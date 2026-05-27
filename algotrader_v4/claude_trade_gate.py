@@ -13,6 +13,7 @@ from __future__ import annotations
 import asyncio
 import json
 from collections import deque
+from datetime import datetime
 from dataclasses import dataclass, field
 from typing import Optional
 
@@ -223,10 +224,10 @@ def _build_context(snap, action: str, signal: dict, strategy: str) -> dict:
         "multi_timeframe": snap.mtf_alignment if hasattr(snap, "mtf_alignment") else {},
         "regime": {
             "current":         regime.value,
-            "vix":             round(sigs.vix, 1) if sigs else None,
+            "vix":             round(sigs.india_vix, 1) if sigs else None,
             "pcr":             round(sigs.pcr, 2) if sigs else None,
-            "nifty_direction": sigs.nifty_direction if sigs and hasattr(sigs, "nifty_direction") else None,
-            "breadth":         round(sigs.breadth, 2) if sigs else None,
+            "nifty_direction": ("bullish" if sigs.nifty_ltp > sigs.nifty_ema20 else "bearish") if sigs and sigs.nifty_ema20 else None,
+            "breadth":         round(sigs.advance_decline, 2) if sigs else None,
         },
         "portfolio": {
             "open_positions":          risk_st.get("open_positions", 0),

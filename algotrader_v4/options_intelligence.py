@@ -375,6 +375,7 @@ async def get_iv_context(symbol: str) -> dict:
     symbol = symbol.upper()
     try:
         parsed = None
+        data = None
 
         # TrueData path (preferred when enabled)
         if _s.use_truedata_options:
