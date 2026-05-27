@@ -398,6 +398,23 @@ def set_token(req: TokenRequest):
     t = kite_client.set_access_token(req.request_token, req.access_token)
     return {"status": "ok", "access_token": t[:6] + "…"}
 
+@app.post("/auth/kite/refresh", tags=["Auth"])
+async def kite_token_refresh():
+    """Manually trigger Kite auto-login via Playwright (same as 08:50 IST scheduler job).
+    Requires KITE_USER_ID, KITE_PASSWORD, KITE_TOTP_SECRET, KITE_REDIRECT_URL in .env."""
+    missing = [k.upper() for k in ("kite_user_id", "kite_password", "kite_totp_secret",
+                                    "kite_api_key", "kite_redirect_url")
+               if not getattr(settings, k, "")]
+    if missing:
+        raise HTTPException(400, f"Missing .env settings: {', '.join(missing)}")
+    try:
+        from kite_auto_login import refresh_kite_token_async
+        token = await refresh_kite_token_async()
+        return {"status": "ok", "access_token": token[:8] + "…", "message": "Kite token refreshed"}
+    except Exception as e:
+        logger.error("Kite auto-login failed: {}", e)
+        raise HTTPException(500, f"Auto-login failed: {e}")
+
 
 # ── Bot control ──────────────────────────────────────────────────────────────
 @app.post("/bot/start", tags=["Bot"])
