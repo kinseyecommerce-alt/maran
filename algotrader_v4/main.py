@@ -51,8 +51,9 @@ app = FastAPI(
     description="Tick-driven · KiteConnect WebSocket + REST quote · orders + market data",
     docs_url=None, redoc_url=None,
 )
+_HERE = Path(__file__).parent
 app.mount("/swagger-static", StaticFiles(directory=swagger_ui_bundle.swagger_ui_path), name="swagger-static")
-app.mount("/static", StaticFiles(directory="static"), name="static")
+app.mount("/static", StaticFiles(directory=str(_HERE / "static")), name="static")
 
 # MED-1: restrict CORS to explicit methods and headers (no wildcard)
 app.add_middleware(
@@ -287,13 +288,13 @@ class AppPasswordRequest(BaseModel):
 @app.get("/login", include_in_schema=False)
 def login_page():
     """Serve the browser login UI (app + Kite OAuth)."""
-    with open("static/login.html", "r") as f:
+    with open(_HERE / "static" / "login.html", "r") as f:
         return HTMLResponse(f.read())
 
 @app.get("/dashboard", include_in_schema=False)
 def dashboard_page():
     """Serve the main trading dashboard."""
-    p = Path("static/dashboard.html")
+    p = _HERE / "static" / "dashboard.html"
     if not p.exists():
         return HTMLResponse("<h2>Dashboard not found — run deploy to build static assets.</h2>", status_code=404)
     return HTMLResponse(p.read_text())
@@ -397,6 +398,23 @@ def login_url(): return {"login_url": kite_client.login_url()}
 def set_token(req: TokenRequest):
     t = kite_client.set_access_token(req.request_token, req.access_token)
     return {"status": "ok", "access_token": t[:6] + "…"}
+
+@app.post("/auth/kite/refresh", tags=["Auth"])
+async def kite_token_refresh():
+    """Manually trigger Kite auto-login via Playwright (same as 08:50 IST scheduler job).
+    Requires KITE_USER_ID, KITE_PASSWORD, KITE_TOTP_SECRET, KITE_REDIRECT_URL in .env."""
+    missing = [k.upper() for k in ("kite_user_id", "kite_password", "kite_totp_secret",
+                                    "kite_api_key", "kite_redirect_url")
+               if not getattr(settings, k, "")]
+    if missing:
+        raise HTTPException(400, f"Missing .env settings: {', '.join(missing)}")
+    try:
+        from kite_auto_login import refresh_kite_token_async
+        token = await refresh_kite_token_async()
+        return {"status": "ok", "access_token": token[:8] + "…", "message": "Kite token refreshed"}
+    except Exception as e:
+        logger.error("Kite auto-login failed: {}", e)
+        raise HTTPException(500, f"Auto-login failed: {e}")
 
 
 # ── Bot control ──────────────────────────────────────────────────────────────
@@ -561,6 +579,7 @@ async def trigger_weekly_backtest():
 # ── Orders ────────────────────────────────────────────────────────────────────
 @app.post("/orders/place", tags=["Orders"])
 async def place_order(req: OrderRequest):
+    req.symbol = _clean_symbol(req.symbol)
     ok, reason = order_guard.can_place(req.symbol, "manual", req.transaction_type)
     if not ok: raise HTTPException(400, f"Guard: {reason}")
     ok, reason = risk_manager.check_before_order(req.symbol, req.quantity, req.price or 1, req.transaction_type)
@@ -901,6 +920,7 @@ def get_bracket(bracket_id: str):
 
 @app.post("/brackets/manual", tags=["Brackets"])
 async def manual_bracket(req: ManualBracketRequest):
+    req.symbol = _clean_symbol(req.symbol)
     bracket = await atomic_bracket_engine.execute(
         strategy=req.strategy, symbol=req.symbol, exchange=req.exchange,
         side=req.side, quantity=req.quantity, signal_price=req.signal_price,
@@ -1095,6 +1115,7 @@ async def n8n_inbound(request: Request):
             req = OrderRequest(**p)
         except Exception as exc:
             raise HTTPException(422, f"Invalid order payload: {exc}")
+        req.symbol = _clean_symbol(req.symbol)
         ok, reason = order_guard.can_place(req.symbol, "n8n", req.transaction_type)
         if not ok:
             raise HTTPException(400, f"Guard blocked: {reason}")
@@ -1136,6 +1157,13 @@ async def on_startup():
     asyncio.create_task(symbol_scanner.run())
     from platform_scheduler import platform_scheduler
     platform_scheduler.start()
+    # Warn when security-critical settings are absent (auth middleware is a no-op without these)
+    if not settings.api_key:
+        logger.warning("SECURITY: API_KEY is not set — all mutating endpoints are unprotected. Set API_KEY in .env before deploying.")
+    if not settings.jwt_secret_key:
+        logger.warning("SECURITY: JWT_SECRET_KEY is not set — browser login tokens cannot be issued. Set JWT_SECRET_KEY in .env before deploying.")
+    if settings.trading_mode == "LIVE" and not settings.kite_api_key:
+        logger.warning("SECURITY: TRADING_MODE=LIVE but KITE_API_KEY is not set — order placement will fail.")
 
 
 # HIGH-7: reload=False in production — auto-reload bypasses security middleware
