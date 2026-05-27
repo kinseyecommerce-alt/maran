@@ -139,11 +139,17 @@ class PositionSL:
 
     # ATR snapshot (updated from tick indicators)
     atr:            float = 0.0
+    atr_at_entry:   float = 0.0   # ATR at time of registration (for volatility comparison)
+
+    # Partial exit tracking (T1 scale-out: close 50%, trail remainder)
+    partial_exit_done: bool = False
+    quantity_remaining: int = 0   # set to quantity at registration; updated after T1 scale-out
 
     # Per-position callbacks (set via register(), used before module-level fallbacks)
-    _on_sl_hit:     Optional[Callable] = field(default=None, repr=False)
-    _on_target_hit: Optional[Callable] = field(default=None, repr=False)
-    _on_sl_moved:   Optional[Callable] = field(default=None, repr=False)
+    _on_sl_hit:       Optional[Callable] = field(default=None, repr=False)
+    _on_target_hit:   Optional[Callable] = field(default=None, repr=False)
+    _on_sl_moved:     Optional[Callable] = field(default=None, repr=False)
+    _on_partial_exit: Optional[Callable] = field(default=None, repr=False)
 
     @property
     def cfg(self) -> TrailConfig:
@@ -225,9 +231,10 @@ class TrailingSLEngine:
         quantity:    int,
         order_id:    str,
         atr:         float = 0.0,
-        on_sl_hit:     Optional[Callable] = None,
-        on_target_hit: Optional[Callable] = None,
-        on_sl_moved:   Optional[Callable] = None,
+        on_sl_hit:      Optional[Callable] = None,
+        on_target_hit:  Optional[Callable] = None,
+        on_sl_moved:    Optional[Callable] = None,
+        on_partial_exit: Optional[Callable] = None,
     ) -> PositionSL:
         """
         Register a new open position for trailing SL monitoring.
@@ -248,10 +255,12 @@ class TrailingSLEngine:
             symbol=symbol, strategy=strategy, side=side,
             entry_price=entry_price, quantity=quantity,
             order_id=order_id, current_sl=init_sl,
-            best_price=entry_price, atr=atr,
+            best_price=entry_price, atr=atr, atr_at_entry=atr,
+            quantity_remaining=quantity,
             _on_sl_hit=on_sl_hit,
             _on_target_hit=on_target_hit,
             _on_sl_moved=on_sl_moved,
+            _on_partial_exit=on_partial_exit,
         )
 
         with self._lock:
@@ -342,16 +351,28 @@ class TrailingSLEngine:
                 if cb_target:
                     await cb_target(pos, ltp, 2)
 
-        # ── 4. Target 1 hit → tighten trail ───────────────────────────
+        # ── 4. Target 1 hit → partial scale-out + tighten trail ──────
         if not pos.target1_hit:
             t1 = (cfg.target1_pct / 100)
             t1_price = pos.entry_price * (1 + t1 if pos.side == "BUY" else 1 - t1)
             if (pos.side == "BUY" and ltp >= t1_price) or \
                (pos.side == "SELL" and ltp <= t1_price):
                 pos.target1_hit = True
-                # On T1 hit: tighten trail to half the normal trail
+                # Partial scale-out: close 50% of remaining quantity
+                cb_partial = pos._on_partial_exit
+                if cb_partial and not pos.partial_exit_done and pos.quantity_remaining > 1:
+                    exit_qty = pos.quantity_remaining // 2
+                    if exit_qty > 0:
+                        pos.partial_exit_done = True
+                        pos.quantity_remaining -= exit_qty
+                        logger.info(
+                            "🎯 T1 scale-out: {} closing {} of {} @ ₹{:.2f}",
+                            pos.symbol, exit_qty, pos.quantity, ltp
+                        )
+                        await cb_partial(pos, ltp, exit_qty, "T1_SCALE_OUT")
+                # Tighten trail to half the normal trail
                 if pos.side == "BUY":
-                    tighter_sl = round(ltp * (1 - cfg.trail_pct / 200), 2)  # half trail
+                    tighter_sl = round(ltp * (1 - cfg.trail_pct / 200), 2)
                     if tighter_sl > pos.current_sl:
                         pos.current_sl = tighter_sl
                         pos.sl_moves  += 1
@@ -395,6 +416,11 @@ class TrailingSLEngine:
             new_sl = self._compute_trail_sl(pos, ltp, atr_14)
 
             if new_sl is not None:
+                # Dead-zone hysteresis: skip trivial SL moves (<0.05% change)
+                if pos.current_sl > 0 and abs(new_sl - pos.current_sl) / pos.current_sl < 0.0005:
+                    pos.last_updated = time.time()
+                    return
+
                 # Only move SL in profit direction (never widen it)
                 if pos.side == "BUY" and new_sl > pos.current_sl:
                     old = pos.current_sl
@@ -435,6 +461,10 @@ class TrailingSLEngine:
             # Percentage trail — tighter after T1 hit
             pct = cfg.trail_pct / 200 if pos.target1_hit else cfg.trail_pct / 100
             trail_dist = pos.best_price * pct
+
+        # Volatility-adaptive tightening: if ATR has spiked >50% vs entry, tighten by 30%
+        if pos.atr_at_entry > 0 and atr > pos.atr_at_entry * 1.5:
+            trail_dist *= 0.70
 
         if pos.side == "BUY":
             return round(pos.best_price - trail_dist, 2)

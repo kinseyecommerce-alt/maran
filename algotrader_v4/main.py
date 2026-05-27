@@ -286,6 +286,39 @@ class AppPasswordRequest(BaseModel):
     username:     str | None = Field(default=None, min_length=1, max_length=50)
     new_password: str        = Field(min_length=8, max_length=128)
 
+class AgentRiskRequest(BaseModel):
+    sl_pct_intraday:    float | None = Field(None, ge=0.1, le=10.0)
+    sl_pct_scalping:    float | None = Field(None, ge=0.1, le=5.0)
+    sl_pct_options:     float | None = Field(None, ge=5.0,  le=60.0)
+    sl_pct_futures:     float | None = Field(None, ge=0.1, le=5.0)
+    sl_pct_swing:       float | None = Field(None, ge=0.5, le=10.0)
+    tgt_pct_intraday:   float | None = Field(None, ge=0.1, le=20.0)
+    tgt_pct_scalping:   float | None = Field(None, ge=0.1, le=10.0)
+    tgt_pct_options:    float | None = Field(None, ge=5.0,  le=100.0)
+    tgt_pct_futures:    float | None = Field(None, ge=0.1, le=10.0)
+    tgt_pct_swing:      float | None = Field(None, ge=0.5, le=20.0)
+    min_score_intraday: int   | None = Field(None, ge=2, le=10)
+    min_score_scalping: int   | None = Field(None, ge=2, le=10)
+    min_score_options:  int   | None = Field(None, ge=2, le=10)
+    min_score_futures:  int   | None = Field(None, ge=2, le=10)
+    min_score_swing:    int   | None = Field(None, ge=1, le=10)
+    cooldown_intraday:  int   | None = Field(None, ge=30, le=600)
+    cooldown_scalping:  int   | None = Field(None, ge=30, le=600)
+    cooldown_options:   int   | None = Field(None, ge=30, le=600)
+    cooldown_futures:   int   | None = Field(None, ge=30, le=600)
+
+class IntelligenceRequest(BaseModel):
+    use_claude_trade_gate: bool | None = None
+    claude_gate_threshold: int  | None = Field(None, ge=40, le=90)
+    use_multi_timeframe:   bool | None = None
+    mtf_min_alignment:     int  | None = Field(None, ge=1, le=3)
+    use_kelly_sizing:      bool | None = None
+
+class PatternToggleRequest(BaseModel):
+    agent:   str
+    pattern: str
+    enabled: bool
+
 
 # ── UI pages ───────────────────────────────────────────────────────────────
 @app.get("/login", include_in_schema=False)
@@ -859,6 +892,79 @@ def update_app_password(req: AppPasswordRequest):
         settings.admin_username = req.username
     settings.admin_password_hash = hash_password(req.new_password)
     return {"status": "updated", "admin_username": settings.admin_username}
+
+
+# ── Per-Agent Risk Parameters ────────────────────────────────────────────────
+@app.get("/settings/agent-risk", tags=["Settings"])
+def get_agent_risk():
+    return {
+        "sl_pct_intraday":    settings.sl_pct_intraday,
+        "sl_pct_scalping":    settings.sl_pct_scalping,
+        "sl_pct_options":     settings.sl_pct_options,
+        "sl_pct_futures":     settings.sl_pct_futures,
+        "sl_pct_swing":       settings.sl_pct_swing,
+        "tgt_pct_intraday":   settings.tgt_pct_intraday,
+        "tgt_pct_scalping":   settings.tgt_pct_scalping,
+        "tgt_pct_options":    settings.tgt_pct_options,
+        "tgt_pct_futures":    settings.tgt_pct_futures,
+        "tgt_pct_swing":      settings.tgt_pct_swing,
+        "min_score_intraday": settings.min_score_intraday,
+        "min_score_scalping": settings.min_score_scalping,
+        "min_score_options":  settings.min_score_options,
+        "min_score_futures":  settings.min_score_futures,
+        "min_score_swing":    settings.min_score_swing,
+        "cooldown_intraday":  settings.cooldown_intraday,
+        "cooldown_scalping":  settings.cooldown_scalping,
+        "cooldown_options":   settings.cooldown_options,
+        "cooldown_futures":   settings.cooldown_futures,
+    }
+
+@app.patch("/settings/agent-risk", tags=["Settings"])
+def patch_agent_risk(req: AgentRiskRequest):
+    """Update per-agent SL%, TGT%, min score and cooldown in-memory."""
+    d = req.model_dump(exclude_none=True)
+    for k, v in d.items():
+        setattr(settings, k, v)
+    return get_agent_risk()
+
+
+# ── Intelligence Toggles ─────────────────────────────────────────────────────
+@app.get("/settings/intelligence", tags=["Settings"])
+def get_intelligence():
+    return {
+        "use_claude_trade_gate": settings.use_claude_trade_gate,
+        "claude_gate_threshold": settings.claude_gate_threshold,
+        "use_multi_timeframe":   settings.use_multi_timeframe,
+        "mtf_min_alignment":     settings.mtf_min_alignment,
+        "use_kelly_sizing":      settings.use_kelly_sizing,
+    }
+
+@app.patch("/settings/intelligence", tags=["Settings"])
+def patch_intelligence(req: IntelligenceRequest):
+    """Toggle Claude gate, MTF alignment and Kelly sizing in-memory."""
+    d = req.model_dump(exclude_none=True)
+    for k, v in d.items():
+        setattr(settings, k, v)
+    return get_intelligence()
+
+
+# ── Pattern Toggles ──────────────────────────────────────────────────────────
+@app.get("/settings/pattern-toggles", tags=["Settings"])
+def get_pattern_toggles():
+    return bot_state.get_all_pattern_toggles()
+
+@app.patch("/settings/pattern-toggles", tags=["Settings"])
+def patch_pattern_toggle(req: PatternToggleRequest):
+    """Enable or disable a specific pattern for an agent."""
+    known = bot_state.get_all_pattern_toggles()
+    if req.agent not in known:
+        from fastapi import HTTPException
+        raise HTTPException(status_code=400, detail=f"Unknown agent: {req.agent}")
+    if req.pattern not in known[req.agent]:
+        from fastapi import HTTPException
+        raise HTTPException(status_code=400, detail=f"Unknown pattern '{req.pattern}' for agent '{req.agent}'")
+    bot_state.set_pattern_enabled(req.agent, req.pattern, req.enabled)
+    return {"agent": req.agent, "pattern": req.pattern, "enabled": req.enabled}
 
 
 # ── WebSocket ────────────────────────────────────────────────────────────────────

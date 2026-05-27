@@ -126,6 +126,12 @@ class LiveIndicators:
     stoch_rsi_d: float = 50.0
     # Williams %R (14) — range -100 to 0; >-20 overbought, <-80 oversold
     williams_r:  float = -50.0
+    # Ichimoku Cloud (9/26/52) — cloud_dir: UP / DOWN / NEUTRAL
+    ichimoku_tenkan:    float = 0.0
+    ichimoku_kijun:     float = 0.0
+    ichimoku_senkou_a:  float = 0.0
+    ichimoku_senkou_b:  float = 0.0
+    ichimoku_cloud_dir: str   = "NEUTRAL"
     computed_at: float = 0.0
 
 
@@ -286,6 +292,21 @@ def _williams_r(close: pd.Series, high: pd.Series, low: pd.Series, period: int =
         return -50.0
 
 
+def _ichimoku(high: pd.Series, low: pd.Series) -> tuple[float, float, float, float, str]:
+    """Ichimoku Cloud (9/26/52). Returns (tenkan, kijun, senkou_a, senkou_b, cloud_dir)."""
+    try:
+        def _midpoint(h: pd.Series, l: pd.Series, n: int) -> float:
+            return float((h.iloc[-n:].max() + l.iloc[-n:].min()) / 2)
+        tenkan  = _midpoint(high, low, 9)
+        kijun   = _midpoint(high, low, 26)
+        s_a     = (tenkan + kijun) / 2
+        s_b     = _midpoint(high, low, 52)
+        cloud_dir = "UP" if s_a > s_b else ("DOWN" if s_a < s_b else "NEUTRAL")
+        return round(tenkan, 2), round(kijun, 2), round(s_a, 2), round(s_b, 2), cloud_dir
+    except Exception:
+        return 0.0, 0.0, 0.0, 0.0, "NEUTRAL"
+
+
 # ── Indicator calculator ──────────────────────────────────────────────────────
 
 class IndicatorCalc:
@@ -367,6 +388,11 @@ class IndicatorCalc:
 
             if n >= 14:
                 ind.williams_r = _williams_r(close, high, low)
+
+            if n >= 52:
+                (ind.ichimoku_tenkan, ind.ichimoku_kijun,
+                 ind.ichimoku_senkou_a, ind.ichimoku_senkou_b,
+                 ind.ichimoku_cloud_dir) = _ichimoku(high, low)
 
         except Exception as exc:
             logger.debug("Indicator compute error {}: {}", sym, exc)
@@ -579,9 +605,12 @@ class TickEngine:
                     "vol_ratio":   round(ind.volume_ratio, 2),
                     "supertrend":  ind.supertrend_dir,
                     "squeeze_on":  ind.squeeze_on,
-                    "stoch_rsi_k": ind.stoch_rsi_k,
-                    "williams_r":  ind.williams_r,
-                    "source":     source,
+                    "stoch_rsi_k":     ind.stoch_rsi_k,
+                    "williams_r":      ind.williams_r,
+                    "ichimoku_tenkan": round(ind.ichimoku_tenkan, 2),
+                    "ichimoku_kijun":  round(ind.ichimoku_kijun,  2),
+                    "ichimoku_cloud":  ind.ichimoku_cloud_dir,
+                    "source":          source,
                     "ts":         tick.timestamp.isoformat(),
                 })
             except Exception:

@@ -70,6 +70,33 @@ class Settings(BaseSettings):
     max_trades_scalping: int = 20
     cooldown_after_loss_sec: int = 300
 
+    # Per-agent stop-loss % (intraday/scalping/futures/swing = price %; options = premium %)
+    sl_pct_intraday:  float = 1.5
+    sl_pct_scalping:  float = 0.3
+    sl_pct_options:   float = 30.0
+    sl_pct_futures:   float = 0.5
+    sl_pct_swing:     float = 3.0
+
+    # Per-agent target %
+    tgt_pct_intraday: float = 3.0
+    tgt_pct_scalping: float = 0.5
+    tgt_pct_options:  float = 65.0
+    tgt_pct_futures:  float = 1.2
+    tgt_pct_swing:    float = 8.0
+
+    # Per-agent minimum pattern score to fire
+    min_score_intraday: int = 4
+    min_score_scalping: int = 3
+    min_score_options:  int = 4
+    min_score_futures:  int = 4
+    min_score_swing:    int = 1
+
+    # Per-agent entry cooldown (seconds between trades on same symbol)
+    cooldown_intraday: int = 180
+    cooldown_scalping: int = 90
+    cooldown_options:  int = 120
+    cooldown_futures:  int = 180
+
     # Pre-learned system (set after running historical_learner.py)
     skip_startup_backtest: bool = False   # use pre-learned approved_symbols.json
     use_nifty100_watchlist: bool = False  # auto-use full Nifty 100 as watchlist

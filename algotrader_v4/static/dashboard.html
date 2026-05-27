@@ -1522,15 +1522,27 @@
         <div class="settings-section">
           <div class="settings-title"><i data-lucide="sliders-horizontal"></i> Intelligence Toggles</div>
           <label class="toggle-wrap" style="margin-bottom:14px">
-            <div class="toggle"><input type="checkbox" id="set-claude-gate" onchange="settingToggle('claude_gate',this.checked)"><span class="toggle-slider"></span></div>
+            <div class="toggle"><input type="checkbox" id="set-claude-gate" onchange="saveIntelligence()"><span class="toggle-slider"></span></div>
             <span class="toggle-label">Claude Trade Gate</span>
           </label>
+          <div style="margin-bottom:14px">
+            <label style="font-size:12px;color:var(--muted);display:block;margin-bottom:6px">Claude Gate Threshold <span id="int-gate-val" style="color:var(--accent)">65</span>%</label>
+            <input type="range" id="int-gate-threshold" min="40" max="90" step="5" value="65" style="width:200px;accent-color:var(--accent)" oninput="document.getElementById('int-gate-val').textContent=this.value" onchange="saveIntelligence()">
+          </div>
           <label class="toggle-wrap" style="margin-bottom:14px">
-            <div class="toggle"><input type="checkbox" id="set-mtf" onchange="settingToggle('mtf',this.checked)"><span class="toggle-slider"></span></div>
+            <div class="toggle"><input type="checkbox" id="set-mtf" onchange="saveIntelligence()"><span class="toggle-slider"></span></div>
             <span class="toggle-label">Multi-Timeframe Alignment</span>
           </label>
+          <div style="margin-bottom:14px">
+            <label style="font-size:12px;color:var(--muted);display:block;margin-bottom:6px">MTF Min Alignment (1–3 timeframes must agree)</label>
+            <select id="int-mtf-align" class="risk-input" style="width:120px" onchange="saveIntelligence()">
+              <option value="1">1 of 3</option>
+              <option value="2" selected>2 of 3</option>
+              <option value="3">3 of 3</option>
+            </select>
+          </div>
           <label class="toggle-wrap" style="margin-bottom:14px">
-            <div class="toggle"><input type="checkbox" id="set-kelly" onchange="settingToggle('kelly',this.checked)"><span class="toggle-slider"></span></div>
+            <div class="toggle"><input type="checkbox" id="set-kelly" onchange="saveIntelligence()"><span class="toggle-slider"></span></div>
             <span class="toggle-label">Kelly Sizing</span>
           </label>
           <label class="toggle-wrap" style="margin-bottom:14px">
@@ -1575,6 +1587,79 @@
           <button class="btn btn-blue btn-sm" onclick="saveTradingLimits()">
             <i data-lucide="save"></i> Save Limits
           </button>
+        </div>
+
+        <!-- Per-Agent Risk Parameters -->
+        <div class="settings-section">
+          <div class="settings-title"><i data-lucide="sliders"></i> Per-Agent Risk Parameters</div>
+          <div style="color:var(--muted);font-size:12px;margin-bottom:12px">
+            SL%/TGT% = minimum stop-loss and target as % of entry price. Min Score = entry threshold (higher = fewer but higher-quality trades).
+          </div>
+          <div style="overflow-x:auto">
+            <table style="width:100%;border-collapse:collapse;font-size:13px">
+              <thead>
+                <tr style="color:var(--muted);text-align:left;border-bottom:1px solid var(--border)">
+                  <th style="padding:6px 8px">Agent</th>
+                  <th style="padding:6px 8px">SL %</th>
+                  <th style="padding:6px 8px">Target %</th>
+                  <th style="padding:6px 8px">Min Score</th>
+                  <th style="padding:6px 8px">Cooldown (s)</th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr style="border-bottom:1px solid rgba(255,255,255,.05)">
+                  <td style="padding:8px;color:var(--accent);font-weight:600">Intraday</td>
+                  <td style="padding:8px"><input type="number" id="ar-sl-intraday" step="0.1" min="0.1" max="10" class="risk-input" style="width:70px"></td>
+                  <td style="padding:8px"><input type="number" id="ar-tgt-intraday" step="0.1" min="0.1" max="20" class="risk-input" style="width:70px"></td>
+                  <td style="padding:8px"><input type="number" id="ar-ms-intraday" step="1" min="2" max="10" class="risk-input" style="width:60px"></td>
+                  <td style="padding:8px"><input type="number" id="ar-cd-intraday" step="10" min="30" max="600" class="risk-input" style="width:70px"></td>
+                </tr>
+                <tr style="border-bottom:1px solid rgba(255,255,255,.05)">
+                  <td style="padding:8px;color:var(--accent);font-weight:600">Scalping</td>
+                  <td style="padding:8px"><input type="number" id="ar-sl-scalping" step="0.05" min="0.1" max="5" class="risk-input" style="width:70px"></td>
+                  <td style="padding:8px"><input type="number" id="ar-tgt-scalping" step="0.05" min="0.1" max="10" class="risk-input" style="width:70px"></td>
+                  <td style="padding:8px"><input type="number" id="ar-ms-scalping" step="1" min="2" max="10" class="risk-input" style="width:60px"></td>
+                  <td style="padding:8px"><input type="number" id="ar-cd-scalping" step="10" min="30" max="600" class="risk-input" style="width:70px"></td>
+                </tr>
+                <tr style="border-bottom:1px solid rgba(255,255,255,.05)">
+                  <td style="padding:8px;color:var(--accent);font-weight:600">Options</td>
+                  <td style="padding:8px"><input type="number" id="ar-sl-options" step="1" min="5" max="60" class="risk-input" style="width:70px"></td>
+                  <td style="padding:8px"><input type="number" id="ar-tgt-options" step="1" min="5" max="100" class="risk-input" style="width:70px"></td>
+                  <td style="padding:8px"><input type="number" id="ar-ms-options" step="1" min="2" max="10" class="risk-input" style="width:60px"></td>
+                  <td style="padding:8px" style="color:var(--muted);font-size:11px">IV-adaptive</td>
+                </tr>
+                <tr style="border-bottom:1px solid rgba(255,255,255,.05)">
+                  <td style="padding:8px;color:var(--accent);font-weight:600">Futures</td>
+                  <td style="padding:8px"><input type="number" id="ar-sl-futures" step="0.1" min="0.1" max="5" class="risk-input" style="width:70px"></td>
+                  <td style="padding:8px"><input type="number" id="ar-tgt-futures" step="0.1" min="0.1" max="10" class="risk-input" style="width:70px"></td>
+                  <td style="padding:8px"><input type="number" id="ar-ms-futures" step="1" min="2" max="10" class="risk-input" style="width:60px"></td>
+                  <td style="padding:8px"><input type="number" id="ar-cd-futures" step="10" min="30" max="600" class="risk-input" style="width:70px"></td>
+                </tr>
+                <tr>
+                  <td style="padding:8px;color:var(--accent);font-weight:600">Swing</td>
+                  <td style="padding:8px"><input type="number" id="ar-sl-swing" step="0.5" min="0.5" max="10" class="risk-input" style="width:70px"></td>
+                  <td style="padding:8px"><input type="number" id="ar-tgt-swing" step="0.5" min="0.5" max="20" class="risk-input" style="width:70px"></td>
+                  <td style="padding:8px"><input type="number" id="ar-ms-swing" step="1" min="1" max="10" class="risk-input" style="width:60px"></td>
+                  <td style="padding:8px;color:var(--muted);font-size:11px">per-minute</td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+          <button class="btn btn-blue btn-sm" style="margin-top:12px" onclick="saveAgentRisk()">
+            <i data-lucide="save"></i> Save Risk Parameters
+          </button>
+        </div>
+
+        <!-- Pattern Toggles -->
+        <div class="settings-section">
+          <div class="settings-title"><i data-lucide="grid-3x3"></i> Pattern Toggles</div>
+          <div style="color:var(--muted);font-size:12px;margin-bottom:12px">
+            Disable individual entry patterns per agent. Changes take effect on the next tick.
+          </div>
+          <div id="pattern-toggles-container">
+            <!-- populated by renderPatternToggles() -->
+            <div style="color:var(--muted);font-size:12px">Loading patterns…</div>
+          </div>
         </div>
 
         <!-- Agent Enable / Disable -->
@@ -2774,6 +2859,138 @@ async function saveTradingLimits() {
 }
 
 /* ═══════════════════════════════════════════════════════════════
+   AGENT RISK: fetch + save
+═══════════════════════════════════════════════════════════════ */
+async function fetchAgentRisk() {
+  try {
+    const d = await api('GET', '/settings/agent-risk');
+    const _s = (id, v) => { const el = document.getElementById(id); if (el) el.value = v ?? ''; };
+    _s('ar-sl-intraday',  d.sl_pct_intraday);
+    _s('ar-tgt-intraday', d.tgt_pct_intraday);
+    _s('ar-ms-intraday',  d.min_score_intraday);
+    _s('ar-cd-intraday',  d.cooldown_intraday);
+    _s('ar-sl-scalping',  d.sl_pct_scalping);
+    _s('ar-tgt-scalping', d.tgt_pct_scalping);
+    _s('ar-ms-scalping',  d.min_score_scalping);
+    _s('ar-cd-scalping',  d.cooldown_scalping);
+    _s('ar-sl-options',   d.sl_pct_options);
+    _s('ar-tgt-options',  d.tgt_pct_options);
+    _s('ar-ms-options',   d.min_score_options);
+    _s('ar-sl-futures',   d.sl_pct_futures);
+    _s('ar-tgt-futures',  d.tgt_pct_futures);
+    _s('ar-ms-futures',   d.min_score_futures);
+    _s('ar-cd-futures',   d.cooldown_futures);
+    _s('ar-sl-swing',     d.sl_pct_swing);
+    _s('ar-tgt-swing',    d.tgt_pct_swing);
+    _s('ar-ms-swing',     d.min_score_swing);
+  } catch (_) {}
+}
+
+async function saveAgentRisk() {
+  const _f = id => { const v = parseFloat(document.getElementById(id)?.value); return isNaN(v) ? undefined : v; };
+  const _i = id => { const v = parseInt(document.getElementById(id)?.value);   return isNaN(v) ? undefined : v; };
+  const body = {
+    sl_pct_intraday: _f('ar-sl-intraday'),  tgt_pct_intraday: _f('ar-tgt-intraday'),
+    min_score_intraday: _i('ar-ms-intraday'), cooldown_intraday: _i('ar-cd-intraday'),
+    sl_pct_scalping: _f('ar-sl-scalping'),  tgt_pct_scalping: _f('ar-tgt-scalping'),
+    min_score_scalping: _i('ar-ms-scalping'), cooldown_scalping: _i('ar-cd-scalping'),
+    sl_pct_options:  _f('ar-sl-options'),   tgt_pct_options:  _f('ar-tgt-options'),
+    min_score_options:  _i('ar-ms-options'),
+    sl_pct_futures:  _f('ar-sl-futures'),   tgt_pct_futures:  _f('ar-tgt-futures'),
+    min_score_futures:  _i('ar-ms-futures'), cooldown_futures: _i('ar-cd-futures'),
+    sl_pct_swing:    _f('ar-sl-swing'),     tgt_pct_swing:    _f('ar-tgt-swing'),
+    min_score_swing: _i('ar-ms-swing'),
+  };
+  Object.keys(body).forEach(k => body[k] === undefined && delete body[k]);
+  try {
+    await api('PATCH', '/settings/agent-risk', body);
+    toast('Agent risk parameters saved', 'ok');
+  } catch (e) { toast(`Save error: ${e.message}`, 'error'); }
+}
+
+/* ═══════════════════════════════════════════════════════════════
+   INTELLIGENCE: fetch + save
+═══════════════════════════════════════════════════════════════ */
+async function fetchIntelligence() {
+  try {
+    const d = await api('GET', '/settings/intelligence');
+    const chk = (id, v) => { const el = document.getElementById(id); if (el) el.checked = !!v; };
+    chk('set-claude-gate', d.use_claude_trade_gate);
+    chk('set-mtf',         d.use_multi_timeframe);
+    chk('set-kelly',       d.use_kelly_sizing);
+    const th = document.getElementById('int-gate-threshold');
+    if (th) { th.value = d.claude_gate_threshold ?? 65; document.getElementById('int-gate-val').textContent = th.value; }
+    const al = document.getElementById('int-mtf-align');
+    if (al) al.value = d.mtf_min_alignment ?? 2;
+  } catch (_) {}
+}
+
+async function saveIntelligence() {
+  const _b = id => { const el = document.getElementById(id); return el ? el.checked : undefined; };
+  const _i = id => { const v = parseInt(document.getElementById(id)?.value); return isNaN(v) ? undefined : v; };
+  const body = {
+    use_claude_trade_gate: _b('set-claude-gate'),
+    claude_gate_threshold: _i('int-gate-threshold'),
+    use_multi_timeframe:   _b('set-mtf'),
+    mtf_min_alignment:     _i('int-mtf-align'),
+    use_kelly_sizing:      _b('set-kelly'),
+  };
+  Object.keys(body).forEach(k => body[k] === undefined && delete body[k]);
+  try {
+    await api('PATCH', '/settings/intelligence', body);
+    toast('Intelligence settings saved', 'ok');
+  } catch (e) { toast(`Save error: ${e.message}`, 'error'); }
+}
+
+/* ═══════════════════════════════════════════════════════════════
+   PATTERN TOGGLES: fetch + render
+═══════════════════════════════════════════════════════════════ */
+let _patternData = {};
+
+async function fetchPatternToggles() {
+  try {
+    _patternData = await api('GET', '/settings/pattern-toggles');
+    renderPatternToggles();
+  } catch (_) {}
+}
+
+function renderPatternToggles() {
+  const c = document.getElementById('pattern-toggles-container');
+  if (!c) return;
+  const agents = Object.keys(_patternData);
+  if (!agents.length) { c.innerHTML = '<div style="color:var(--muted);font-size:12px">No patterns loaded.</div>'; return; }
+  c.innerHTML = agents.map(agent => {
+    const patterns = _patternData[agent];
+    const total   = Object.keys(patterns).length;
+    const active  = Object.values(patterns).filter(Boolean).length;
+    const rows    = Object.entries(patterns).map(([p, en]) =>
+      `<label style="display:flex;align-items:center;gap:8px;padding:4px 0;cursor:pointer;min-width:180px">
+        <input type="checkbox" ${en ? 'checked' : ''} onchange="togglePattern('${agent}','${p}',this.checked)"
+          style="width:15px;height:15px;accent-color:var(--accent);cursor:pointer">
+        <span style="font-size:12px;color:${en ? 'var(--text-primary)' : 'var(--muted)'}">${p}</span>
+      </label>`
+    ).join('');
+    return `<details style="margin-bottom:10px">
+      <summary style="cursor:pointer;padding:8px 10px;background:rgba(0,212,170,.07);border-radius:6px;
+        font-size:13px;font-weight:600;color:var(--accent);list-style:none;display:flex;justify-content:space-between;align-items:center">
+        <span>${agent.charAt(0).toUpperCase()+agent.slice(1)}</span>
+        <span style="font-size:11px;font-weight:400;color:var(--muted)">${active}/${total} active</span>
+      </summary>
+      <div style="display:flex;flex-wrap:wrap;gap:4px 16px;padding:10px 6px">${rows}</div>
+    </details>`;
+  }).join('');
+}
+
+async function togglePattern(agent, pattern, enabled) {
+  try {
+    await api('PATCH', '/settings/pattern-toggles', { agent, pattern, enabled });
+    if (_patternData[agent]) _patternData[agent][pattern] = enabled;
+    renderPatternToggles();
+    toast(`${pattern} ${enabled ? 'enabled' : 'disabled'}`, enabled ? 'ok' : 'info');
+  } catch (e) { toast(`Toggle error: ${e.message}`, 'error'); }
+}
+
+/* ═══════════════════════════════════════════════════════════════
    POLLING: fetch all state
 ═══════════════════════════════════════════════════════════════ */
 async function pollAll() {
@@ -2793,6 +3010,9 @@ async function pollAll() {
     fetchTSLStatus(),
     fetchCapitalAllocation(),
     fetchKiteAccounts(),
+    fetchAgentRisk(),
+    fetchIntelligence(),
+    fetchPatternToggles(),
   ]);
 
   renderStats();
