@@ -828,6 +828,22 @@
     .kite-info-label { font-size: 12px; color: var(--muted); width: 100px; flex-shrink: 0; }
     .kite-info-val   { font-size: 13px; color: var(--text); font-weight: 500; }
 
+    /* ── Kite Accounts ──────────────────────────────────────────── */
+    .acct-row {
+      display: flex; align-items: center; gap: 10px;
+      padding: 9px 12px;
+      background: var(--bg);
+      border: 1px solid var(--border);
+      border-radius: 7px;
+      margin-bottom: 8px;
+    }
+    .acct-row:last-child { margin-bottom: 0; }
+    .acct-name  { font-size: 13px; font-weight: 600; color: var(--text); flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .acct-key   { font-size: 11px; color: var(--muted); font-family: monospace; }
+    .badge-active { font-size: 10px; font-weight: 700; background: rgba(16,185,129,0.15); color: var(--green); border-radius: 4px; padding: 2px 7px; flex-shrink: 0; }
+    .acct-form-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin-bottom: 14px; }
+    @media (max-width: 600px) { .acct-form-grid { grid-template-columns: 1fr; } }
+
     /* ── Toast notifications ────────────────────────────────────── */
     #toast-container {
       position: fixed;
@@ -1428,6 +1444,42 @@
            TAB 6: SETTINGS
       ═══════════════════════════════════════════════════════════ -->
       <div class="tab-panel" id="tab-settings">
+
+        <!-- Kite Accounts (multi-account) -->
+        <div class="settings-section">
+          <div class="settings-title"><i data-lucide="user-cog"></i> Kite Accounts</div>
+
+          <!-- Add / Update form -->
+          <div class="acct-form-grid">
+            <div>
+              <label style="font-size:12px;color:var(--muted);display:block;margin-bottom:5px">Account Label</label>
+              <input id="acct-name" type="text" class="risk-input" style="width:100%" placeholder="e.g. Main Account">
+            </div>
+            <div></div>
+            <div>
+              <label style="font-size:12px;color:var(--muted);display:block;margin-bottom:5px">API Key</label>
+              <input id="acct-apikey" type="text" class="risk-input" style="width:100%" placeholder="Kite API Key" oninput="acctAutoSave()">
+            </div>
+            <div>
+              <label style="font-size:12px;color:var(--muted);display:block;margin-bottom:5px">API Secret</label>
+              <div style="display:flex;gap:6px">
+                <input id="acct-secret" type="password" class="risk-input" style="flex:1" placeholder="Kite API Secret" oninput="acctAutoSave()">
+                <button class="btn btn-sm" style="padding:0 9px;background:var(--surface2)" onclick="toggleSecretVis()" title="Show/hide">
+                  <i data-lucide="eye" id="acct-eye" style="width:14px;height:14px"></i>
+                </button>
+              </div>
+            </div>
+          </div>
+          <button class="btn btn-blue btn-sm" onclick="saveKiteAccount()">
+            <i data-lucide="save"></i> Save Account
+          </button>
+          <span id="acct-autosave-status" style="font-size:11px;color:var(--muted);margin-left:10px"></span>
+
+          <!-- Saved accounts list -->
+          <div id="acct-list" style="margin-top:18px">
+            <!-- populated by renderKiteAccounts() -->
+          </div>
+        </div>
 
         <!-- Kite Connection -->
         <div class="settings-section">
@@ -2322,6 +2374,121 @@ function renderKiteStatus(data) {
 }
 
 /* ═══════════════════════════════════════════════════════════════
+   KITE ACCOUNTS: multi-account management
+═══════════════════════════════════════════════════════════════ */
+let _acctSaveTimer = null;
+
+function acctAutoSave() {
+  clearTimeout(_acctSaveTimer);
+  const status = document.getElementById('acct-autosave-status');
+  status.textContent = 'typing…';
+  _acctSaveTimer = setTimeout(() => {
+    const name   = (document.getElementById('acct-name').value   || '').trim();
+    const apiKey = (document.getElementById('acct-apikey').value || '').trim();
+    const secret = (document.getElementById('acct-secret').value || '').trim();
+    if (name && apiKey && secret) {
+      _doSaveAccount(name, apiKey, secret, true);
+    } else if (apiKey || secret) {
+      status.textContent = 'fill in label too…';
+    }
+  }, 800);
+}
+
+function toggleSecretVis() {
+  const inp = document.getElementById('acct-secret');
+  const eye = document.getElementById('acct-eye');
+  if (inp.type === 'password') {
+    inp.type = 'text';
+    eye.setAttribute('data-lucide', 'eye-off');
+  } else {
+    inp.type = 'password';
+    eye.setAttribute('data-lucide', 'eye');
+  }
+  lucide.createIcons({ nodes: [document.getElementById('acct-eye').parentElement] });
+}
+
+async function saveKiteAccount() {
+  const name   = (document.getElementById('acct-name').value   || '').trim();
+  const apiKey = (document.getElementById('acct-apikey').value || '').trim();
+  const secret = (document.getElementById('acct-secret').value || '').trim();
+  if (!name)   { toast('Enter an account label', 'warn'); return; }
+  if (!apiKey) { toast('Enter the API key',       'warn'); return; }
+  if (!secret) { toast('Enter the API secret',    'warn'); return; }
+  await _doSaveAccount(name, apiKey, secret, false);
+}
+
+async function _doSaveAccount(name, apiKey, secret, silent) {
+  const status = document.getElementById('acct-autosave-status');
+  try {
+    const d = await api('POST', '/accounts', { name, api_key: apiKey, api_secret: secret });
+    renderKiteAccounts(d.accounts);
+    if (silent) {
+      status.textContent = 'saved ✓';
+      setTimeout(() => { status.textContent = ''; }, 2000);
+    } else {
+      status.textContent = '';
+      toast(`Account "${name}" saved`, 'ok');
+    }
+  } catch (e) {
+    status.textContent = '';
+    if (!silent) toast(`Save error: ${e.message}`, 'error');
+  }
+}
+
+async function activateKiteAccount(name) {
+  try {
+    const d = await api('POST', `/accounts/${encodeURIComponent(name)}/activate`);
+    renderKiteAccounts(d.accounts);
+    toast(`Account "${name}" is now active`, 'ok');
+  } catch (e) {
+    toast(`Activate error: ${e.message}`, 'error');
+  }
+}
+
+async function deleteKiteAccount(name) {
+  const ok = await showConfirm('Delete account?', `Remove "${name}" from saved accounts?`);
+  if (!ok) return;
+  try {
+    const d = await api('DELETE', `/accounts/${encodeURIComponent(name)}`);
+    renderKiteAccounts(d.accounts);
+    toast(`Account "${name}" deleted`, 'ok');
+  } catch (e) {
+    toast(`Delete error: ${e.message}`, 'error');
+  }
+}
+
+async function fetchKiteAccounts() {
+  try {
+    const d = await api('GET', '/accounts');
+    if (d) renderKiteAccounts(d.accounts);
+  } catch (_) {}
+}
+
+function renderKiteAccounts(accounts) {
+  const el = document.getElementById('acct-list');
+  if (!accounts || !accounts.length) {
+    el.innerHTML = '<div style="color:var(--muted);font-size:12px">No accounts saved yet.</div>';
+    return;
+  }
+  el.innerHTML = accounts.map(a => `
+    <div class="acct-row">
+      <span class="acct-name">${escHtml(a.name)}</span>
+      ${a.api_key_masked ? `<span class="acct-key">${escHtml(a.api_key_masked)}</span>` : ''}
+      ${a.active ? '<span class="badge-active">ACTIVE</span>' : ''}
+      ${!a.active ? `<button class="btn btn-sm btn-blue" style="padding:2px 10px;font-size:11px" onclick="activateKiteAccount(${JSON.stringify(a.name)})">Activate</button>` : ''}
+      <button class="btn btn-sm" style="padding:2px 8px;font-size:11px;background:rgba(239,68,68,0.15);color:#f87171" onclick="deleteKiteAccount(${JSON.stringify(a.name)})" title="Delete">
+        <i data-lucide="trash-2" style="width:12px;height:12px"></i>
+      </button>
+    </div>
+  `).join('');
+  lucide.createIcons({ nodes: [el] });
+}
+
+function escHtml(s) {
+  return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+}
+
+/* ═══════════════════════════════════════════════════════════════
    RENDER: Mode badge
 ═══════════════════════════════════════════════════════════════ */
 function renderMode(mode) {
@@ -2599,6 +2766,7 @@ async function pollAll() {
     fetchAgentEnables(),
     fetchTSLStatus(),
     fetchCapitalAllocation(),
+    fetchKiteAccounts(),
   ]);
 
   renderStats();

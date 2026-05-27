@@ -28,6 +28,7 @@ from config import settings
 from auth import authenticate, create_token, decode_token, hash_password
 from market_data import nse_client, yf_client, is_market_open
 from kite_client import kite_client
+import kite_accounts
 from risk_manager import risk_manager
 from order_guard import order_guard
 from backtest_engine import backtest_engine
@@ -771,10 +772,65 @@ def update_credentials(req: CredentialsUpdateRequest):
     if req.anthropic_api_key is not None: settings.anthropic_api_key = req.anthropic_api_key
     if req.truedata_username is not None: settings.truedata_username = req.truedata_username
     if req.truedata_password is not None: settings.truedata_password = req.truedata_password
+    # Mirror into the accounts store so the active account stays in sync
+    if req.kite_api_key is not None or req.kite_api_secret is not None:
+        active = kite_accounts.get_active()
+        name = active["name"] if active else "default"
+        kite_accounts.add_or_update(
+            name,
+            settings.kite_api_key or "",
+            settings.kite_api_secret or "",
+        )
+        if not active:
+            kite_accounts.activate(name)
     creds = kite_client.validate_credentials()
     creds["truedata_username"] = bool(settings.truedata_username)
     creds["truedata_password"] = bool(settings.truedata_password)
     return {"status": "updated", "credentials": creds}
+
+
+class AddKiteAccountRequest(BaseModel):
+    name:       str = Field(min_length=1, max_length=50)
+    api_key:    str = Field(min_length=1)
+    api_secret: str = Field(min_length=1)
+
+
+@app.get("/accounts", tags=["Accounts"])
+def list_kite_accounts():
+    """List saved Kite accounts (secrets masked)."""
+    return {"accounts": kite_accounts.list_accounts()}
+
+
+@app.post("/accounts", tags=["Accounts"])
+def add_kite_account(req: AddKiteAccountRequest):
+    """Add or update a named Kite account. Secrets are stored on disk."""
+    kite_accounts.add_or_update(req.name, req.api_key, req.api_secret)
+    return {"status": "saved", "name": req.name, "accounts": kite_accounts.list_accounts()}
+
+
+@app.delete("/accounts/{name}", tags=["Accounts"])
+def delete_kite_account(name: str):
+    """Remove a saved Kite account."""
+    if not kite_accounts.delete(name):
+        raise HTTPException(status_code=404, detail=f"Account '{name}' not found")
+    return {"status": "deleted", "accounts": kite_accounts.list_accounts()}
+
+
+@app.post("/accounts/{name}/activate", tags=["Accounts"])
+def activate_kite_account(name: str):
+    """Switch the active Kite account — updates running credentials immediately."""
+    creds = kite_accounts.activate(name)
+    if creds is None:
+        raise HTTPException(status_code=404, detail=f"Account '{name}' not found")
+    settings.kite_api_key    = creds["api_key"]
+    settings.kite_api_secret = creds["api_secret"]
+    if creds.get("access_token"):
+        settings.kite_access_token = creds["access_token"]
+    return {
+        "status":   "activated",
+        "name":     name,
+        "accounts": kite_accounts.list_accounts(),
+    }
 
 
 @app.post("/settings/app-password", tags=["Settings"])
