@@ -140,6 +140,11 @@ class PositionSL:
     # ATR snapshot (updated from tick indicators)
     atr:            float = 0.0
 
+    # Per-position callbacks (set via register(), used before module-level fallbacks)
+    _on_sl_hit:     Optional[Callable] = field(default=None, repr=False)
+    _on_target_hit: Optional[Callable] = field(default=None, repr=False)
+    _on_sl_moved:   Optional[Callable] = field(default=None, repr=False)
+
     @property
     def cfg(self) -> TrailConfig:
         return TRAIL_CONFIGS.get(self.strategy, TRAIL_CONFIGS["intraday"])
@@ -220,10 +225,16 @@ class TrailingSLEngine:
         quantity:    int,
         order_id:    str,
         atr:         float = 0.0,
+        on_sl_hit:     Optional[Callable] = None,
+        on_target_hit: Optional[Callable] = None,
+        on_sl_moved:   Optional[Callable] = None,
     ) -> PositionSL:
         """
         Register a new open position for trailing SL monitoring.
         Called immediately after order is confirmed.
+
+        Per-position callbacks (on_sl_hit, on_target_hit, on_sl_moved) take
+        priority over the module-level fallback callbacks on the engine.
         """
         cfg = TRAIL_CONFIGS.get(strategy, TRAIL_CONFIGS["intraday"])
 
@@ -238,6 +249,9 @@ class TrailingSLEngine:
             entry_price=entry_price, quantity=quantity,
             order_id=order_id, current_sl=init_sl,
             best_price=entry_price, atr=atr,
+            _on_sl_hit=on_sl_hit,
+            _on_target_hit=on_target_hit,
+            _on_sl_moved=on_sl_moved,
         )
 
         with self._lock:
@@ -283,6 +297,11 @@ class TrailingSLEngine:
         cfg = pos.cfg
         old_sl = pos.current_sl
 
+        # Resolve per-position callbacks, falling back to module-level ones
+        cb_sl_hit    = pos._on_sl_hit    or self.on_sl_hit
+        cb_target    = pos._on_target_hit or self.on_target_hit
+        cb_sl_moved  = pos._on_sl_moved  or self.on_sl_moved
+
         # Update ATR if available
         if atr_14 > 0:
             pos.atr = atr_14
@@ -308,8 +327,8 @@ class TrailingSLEngine:
                 "🔴 SL HIT: {} {} @ ₹{:.2f} | SL was ₹{:.2f} | P&L ₹{:.0f}",
                 pos.symbol, pos.side, ltp, pos.current_sl, pnl
             )
-            if self.on_sl_hit:
-                await self.on_sl_hit(pos, ltp, pnl)
+            if cb_sl_hit:
+                await cb_sl_hit(pos, ltp, pnl)
             return
 
         # ── 3. Target 2 hit ────────────────────────────────────────────
@@ -320,8 +339,8 @@ class TrailingSLEngine:
                (pos.side == "SELL" and ltp <= t2_price):
                 pos.target2_hit = True
                 logger.info("🎯 TARGET 2 hit: {} @ ₹{:.2f}", pos.symbol, ltp)
-                if self.on_target_hit:
-                    await self.on_target_hit(pos, ltp, 2)
+                if cb_target:
+                    await cb_target(pos, ltp, 2)
 
         # ── 4. Target 1 hit → tighten trail ───────────────────────────
         if not pos.target1_hit:
@@ -345,8 +364,8 @@ class TrailingSLEngine:
                     "🎯 T1 hit: {} @ ₹{:.2f} → TSL tightened to ₹{:.2f}",
                     pos.symbol, ltp, pos.current_sl
                 )
-                if self.on_target_hit:
-                    await self.on_target_hit(pos, ltp, 1)
+                if cb_target:
+                    await cb_target(pos, ltp, 1)
 
         # ── 5. Breakeven ───────────────────────────────────────────────
         if not pos.breakeven_hit and profit_pct >= cfg.breakeven_pct:
@@ -356,15 +375,15 @@ class TrailingSLEngine:
                 pos.breakeven_hit = True
                 pos.sl_moves     += 1
                 logger.info("✅ Breakeven locked: {} SL → ₹{:.2f}", pos.symbol, pos.current_sl)
-                if self.on_sl_moved:
-                    await self.on_sl_moved(pos, old_sl, "BREAKEVEN")
+                if cb_sl_moved:
+                    await cb_sl_moved(pos, old_sl, "BREAKEVEN")
             elif pos.side == "SELL" and be_sl < pos.current_sl:
                 pos.current_sl   = round(be_sl, 2)
                 pos.breakeven_hit = True
                 pos.sl_moves     += 1
                 logger.info("✅ Breakeven locked: {} SL → ₹{:.2f}", pos.symbol, pos.current_sl)
-                if self.on_sl_moved:
-                    await self.on_sl_moved(pos, old_sl, "BREAKEVEN")
+                if cb_sl_moved:
+                    await cb_sl_moved(pos, old_sl, "BREAKEVEN")
 
         # ── 6. Activate trailing ───────────────────────────────────────
         if not pos.trail_active and profit_pct >= cfg.activation_pct:
@@ -387,8 +406,8 @@ class TrailingSLEngine:
                         "📈 TSL moved: {} ₹{:.2f} → ₹{:.2f} | locked ₹{:.0f}",
                         pos.symbol, old, new_sl, locked
                     )
-                    if self.on_sl_moved:
-                        await self.on_sl_moved(pos, old, "TRAIL")
+                    if cb_sl_moved:
+                        await cb_sl_moved(pos, old, "TRAIL")
 
                 elif pos.side == "SELL" and new_sl < pos.current_sl:
                     old = pos.current_sl
@@ -400,8 +419,8 @@ class TrailingSLEngine:
                         "📈 TSL moved: {} ₹{:.2f} → ₹{:.2f} | locked ₹{:.0f}",
                         pos.symbol, old, new_sl, locked
                     )
-                    if self.on_sl_moved:
-                        await self.on_sl_moved(pos, old, "TRAIL")
+                    if cb_sl_moved:
+                        await cb_sl_moved(pos, old, "TRAIL")
 
         pos.last_updated = time.time()
 

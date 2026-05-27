@@ -62,19 +62,43 @@ def _setup_tsl_callbacks() -> None:
 
     async def _on_sl_hit(pos, ltp: float, pnl: float) -> None:
         entry = _tsl_sl_orders.pop(pos.order_id, None)
+        sl_already_filled = False
         if entry and entry.get("sl_order_id"):
+            sl_oid = entry["sl_order_id"]
+            # Check if the SL-M order already executed on the exchange
             try:
-                kite_client.cancel_order(entry["sl_order_id"])
+                if hasattr(kite_client, "_paper_orders"):
+                    for o in kite_client._paper_orders:
+                        if o["order_id"] == sl_oid and o["status"] == "COMPLETE":
+                            sl_already_filled = True
+                            break
+                if not sl_already_filled:
+                    history = kite_client.order_history(sl_oid)
+                    for h in reversed(history):
+                        if h.get("status") == "COMPLETE":
+                            sl_already_filled = True
+                            break
             except Exception:
                 pass
-        kite_client.place_order(
-            tradingsymbol=pos.symbol,
-            exchange=entry.get("exchange", "NSE") if entry else "NSE",
-            transaction_type="SELL" if pos.side == "BUY" else "BUY",
-            quantity=pos.quantity, order_type="MARKET",
-            product=entry.get("product", "MIS") if entry else "MIS",
-            tag=f"TSL-HIT-{pos.strategy}",
-        )
+            if not sl_already_filled:
+                try:
+                    kite_client.cancel_order(sl_oid)
+                except Exception:
+                    pass
+
+        # Only place MARKET exit if the SL-M hasn't already filled
+        if not sl_already_filled:
+            kite_client.place_order(
+                tradingsymbol=pos.symbol,
+                exchange=entry.get("exchange", "NSE") if entry else "NSE",
+                transaction_type="SELL" if pos.side == "BUY" else "BUY",
+                quantity=pos.quantity, order_type="MARKET",
+                product=entry.get("product", "MIS") if entry else "MIS",
+                tag=f"TSL-HIT-{pos.strategy}",
+            )
+        else:
+            logger.info("SL-M {} already COMPLETE — skipping MARKET exit to avoid double-exit",
+                        entry.get("sl_order_id") if entry else "?")
         order_guard.release_order(pos.symbol, pos.strategy, pos.side, pnl)
         risk_manager.record_trade(pnl)
         risk_manager.position_closed()
@@ -92,6 +116,8 @@ def _setup_tsl_callbacks() -> None:
                 tag=f"TSL-T{level}-{pos.strategy}",
             )
 
+    # Callbacks are now passed per-position via register() — keep module-level
+    # as fallbacks for any code that still registers without per-position callbacks.
     trailing_sl_engine.on_sl_moved   = _on_sl_moved
     trailing_sl_engine.on_sl_hit     = _on_sl_hit
     trailing_sl_engine.on_target_hit = _on_target_hit
@@ -333,14 +359,18 @@ class BaseAgent(ABC):
         self.state.signals_fired += 1
         self.state.last_signal    = signal
 
-        # Wire TSL callbacks (idempotent — only installs once globally)
+        # Wire TSL callbacks (idempotent — only installs module-level fallbacks once)
         _setup_tsl_callbacks()
 
         # Register with trailing SL engine (monitors every tick)
+        # Pass per-position callbacks so they don't conflict with atomic_bracket's
         trailing_sl_engine.register(
             symbol=sym, strategy=self.name, side=action,
             entry_price=ltp, quantity=qty, order_id=order_id,
             atr=snap.indicators.atr_14,
+            on_sl_hit=trailing_sl_engine.on_sl_hit,
+            on_target_hit=trailing_sl_engine.on_target_hit,
+            on_sl_moved=trailing_sl_engine.on_sl_moved,
         )
 
         sl = signal.get("stop_loss", risk_manager.sl_price(ltp, action))
