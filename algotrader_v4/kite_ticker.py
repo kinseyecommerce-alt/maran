@@ -115,14 +115,18 @@ class KiteTicker:
             buys  = depth.get("buy",  [{}])
             sells = depth.get("sell", [{}])
 
+            abs_change = t.get("change", 0.0)
+            prev_close = ohlc.get("close", 0.0)
+            pct_change = (abs_change / prev_close * 100.0) if prev_close else 0.0
+
             tick = Tick(
                 symbol     = sym,
                 ltp        = t.get("last_price", 0.0),
                 bid        = buys[0].get("price",  0.0) if buys  else 0.0,
                 ask        = sells[0].get("price", 0.0) if sells else 0.0,
                 volume     = t.get("volume_traded", 0),
-                change     = t.get("change", 0.0),
-                change_pct = t.get("change", 0.0),
+                change     = abs_change,
+                change_pct = pct_change,
                 high       = ohlc.get("high",  0.0),
                 low        = ohlc.get("low",   0.0),
                 open       = ohlc.get("open",  0.0),

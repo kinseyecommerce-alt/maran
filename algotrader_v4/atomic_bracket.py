@@ -176,10 +176,10 @@ class AtomicBracketEngine:
             await self._broadcast_update(bracket)
             return None
         trailing_sl_engine.register(symbol=symbol, strategy=strategy, side=side,
-            entry_price=fill_price, quantity=quantity, order_id=bracket_id)
-        trailing_sl_engine.on_sl_hit    = self._on_tsl_sl_hit
-        trailing_sl_engine.on_target_hit = self._on_tsl_target_hit
-        trailing_sl_engine.on_sl_moved   = self._on_tsl_sl_moved
+            entry_price=fill_price, quantity=quantity, order_id=bracket_id,
+            on_sl_hit=self._on_tsl_sl_hit,
+            on_target_hit=self._on_tsl_target_hit,
+            on_sl_moved=self._on_tsl_sl_moved)
         order_guard.register_order(symbol, strategy, side, entry_oid)
         risk_manager.position_opened()
         bracket.status = BracketStatus.ACTIVE
@@ -232,6 +232,25 @@ class AtomicBracketEngine:
                 order_type="MARKET", product=bracket.product, tag="BRK-EMERGENCY-REVERSE")
         except Exception as exc:
             logger.critical("Emergency reverse ALSO FAILED: {}", exc)
+            # Alert + kill switch: unprotected position exists with no SL
+            from agents.base_agent import send_telegram
+            from sebi_compliance import sebi_compliance
+            try:
+                await send_telegram(
+                    f"<b>EMERGENCY</b> reverse FAILED for {bracket.symbol} "
+                    f"({bracket.side} qty={bracket.quantity}). "
+                    f"Position is UNPROTECTED — no SL in place. "
+                    f"Triggering kill switch. Error: {exc}"
+                )
+            except Exception:
+                pass
+            try:
+                sebi_compliance.trigger_kill_switch(
+                    reason=f"Emergency reverse failed: {bracket.symbol} {bracket.side} "
+                           f"qty={bracket.quantity} — unprotected position"
+                )
+            except Exception as ks_exc:
+                logger.critical("Kill switch trigger ALSO FAILED: {}", ks_exc)
 
     async def _on_tsl_sl_hit(self, pos, ltp: float, pnl: float) -> None:
         bracket = self._find_by_symbol_strategy(pos.symbol, pos.strategy)
@@ -239,16 +258,41 @@ class AtomicBracketEngine:
         bracket.status = BracketStatus.SL_HIT
         bracket.pnl    = pnl
         bracket.closed_at = time.time()
+
+        # Check if the SL-M order already executed on the exchange.
+        # If COMPLETE, the exchange already closed the position — skip MARKET exit
+        # to avoid a double-exit creating a reverse position.
+        sl_already_filled = False
         if bracket.sl_order_id:
-            try: kite_client.cancel_order(bracket.sl_order_id)
-            except Exception: pass
-        exit_side = "SELL" if bracket.side == "BUY" else "BUY"
-        try:
-            kite_client.place_order(tradingsymbol=bracket.symbol, exchange=bracket.exchange,
-                transaction_type=exit_side, quantity=bracket.quantity,
-                order_type="MARKET", product=bracket.product, tag="BRK-SL-EXIT")
-        except Exception as exc:
-            logger.error("SL exit order failed: {}", exc)
+            try:
+                if hasattr(kite_client, "_paper_orders"):
+                    for o in kite_client._paper_orders:
+                        if o["order_id"] == bracket.sl_order_id and o["status"] == "COMPLETE":
+                            sl_already_filled = True
+                            break
+                if not sl_already_filled:
+                    history = kite_client.order_history(bracket.sl_order_id)
+                    for h in reversed(history):
+                        if h.get("status") == "COMPLETE":
+                            sl_already_filled = True
+                            break
+            except Exception:
+                pass
+            if not sl_already_filled:
+                try: kite_client.cancel_order(bracket.sl_order_id)
+                except Exception: pass
+
+        if not sl_already_filled:
+            exit_side = "SELL" if bracket.side == "BUY" else "BUY"
+            try:
+                kite_client.place_order(tradingsymbol=bracket.symbol, exchange=bracket.exchange,
+                    transaction_type=exit_side, quantity=bracket.quantity,
+                    order_type="MARKET", product=bracket.product, tag="BRK-SL-EXIT")
+            except Exception as exc:
+                logger.error("SL exit order failed: {}", exc)
+        else:
+            logger.info("SL-M {} already COMPLETE on exchange — skipping MARKET exit",
+                        bracket.sl_order_id)
         order_guard.release_order(bracket.symbol, bracket.strategy, bracket.side, pnl)
         risk_manager.record_trade(pnl)
         risk_manager.position_closed()
