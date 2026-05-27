@@ -483,6 +483,12 @@ class KiteClient:
         quantity, order_type, product, price, trigger_price, tag,
     ) -> str:
         order_id = f"PAPER-{uuid.uuid4().hex[:8].upper()}"
+        # SL / SL-M orders stay pending until trigger_price is crossed
+        if order_type in ("SL", "SL-M"):
+            status = "TRIGGER PENDING"
+        else:
+            status = "COMPLETE"
+
         record = {
             "order_id":         order_id,
             "tradingsymbol":    tradingsymbol,
@@ -493,12 +499,14 @@ class KiteClient:
             "product":          product,
             "price":            price,
             "trigger_price":    trigger_price,
-            "status":           "COMPLETE",
+            "status":           status,
             "tag":              tag,
             "placed_at":        datetime.now().isoformat(),
         }
         self._paper_orders.append(record)
-        self._update_paper_position(record)
+        # Only update position for immediately filled orders
+        if status == "COMPLETE":
+            self._update_paper_position(record)
         logger.info("[PAPER] {} {} {} qty={} @ ₹{} | id={}",
                     transaction_type, tradingsymbol, order_type,
                     quantity, price, order_id)
@@ -510,7 +518,16 @@ class KiteClient:
                      else -order["quantity"])
         for pos in self._paper_positions:
             if pos["tradingsymbol"] == sym:
-                pos["quantity"] += qty_delta
+                old_qty = pos["quantity"]
+                new_qty = old_qty + qty_delta
+                if new_qty != 0 and abs(qty_delta) > 0:
+                    if (old_qty > 0 and qty_delta > 0) or (old_qty < 0 and qty_delta < 0):
+                        # Adding to position — weighted average
+                        pos["average_price"] = round(
+                            (pos["average_price"] * abs(old_qty) + order["price"] * abs(qty_delta))
+                            / abs(new_qty), 2
+                        )
+                pos["quantity"] = new_qty
                 return
         self._paper_positions.append({
             "tradingsymbol": sym,
@@ -521,6 +538,44 @@ class KiteClient:
             "last_price":    order["price"],
             "pnl":           0.0,
         })
+
+    # ── Paper-mode tick-driven updates ────────────────────────────────────
+
+    def check_paper_triggers(self, symbol: str, ltp: float) -> None:
+        """
+        Check pending SL/SL-M paper orders for *symbol*.
+        If ltp crosses the trigger_price, mark the order COMPLETE
+        and update the paper position.
+        """
+        for order in self._paper_orders:
+            if order["tradingsymbol"] != symbol:
+                continue
+            if order["status"] != "TRIGGER PENDING":
+                continue
+            tp = order.get("trigger_price", 0.0)
+            if tp <= 0:
+                continue
+            triggered = False
+            if order["transaction_type"] == "SELL" and ltp <= tp:
+                triggered = True
+            elif order["transaction_type"] == "BUY" and ltp >= tp:
+                triggered = True
+            if triggered:
+                order["status"] = "COMPLETE"
+                order["price"] = ltp  # filled at market after trigger
+                self._update_paper_position(order)
+                logger.info("[PAPER] Trigger hit — {} {} {} qty={} trigger=₹{} fill=₹{}",
+                            order["transaction_type"], symbol,
+                            order["order_type"], order["quantity"], tp, ltp)
+
+    def update_paper_pnl(self, symbol: str, ltp: float) -> None:
+        """
+        Update last_price and P&L for every paper position matching *symbol*.
+        """
+        for pos in self._paper_positions:
+            if pos["tradingsymbol"] == symbol:
+                pos["last_price"] = ltp
+                pos["pnl"] = round((ltp - pos["average_price"]) * pos["quantity"], 2)
 
 
 kite_client = KiteClient()
