@@ -1,0 +1,11 @@
+[phases.setup]
+nixPkgs = ["python312", "gcc", "libffi"]
+
+[phases.install]
+cmds = [
+  "cd algotrader_v4 && pip install --upgrade pip setuptools wheel",
+  "cd algotrader_v4 && pip install -r requirements.txt",
+]
+
+[start]
+cmd = "cd algotrader_v4 && uvicorn main:app --host 0.0.0.0 --port $PORT --workers 1 --loop uvloop --http httptools --log-level warning --access-log"
