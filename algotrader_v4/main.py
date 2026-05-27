@@ -51,8 +51,9 @@ app = FastAPI(
     description="Tick-driven · KiteConnect WebSocket + REST quote · orders + market data",
     docs_url=None, redoc_url=None,
 )
+_HERE = Path(__file__).parent
 app.mount("/swagger-static", StaticFiles(directory=swagger_ui_bundle.swagger_ui_path), name="swagger-static")
-app.mount("/static", StaticFiles(directory="static"), name="static")
+app.mount("/static", StaticFiles(directory=str(_HERE / "static")), name="static")
 
 # MED-1: restrict CORS to explicit methods and headers (no wildcard)
 app.add_middleware(
@@ -287,13 +288,13 @@ class AppPasswordRequest(BaseModel):
 @app.get("/login", include_in_schema=False)
 def login_page():
     """Serve the browser login UI (app + Kite OAuth)."""
-    with open("static/login.html", "r") as f:
+    with open(_HERE / "static" / "login.html", "r") as f:
         return HTMLResponse(f.read())
 
 @app.get("/dashboard", include_in_schema=False)
 def dashboard_page():
     """Serve the main trading dashboard."""
-    p = Path("static/dashboard.html")
+    p = _HERE / "static" / "dashboard.html"
     if not p.exists():
         return HTMLResponse("<h2>Dashboard not found — run deploy to build static assets.</h2>", status_code=404)
     return HTMLResponse(p.read_text())
