@@ -86,20 +86,18 @@ If any test fails:
 Use WebSearch to research the following. Collect findings before implementing.
 
 ### 3a — NSE India API & Market Data
-Search: `"NSE India API 2025 new endpoint" OR "nseindia.com API rate limit 2025"`
+Search: `"NSE India algo trading API 2026 rate limits endpoints"` (use current year)
 - New endpoints?
 - Header/cookie changes?
 - Rate limit updates beyond 10 OPS?
 - Market hours changes?
 
 ### 3b — Python Library Upgrades
-Search PyPI for latest stable versions of each:
-- `fastapi`, `uvicorn`, `yfinance`, `kiteconnect`, `httpx`, `apscheduler`, `anthropic`, `pydantic`, `playwright`
-
-Compare against current `requirements.txt`:
-```
-/home/user/JAG/algotrader_v4/requirements.txt
-```
+Search: `"yfinance 2026 latest version pypi"`, `"fastapi 2026 latest version security features"`
+- Run `pip show <pkg> | grep Version` to get installed versions
+- Run `pip index versions <pkg>` to find latest available
+- Compare installed vs requirements.txt pin — update requirements.txt to match installed
+- Key packages: fastapi, uvicorn, yfinance, httpx, apscheduler, anthropic, pydantic, pydantic-settings, websockets, starlette
 
 ### 3c — Technical Indicators
 Search: `"new trading indicators python 2025" OR "best NSE intraday indicators"`
@@ -404,6 +402,43 @@ This run improved:
 ## Learned Knowledge
 
 *(Updated each run by Abi — most recent at top)*
+
+### Run: 2026-05-27
+
+**Requirements upgraded (all already installed, pinned to current):**
+- `yfinance==0.2.51` → `1.4.0` (major version — API broadly compatible; still use `.history()` and `.Ticker()`)
+- `fastapi==0.111.0` → `0.136.3` (latest; CVE-2024-47874 fully fixed; no API changes needed)
+- `starlette==0.37.2` → `1.1.0` (latest; bundled with FastAPI 0.136.x)
+- `uvicorn[standard]==0.34.3` → `0.48.0` (latest; HTTP/1.1+HTTP/2+WebSocket native async workers)
+- `websockets==12.0` → `16.0` (latest; backward-compatible)
+- `pydantic==2.7.3` → `2.13.4` (latest; stay on v2 API — no migration needed)
+- `pydantic-settings==2.3.4` → `2.14.1` (latest; no API changes)
+
+**No new indicators needed:** Williams %R, Stochastic RSI, Supertrend, HMA, TTM Squeeze, VWAP Bands, all EMAs — all already in LiveIndicators.
+
+**No new strategy patterns needed:** All 7 patterns already implemented in IntradayAgent (VWAP_TREND, EMA_PULLBACK, ORB_BREAK, BREAKOUT, VWAP_RECLAIM, TTM_SQUEEZE, VWAP_BAND_REVERT).
+
+**Prompt caching already applied:** `claude_trade_gate.py` uses `cache_control: {type: ephemeral}` on system prompt. Note: as of Feb 2026, cache TTL is 5 min (not 60 min). Still 90% cost reduction for high-frequency trade sequences. Minimum cacheable size: 1024 tokens for Sonnet.
+
+**UI improvement — Williams %R added to Abi Indicator Radar:**
+- Added `williams_r` computation to `_radarCard()` JS function in `dashboard.html`
+- Shows W%R label with OB/OS/MID classification (>-20 = OB, <-80 = OS)
+- Color-coded: OB=red (radar-dn), OS=green (radar-up), MID=neutral
+- Updated radar subtitle to list "Williams %R" alongside Supertrend/HMA/TTM Squeeze
+- Updated `ws.onmessage` trigger condition to include `msg.williams_r !== undefined`
+- Pattern: W%R is already broadcast in `ws_broadcast` in tick_engine.py — only JS side needed updating
+
+**NSE API insights (May 2026):**
+- NSE SEBI algo framework effective April 1 2026: each registered algo gets Exchange-issued Algo-ID on every order (sebi_compliance.py already handles this)
+- Rate limits: NSE hard cap 10 OPS; Zerodha Kite allows 3 orders/sec; our 8 req/s (125ms) stays safe
+- Static IP now required for broker API access (Kite, Upstox, etc.)
+
+**Prompt caching gotcha:** Never put dynamic content (timestamps, IDs) in the cached prefix — it invalidates the cache. In claude_trade_gate.py the `_SYSTEM_PROMPT` is static (correct). Dynamic context goes into the user message (correct).
+
+**Search queries that were useful this run:**
+- `"yfinance 2026 latest version pypi"` → found v1.4.0 on PyPI
+- `"fastapi 2026 latest version security features"` → confirmed 0.136.x, CVE-2024-47874 fixed
+- `"anthropic claude API prompt caching 2026"` → confirmed 5-min TTL change, 1024 token min
 
 ### Run: 2026-05-23 (run 3)
 **Indicators added:**

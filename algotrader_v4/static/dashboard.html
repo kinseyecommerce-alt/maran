@@ -1118,7 +1118,7 @@
           <div class="card-header" style="display:flex;align-items:center;gap:10px">
             <h3 class="card-title" style="margin:0"><i data-lucide="radar"></i> Abi Indicator Radar</h3>
             <span class="badge badge-stopped" id="radar-live-badge" style="font-size:11px">LIVE</span>
-            <span style="margin-left:auto;font-size:11px;color:var(--text-muted)">Updates every tick · Supertrend · HMA · TTM Squeeze</span>
+            <span style="margin-left:auto;font-size:11px;color:var(--text-muted)">Updates every tick · Supertrend · HMA · TTM Squeeze · Williams %R</span>
           </div>
           <div id="abi-radar-grid" style="display:grid;grid-template-columns:repeat(auto-fill,minmax(220px,1fr));gap:10px;margin-top:12px;max-height:380px;overflow-y:auto">
             <div style="color:var(--text-muted);font-size:13px;grid-column:1/-1;padding:16px 0;text-align:center">
@@ -2919,6 +2919,11 @@ function connectWS() {
     const srLabel = srK === null ? '—' : srK > 80 ? 'OB' : srK < 20 ? 'OS' : 'MID';
     const srClass = srK === null ? 'radar-neu' : srK > 80 ? 'radar-dn' : srK < 20 ? 'radar-up' : 'radar-neu';
     const srNum   = srK !== null ? srK.toFixed(1) : '';
+    // Williams %R row (range -100 to 0; >-20 overbought, <-80 oversold)
+    const wr = typeof d.williams_r === 'number' ? d.williams_r : null;
+    const wrLabel = wr === null ? '—' : wr > -20 ? 'OB' : wr < -80 ? 'OS' : 'MID';
+    const wrClass = wr === null ? 'radar-neu' : wr > -20 ? 'radar-dn' : wr < -80 ? 'radar-up' : 'radar-neu';
+    const wrNum   = wr !== null ? wr.toFixed(1) : '';
     // VWAP band proximity
     const ltp = d.ltp || 0;
     const u3  = d.vwap_u3 || 0, l3 = d.vwap_l3 || 0;
@@ -2953,6 +2958,11 @@ function connectWS() {
         <span class="radar-val">${srLabel}</span>
         <span class="radar-num">${srNum}</span>
       </div>
+      ${wr !== null ? `<div class="radar-row ${wrClass}">
+        <span class="radar-lbl">W%R</span>
+        <span class="radar-val">${wrLabel}</span>
+        <span class="radar-num">${wrNum}</span>
+      </div>` : ''}
       ${bandLabel ? `<div class="radar-row ${bandClass}">
         <span class="radar-lbl">Band</span>
         <span class="radar-val" style="flex:1;font-size:11px">${bandLabel}</span>
@@ -2993,7 +3003,7 @@ function connectWS() {
           cell.dataset.prev   = curr;
         });
         // Update Abi Indicator Radar
-        if (msg.supertrend !== undefined || msg.hma !== undefined || msg.squeeze_on !== undefined) {
+        if (msg.supertrend !== undefined || msg.hma !== undefined || msg.squeeze_on !== undefined || msg.williams_r !== undefined) {
           updateRadar(sym, msg);
         }
       }
