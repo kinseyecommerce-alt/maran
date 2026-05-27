@@ -381,7 +381,7 @@ def test_settings_tab(page: Page, jwt: str):
 
     # --- Save Trading Limits button ---
     page.locator("#tl-intraday").fill("10")
-    page.locator("#tl-fno").fill("5")
+    page.locator("#tl-options").fill("5")     # was #tl-fno (renamed to options)
     page.locator("#tl-swing").fill("4")
     page.locator("#tl-scalping").fill("25")
     page.locator("#tl-cooldown").fill("200")
@@ -394,6 +394,55 @@ def test_settings_tab(page: Page, jwt: str):
         ok(f"Save Limits button → toast: '{toast[:60]}'")
     else:
         ok("Save Limits button clicked")
+
+    # --- Per-Agent Risk Parameters ---
+    risk_sl = page.locator("#ar-sl-intraday")
+    if risk_sl.count() > 0:
+        page.locator("#ar-sl-intraday").fill("1.5")
+        page.locator("#ar-tgt-intraday").fill("3.0")
+        page.locator("#ar-ms-intraday").fill("4")
+        page.locator("#ar-cd-intraday").fill("180")
+        save_risk_btn = page.locator("button[onclick='saveAgentRisk()']")
+        save_risk_btn.click()
+        page.wait_for_timeout(1200)
+        toast = wait_toast(page, 3000)
+        if toast:
+            ok(f"Save Agent Risk button → toast: '{toast[:60]}'")
+        else:
+            ok("Save Agent Risk button clicked")
+    else:
+        warn("Per-Agent Risk Parameters", "section not found")
+    snap(page, "06c2_agent_risk")
+
+    # --- Pattern Toggles ---
+    pat_container = page.locator("#pattern-toggles-container")
+    if pat_container.count() > 0:
+        # Wait for async fetch to populate
+        page.wait_for_timeout(1500)
+        details = page.locator("#pattern-toggles-container details")
+        if details.count() > 0:
+            ok(f"Pattern Toggles panel loaded — {details.count()} agent sections")
+            # Expand first section and click first checkbox
+            details.first.click()
+            page.wait_for_timeout(400)
+            first_cb = details.first.locator("input[type=checkbox]").first
+            if first_cb.count() > 0:
+                before = first_cb.is_checked()
+                first_cb.click()
+                page.wait_for_timeout(800)
+                after = first_cb.is_checked()
+                if before != after:
+                    ok(f"Pattern toggle checkbox toggled ({before} → {after})")
+                    # Toggle back
+                    first_cb.click()
+                    page.wait_for_timeout(600)
+                else:
+                    warn("Pattern checkbox", "state did not change")
+        else:
+            warn("Pattern Toggles", "no agent sections rendered (fetch may have failed)")
+    else:
+        warn("Pattern Toggles container", "not found in DOM")
+    snap(page, "06c3_pattern_toggles")
 
     # --- Capital Allocation inputs + Save button ---
     page.locator("#ca-total").fill("500000")
@@ -416,21 +465,12 @@ def test_settings_tab(page: Page, jwt: str):
     else:
         ok("Save Allocation button clicked")
 
-    # --- Reconnect Kite button (opens new tab — just verify it's clickable) ---
-    reconnect_btn = page.locator("button[onclick*=\"window.open('/login'\"]")
-    if reconnect_btn.count() > 0:
-        with page.context.expect_page() as new_page_info:
-            reconnect_btn.click()
-        new_page = new_page_info.value
-        new_page.wait_for_load_state("domcontentloaded")
-        new_url = new_page.url
-        new_page.close()
-        if "/login" in new_url:
-            ok(f"Reconnect Kite button → opens login page in new tab ({new_url})")
-        else:
-            warn("Reconnect Kite button", f"opened: {new_url}")
+    # --- Authorize with Kite button (replaced Reconnect Kite; same-tab redirect) ---
+    auth_btn = page.locator("button[onclick='connectKiteOAuth()']")
+    if auth_btn.count() > 0:
+        ok("Authorize with Kite button present and wired to connectKiteOAuth()")
     else:
-        warn("Reconnect Kite button", "not found")
+        warn("Authorize with Kite button", "not found — check Settings tab Kite section")
     snap(page, "06e_settings_done")
 
 
