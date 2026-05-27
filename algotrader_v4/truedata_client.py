@@ -94,21 +94,49 @@ class TrueDataTicker:
 
     def _run(self) -> None:
         import time
-        td = _get_td()
-        if td is None:
-            logger.error("[TrueDataTicker] No TD connection — aborting")
-            return
-        try:
-            td.on_data = self._on_tick
-            td_syms    = [_td_symbol(s) for s in self._symbols]
-            req_ids    = td.start_live_data(td_syms)
-            self._connected = True
-            logger.info("[TrueDataTicker] subscribed {} req_ids", len(req_ids))
-            while self._connected:
-                time.sleep(1)
-        except Exception as exc:
-            logger.error("[TrueDataTicker] runtime error: {}", exc)
-            self._connected = False
+        global _td_instance
+        backoff = 1.0
+        max_backoff = 60.0
+        consecutive_failures = 0
+
+        while self._connected or consecutive_failures == 0:
+            td = _get_td()
+            if td is None:
+                consecutive_failures += 1
+                if consecutive_failures >= 3:
+                    # Reset the shared instance so next attempt creates a fresh connection
+                    with _td_lock:
+                        _td_instance = None
+                    logger.warning("[TrueDataTicker] reset TD instance after {} failures", consecutive_failures)
+                wait = min(backoff * (2 ** (consecutive_failures - 1)), max_backoff)
+                logger.warning("[TrueDataTicker] No TD connection — retry in {:.0f}s (attempt {})",
+                               wait, consecutive_failures)
+                time.sleep(wait)
+                continue
+            try:
+                td.on_data = self._on_tick
+                td_syms    = [_td_symbol(s) for s in self._symbols]
+                req_ids    = td.start_live_data(td_syms)
+                self._connected = True
+                consecutive_failures = 0
+                backoff = 1.0
+                logger.info("[TrueDataTicker] subscribed {} req_ids", len(req_ids))
+                while self._connected:
+                    time.sleep(1)
+                # If self._connected was set to False (graceful stop), exit the retry loop
+                return
+            except Exception as exc:
+                self._connected = False
+                consecutive_failures += 1
+                wait = min(backoff * (2 ** (consecutive_failures - 1)), max_backoff)
+                logger.error("[TrueDataTicker] runtime error: {} — reconnecting in {:.0f}s (attempt {})",
+                             exc, wait, consecutive_failures)
+                if consecutive_failures >= 3:
+                    with _td_lock:
+                        _td_instance = None
+                    logger.warning("[TrueDataTicker] reset TD instance after {} consecutive failures",
+                                   consecutive_failures)
+                time.sleep(wait)
 
     def _on_tick(self, tick) -> None:
         if not self._callback or not self._loop:

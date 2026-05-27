@@ -443,6 +443,7 @@ class TickEngine:
         self._kite_ticker = None
         self._use_ws: bool = False
         self._ws_received: set[str] = set()
+        self._ws_down_since: Optional[float] = None  # monotonic time when WS disconnect detected
 
     # ── Setup ─────────────────────────────────────────────────────────
 
@@ -540,6 +541,11 @@ class TickEngine:
         self._latest_tick[symbol] = tick
         self._latest_ind[symbol]  = ind
 
+        # Paper-mode: update P&L and check SL/SL-M triggers on each tick
+        if settings.trading_mode == "PAPER":
+            kite_client.update_paper_pnl(symbol, tick.ltp)
+            kite_client.check_paper_triggers(symbol, tick.ltp)
+
         snap = MarketSnapshot(
             symbol=symbol, tick=tick, indicators=ind,
             candles_1min=self._bufs_1min[symbol].candles()[-60:],
@@ -584,9 +590,11 @@ class TickEngine:
     # ── KiteConnect WebSocket ingest ──────────────────────────────────
 
     async def _ingest_kite_tick(self, symbol: str, tick: Tick) -> None:
-        """Process a tick received directly from KiteConnect WebSocket."""
+        """Process a tick received directly from KiteConnect/TrueData WebSocket."""
         self._ws_received.add(symbol)
-        await self._process_tick(symbol, tick, source="KITE_WS")
+        from truedata_client import TrueDataTicker
+        source = "TRUEDATA_WS" if isinstance(self._kite_ticker, TrueDataTicker) else "KITE_WS"
+        await self._process_tick(symbol, tick, source=source)
 
     # ── Main poll loop ────────────────────────────────────────────────
 
@@ -602,6 +610,37 @@ class TickEngine:
             if not is_market_open() and settings.trading_mode == "LIVE":
                 await asyncio.sleep(30)
                 continue
+
+            # ── WS health check: fall back to REST if WS disconnected > 10s ──
+            if self._use_ws and self._kite_ticker is not None:
+                ws_connected = getattr(self._kite_ticker, "is_connected", True)
+                # is_connected may be a property or a bool; resolve it
+                if callable(ws_connected):
+                    ws_connected = ws_connected()
+                if not ws_connected:
+                    if self._ws_down_since is None:
+                        self._ws_down_since = time.monotonic()
+                    elif time.monotonic() - self._ws_down_since > 10.0:
+                        logger.warning(
+                            "TickEngine: WebSocket disconnected for >10s — "
+                            "falling back to REST polling for {} symbols",
+                            len(self._ws_received),
+                        )
+                        self._use_ws = False
+                        self._ws_received.clear()
+                        self._ws_down_since = None
+                else:
+                    # WS is healthy — if we previously fell back, re-enable
+                    if self._ws_down_since is not None:
+                        self._ws_down_since = None
+            elif not self._use_ws and self._kite_ticker is not None:
+                # Check if WS has reconnected so we can re-enable it
+                ws_connected = getattr(self._kite_ticker, "is_connected", False)
+                if callable(ws_connected):
+                    ws_connected = ws_connected()
+                if ws_connected:
+                    logger.info("TickEngine: WebSocket reconnected — re-enabling WS ticks")
+                    self._use_ws = True
 
             if settings.trading_mode == "PAPER":
                 tasks = [self._fetch_and_process(sym) for sym in self._symbols]
