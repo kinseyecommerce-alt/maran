@@ -21,7 +21,7 @@ GATE_THRESHOLDS: dict[str, dict] = {
     "vwap_reversion": {"win_rate": 58, "sharpe": 1.0,  "drawdown": 12, "min_trades": 25, "pf": 1.3},
     # live-agent strategy aliases
     "scalping":       {"win_rate": 55, "sharpe": 0.9,  "drawdown": 10, "min_trades": 30, "pf": 1.15},
-    "fno":            {"win_rate": 50, "sharpe": 0.9,  "drawdown": 20, "min_trades": 15, "pf": 1.3},
+    "options":            {"win_rate": 50, "sharpe": 0.9,  "drawdown": 20, "min_trades": 15, "pf": 1.3},
 }
 
 # ── Per-strategy configuration (SL %, target %, product, hold) ────────────
@@ -35,7 +35,7 @@ STRATEGY_CONFIG: dict[str, dict] = {
     "orb":            {"sl": 1.0,  "t1": 2.0,  "t2": 3.5,  "product": "MIS",  "hold_bars": 10},
     "vwap_reversion": {"sl": 0.8,  "t1": 1.5,  "t2": 2.5,  "product": "MIS",  "hold_bars": 8},
     "scalping":       {"sl": 0.5,  "t1": 1.0,  "t2": 1.8,  "product": "MIS",  "hold_bars": 5},
-    "fno":            {"sl": 25.0, "t1": 50.0, "t2": 80.0, "product": "NRML", "hold_bars": 3},
+    "options":            {"sl": 25.0, "t1": 50.0, "t2": 80.0, "product": "NRML", "hold_bars": 3},
 }
 
 

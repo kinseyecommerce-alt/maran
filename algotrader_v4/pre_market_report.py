@@ -201,7 +201,7 @@ Output ONLY valid JSON — no markdown fences, no explanatory text outside the J
   "sector_focus": [
     {"sector": "<name>", "bias": "long|short|neutral", "reason": "<concise reason>"}
   ],
-  "strategy_weights": {"intraday": <0-100>, "scalping": <0-100>, "swing": <0-100>, "fno": <0-100>},
+  "strategy_weights": {"intraday": <0-100>, "scalping": <0-100>, "swing": <0-100>, "options": <0-100>},
   "stock_setups": [
     {"symbol": "<NSE symbol>", "bias": "long|short", "reason": "<concise reason>"}
   ],
@@ -478,7 +478,7 @@ async def generate_pre_market_report() -> dict:
             "sentiment_confidence": 50,
             "key_risks": ["Claude synthesis unavailable — data-only report"],
             "sector_focus": [],
-            "strategy_weights": {"intraday": 25, "scalping": 25, "swing": 25, "fno": 25},
+            "strategy_weights": {"intraday": 25, "scalping": 25, "swing": 25, "options": 25},
             "stock_setups": [],
             "summary": "Pre-market data collected. Claude analysis unavailable.",
         }

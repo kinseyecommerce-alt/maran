@@ -33,7 +33,8 @@ _AUDIT_LOG_DIR = Path("logs")
 # ── Reg 1: Approved algo registry ─────────────────────────────────────────────
 APPROVED_ALGO_IDS: dict[str, str] = {
     "intraday": "ALGO-INTRA-001",
-    "fno":      "ALGO-FNO-002",
+    "options":  "ALGO-OPT-002",
+    "futures":  "ALGO-FUT-006",
     "swing":    "ALGO-SWING-003",
     "scalping": "ALGO-SCALP-004",
     "manual":   "ALGO-MANUAL-005",
@@ -49,7 +50,7 @@ _STRATEGY_DISCLOSURES: dict[str, dict] = {
         "risk_controls": "Stop-loss, target, trailing SL, max daily loss, position limits",
         "parameters": {"ema_short": 9, "ema_long": 21, "rsi_min": 45, "rsi_max": 67, "vol_ratio_min": 1.3},
     },
-    "fno": {
+    "options": {
         "name": "F&O Options Writer",
         "description": "Sells options based on IV percentile and delta-neutral positioning",
         "instruments": "NSE F&O (NRML)",
@@ -57,6 +58,15 @@ _STRATEGY_DISCLOSURES: dict[str, dict] = {
         "holding_period": "1-3 days to expiry",
         "risk_controls": "Delta hedging, max loss per trade, margin monitoring",
         "parameters": {"iv_percentile_min": 70, "delta_range": [-0.3, 0.3]},
+    },
+    "futures": {
+        "name": "Index Futures Trend Follower",
+        "description": "Trades NFO index futures on EMA/ORB/VWAP trend-following patterns",
+        "instruments": "NSE NFO Futures (NRML)",
+        "order_types": ["MARKET"],
+        "holding_period": "Intraday — squared off by 14:55",
+        "risk_controls": "0.5% stop-loss, 1.2% target, 3-min cooldown, lot-based sizing",
+        "parameters": {"sl_pct": 0.5, "tgt_pct": 1.2, "cooldown_sec": 180},
     },
     "swing": {
         "name": "EMA Crossover Swing",

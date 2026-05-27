@@ -343,7 +343,7 @@ class IntradayAgent(BaseAgent):
 # 2.  F&O  —  NRML, IV proxy + OI + RSI extremes + Bollinger breakout
 # ═══════════════════════════════════════════════════════════════════════════════
 
-class FnOAgent(BaseAgent):
+class OptionsAgent(BaseAgent):
     """
     Never-miss NSE/NFO options agent — 7 entry patterns, all market conditions covered.
 
@@ -363,7 +363,7 @@ class FnOAgent(BaseAgent):
     Cooldown:       120s per symbol per direction (CE and PE tracked independently)
     IV gate:        hard block if IV rank > 72% (never buy expensive premium)
     """
-    name    = "fno"
+    name    = "options"
     product = "NRML"
     min_candles_1min = 10
 
@@ -482,7 +482,7 @@ class FnOAgent(BaseAgent):
             "pattern":           best_pattern,
             "_gate_size_factor": sf,
             "trigger": (
-                f"FNO-{best_opt} [{best_pattern}] score={best_score}/14 "
+                f"OPT-{best_opt} [{best_pattern}] score={best_score}/14 "
                 f"IVr={iv_rank:.0f}% sf={sf} rsi={ind.rsi_14:.0f} "
                 f"trend={ind.trend}"
             ),
@@ -734,14 +734,14 @@ class FnOAgent(BaseAgent):
         )
         if not sebi_ok:
             from loguru import logger
-            logger.warning("[fno] SEBI blocked {} {}: {}", action, opt_sym, sebi_reason)
+            logger.warning("[options] SEBI blocked {} {}: {}", action, opt_sym, sebi_reason)
             return
 
         order_id = kite_client.place_order(
             tradingsymbol=opt_sym, exchange=exch,
             transaction_type=action, quantity=qty,
             order_type="MARKET", product=self.product,
-            tag="Agent-fno",
+            tag="Agent-options",
         )
         sebi_compliance.record_order_id(self.name, opt_sym, order_id)
         order_guard.register_order(underlying, self.name, action, order_id)
@@ -765,11 +765,11 @@ class FnOAgent(BaseAgent):
             tradingsymbol=opt_sym, exchange=exch,
             transaction_type="SELL", quantity=qty,
             order_type="SL-M", product=self.product,
-            trigger_price=sl_px, tag="Agent-fno-SL",
+            trigger_price=sl_px, tag="Agent-options-SL",
         )
 
         await send_telegram(
-            f"<b>[FNO]</b> {action} {opt_sym} ≈₹{opt_price:.1f}\n"
+            f"<b>[OPTIONS]</b> {action} {opt_sym} ≈₹{opt_price:.1f}\n"
             f"Pattern: {signal.get('pattern')} | Score: {signal.get('score')}/14\n"
             f"{signal.get('option_type')} {signal.get('strike')} | IVr={iv_rank:.0f}% sf={sf}\n"
             f"SL: ₹{sl_px:.1f} | TGT: ₹{tgt_px:.1f} | Ord: {order_id}"
@@ -1508,7 +1508,7 @@ class FuturesAgent(BaseAgent):
 
 ALL_AGENTS: dict[str, BaseAgent] = {
     "intraday": IntradayAgent(),
-    "fno":      FnOAgent(),
+    "options":  OptionsAgent(),
     "futures":  FuturesAgent(),
     "swing":    SwingAgent(),
     "scalping": ScalpingAgent(),

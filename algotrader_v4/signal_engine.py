@@ -19,7 +19,7 @@ from loguru import logger
 from config import settings
 from market_data import yf_client
 
-STRATEGY = Literal["intraday", "fno", "swing", "scalping"]
+STRATEGY = Literal["intraday", "options", "swing", "scalping"]
 
 SYSTEM_PROMPT = """
 You are a senior NSE/BSE quant analyst. You receive either:
@@ -87,7 +87,7 @@ class SignalEngine:
         "intraday": ("15m",  "5d"),
         "scalping": ("5m",   "2d"),
         "swing":    ("1d",   "6mo"),
-        "fno":      ("60m",  "1mo"),
+        "options":      ("60m",  "1mo"),
     }
 
     def _fetch_candles(

@@ -5,7 +5,7 @@ Both main.py and master_agent_v5.py import from here.
 
 _agent_enabled: dict[str, bool] = {
     "intraday": True,
-    "fno":      True,
+    "options":  True,
     "futures":  True,
     "swing":    True,
     "scalping": True,

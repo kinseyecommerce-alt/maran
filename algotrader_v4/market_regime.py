@@ -74,36 +74,36 @@ class StrategyPlan:
 
 REGIME_PLANS: dict[Regime, StrategyPlan] = {
     Regime.BULL_TREND: StrategyPlan(
-        active     = ["swing", "intraday", "scalping", "fno"],
+        active     = ["swing", "intraday", "scalping", "options"],
         paused     = [],
-        allocation = {"swing":40, "intraday":35, "scalping":15, "fno":10},
+        allocation = {"swing":40, "intraday":35, "scalping":15, "options":10},
         size_factor= 1.0,
         reasoning  = "Strong uptrend confirmed — favour trend-following. Swing positions hold well. "
                      "Intraday on dips. Scalping for quick BUY entries on pullbacks.",
         regime     = Regime.BULL_TREND,
     ),
     Regime.BEAR_TREND: StrategyPlan(
-        active     = ["scalping", "fno", "intraday"],
+        active     = ["scalping", "options", "intraday"],
         paused     = ["swing"],
-        allocation = {"scalping":40, "fno":30, "intraday":30, "swing":0},
+        allocation = {"scalping":40, "options":30, "intraday":30, "swing":0},
         size_factor= 0.75,
         reasoning  = "Downtrend — swing trades stopped to avoid catching falling knives. "
                      "Scalping short setups. F&O PUT buying on bounces. Intraday SELL side only.",
         regime     = Regime.BEAR_TREND,
     ),
     Regime.BULL_VOLATILE: StrategyPlan(
-        active     = ["intraday", "scalping", "fno"],
+        active     = ["intraday", "scalping", "options"],
         paused     = ["swing"],
-        allocation = {"intraday":40, "scalping":35, "fno":25, "swing":0},
+        allocation = {"intraday":40, "scalping":35, "options":25, "swing":0},
         size_factor= 0.75,
         reasoning  = "Uptrend but VIX elevated — avoid overnight swing risk. "
                      "Intraday and scalping are ideal. F&O straddles for volatility play.",
         regime     = Regime.BULL_VOLATILE,
     ),
     Regime.BEAR_VOLATILE: StrategyPlan(
-        active     = ["scalping", "fno"],
+        active     = ["scalping", "options"],
         paused     = ["swing", "intraday"],
-        allocation = {"scalping":50, "fno":50, "swing":0, "intraday":0},
+        allocation = {"scalping":50, "options":50, "swing":0, "intraday":0},
         size_factor= 0.5,
         reasoning  = "Falling market + high VIX — most dangerous regime. "
                      "Only scalping short setups and protective F&O PUT buying allowed. "
@@ -111,9 +111,9 @@ REGIME_PLANS: dict[Regime, StrategyPlan] = {
         regime     = Regime.BEAR_VOLATILE,
     ),
     Regime.RANGING: StrategyPlan(
-        active     = ["scalping", "fno", "intraday"],
+        active     = ["scalping", "options", "intraday"],
         paused     = ["swing"],
-        allocation = {"scalping":45, "fno":35, "intraday":20, "swing":0},
+        allocation = {"scalping":45, "options":35, "intraday":20, "swing":0},
         size_factor= 0.75,
         reasoning  = "Market consolidating — no clear directional trend. "
                      "Scalping mean-reversion edges. F&O iron condor / strangles for premium. "
@@ -121,9 +121,9 @@ REGIME_PLANS: dict[Regime, StrategyPlan] = {
         regime     = Regime.RANGING,
     ),
     Regime.HIGH_VOLATILE: StrategyPlan(
-        active     = ["fno", "scalping"],
+        active     = ["options", "scalping"],
         paused     = ["swing", "intraday"],
-        allocation = {"fno":50, "scalping":30, "intraday":20, "swing":0},
+        allocation = {"options":50, "scalping":30, "intraday":20, "swing":0},
         size_factor= 0.25,
         reasoning  = "EXTREME VOLATILITY (VIX > 25). Only experienced F&O hedging and "
                      "very tight scalping. Position sizes at 25%. Intraday only if clear signal.",
@@ -131,8 +131,8 @@ REGIME_PLANS: dict[Regime, StrategyPlan] = {
     ),
     Regime.UNKNOWN: StrategyPlan(
         active     = ["scalping"],
-        paused     = ["swing", "intraday", "fno"],
-        allocation = {"scalping":100, "swing":0, "intraday":0, "fno":0},
+        paused     = ["swing", "intraday", "options"],
+        allocation = {"scalping":100, "swing":0, "intraday":0, "options":0},
         size_factor= 0.5,
         reasoning  = "Could not determine market regime. Running only scalping at reduced size.",
         regime     = Regime.UNKNOWN,

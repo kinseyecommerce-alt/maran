@@ -145,7 +145,7 @@ async def _rate_limiter(request: Request, call_next):
 
 # ── HIGH-2: Input validation helpers (prompt injection / path traversal) ────────
 _SYMBOL_RE = re.compile(r"^[A-Z0-9\-&]{1,20}$")
-_VALID_STRATEGIES = frozenset({"intraday", "fno", "swing", "scalping"})
+_VALID_STRATEGIES = frozenset({"intraday", "options", "futures", "swing", "scalping"})
 
 def _clean_symbol(sym: str) -> str:
     s = sym.strip().upper()
@@ -252,7 +252,7 @@ class KillSwitchResetRequest(BaseModel):
 
 class TradingLimitsRequest(BaseModel):
     max_trades_intraday:  int | None = Field(default=None, ge=1, le=100)
-    max_trades_fno:       int | None = Field(default=None, ge=1, le=50)
+    max_trades_options:   int | None = Field(default=None, ge=1, le=50)
     max_trades_futures:   int | None = Field(default=None, ge=1, le=50)
     max_trades_swing:     int | None = Field(default=None, ge=1, le=30)
     max_trades_scalping:  int | None = Field(default=None, ge=1, le=200)
@@ -260,7 +260,7 @@ class TradingLimitsRequest(BaseModel):
 
 class AgentEnablesRequest(BaseModel):
     intraday: bool | None = None
-    fno:      bool | None = None
+    options:  bool | None = None
     futures:  bool | None = None
     swing:    bool | None = None
     scalping: bool | None = None
@@ -694,7 +694,7 @@ def risk_update(req: RiskUpdateRequest):
 def get_trading_limits():
     return {
         "max_trades_intraday":     settings.max_trades_intraday,
-        "max_trades_fno":          settings.max_trades_fno,
+        "max_trades_options":      settings.max_trades_options,
         "max_trades_futures":      settings.max_trades_futures,
         "max_trades_swing":        settings.max_trades_swing,
         "max_trades_scalping":     settings.max_trades_scalping,
@@ -704,7 +704,7 @@ def get_trading_limits():
 @app.patch("/settings/trading-limits", tags=["Settings"])
 def patch_trading_limits(req: TradingLimitsRequest):
     if req.max_trades_intraday     is not None: settings.max_trades_intraday     = req.max_trades_intraday
-    if req.max_trades_fno          is not None: settings.max_trades_fno          = req.max_trades_fno
+    if req.max_trades_options      is not None: settings.max_trades_options      = req.max_trades_options
     if req.max_trades_futures      is not None: settings.max_trades_futures      = req.max_trades_futures
     if req.max_trades_swing        is not None: settings.max_trades_swing        = req.max_trades_swing
     if req.max_trades_scalping     is not None: settings.max_trades_scalping     = req.max_trades_scalping
@@ -761,7 +761,7 @@ def get_capital_allocation():
         },
         "agent_buckets": {
             "intraday": "intraday", "scalping": "intraday",
-            "swing": "swing",       "fno": "options",
+            "swing": "swing",       "options": "options",  "futures": "options",
         }
     }
 

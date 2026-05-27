@@ -35,7 +35,7 @@ PROGRESS_FILE = Path("logs/learning_progress.json")
 APPROVED_FILE = Path("logs/approved_symbols.json")
 Path("logs").mkdir(exist_ok=True)
 
-ALL_STRATEGIES = ["intraday", "scalping", "fno", "swing"]
+ALL_STRATEGIES = ["intraday", "scalping", "options", "swing"]
 
 
 def _load_progress() -> dict:

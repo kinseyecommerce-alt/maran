@@ -163,7 +163,7 @@ CRITERIA: dict[str, SelectionCriteria] = {
         score_weights   = {"liquidity":35, "trend":35, "momentum":20, "volatility":10},
         description     = "Top-100 NSE stocks — trending + high-volume for intraday momentum",
     ),
-    "fno": SelectionCriteria(
+    "options": SelectionCriteria(
         universe        = NSE_TOP_100,          # F&O gate applied inside scorer
         top_n           = 6,
         min_avg_volume  = 1_000_000,

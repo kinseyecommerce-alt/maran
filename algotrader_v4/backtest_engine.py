@@ -153,7 +153,7 @@ STRATEGY_PARAMS = {
         "target_pct": 3.0,
         "max_hold_bars": 20,
     },
-    "fno": {
+    "options": {
         "interval": "60minute",
         "sl_pct": 5.0,
         "target_pct": 10.0,
@@ -410,7 +410,7 @@ class BacktestEngine:
                 if vwap_cross and ema_bull and rsi_ok:
                     signals.iloc[i] = 1
 
-        elif strategy == "fno":
+        elif strategy == "options":
             rsi    = ta.momentum.RSIIndicator(close, 14).rsi()
             atr    = ta.volatility.AverageTrueRange(high, low, close, 14).average_true_range()
             atr_ma = atr.rolling(30).mean()

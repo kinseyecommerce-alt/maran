@@ -44,11 +44,12 @@ Return ONLY valid JSON — no markdown, no code fences:
   "regime_confidence": 0-100,
   "agent_directives": {
     "intraday":  {"action": "run|pause|reduce_size", "reason": "<specific reason>"},
-    "fno":       {"action": "run|pause|reduce_size", "reason": "<specific reason>"},
+    "options":   {"action": "run|pause|reduce_size", "reason": "<specific reason>"},
+    "futures":   {"action": "run|pause|reduce_size", "reason": "<specific reason>"},
     "swing":     {"action": "run|pause|reduce_size", "reason": "<specific reason>"},
     "scalping":  {"action": "run|pause|reduce_size", "reason": "<specific reason>"}
   },
-  "capital_allocation": {"intraday": 0-100, "fno": 0-100, "swing": 0-100, "scalping": 0-100},
+  "capital_allocation": {"intraday": 0-100, "options": 0-100, "futures": 0-100, "swing": 0-100, "scalping": 0-100},
   "trade_gate_threshold": 55-85,
   "risk_override": {"halt_new_trades": false, "reason": ""},
   "opportunity_alert": "<null or 1-sentence alert about a specific opportunity window>",

@@ -37,7 +37,7 @@ class OrderGuard:
     def _max_trades(strategy: str) -> int:
         return {
             "intraday": settings.max_trades_intraday,
-            "fno":      settings.max_trades_fno,
+            "options":      settings.max_trades_options,
             "swing":    settings.max_trades_swing,
             "scalping": settings.max_trades_scalping,
         }.get(strategy, 10)

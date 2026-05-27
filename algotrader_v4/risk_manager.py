@@ -18,7 +18,8 @@ _AGENT_TO_BUCKET: dict[str, str] = {
     "intraday": "intraday",
     "scalping": "intraday",   # scalping shares the equity intraday pool
     "swing":    "swing",
-    "fno":      "options",
+    "options":  "options",
+    "futures":  "futures",
 }
 
 _BUCKET_PCT_ATTR: dict[str, str] = {
@@ -28,12 +29,13 @@ _BUCKET_PCT_ATTR: dict[str, str] = {
     "futures":  "futures_capital_pct",
 }
 
-# Max-positions config attr per agent; None = lot-based (fno), no per-symbol split
+# Max-positions config attr per agent; None = lot-based (options/futures), no per-symbol split
 _AGENT_MAX_POS: dict[str, str | None] = {
     "intraday": "max_intraday_positions",
     "scalping": "max_scalping_positions",
     "swing":    "max_swing_positions",
-    "fno":      None,
+    "options":  None,
+    "futures":  None,
 }
 
 

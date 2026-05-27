@@ -1160,7 +1160,7 @@
               <input type="checkbox" id="strat-scalping" checked> Scalping
             </label>
             <label class="checkbox-item">
-              <input type="checkbox" id="strat-fno"> Options (F&amp;O)
+              <input type="checkbox" id="strat-options"> Options (F&amp;O)
             </label>
             <label class="checkbox-item">
               <input type="checkbox" id="strat-futures"> Futures
@@ -1553,7 +1553,7 @@
             </div>
             <div>
               <label style="font-size:12px;color:var(--muted);display:block;margin-bottom:5px">Options/F&amp;O (max trades/day)</label>
-              <input type="number" id="tl-fno" min="1" max="50" class="risk-input" style="width:100%" placeholder="4">
+              <input type="number" id="tl-options" min="1" max="50" class="risk-input" style="width:100%" placeholder="4">
             </div>
             <div>
               <label style="font-size:12px;color:var(--muted);display:block;margin-bottom:5px">Futures (max trades/day)</label>
@@ -2098,7 +2098,7 @@ function renderBotStatus() {
    RENDER: Strategy Cards
 ═══════════════════════════════════════════════════════════════ */
 const STRATEGY_ICONS = {
-  intraday: 'trending-up', scalping: 'zap', fno: 'bar-chart-2', futures: 'activity', swing: 'wave'
+  intraday: 'trending-up', scalping: 'zap', options: 'bar-chart-2', futures: 'activity', swing: 'wave'
 };
 
 function renderStrategyCards() {
@@ -2107,7 +2107,7 @@ function renderStrategyCards() {
   const names  = Object.keys(agents);
 
   if (names.length === 0) {
-    grid.innerHTML = ['intraday','scalping','fno','futures','swing'].map(name => strategyCardHtml(name, null)).join('');
+    grid.innerHTML = ['intraday','scalping','options','futures','swing'].map(name => strategyCardHtml(name, null)).join('');
     lucide.createIcons({ nodes: [grid] });
     return;
   }
@@ -2611,7 +2611,7 @@ async function toggleBot() {
       const strategies = [];
       if (document.getElementById('strat-intraday').checked) strategies.push('intraday');
       if (document.getElementById('strat-scalping').checked) strategies.push('scalping');
-      if (document.getElementById('strat-fno').checked)      strategies.push('fno');
+      if (document.getElementById('strat-options').checked)      strategies.push('options');
       if (document.getElementById('strat-futures').checked)  strategies.push('futures');
       if (document.getElementById('strat-swing').checked)    strategies.push('swing');
 
@@ -2738,7 +2738,7 @@ async function fetchTradingLimits() {
   try {
     const d = await api('GET', '/settings/trading-limits');
     document.getElementById('tl-intraday').value = d.max_trades_intraday  ?? 8;
-    document.getElementById('tl-fno').value      = d.max_trades_fno       ?? 4;
+    document.getElementById('tl-options').value      = d.max_trades_options       ?? 4;
     document.getElementById('tl-futures').value  = d.max_trades_futures   ?? 4;
     document.getElementById('tl-swing').value    = d.max_trades_swing     ?? 3;
     document.getElementById('tl-scalping').value = d.max_trades_scalping  ?? 20;
@@ -2755,7 +2755,7 @@ async function saveTradingLimits() {
     const _int = id => { const v = parseInt(document.getElementById(id).value); return isNaN(v) ? undefined : v; };
     const body = {
       max_trades_intraday:     _int('tl-intraday'),
-      max_trades_fno:          _int('tl-fno'),
+      max_trades_options:          _int('tl-options'),
       max_trades_futures:      _int('tl-futures'),
       max_trades_swing:        _int('tl-swing'),
       max_trades_scalping:     _int('tl-scalping'),
@@ -3109,7 +3109,7 @@ async function fetchAgentEnables() {
 function renderAgentEnables() {
   const container = document.getElementById('agent-enables-list');
   if (!container) return;
-  const names = ['intraday', 'scalping', 'fno', 'futures', 'swing'];
+  const names = ['intraday', 'scalping', 'options', 'futures', 'swing'];
   container.innerHTML = names.map(name => {
     const enabled = state.agentEnables[name] !== false;
     return `<label class="toggle-wrap" style="margin:0">

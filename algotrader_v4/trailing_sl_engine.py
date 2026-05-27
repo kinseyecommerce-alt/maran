@@ -85,7 +85,7 @@ TRAIL_CONFIGS: dict[str, TrailConfig] = {
         mode            = SLMode.TRAILING,
         atr_multiplier  = 1.2,
     ),
-    "fno": TrailConfig(
+    "options": TrailConfig(
         initial_sl_pct  = 35.0,   # % of premium
         trail_pct       = 20.0,
         breakeven_pct   = 15.0,
