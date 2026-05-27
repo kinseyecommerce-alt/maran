@@ -658,6 +658,7 @@ async def cancel(order_id: str):
 @app.post("/orders/squareoff", tags=["Orders"])
 async def squareoff():
     ids = kite_client.squareoff_all_positions()
+    order_guard.reset_daily()
     return {"status": "ok", "squared_off": len(ids)}
 
 # HIGH-6: generic error messages, raw exceptions logged server-side only
