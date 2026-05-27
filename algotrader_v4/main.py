@@ -561,6 +561,7 @@ async def trigger_weekly_backtest():
 # ── Orders ────────────────────────────────────────────────────────────────────
 @app.post("/orders/place", tags=["Orders"])
 async def place_order(req: OrderRequest):
+    req.symbol = _clean_symbol(req.symbol)
     ok, reason = order_guard.can_place(req.symbol, "manual", req.transaction_type)
     if not ok: raise HTTPException(400, f"Guard: {reason}")
     ok, reason = risk_manager.check_before_order(req.symbol, req.quantity, req.price or 1, req.transaction_type)
@@ -901,6 +902,7 @@ def get_bracket(bracket_id: str):
 
 @app.post("/brackets/manual", tags=["Brackets"])
 async def manual_bracket(req: ManualBracketRequest):
+    req.symbol = _clean_symbol(req.symbol)
     bracket = await atomic_bracket_engine.execute(
         strategy=req.strategy, symbol=req.symbol, exchange=req.exchange,
         side=req.side, quantity=req.quantity, signal_price=req.signal_price,
@@ -1095,6 +1097,7 @@ async def n8n_inbound(request: Request):
             req = OrderRequest(**p)
         except Exception as exc:
             raise HTTPException(422, f"Invalid order payload: {exc}")
+        req.symbol = _clean_symbol(req.symbol)
         ok, reason = order_guard.can_place(req.symbol, "n8n", req.transaction_type)
         if not ok:
             raise HTTPException(400, f"Guard blocked: {reason}")
@@ -1136,6 +1139,13 @@ async def on_startup():
     asyncio.create_task(symbol_scanner.run())
     from platform_scheduler import platform_scheduler
     platform_scheduler.start()
+    # Warn when security-critical settings are absent (auth middleware is a no-op without these)
+    if not settings.api_key:
+        logger.warning("SECURITY: API_KEY is not set — all mutating endpoints are unprotected. Set API_KEY in .env before deploying.")
+    if not settings.jwt_secret_key:
+        logger.warning("SECURITY: JWT_SECRET_KEY is not set — browser login tokens cannot be issued. Set JWT_SECRET_KEY in .env before deploying.")
+    if settings.trading_mode == "LIVE" and not settings.kite_api_key:
+        logger.warning("SECURITY: TRADING_MODE=LIVE but KITE_API_KEY is not set — order placement will fail.")
 
 
 # HIGH-7: reload=False in production — auto-reload bypasses security middleware
