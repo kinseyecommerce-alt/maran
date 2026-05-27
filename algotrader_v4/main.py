@@ -253,6 +253,7 @@ class KillSwitchResetRequest(BaseModel):
 class TradingLimitsRequest(BaseModel):
     max_trades_intraday:  int | None = Field(default=None, ge=1, le=100)
     max_trades_fno:       int | None = Field(default=None, ge=1, le=50)
+    max_trades_futures:   int | None = Field(default=None, ge=1, le=50)
     max_trades_swing:     int | None = Field(default=None, ge=1, le=30)
     max_trades_scalping:  int | None = Field(default=None, ge=1, le=200)
     cooldown_after_loss_sec: int | None = Field(default=None, ge=0, le=3600)
@@ -260,6 +261,7 @@ class TradingLimitsRequest(BaseModel):
 class AgentEnablesRequest(BaseModel):
     intraday: bool | None = None
     fno:      bool | None = None
+    futures:  bool | None = None
     swing:    bool | None = None
     scalping: bool | None = None
 
@@ -349,29 +351,44 @@ def kite_callback(request_token: str = "", action: str = "", status: str = ""):
     """Zerodha redirects here after OAuth. Auto-captures the request_token."""
     if status != "success" or not request_token:
         return HTMLResponse(
-            "<h2 style='font-family:sans-serif;color:#f85149'>Kite login failed or cancelled.</h2>"
-            "<p><a href='/login'>← Back to login</a></p>",
+            "<html><head><meta http-equiv='refresh' content='3;url=/dashboard'></head>"
+            "<body style='font-family:sans-serif;background:#0d1117;color:#e6edf3;"
+            "display:flex;align-items:center;justify-content:center;height:100vh'>"
+            "<div style='text-align:center'><div style='font-size:2.5rem'>❌</div>"
+            "<h2 style='color:#f85149'>Kite login failed or cancelled.</h2>"
+            "<p style='color:#8b949e'>Redirecting to dashboard…</p></div></body></html>",
             status_code=400,
         )
     try:
         token = kite_client.set_access_token(request_token=request_token)
+        # Store access token in the active account if one exists
+        active = kite_accounts.get_active()
+        if active:
+            kite_accounts.update_access_token(active["name"], token)
+        settings.kite_access_token = token
         return HTMLResponse(f"""
-        <html><head><title>Kite Connected</title></head>
+        <html><head><title>Kite Connected</title>
+        <meta http-equiv='refresh' content='2;url=/dashboard'>
+        </head>
         <body style="font-family:sans-serif;background:#0d1117;color:#e6edf3;
                      display:flex;align-items:center;justify-content:center;height:100vh">
           <div style="text-align:center">
             <div style="font-size:3rem">✅</div>
             <h2 style="color:#3fb950">Kite Connected!</h2>
-            <p style="color:#8b949e">Token: {token[:8]}…</p>
-            <p style="margin-top:16px"><a href="/login" style="color:#58a6ff">Back to dashboard</a></p>
+            <p style="color:#8b949e">Token: {token[:8]}… — Redirecting to dashboard…</p>
           </div>
         </body></html>
         """)
     except Exception as e:
         logger.error("Kite callback error: {}", e)
         return HTMLResponse(
-            "<h2 style='font-family:sans-serif;color:#f85149'>Token exchange failed.</h2>"
-            "<p><a href='/login'>← Try again</a></p>",
+            "<html><head><meta http-equiv='refresh' content='3;url=/dashboard'></head>"
+            f"<body style='font-family:sans-serif;background:#0d1117;color:#e6edf3;"
+            f"display:flex;align-items:center;justify-content:center;height:100vh'>"
+            f"<div style='text-align:center'><div style='font-size:2.5rem'>❌</div>"
+            f"<h2 style='color:#f85149'>Token exchange failed.</h2>"
+            f"<p style='color:#8b949e'>{e}</p>"
+            f"<p style='color:#8b949e'>Redirecting to dashboard…</p></div></body></html>",
             status_code=500,
         )
 
@@ -678,6 +695,7 @@ def get_trading_limits():
     return {
         "max_trades_intraday":     settings.max_trades_intraday,
         "max_trades_fno":          settings.max_trades_fno,
+        "max_trades_futures":      settings.max_trades_futures,
         "max_trades_swing":        settings.max_trades_swing,
         "max_trades_scalping":     settings.max_trades_scalping,
         "cooldown_after_loss_sec": settings.cooldown_after_loss_sec,
@@ -687,6 +705,7 @@ def get_trading_limits():
 def patch_trading_limits(req: TradingLimitsRequest):
     if req.max_trades_intraday     is not None: settings.max_trades_intraday     = req.max_trades_intraday
     if req.max_trades_fno          is not None: settings.max_trades_fno          = req.max_trades_fno
+    if req.max_trades_futures      is not None: settings.max_trades_futures      = req.max_trades_futures
     if req.max_trades_swing        is not None: settings.max_trades_swing        = req.max_trades_swing
     if req.max_trades_scalping     is not None: settings.max_trades_scalping     = req.max_trades_scalping
     if req.cooldown_after_loss_sec is not None: settings.cooldown_after_loss_sec = req.cooldown_after_loss_sec

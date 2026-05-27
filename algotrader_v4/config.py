@@ -65,6 +65,7 @@ class Settings(BaseSettings):
     # Overtrade prevention (per strategy per day)
     max_trades_intraday: int = 8
     max_trades_fno: int = 4
+    max_trades_futures: int = 4
     max_trades_swing: int = 3
     max_trades_scalping: int = 20
     cooldown_after_loss_sec: int = 300

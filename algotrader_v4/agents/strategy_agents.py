@@ -1272,12 +1272,244 @@ class ScalpingAgent(BaseAgent):
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
+# 5.  FUTURES  —  NFO futures, trend-following + breakout, NRML product
+# ═══════════════════════════════════════════════════════════════════════════════
+
+class FuturesAgent(BaseAgent):
+    """
+    NSE/BSE index & stock futures agent (product=NRML, exchange=NFO).
+
+    Patterns:
+      1. EMA_TREND   — EMA9 > EMA21 > EMA50 full alignment with RSI 50-70
+      2. ORB_FUTURES — Opening range breakout 9:30-10:00, futures margin leverage
+      3. VWAP_PULL   — Price pulls to VWAP from above/below with volume surge
+      4. MACD_CROSS  — MACD histogram crosses zero with Supertrend confirmation
+      5. ATR_BREAK   — Price breaks yesterday high/low by >1.5×ATR
+
+    Sizing: full capital bucket, 1 lot minimum; lot sizes match index lot sizes.
+    Cooldown: 180s per symbol per direction.
+    Time gate: entries only 9:20–14:45 IST.
+    """
+    name    = "futures"
+    product = "NRML"
+    min_candles_1min = 15
+
+    # NSE/BSE index futures lot sizes (same underlying as options)
+    LOT_SIZES: dict = {"NIFTY": 75, "BANKNIFTY": 15, "MIDCPNIFTY": 75,
+                       "FINNIFTY": 40, "SENSEX": 10}
+    MIN_SCORE = 4
+    COOL_S    = 180
+
+    _orb_high:        dict = {}
+    _orb_low:         dict = {}
+    _orb_fired:       dict = {}
+    _prev_above_vwap: dict = {}
+    _prev_macd_hist:  dict = {}
+    _prev_ltp:        dict = {}
+    _cool_ts:         dict = {}
+    _day_high:        dict = {}   # sym → float (rolling daily high for ATR_BREAK)
+    _day_low:         dict = {}   # sym → float
+
+    def evaluate_tick(self, snap: MarketSnapshot) -> tuple[str, Optional[dict]]:
+        ind = snap.indicators
+        sym = snap.symbol
+        ltp = snap.tick.ltp
+        now = now_ist()
+        t   = now.time().replace(tzinfo=None)
+
+        if not (time(9, 20) <= t <= time(14, 45)):
+            return "HOLD", None
+
+        self._update_orb(sym, snap, t)
+        self._update_day_range(sym, ltp)
+
+        best_score, best_side, best_pattern = -1, "", ""
+        patterns = [
+            self._pat_ema_trend,
+            self._pat_orb,
+            self._pat_vwap_pull,
+            self._pat_macd_cross,
+            self._pat_atr_break,
+        ]
+        for pat_fn in patterns:
+            try:
+                side, base, pname = pat_fn(sym, snap, ind, ltp, t)
+            except Exception:
+                continue
+            if not side:
+                continue
+            total = base + self._ctx_bonus(side, ind)
+            if total > best_score:
+                best_score, best_side, best_pattern = total, side, pname
+
+        if best_score < self.MIN_SCORE:
+            self._update_state(sym, ind, ltp)
+            return "HOLD", None
+
+        cools = self._cool_ts.setdefault(sym, {})
+        last  = cools.get(best_side)
+        if last and (now - last).total_seconds() < self.COOL_S:
+            self._update_state(sym, ind, ltp)
+            return "HOLD", None
+        cools[best_side] = now
+
+        lot_sz = self.LOT_SIZES.get(sym, 1)
+        # SL: 0.5% for index futures; TGT: 1.2% (good risk/reward)
+        sl_pct  = 0.5
+        tgt_pct = 1.2
+
+        fut_sym = self._futures_symbol(sym)
+
+        self._update_state(sym, ind, ltp)
+        action = "BUY" if best_side == "LONG" else "SELL"
+        return action, {
+            "exchange":       "NFO",
+            "futures_symbol": fut_sym,
+            "side":           best_side,
+            "lot_size":       lot_sz,
+            "stop_loss_pct":  sl_pct,
+            "target_pct":     tgt_pct,
+            "score":          best_score,
+            "pattern":        best_pattern,
+            "trigger": (
+                f"FUT-{best_side} [{best_pattern}] score={best_score} "
+                f"rsi={ind.rsi_14:.0f} trend={ind.trend}"
+            ),
+        }
+
+    def _pat_ema_trend(self, sym, snap, ind, ltp, t):
+        bull = ind.ema9 > ind.ema21 > 0 and ind.ema21 > ind.ema50 > 0
+        bear = ind.ema9 < ind.ema21 > 0 and ind.ema21 < ind.ema50 > 0
+        if bull and 50 <= ind.rsi_14 <= 72 and ind.macd_hist > 0:
+            return "LONG", 5, "EMA_TREND"
+        if bear and 28 <= ind.rsi_14 <= 50 and ind.macd_hist < 0:
+            return "SHORT", 5, "EMA_TREND"
+        return "", 0, ""
+
+    def _pat_orb(self, sym, snap, ind, ltp, t):
+        if not (time(9, 30) <= t <= time(10, 0)):
+            return "", 0, ""
+        orb_h = self._orb_high.get(sym)
+        orb_l = self._orb_low.get(sym)
+        if not (orb_h and orb_l and orb_h > orb_l):
+            return "", 0, ""
+        if self._orb_fired.get(sym):
+            return "", 0, ""
+        prev = self._prev_ltp.get(sym, ltp)
+        if prev <= orb_h and ltp > orb_h * 1.001:
+            self._orb_fired[sym] = True
+            return "LONG", 5, "ORB_FUTURES"
+        if prev >= orb_l and ltp < orb_l * 0.999:
+            self._orb_fired[sym] = True
+            return "SHORT", 5, "ORB_FUTURES"
+        return "", 0, ""
+
+    def _pat_vwap_pull(self, sym, snap, ind, ltp, t):
+        if not ind.vwap or ind.vwap <= 0:
+            return "", 0, ""
+        was_above = self._prev_above_vwap.get(sym, ltp >= ind.vwap)
+        now_above = ltp > ind.vwap
+        if was_above == now_above:
+            return "", 0, ""
+        if ind.volume_ratio < 1.3:
+            return "", 0, ""
+        if now_above and ind.ema9 > ind.ema21:
+            return "LONG", 4, "VWAP_PULL"
+        if not now_above and ind.ema9 < ind.ema21:
+            return "SHORT", 4, "VWAP_PULL"
+        return "", 0, ""
+
+    def _pat_macd_cross(self, sym, snap, ind, ltp, t):
+        prev_hist = self._prev_macd_hist.get(sym, ind.macd_hist)
+        # MACD histogram crosses zero upward
+        if prev_hist <= 0 < ind.macd_hist and ind.supertrend_dir == "UP":
+            return "LONG", 4, "MACD_CROSS"
+        # MACD histogram crosses zero downward
+        if prev_hist >= 0 > ind.macd_hist and ind.supertrend_dir == "DOWN":
+            return "SHORT", 4, "MACD_CROSS"
+        return "", 0, ""
+
+    def _pat_atr_break(self, sym, snap, ind, ltp, t):
+        if not ind.atr_14 or ind.atr_14 <= 0:
+            return "", 0, ""
+        dh = self._day_high.get(sym, ltp)
+        dl = self._day_low.get(sym, ltp)
+        threshold = ind.atr_14 * 1.5
+        if ltp > dh and (ltp - dh) > threshold and ind.volume_ratio > 1.5:
+            return "LONG", 4, "ATR_BREAK"
+        if ltp < dl and (dl - ltp) > threshold and ind.volume_ratio > 1.5:
+            return "SHORT", 4, "ATR_BREAK"
+        return "", 0, ""
+
+    def _ctx_bonus(self, side: str, ind: LiveIndicators) -> int:
+        b = 0
+        is_long = (side == "LONG")
+        if ind.volume_ratio > 1.4:              b += 1
+        if is_long  and ind.macd_hist > 0:      b += 1
+        if not is_long and ind.macd_hist < 0:   b += 1
+        if is_long  and ind.trend == "UP":      b += 1
+        if not is_long and ind.trend == "DOWN": b += 1
+        return b
+
+    def _update_orb(self, sym: str, snap: MarketSnapshot, t: time) -> None:
+        if not (time(9, 15) <= t <= time(9, 30)):
+            return
+        if sym not in self._orb_high:
+            self._orb_high[sym] = snap.tick.ltp
+            self._orb_low[sym]  = snap.tick.ltp
+            self._orb_fired[sym] = False
+        for c in snap.candles_1min:
+            c_t = getattr(c, "ts", None)
+            if c_t and time(9, 15) <= c_t.time() <= time(9, 30):
+                self._orb_high[sym] = max(self._orb_high[sym], c.high)
+                self._orb_low[sym]  = min(self._orb_low[sym],  c.low)
+
+    def _update_day_range(self, sym: str, ltp: float) -> None:
+        self._day_high[sym] = max(self._day_high.get(sym, ltp), ltp)
+        self._day_low[sym]  = min(self._day_low.get(sym, ltp), ltp)
+
+    def _update_state(self, sym: str, ind: LiveIndicators, ltp: float) -> None:
+        if ind.vwap and ind.vwap > 0:
+            self._prev_above_vwap[sym] = ltp > ind.vwap
+        self._prev_macd_hist[sym] = ind.macd_hist
+        self._prev_ltp[sym] = ltp
+
+    def _futures_symbol(self, underlying: str) -> str:
+        from datetime import date, timedelta
+        today  = date.today()
+        expiry = today + timedelta(days=1)
+        # Futures expire on last Thursday of expiry month
+        while expiry.weekday() != 3:
+            expiry += timedelta(days=1)
+        return f"{underlying}{expiry.strftime('%y%b').upper()}FUT"
+
+    def should_exit_position(self, pos: dict, ind: LiveIndicators) -> tuple[bool, str]:
+        entry = pos.get("average_price", 0.0)
+        ltp   = ind.ltp
+        if not entry or entry <= 0:
+            return False, ""
+        side = pos.get("side", "LONG")
+        chg  = ((ltp - entry) / entry * 100) if side == "LONG" else ((entry - ltp) / entry * 100)
+
+        if chg <= -0.5:
+            return True, f"Futures SL -0.5% ₹{ltp:.2f}"
+        if chg >= 1.2:
+            return True, f"Futures TGT +1.2% ₹{ltp:.2f}"
+        if chg >= 0.8 and ind.momentum in ("WEAK_UP", "NEUTRAL", "WEAK_DOWN"):
+            return True, f"Futures +0.8% momentum fading"
+        if datetime.now().time() >= time(14, 55):
+            return True, "Auto square-off 2:55 PM"
+        return False, ""
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
 # Registry
 # ═══════════════════════════════════════════════════════════════════════════════
 
 ALL_AGENTS: dict[str, BaseAgent] = {
     "intraday": IntradayAgent(),
     "fno":      FnOAgent(),
+    "futures":  FuturesAgent(),
     "swing":    SwingAgent(),
     "scalping": ScalpingAgent(),
 }

@@ -1160,7 +1160,10 @@
               <input type="checkbox" id="strat-scalping" checked> Scalping
             </label>
             <label class="checkbox-item">
-              <input type="checkbox" id="strat-fno"> F&amp;O
+              <input type="checkbox" id="strat-fno"> Options (F&amp;O)
+            </label>
+            <label class="checkbox-item">
+              <input type="checkbox" id="strat-futures"> Futures
             </label>
             <label class="checkbox-item">
               <input type="checkbox" id="strat-swing"> Swing
@@ -1505,9 +1508,12 @@
             <span class="kite-info-label">Email</span>
             <span class="kite-info-val" id="settings-kite-email">—</span>
           </div>
-          <div style="margin-top:14px">
-            <button class="btn btn-blue btn-sm" onclick="window.open('/login','_blank')">
-              <i data-lucide="external-link"></i> Reconnect Kite
+          <div style="margin-top:14px;font-size:12px;color:var(--muted);margin-bottom:8px">
+            Save your API key &amp; secret in <em>Kite Accounts</em> above, then click Authorize.
+          </div>
+          <div style="margin-top:4px">
+            <button class="btn btn-blue btn-sm" onclick="connectKiteOAuth()">
+              <i data-lucide="log-in"></i> Authorize with Kite
             </button>
           </div>
         </div>
@@ -1546,8 +1552,12 @@
               <input type="number" id="tl-intraday" min="1" max="100" class="risk-input" style="width:100%" placeholder="8">
             </div>
             <div>
-              <label style="font-size:12px;color:var(--muted);display:block;margin-bottom:5px">F&amp;O (max trades/day)</label>
+              <label style="font-size:12px;color:var(--muted);display:block;margin-bottom:5px">Options/F&amp;O (max trades/day)</label>
               <input type="number" id="tl-fno" min="1" max="50" class="risk-input" style="width:100%" placeholder="4">
+            </div>
+            <div>
+              <label style="font-size:12px;color:var(--muted);display:block;margin-bottom:5px">Futures (max trades/day)</label>
+              <input type="number" id="tl-futures" min="1" max="50" class="risk-input" style="width:100%" placeholder="4">
             </div>
             <div>
               <label style="font-size:12px;color:var(--muted);display:block;margin-bottom:5px">Swing (max trades/day)</label>
@@ -2088,7 +2098,7 @@ function renderBotStatus() {
    RENDER: Strategy Cards
 ═══════════════════════════════════════════════════════════════ */
 const STRATEGY_ICONS = {
-  intraday: 'trending-up', scalping: 'zap', fno: 'bar-chart-2', swing: 'wave'
+  intraday: 'trending-up', scalping: 'zap', fno: 'bar-chart-2', futures: 'activity', swing: 'wave'
 };
 
 function renderStrategyCards() {
@@ -2097,7 +2107,7 @@ function renderStrategyCards() {
   const names  = Object.keys(agents);
 
   if (names.length === 0) {
-    grid.innerHTML = ['intraday','scalping','fno','swing'].map(name => strategyCardHtml(name, null)).join('');
+    grid.innerHTML = ['intraday','scalping','fno','futures','swing'].map(name => strategyCardHtml(name, null)).join('');
     lucide.createIcons({ nodes: [grid] });
     return;
   }
@@ -2464,6 +2474,19 @@ async function fetchKiteAccounts() {
   } catch (_) {}
 }
 
+async function connectKiteOAuth() {
+  try {
+    const d = await api('GET', '/auth/login-url');
+    if (d && d.login_url) {
+      window.location.href = d.login_url;
+    } else {
+      showToast('Could not get Kite login URL. Make sure API key is saved.', 'error');
+    }
+  } catch (e) {
+    showToast('Error fetching Kite login URL: ' + e.message, 'error');
+  }
+}
+
 function renderKiteAccounts(accounts) {
   const el = document.getElementById('acct-list');
   if (!accounts || !accounts.length) {
@@ -2589,6 +2612,7 @@ async function toggleBot() {
       if (document.getElementById('strat-intraday').checked) strategies.push('intraday');
       if (document.getElementById('strat-scalping').checked) strategies.push('scalping');
       if (document.getElementById('strat-fno').checked)      strategies.push('fno');
+      if (document.getElementById('strat-futures').checked)  strategies.push('futures');
       if (document.getElementById('strat-swing').checked)    strategies.push('swing');
 
       if (strategies.length === 0) {
@@ -2715,6 +2739,7 @@ async function fetchTradingLimits() {
     const d = await api('GET', '/settings/trading-limits');
     document.getElementById('tl-intraday').value = d.max_trades_intraday  ?? 8;
     document.getElementById('tl-fno').value      = d.max_trades_fno       ?? 4;
+    document.getElementById('tl-futures').value  = d.max_trades_futures   ?? 4;
     document.getElementById('tl-swing').value    = d.max_trades_swing     ?? 3;
     document.getElementById('tl-scalping').value = d.max_trades_scalping  ?? 20;
     document.getElementById('tl-cooldown').value = d.cooldown_after_loss_sec ?? 300;
@@ -2731,6 +2756,7 @@ async function saveTradingLimits() {
     const body = {
       max_trades_intraday:     _int('tl-intraday'),
       max_trades_fno:          _int('tl-fno'),
+      max_trades_futures:      _int('tl-futures'),
       max_trades_swing:        _int('tl-swing'),
       max_trades_scalping:     _int('tl-scalping'),
       cooldown_after_loss_sec: _int('tl-cooldown'),
@@ -3083,7 +3109,7 @@ async function fetchAgentEnables() {
 function renderAgentEnables() {
   const container = document.getElementById('agent-enables-list');
   if (!container) return;
-  const names = ['intraday', 'scalping', 'fno', 'swing'];
+  const names = ['intraday', 'scalping', 'fno', 'futures', 'swing'];
   container.innerHTML = names.map(name => {
     const enabled = state.agentEnables[name] !== false;
     return `<label class="toggle-wrap" style="margin:0">
