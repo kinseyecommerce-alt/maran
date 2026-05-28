@@ -307,8 +307,10 @@ class BaseAgent(ABC):
 
                     await self._try_enter(snap, action, signal)
             except Exception as exc:
-                err = f"{snap.symbol}: {str(exc)[:100]}"
-                self.state.errors.append(err)
+                import traceback as _tb
+                err = f"{snap.symbol}: {exc}"
+                self.state.errors.append(err[-200:])
+                logger.error("[{}] tick-loop error on {}: {}\n{}", self.name, snap.symbol, exc, _tb.format_exc())
 
     # ── Entry ───────────────────────────────────────────────────────────
 

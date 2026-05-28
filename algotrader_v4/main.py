@@ -484,8 +484,22 @@ async def start_bot(req: BotStartRequest):
             from symbol_scanner import NIFTY_50
             watchlist = [{"symbol": s, "exchange": "NSE"} for s in NIFTY_50[:20]]
             logger.warning("[bot/start] Symbol scanner returned no results — using Nifty 50 fallback ({} symbols)", len(watchlist))
-    report = master_agent.start(strategies, watchlist)
+    try:
+        report = master_agent.start(strategies, watchlist)
+    except RuntimeError as e:
+        raise HTTPException(503, str(e))
+    kite_connected = False
+    kite_user = None
+    if settings.trading_mode == "LIVE":
+        try:
+            p = kite_client.kite.profile()
+            kite_connected = True
+            kite_user = p.get("user_name")
+        except Exception:
+            pass
     return {"status": "started", "architecture": "tick-driven 1s",
+            "trading_mode": settings.trading_mode,
+            "kite_connected": kite_connected, "kite_user": kite_user,
             "symbol_selection": "auto-scanned" if not req.watchlist else "manual",
             "watchlist": [w["symbol"] for w in watchlist], "report": report}
 
@@ -493,6 +507,23 @@ async def start_bot(req: BotStartRequest):
 async def stop_bot():
     await master_agent.stop()
     return {"status": "stopped"}
+
+@app.post("/bot/test-order", tags=["Bot"])
+async def test_order(symbol: str = "SBIN", qty: int = 1):
+    """Place 1-share MARKET BUY to verify Kite connectivity, then immediately cancel."""
+    symbol = _clean_symbol(symbol)
+    order_id = kite_client.place_order(
+        tradingsymbol=symbol, exchange="NSE",
+        transaction_type="BUY", quantity=qty,
+        order_type="MARKET", product="MIS", tag="TestOrder",
+    )
+    if settings.trading_mode == "LIVE":
+        try:
+            kite_client.cancel_order(order_id)
+        except Exception:
+            pass
+    return {"status": "ok", "order_id": order_id, "mode": settings.trading_mode,
+            "note": "PAPER: simulated. LIVE: placed then cancelled."}
 
 @app.get("/bot/status", tags=["Bot"])
 def bot_status(): return master_agent.get_status()

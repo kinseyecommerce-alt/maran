@@ -144,6 +144,19 @@ class MasterAgent:
 
     def start(self, strategies: list[str], watchlist: list[dict]) -> dict:
         self.running = True
+
+        # Pre-flight: verify Kite connection before committing to a live run
+        if settings.trading_mode == "LIVE":
+            try:
+                profile = kite_client.kite.profile()
+                logger.info("[master_v5] Kite connected: {} ({})",
+                            profile.get("user_name", "?"), profile.get("user_id", "?"))
+            except Exception as exc:
+                self.running = False
+                raise RuntimeError(
+                    f"Kite connection failed — check KITE_ACCESS_TOKEN in .env: {exc}"
+                )
+
         report: dict[str, dict] = {}
 
         for strat in strategies:

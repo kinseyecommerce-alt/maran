@@ -144,6 +144,7 @@ class MarketSnapshot:
     indicators:   LiveIndicators
     candles_1min: list[Candle] = field(default_factory=list)
     candles_5min: list[Candle] = field(default_factory=list)
+    bar_seconds:  int = 60       # 60 = 1m, 300 = 5m, 900 = 15m
 
 
 # ── Tick buffer ───────────────────────────────────────────────────────────────

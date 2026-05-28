@@ -220,7 +220,7 @@ def compute_indicators_at(sym: str, df: pd.DataFrame, bar_idx: int,
 
 
 def make_snapshot(sym: str, ind: LiveIndicators, df: pd.DataFrame,
-                  bar_idx: int, ltp: float) -> MarketSnapshot:
+                  bar_idx: int, ltp: float, bar_seconds: int = 60) -> MarketSnapshot:
     # Use only real session bars for the candle history shown to agents
     session_bars = df[df.get("is_session", pd.Series([True]*len(df), index=df.index))]
     candle_src = session_bars.iloc[max(0, len(session_bars) - 60):]
@@ -249,6 +249,7 @@ def make_snapshot(sym: str, ind: LiveIndicators, df: pd.DataFrame,
     return MarketSnapshot(
         symbol=sym, tick=tick, indicators=ind,
         candles_1min=candles, candles_5min=candles[::5],
+        bar_seconds=bar_seconds,
     )
 
 
@@ -410,7 +411,7 @@ class AgentTracker:
 # ═══════════════════════════════════════════════════════════════════════════════
 # Main simulation loop
 # ═══════════════════════════════════════════════════════════════════════════════
-TIMEFRAMES = [("1m", "1min"), ("5m", "5min"), ("15m", "15min")]
+TIMEFRAMES = [("1m", "1min", 60), ("5m", "5min", 300), ("15m", "15min", 900)]
 
 AGENT_CLASSES = [
     ("Intraday",  IntradayAgent),
@@ -444,14 +445,14 @@ def run_simulation(seed: int = 2026) -> dict[str, dict[str, AgentTracker]]:
 
     # Trackers: {tf: {agent_name: AgentTracker}}
     trackers: dict[str, dict[str, AgentTracker]] = {}
-    for tf_label, _ in TIMEFRAMES:
+    for tf_label, _, _bsec in TIMEFRAMES:
         trackers[tf_label] = {name: AgentTracker(name, tf_label)
                                for name, _ in AGENT_CLASSES}
 
     all_signals_log: list[dict] = []
 
     # Simulate each timeframe independently
-    for tf_label, tf_freq in TIMEFRAMES:
+    for tf_label, tf_freq, tf_bar_sec in TIMEFRAMES:
         print(f"  {C}{B}── {tf_label.upper()} TIMEFRAME ──────────────────────────────{X}")
 
         # Build agents fresh per timeframe (clean state)
@@ -493,7 +494,7 @@ def run_simulation(seed: int = 2026) -> dict[str, dict[str, AgentTracker]]:
 
                 # Compute indicators on full window (pre-history + session so far)
                 ind  = compute_indicators_at(sym, df, bar_idx, ltp)
-                snap = make_snapshot(sym, ind, df, bar_idx, ltp)
+                snap = make_snapshot(sym, ind, df, bar_idx, ltp, bar_seconds=tf_bar_sec)
 
                 # Run each agent
                 for agent_name, agent in agents:
@@ -549,7 +550,7 @@ def print_report(trackers: dict, all_signals_log: list):
 
     leaderboard: list[tuple] = []   # (agent, tf, metrics)
 
-    for tf_label, tf_freq in TIMEFRAMES:
+    for tf_label, tf_freq, _bsec in TIMEFRAMES:
         print(f"  {C}{B}── {tf_label.upper()} TIMEFRAME ─────────────────────────────────────{X}")
         print(f"  {'Agent':10s} {'Trades':>6} {'Wins':>5} {'WinRate':>8} {'AvgPnL%':>8}"
               f" {'TotalP&L':>10} {'MaxDD%':>7} {'Sharpe':>7} {'R:R':>5}")
