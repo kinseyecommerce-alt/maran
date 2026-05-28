@@ -564,7 +564,7 @@ section("7. SEBI COMPLIANCE")
 from sebi_compliance import SEBICompliance, KillSwitchState, APPROVED_ALGO_IDS
 
 def t_sebi_5_algos():
-    assert len(APPROVED_ALGO_IDS) == 5
+    assert len(APPROVED_ALGO_IDS) == 6   # 5 strategies + 1 manual API ID
 
 def t_sebi_algo_id_format():
     assert all(v.startswith("ALGO-") for v in APPROVED_ALGO_IDS.values())
@@ -889,7 +889,7 @@ def _make_snap(symbol="RELIANCE", ltp=2800.0, rsi=52.0, trend="UP",
                           candles_1min=candles, candles_5min=candles[:6])
 
 def t_agents_4():
-    assert len(ALL_AGENTS) == 4
+    assert len(ALL_AGENTS) == 5
     assert set(ALL_AGENTS.keys()) == {"intraday","options","futures","swing","scalping"}
 
 def t_intraday_returns_action():
@@ -2064,6 +2064,9 @@ def t_fno_ctx_bonus_bear():
 def t_fno_pat_ema_cross_ce():
     from unittest.mock import MagicMock
     a = OptionsAgent()
+    # Prime prev state: EMA9 was BELOW EMA21 (bearish) — crossing above is the event
+    a._prev_ema9_opt["NIFTY"]  = 21990.0   # was below ema21=22000
+    a._prev_ema21_opt["NIFTY"] = 22000.0
     ind = MagicMock()
     ind.ema9 = 22100.0; ind.ema21 = 22000.0; ind.ema50 = 21900.0; ind.rsi_14 = 60.0
     opt, base, pname = a._pat_ema_cross("NIFTY", None, ind, 22150.0, time(10, 0))
@@ -2072,6 +2075,9 @@ def t_fno_pat_ema_cross_ce():
 def t_fno_pat_ema_cross_pe():
     from unittest.mock import MagicMock
     a = OptionsAgent()
+    # Prime prev state: EMA9 was ABOVE EMA21 (bullish) — crossing below is the event
+    a._prev_ema9_opt["NIFTY"]  = 22010.0   # was above ema21=22000
+    a._prev_ema21_opt["NIFTY"] = 22000.0
     ind = MagicMock()
     ind.ema9 = 21900.0; ind.ema21 = 22000.0; ind.ema50 = 22100.0; ind.rsi_14 = 40.0
     opt, base, pname = a._pat_ema_cross("NIFTY", None, ind, 21850.0, time(10, 0))
@@ -2081,17 +2087,19 @@ def t_fno_pat_rsi_extreme_ce():
     from unittest.mock import MagicMock
     a = OptionsAgent()
     ind = MagicMock()
-    ind.rsi_14 = 75.0; ind.macd_hist = 0.8; ind.volume_ratio = 1.6
+    # RSI_MOMENTUM fires CE at 58-70 (momentum, not overbought exhaustion)
+    ind.rsi_14 = 64.0; ind.macd_hist = 0.8; ind.volume_ratio = 1.6
     opt, base, pname = a._pat_rsi_extreme("NIFTY", None, ind, 22000.0, time(10, 0))
-    assert opt == "CE" and pname == "RSI_EXTREME"
+    assert opt == "CE" and pname == "RSI_MOMENTUM"
 
 def t_fno_pat_rsi_extreme_pe():
     from unittest.mock import MagicMock
     a = OptionsAgent()
     ind = MagicMock()
-    ind.rsi_14 = 25.0; ind.macd_hist = -0.8; ind.volume_ratio = 1.5
+    # RSI_MOMENTUM fires PE at 30-42 (strong downtrend, not oversold bounce)
+    ind.rsi_14 = 36.0; ind.macd_hist = -0.8; ind.volume_ratio = 1.5
     opt, base, pname = a._pat_rsi_extreme("NIFTY", None, ind, 22000.0, time(10, 0))
-    assert opt == "PE" and pname == "RSI_EXTREME"
+    assert opt == "PE" and pname == "RSI_MOMENTUM"
 
 def t_fno_pat_vwap_reclaim_ce():
     from unittest.mock import MagicMock

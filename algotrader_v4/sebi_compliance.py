@@ -332,6 +332,7 @@ class SEBICompliance:
             "algo_strategies": [
                 self.get_strategy_logic_disclosure(s)
                 for s in APPROVED_ALGO_IDS
+                if s != "manual"    # manual is an internal ID, not a registered strategy
             ],
             "risk_controls": {
                 "kill_switch":        "Available via POST /sebi/kill-switch",

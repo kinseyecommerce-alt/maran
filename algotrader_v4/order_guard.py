@@ -90,16 +90,18 @@ class OrderGuard:
             # Release cross-agent lock only if this agent still owns the symbol
             if self._symbol_owner.get(symbol) == f"{strategy}:{side}":
                 self._symbol_owner.pop(symbol, None)
-            # Per-symbol cooldown: 30s after any exit
-            self._symbol_cooldown[symbol] = time.time() + 30
+            # Per-symbol cooldown: 30s only after a losing trade (don't penalise winners)
+            if pnl < 0:
+                self._symbol_cooldown[symbol] = time.time() + 30
             # Per-strategy loss cooldown
             if pnl < 0 and settings.cooldown_after_loss_sec > 0:
                 self._cooldown_until[strategy] = time.time() + settings.cooldown_after_loss_sec
 
-    def is_symbol_active_anywhere(self, symbol: str) -> bool:
-        """Returns True if ANY agent holds an active position on this symbol."""
+    def is_symbol_active_anywhere(self, symbol: str) -> list[str]:
+        """Returns list of strategy names holding an active position on this symbol."""
         with self._lock:
-            return symbol in self._symbol_owner
+            return [ao.strategy for (sym, _strat, _side), ao in self._active.items()
+                    if sym == symbol]
 
     def active_strategies_for_symbol(self, symbol: str) -> list[str]:
         """Returns list of strategy names active on this symbol (for diagnostics)."""
