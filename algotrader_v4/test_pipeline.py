@@ -978,7 +978,8 @@ def t_scalping_exit_sl():
 def t_scalping_exit_target():
     agent = ScalpingAgent()
     pos = {"tradingsymbol": "RELIANCE", "quantity": 5, "average_price": 2800.0}
-    ind = _make_snap(ltp=2820.0).indicators
+    # tgt_dist = max(atr*1.4=21.0, entry*0.70%=19.6) = 21.0  →  tgt = 2821
+    ind = _make_snap(ltp=2825.0).indicators
     exit_, reason = agent.should_exit_position(pos, ind)
     assert exit_ is True and "target" in reason.lower()
 
