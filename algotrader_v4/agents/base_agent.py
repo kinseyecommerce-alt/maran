@@ -119,6 +119,23 @@ def _setup_tsl_callbacks() -> None:
         risk_manager.position_closed()
         trailing_sl_engine.deregister(pos.order_id)
 
+        # Persist to SQLite (Phase 3)
+        try:
+            from state_store import close_position, record_trade
+            from risk_manager import compute_tx_costs
+            close_position(pos.order_id)
+            cost = compute_tx_costs(pos.quantity, pos.entry_price, ltp, "MIS")
+            record_trade(
+                symbol=pos.symbol, strategy=pos.strategy,
+                side=pos.side, entry_price=pos.entry_price,
+                exit_price=ltp, quantity=pos.quantity,
+                gross_pnl=pnl, net_pnl=pnl - cost, cost=cost,
+                exit_reason="SL_HIT",
+                entry_time=str(getattr(pos, "opened_at", "")),
+            )
+        except Exception:
+            pass
+
     async def _on_target_hit(pos, ltp: float, level: int) -> None:
         pnl_est = (ltp - pos.entry_price) * pos.quantity * (1 if pos.side == "BUY" else -1)
         _activity(
@@ -175,6 +192,9 @@ async def send_telegram(text: str) -> None:
         pass
 
 
+_ADAPTIVE_REFRESH_INTERVAL = 300  # seconds between adaptive param refreshes
+
+
 class BaseAgent(ABC):
     name:    str = "base"
     product: str = "MIS"
@@ -185,6 +205,9 @@ class BaseAgent(ABC):
         self._queue: Optional[asyncio.Queue] = None
         self._task:  Optional[asyncio.Task]  = None
         self._approved: set[str] = set()
+        # Phase 3E: adaptive engine feedback — refreshed every 300s
+        self._last_adaptive_refresh: float = 0.0
+        self._adaptive_min_score_override: Optional[int] = None
 
     @abstractmethod
     def evaluate_tick(self, snap: MarketSnapshot) -> tuple[str, Optional[dict]]:
@@ -251,6 +274,31 @@ class BaseAgent(ABC):
 
     # ── Main tick loop ──────────────────────────────────────────────────
 
+    def _refresh_adaptive_params(self) -> None:
+        """Phase 3E: Pull updated params from adaptive engine back into live agent thresholds.
+        Uses size_factor from adaptive engine to modulate position sizing in real-time.
+        This closes the loop: online learning → adaptive params → live trading behaviour.
+        """
+        import time as _time
+        now = _time.monotonic()
+        if now - self._last_adaptive_refresh < _ADAPTIVE_REFRESH_INTERVAL:
+            return
+        self._last_adaptive_refresh = now
+        try:
+            from adaptive_engine import adaptive_engine
+            params = adaptive_engine.get_params(self.name, "")
+            if getattr(params, "adaptation_count", 0) >= 10:
+                sf = getattr(params, "size_factor", 1.0)
+                status = getattr(params, "status", "ACTIVE")
+                if status == "CAUTIOUS" and sf < 1.0:
+                    self._adaptive_min_score_override = sf  # stored, applied in _try_enter
+                elif status == "ACTIVE":
+                    self._adaptive_min_score_override = None
+                logger.debug("[{}] Adaptive refresh: status={} size_factor={:.2f}",
+                             self.name, status, sf)
+        except Exception:
+            pass
+
     async def _run_loop(self) -> None:
         while self.state.running:
             try:
@@ -258,6 +306,8 @@ class BaseAgent(ABC):
                     self._queue.get(), timeout=2.0
                 )
             except asyncio.TimeoutError:
+                # Periodic adaptive refresh during idle ticks
+                self._refresh_adaptive_params()
                 continue
             except asyncio.CancelledError:
                 break
@@ -369,12 +419,39 @@ class BaseAgent(ABC):
         sym  = snap.symbol
         ltp  = snap.tick.ltp
         exch = signal.get("exchange", "NSE")
-        qty  = risk_manager.calculate_quantity(ltp, agent=self.name)
 
-        # Apply Kelly-adjusted size (gate may have set a size_factor)
+        # ATR-based sizing (Phase 2)
+        atr_14 = getattr(snap.indicators, "atr_14", 0)
+        if getattr(settings, "use_atr_sizing", False) and atr_14 > 0:
+            qty = risk_manager.calculate_quantity_atr(ltp, atr_14, agent=self.name)
+        else:
+            qty = risk_manager.calculate_quantity(ltp, agent=self.name)
+
+        # Kelly sizing (uses adaptive engine win stats)
+        if settings.use_kelly_sizing:
+            kf  = risk_manager.kelly_fraction(self.name, snap.symbol)
+            qty = max(1, int(qty * kf))
+
+        # Phase 3E: Apply adaptive engine's size_factor (from online learning)
+        if self._adaptive_min_score_override is not None and isinstance(
+            self._adaptive_min_score_override, float
+        ):
+            qty = max(1, int(qty * float(self._adaptive_min_score_override)))
+
+        # Apply gate size factor on top
         size_factor = signal.pop("_gate_size_factor", 1.0)
-        if settings.use_kelly_sizing and size_factor < 1.0:
+        if size_factor < 1.0:
             qty = max(1, int(qty * size_factor))
+
+        # Sector limit check (Phase 3)
+        _open_syms_for_sector = [
+            p["tradingsymbol"] for p in kite_client.positions().get("net", [])
+            if p.get("quantity", 0) != 0
+        ]
+        sector_ok, sector_reason = risk_manager.check_sector_limit(sym, _open_syms_for_sector)
+        if not sector_ok:
+            logger.debug("[{}] {} sector BLOCK: {}", self.name, sym, sector_reason)
+            return
 
         allowed, reason = order_guard.can_place(sym, self.name, action)
         if not allowed:
@@ -411,6 +488,25 @@ class BaseAgent(ABC):
         self.state.trades_today  += 1
         self.state.signals_fired += 1
         self.state.last_signal    = signal
+
+        # Persist position to SQLite (Phase 3)
+        try:
+            from state_store import upsert_position
+            sl_price_val = signal.get("stop_loss", risk_manager.sl_price(ltp, action))
+            tgt_val      = signal.get("target", risk_manager.target_price(ltp, action))
+            upsert_position(
+                order_id=order_id,
+                symbol=sym,
+                strategy=self.name,
+                side=action,
+                entry_price=ltp,
+                quantity=qty,
+                sl_price=sl_price_val,
+                target=tgt_val,
+                product=signal.get("product", self.product),
+            )
+        except Exception:
+            pass
 
         _activity(
             agent=self.name, event="ORDER_ENTRY",
@@ -503,6 +599,28 @@ class BaseAgent(ABC):
             risk_manager.position_closed()
             self.state.pnl_today += pnl
             trailing_sl_engine.deregister(oid)
+
+            # Persist to SQLite (Phase 3)
+            try:
+                from state_store import record_trade as _st_record
+                from risk_manager import compute_tx_costs
+                entry_price = pos.get("average_price", snap.tick.ltp)
+                product_val = pos.get("product", self.product)
+                cost = compute_tx_costs(qty, entry_price, snap.tick.ltp, product_val)
+                from market_regime import regime_detector
+                _st_record(
+                    symbol=sym, strategy=self.name,
+                    side="BUY" if side == "SELL" else "SELL",
+                    entry_price=entry_price,
+                    exit_price=snap.tick.ltp,
+                    quantity=qty,
+                    gross_pnl=pnl, net_pnl=pnl - cost, cost=cost,
+                    exit_reason=reason,
+                    regime=regime_detector.current_regime.value
+                        if regime_detector.current_regime else "",
+                )
+            except Exception:
+                pass
             _dot = "\U0001f534" if pnl < 0 else "\U0001f7e2"
             await send_telegram(
                 f"{_dot} <b>[{self.name.upper()}]</b> EXIT {sym}\n"
