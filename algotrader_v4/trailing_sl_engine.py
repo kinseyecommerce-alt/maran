@@ -86,10 +86,10 @@ TRAIL_CONFIGS: dict[str, TrailConfig] = {
         atr_multiplier  = 1.2,
     ),
     "options": TrailConfig(
-        initial_sl_pct  = 35.0,   # % of premium
-        trail_pct       = 20.0,
-        breakeven_pct   = 15.0,
-        activation_pct  = 30.0,
+        initial_sl_pct  = 30.0,   # % of premium — aligned with config.py sl_pct_options
+        trail_pct       = 15.0,
+        breakeven_pct   = 12.0,
+        activation_pct  = 25.0,
         target1_pct     = 50.0,
         target2_pct     = 80.0,
         mode            = SLMode.TRAILING,
@@ -104,6 +104,16 @@ TRAIL_CONFIGS: dict[str, TrailConfig] = {
         target2_pct     = 8.00,
         mode            = SLMode.ATR_TRAIL,
         atr_multiplier  = 1.5,
+    ),
+    "futures": TrailConfig(
+        initial_sl_pct  = 1.00,
+        trail_pct       = 0.50,
+        breakeven_pct   = 0.50,
+        activation_pct  = 1.00,
+        target1_pct     = 2.00,
+        target2_pct     = 3.50,
+        mode            = SLMode.ATR_TRAIL,
+        atr_multiplier  = 1.2,
     ),
 }
 

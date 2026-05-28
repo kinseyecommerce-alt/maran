@@ -477,7 +477,7 @@ section("6. TRAILING SL ENGINE")
 from trailing_sl_engine import TrailingSLEngine, TRAIL_CONFIGS, SLMode, SLStatus
 
 def t_tsl_configs_all_strats():
-    for s in ["intraday","options","swing","scalping"]:
+    for s in ["intraday","options","swing","scalping","futures"]:
         assert s in TRAIL_CONFIGS, f"Missing config: {s}"
 
 def t_tsl_register():
@@ -547,7 +547,7 @@ async def t_tsl_sell_side():
     await tsl.on_tick("ICICIBANK", 880.0, 6.0)
     assert tsl.get_position("oid-t07") is not None
 
-run("TRAIL_CONFIGS has all 4 strategies",      t_tsl_configs_all_strats)
+run("TRAIL_CONFIGS has all 5 strategies",      t_tsl_configs_all_strats)
 run("register() sets entry_price + symbol",    t_tsl_register)
 run("get_position() finds by order_id",        t_tsl_get_position)
 run("all_positions() returns list",            t_tsl_all_positions_list)
@@ -858,7 +858,7 @@ run("all_selected_flat() returns list",        t_ss_flat_list)
 # ══════════════════════════════════════════════════════════════════════════
 section("11. STRATEGY AGENTS")
 from agents.strategy_agents import (
-    ALL_AGENTS, IntradayAgent, OptionsAgent, SwingAgent, ScalpingAgent
+    ALL_AGENTS, IntradayAgent, OptionsAgent, SwingAgent, ScalpingAgent, FuturesAgent
 )
 from tick_engine import MarketSnapshot, Tick, LiveIndicators, Candle
 
@@ -2242,6 +2242,85 @@ run("NFO symbol contains underlying/strike/type",           t_fno_nfo_symbol_for
 run("IV rank >72% blocks entry (no premium buying)",        t_fno_high_iv_blocks_entry)
 run("score=4 → 0.25× size factor",                          t_fno_min_score_4_size_025)
 run("CE and PE cooldown tracked independently",             t_fno_cooldown_per_direction)
+
+
+# ── FuturesAgent tests ────────────────────────────────────────────────────
+
+def t_futures_tsl_config_present():
+    assert "futures" in TRAIL_CONFIGS, "futures key missing from TRAIL_CONFIGS"
+    cfg = TRAIL_CONFIGS["futures"]
+    assert cfg.mode == SLMode.ATR_TRAIL
+    assert cfg.initial_sl_pct == 1.0
+
+def t_futures_tsl_register_uses_futures_config():
+    tsl = TrailingSLEngine()
+    entry = 20000.0
+    pos = tsl.register("NIFTY", "futures", "BUY", entry, 75, "oid-fut01", atr=50.0)
+    expected_sl = entry * (1 - TRAIL_CONFIGS["futures"].initial_sl_pct / 100)
+    assert abs(pos.current_sl - expected_sl) < 0.01, (
+        f"Expected SL {expected_sl:.2f} from futures config, got {pos.current_sl:.2f} "
+        f"(intraday would give {entry * 0.985:.2f})"
+    )
+
+def t_futures_valid_action():
+    agent = FuturesAgent()
+    snap = _make_snap(symbol="NIFTY", ltp=22000.0)
+    action, _ = agent.evaluate_tick(snap)
+    assert action in ("BUY", "SELL", "HOLD", "EXIT")
+
+def t_futures_atr_sl_below_entry():
+    from config import settings as _s
+    assert _s.sl_pct_futures == 1.0
+
+def t_futures_exit_sl_long():
+    from config import settings as _s
+    agent = FuturesAgent()
+    entry = 22000.0
+    ltp_sl = entry * (1 - _s.sl_pct_futures / 100) - 1
+    ind = _make_snap(ltp=ltp_sl).indicators
+    ind.ltp = ltp_sl
+    pos = {"average_price": entry, "side": "LONG"}
+    should_exit, reason = agent.should_exit_position(pos, ind)
+    assert should_exit is True and "Futures SL" in reason
+
+def t_futures_exit_target_long():
+    from config import settings as _s
+    agent = FuturesAgent()
+    entry = 22000.0
+    ltp_tgt = entry * (1 + _s.tgt_pct_futures / 100) + 1
+    ind = _make_snap(ltp=ltp_tgt).indicators
+    ind.ltp = ltp_tgt
+    pos = {"average_price": entry, "side": "LONG"}
+    should_exit, reason = agent.should_exit_position(pos, ind)
+    assert should_exit is True and "Futures TGT" in reason
+
+def t_futures_no_exit_before_sl():
+    from config import settings as _s
+    from unittest.mock import patch
+    agent = FuturesAgent()
+    entry = 22000.0
+    ltp_safe = entry * (1 - (_s.sl_pct_futures / 100) * 0.5)
+    ind = _make_snap(ltp=ltp_safe).indicators
+    ind.ltp = ltp_safe
+    pos = {"average_price": entry, "side": "LONG"}
+    _safe_time = datetime(2026, 1, 15, 11, 0, 0)
+    with patch("agents.strategy_agents.now_ist", return_value=_safe_time):
+        should_exit, reason = agent.should_exit_position(pos, ind)
+    assert should_exit is False, f"Expected no exit but got: {reason}"
+
+def t_futures_10_pattern_methods_exist():
+    import inspect
+    methods = [m for m in dir(FuturesAgent) if m.startswith("_pat_")]
+    assert len(methods) >= 10, f"Expected ≥10 _pat_ methods, found {len(methods)}: {methods}"
+
+run("futures TSL config present in TRAIL_CONFIGS",        t_futures_tsl_config_present)
+run("futures TSL register uses futures initial SL",       t_futures_tsl_register_uses_futures_config)
+run("FuturesAgent.evaluate_tick returns valid action",    t_futures_valid_action)
+run("futures sl_pct_futures default == 1.0%",             t_futures_atr_sl_below_entry)
+run("futures exits long when price hits SL",              t_futures_exit_sl_long)
+run("futures exits long when price hits target",          t_futures_exit_target_long)
+run("futures no exit when price between SL and target",   t_futures_no_exit_before_sl)
+run("FuturesAgent has ≥10 pattern methods",               t_futures_10_pattern_methods_exist)
 
 
 # ══════════════════════════════════════════════════════════════════════════
