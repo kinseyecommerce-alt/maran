@@ -10,9 +10,9 @@ How symbols are selected (per strategy):
   SWING     → Nifty 200 universe + weekly trend aligned + RSI reset zone
   SCALPING  → Nifty 50 only + tight spread + highest vol ratio
 
-Sources used (all free, no Kite):
-  • NSE India API → equity list, F&O eligibility, OI data, market status
-  • yfinance      → OHLCV history for scoring (EMA, ATR, volume, RSI)
+Sources used:
+  • NSE India API  → equity list, F&O eligibility, OI data, market status
+  • TrueData REST  → OHLCV history for scoring (EMA, ATR, volume, RSI)
 
 Runs daily at 09:00 IST (before market opens at 09:15).
 Also callable on demand via POST /symbols/refresh.
@@ -29,7 +29,7 @@ import numpy as np
 import ta
 from loguru import logger
 
-from market_data import nse_client, yf_client
+from truedata_client import truedata_historical
 
 
 # ── NSE universe lists ─────────────────────────────────────────────────────────
@@ -218,7 +218,7 @@ class SymbolScanner:
     Scans the NSE universe and selects the best symbols per strategy.
 
     Selection pipeline:
-      1. Fetch OHLCV from yfinance (20 days of daily + 5 days of 15-min)
+      1. Fetch OHLCV from TrueData (20 days of daily + 5 days of 15-min)
       2. Compute scoring indicators (volume, ATR, RSI, EMA, ADX)
       3. Apply hard filters (min volume, ATR range, F&O eligibility)
       4. Score each symbol (weighted 0–100)
@@ -318,7 +318,7 @@ class SymbolScanner:
     ) -> dict[str, SymbolScore]:
         """Fetch + score each symbol concurrently."""
         scores: dict[str, SymbolScore] = {}
-        sem = asyncio.Semaphore(10)  # max 10 concurrent yfinance fetches
+        sem = asyncio.Semaphore(10)  # max 10 concurrent TrueData fetches
 
         async def fetch_one(sym: str):
             async with sem:
@@ -334,12 +334,12 @@ class SymbolScanner:
         return scores
 
     def _score_symbol(self, symbol: str) -> Optional[SymbolScore]:
-        """Compute indicators and scores for one symbol using yfinance."""
+        """Compute indicators and scores for one symbol using TrueData."""
         try:
             # 20 days daily for trend / swing
-            df_d = yf_client.historical(symbol, "NSE", "1d", "1mo")
+            df_d  = truedata_historical.historical(symbol, "NSE", "1d",  lookback_days=30)
             # 5 days 15-min for intraday / scalping indicators
-            df_15 = yf_client.historical(symbol, "NSE", "15m", "5d")
+            df_15 = truedata_historical.historical(symbol, "NSE", "15m", lookback_days=5)
 
             if df_d.empty or len(df_d) < 10:
                 return None
