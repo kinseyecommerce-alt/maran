@@ -519,6 +519,7 @@ class BaseAgent(ABC):
             detail=f"product={signal.get('product', self.product)} size_factor={size_factor}",
         )
 
+
         # Wire TSL callbacks (idempotent — only installs module-level fallbacks once)
         _setup_tsl_callbacks()
 

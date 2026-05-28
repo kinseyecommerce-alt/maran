@@ -1204,6 +1204,7 @@ class ScalpingAgent(BaseAgent):
         if snap.bar_seconds > 60:
             return "HOLD", None
 
+
         # ── Hard guard 1: chaotic open & wind-down — no new scalps ──────────
         if time(9, 15) <= t < time(9, 30):
             return "HOLD", None

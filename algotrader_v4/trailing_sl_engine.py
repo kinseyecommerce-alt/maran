@@ -161,6 +161,11 @@ class PositionSL:
     _on_sl_moved:     Optional[Callable] = field(default=None, repr=False)
     _on_partial_exit: Optional[Callable] = field(default=None, repr=False)
 
+    # Per-position callbacks (set via register(), used before module-level fallbacks)
+    _on_sl_hit:     Optional[Callable] = field(default=None, repr=False)
+    _on_target_hit: Optional[Callable] = field(default=None, repr=False)
+    _on_sl_moved:   Optional[Callable] = field(default=None, repr=False)
+
     @property
     def cfg(self) -> TrailConfig:
         return TRAIL_CONFIGS.get(self.strategy, TRAIL_CONFIGS["intraday"])
