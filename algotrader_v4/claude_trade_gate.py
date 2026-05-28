@@ -150,7 +150,7 @@ def _build_context(snap, action: str, signal: dict, strategy: str) -> dict:
 
     # ── Options-specific intelligence (only populated for fno strategy) ───────
     options_advanced: dict = {}
-    if strategy == "fno":
+    if strategy == "options":
         try:
             import iv_surface as _ivs
             _surf = _ivs.get_surface(snap.symbol)

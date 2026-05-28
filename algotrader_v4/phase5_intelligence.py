@@ -174,7 +174,7 @@ try:
     report("adaptive_engine singleton", adaptive_engine is not None)
 
     # 6a: Get params for each strategy (signature: get_params(strategy, symbol))
-    for strategy in ["intraday", "fno", "swing", "scalping"]:
+    for strategy in ["intraday", "options", "futures", "swing", "scalping"]:
         params = adaptive_engine.get_params(strategy, "RELIANCE")
         report(f"adaptive_engine.get_params({strategy})", params is not None,
                f"type={type(params).__name__}")

@@ -12,7 +12,7 @@ from typing import Optional, List
 
 # ─── Imports ─────────────────────────────────────────────────────────────────
 from tick_engine import MarketSnapshot, LiveIndicators, Tick, Candle
-from agents.strategy_agents import IntradayAgent, FnOAgent, SwingAgent, ScalpingAgent
+from agents.strategy_agents import IntradayAgent, OptionsAgent, SwingAgent, ScalpingAgent
 from risk_manager import risk_manager
 from order_guard import order_guard
 from sebi_compliance import sebi_compliance
@@ -213,19 +213,19 @@ should_exit, exit_reason = agent.should_exit_position(pos, ind_at_target)
 report("should_exit_position at target", should_exit,
        exit_reason if should_exit else f"ltp={ind_at_target.ltp:.1f} entry=2850.0 expected target={2850+62.5:.1f}")
 
-print("\n--- Step 9: FnOAgent tick → BUY signal with option symbol ---")
-fno_agent = FnOAgent()
+print("\n--- Step 9: OptionsAgent tick → BUY signal with option symbol ---")
+fno_agent = OptionsAgent()
 # Use NIFTY for FnO
 nifty_snap = make_bullish_snap("NIFTY", 22500.0)
 fno_action, fno_signal = fno_agent.evaluate_tick(nifty_snap)
-print(f"  FnOAgent result: action={fno_action}, signal={'yes' if fno_signal else 'no'}")
+print(f"  OptionsAgent result: action={fno_action}, signal={'yes' if fno_signal else 'no'}")
 if fno_action == "BUY" and fno_signal:
-    report("FnOAgent.evaluate_tick generates BUY with option symbol", True,
+    report("OptionsAgent.evaluate_tick generates BUY with option symbol", True,
            f"opt_sym={fno_signal.get('option_symbol','')} pattern={fno_signal.get('pattern','')} score={fno_signal.get('score',0)}")
 else:
     now = datetime.now().time()
     if time(14, 50) <= now:
-        report("FnOAgent.evaluate_tick generates BUY with option symbol", True,
+        report("OptionsAgent.evaluate_tick generates BUY with option symbol", True,
                f"Correctly HOLD (after 14:50)")
     else:
         # Try to get more info about why it returned HOLD
@@ -233,7 +233,7 @@ else:
         from options_intelligence import get_cached
         opts = get_cached("NIFTY")
         iv_rank = float(opts.get("iv_rank", 50.0)) if opts else 50.0
-        report("FnOAgent.evaluate_tick generates BUY with option symbol", True,
+        report("OptionsAgent.evaluate_tick generates BUY with option symbol", True,
                f"action={fno_action} iv_rank={iv_rank} (returned HOLD — no strong signal in current tick)")
 
 print("\n--- Step 10: ScalpingAgent tick → check signal ---")

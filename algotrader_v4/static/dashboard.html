@@ -14,8 +14,8 @@
   <title>AlgoTrader Pro — Dashboard</title>
   <link rel="preconnect" href="https://fonts.googleapis.com"/>
   <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&display=swap" rel="stylesheet"/>
-  <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
-  <script src="https://unpkg.com/lucide@latest"></script>
+  <script src="/static/chart.min.js"></script>
+  <script src="/static/lucide.min.js"></script>
   <style>
     /* ── Design tokens ─────────────────────────────────────────── */
     :root {
@@ -828,6 +828,22 @@
     .kite-info-label { font-size: 12px; color: var(--muted); width: 100px; flex-shrink: 0; }
     .kite-info-val   { font-size: 13px; color: var(--text); font-weight: 500; }
 
+    /* ── Kite Accounts ──────────────────────────────────────────── */
+    .acct-row {
+      display: flex; align-items: center; gap: 10px;
+      padding: 9px 12px;
+      background: var(--bg);
+      border: 1px solid var(--border);
+      border-radius: 7px;
+      margin-bottom: 8px;
+    }
+    .acct-row:last-child { margin-bottom: 0; }
+    .acct-name  { font-size: 13px; font-weight: 600; color: var(--text); flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .acct-key   { font-size: 11px; color: var(--muted); font-family: monospace; }
+    .badge-active { font-size: 10px; font-weight: 700; background: rgba(16,185,129,0.15); color: var(--green); border-radius: 4px; padding: 2px 7px; flex-shrink: 0; }
+    .acct-form-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin-bottom: 14px; }
+    @media (max-width: 600px) { .acct-form-grid { grid-template-columns: 1fr; } }
+
     /* ── Toast notifications ────────────────────────────────────── */
     #toast-container {
       position: fixed;
@@ -937,6 +953,12 @@
     <div class="sidebar-nav">
       <div class="nav-item active" data-tab="overview"    onclick="switchTab('overview')">
         <i data-lucide="layout-dashboard"></i><span>Overview</span>
+      </div>
+      <div class="nav-item" data-tab="orders" onclick="switchTab('orders')">
+        <i data-lucide="activity"></i><span>Live Orders</span>
+      </div>
+      <div class="nav-item" data-tab="options" onclick="switchTab('options')">
+        <i data-lucide="layers"></i><span>Options</span>
       </div>
       <div class="nav-item" data-tab="botcontrol"  onclick="switchTab('botcontrol')">
         <i data-lucide="cpu"></i><span>Bot Control</span>
@@ -1102,7 +1124,7 @@
           <div class="card-header" style="display:flex;align-items:center;gap:10px">
             <h3 class="card-title" style="margin:0"><i data-lucide="radar"></i> Abi Indicator Radar</h3>
             <span class="badge badge-stopped" id="radar-live-badge" style="font-size:11px">LIVE</span>
-            <span style="margin-left:auto;font-size:11px;color:var(--text-muted)">Updates every tick · Supertrend · HMA · TTM Squeeze</span>
+            <span style="margin-left:auto;font-size:11px;color:var(--text-muted)">Updates every tick · Supertrend · HMA · TTM Squeeze · Williams %R</span>
           </div>
           <div id="abi-radar-grid" style="display:grid;grid-template-columns:repeat(auto-fill,minmax(220px,1fr));gap:10px;margin-top:12px;max-height:380px;overflow-y:auto">
             <div style="color:var(--text-muted);font-size:13px;grid-column:1/-1;padding:16px 0;text-align:center">
@@ -1112,6 +1134,156 @@
         </div>
 
       </div><!-- /tab-overview -->
+
+
+      <!-- ════════════════════════════════════════════════════════
+           TAB: LIVE ORDERS
+      ═══════════════════════════════════════════════════════════ -->
+      <div class="tab-panel" id="tab-orders">
+
+        <!-- Agent summary cards -->
+        <div class="stat-grid" style="grid-template-columns:repeat(5,1fr);margin-bottom:18px">
+          <div class="stat-card" id="ao-intraday">
+            <div class="stat-label" style="color:#3b82f6"><i data-lucide="zap"></i> Intraday</div>
+            <div class="stat-value" id="ao-intraday-orders">0</div>
+            <div class="stat-sub"  id="ao-intraday-sub">0 signals · 0 vetoed</div>
+          </div>
+          <div class="stat-card" id="ao-scalping">
+            <div class="stat-label" style="color:#8b5cf6"><i data-lucide="zap"></i> Scalping</div>
+            <div class="stat-value" id="ao-scalping-orders">0</div>
+            <div class="stat-sub"  id="ao-scalping-sub">0 signals · 0 vetoed</div>
+          </div>
+          <div class="stat-card" id="ao-options">
+            <div class="stat-label" style="color:#f59e0b"><i data-lucide="zap"></i> Options</div>
+            <div class="stat-value" id="ao-options-orders">0</div>
+            <div class="stat-sub"  id="ao-options-sub">0 signals · 0 vetoed</div>
+          </div>
+          <div class="stat-card" id="ao-futures">
+            <div class="stat-label" style="color:#ef4444"><i data-lucide="zap"></i> Futures</div>
+            <div class="stat-value" id="ao-futures-orders">0</div>
+            <div class="stat-sub"  id="ao-futures-sub">0 signals · 0 vetoed</div>
+          </div>
+          <div class="stat-card" id="ao-swing">
+            <div class="stat-label" style="color:#10b981"><i data-lucide="zap"></i> Swing</div>
+            <div class="stat-value" id="ao-swing-orders">0</div>
+            <div class="stat-sub"  id="ao-swing-sub">0 signals · 0 vetoed</div>
+          </div>
+        </div>
+
+        <!-- Live Activity Feed -->
+        <div class="card">
+          <div class="card-header" style="display:flex;align-items:center;gap:10px">
+            <h3 class="card-title"><i data-lucide="radio"></i> Live Agent Activity Feed</h3>
+            <span class="badge badge-running" id="ao-live-badge" style="font-size:11px;animation:pulse 2s infinite">● LIVE</span>
+            <span style="margin-left:auto;font-size:11px;color:var(--muted)">Updates every 2s · last 100 events</span>
+            <button class="btn btn-sm" onclick="clearActivityFeed()" style="font-size:11px;padding:3px 10px">Clear</button>
+          </div>
+          <div class="table-wrap" style="max-height:520px;overflow-y:auto" id="ao-feed-wrap">
+            <table class="data-table">
+              <thead style="position:sticky;top:0;z-index:2;background:var(--card)">
+                <tr>
+                  <th style="width:70px">Time</th>
+                  <th style="width:80px">Agent</th>
+                  <th style="width:80px">Event</th>
+                  <th style="width:100px">Symbol</th>
+                  <th style="width:55px">Side</th>
+                  <th style="width:80px">Price ₹</th>
+                  <th style="width:55px">Qty</th>
+                  <th style="width:80px">P&amp;L ₹</th>
+                  <th style="width:60px">Gate%</th>
+                  <th>Detail</th>
+                </tr>
+              </thead>
+              <tbody id="ao-feed-tbody">
+                <tr><td colspan="10" class="no-data"><i data-lucide="radio"></i>&nbsp;Waiting for agent activity…</td></tr>
+              </tbody>
+            </table>
+          </div>
+        </div>
+
+        <!-- Trade Journal (from SQLite persistence) -->
+        <div class="card section-gap">
+          <div class="card-header" style="display:flex;align-items:center;gap:10px">
+            <h3 class="card-title"><i data-lucide="book-open"></i> Trade Journal</h3>
+            <select id="tj-days" class="input" style="width:100px;margin-left:auto">
+              <option value="1">Today</option>
+              <option value="7" selected>7 days</option>
+              <option value="30">30 days</option>
+            </select>
+            <select id="tj-agent" class="input" style="width:120px">
+              <option value="">All agents</option>
+              <option value="intraday">Intraday</option>
+              <option value="scalping">Scalping</option>
+              <option value="options">Options</option>
+              <option value="futures">Futures</option>
+              <option value="swing">Swing</option>
+            </select>
+            <button class="btn btn-sm" onclick="fetchTradeJournal()">Load</button>
+            <button class="btn btn-sm" onclick="exportTrades()" style="margin-left:4px">
+              <i data-lucide="download"></i> CSV
+            </button>
+          </div>
+          <!-- P&L summary row -->
+          <div id="tj-summary" style="display:grid;grid-template-columns:repeat(4,1fr);gap:12px;margin-bottom:12px"></div>
+          <div class="table-wrap" style="max-height:400px;overflow-y:auto">
+            <table class="data-table">
+              <thead style="position:sticky;top:0;z-index:2;background:var(--card)">
+                <tr>
+                  <th>Date</th><th>Agent</th><th>Symbol</th><th>Side</th>
+                  <th>Entry ₹</th><th>Exit ₹</th><th>Qty</th>
+                  <th>Gross ₹</th><th>Cost ₹</th><th>Net ₹</th><th>Exit Reason</th>
+                </tr>
+              </thead>
+              <tbody id="tj-tbody">
+                <tr><td colspan="11" class="no-data">Click Load to fetch trade history</td></tr>
+              </tbody>
+            </table>
+          </div>
+        </div>
+
+      </div><!-- /tab-orders -->
+
+
+      <!-- ════════════════════════════════════════════════════════
+           TAB: OPTIONS CHAIN
+      ═══════════════════════════════════════════════════════════ -->
+      <div class="tab-panel" id="tab-options">
+        <div class="card section-gap">
+          <div class="card-header" style="display:flex;align-items:center;gap:10px;flex-wrap:wrap">
+            <h3 class="card-title"><i data-lucide="layers"></i> Options Chain</h3>
+            <div style="display:flex;gap:8px;align-items:center;margin-left:auto">
+              <select id="oc-symbol" class="input" style="width:150px">
+                <option value="NIFTY">NIFTY</option>
+                <option value="BANKNIFTY">BANKNIFTY</option>
+                <option value="FINNIFTY">FINNIFTY</option>
+                <option value="MIDCPNIFTY">MIDCPNIFTY</option>
+              </select>
+              <button class="btn btn-blue" onclick="fetchOptionsChain()">Refresh</button>
+              <span id="oc-spot" style="font-size:13px;color:var(--muted)">Spot: —</span>
+              <span id="oc-expiry" style="font-size:13px;color:var(--muted)">Expiry: —</span>
+            </div>
+          </div>
+          <div class="table-wrap">
+            <table class="data-table" id="oc-table">
+              <thead>
+                <tr>
+                  <th colspan="5" style="background:rgba(239,68,68,0.1);color:#ef4444;text-align:center">PUT (PE)</th>
+                  <th style="text-align:center;background:var(--surface2)">Strike</th>
+                  <th colspan="5" style="background:rgba(59,130,246,0.1);color:#3b82f6;text-align:center">CALL (CE)</th>
+                </tr>
+                <tr>
+                  <th>IV%</th><th>Delta</th><th>Gamma</th><th>Theta</th><th>Vega</th>
+                  <th style="font-weight:700;text-align:center">STRIKE</th>
+                  <th>IV%</th><th>Delta</th><th>Gamma</th><th>Theta</th><th>Vega</th>
+                </tr>
+              </thead>
+              <tbody id="oc-tbody">
+                <tr><td colspan="11" class="no-data">Select a symbol and click Refresh</td></tr>
+              </tbody>
+            </table>
+          </div>
+        </div>
+      </div><!-- /tab-options -->
 
 
       <!-- ════════════════════════════════════════════════════════
@@ -1144,7 +1316,10 @@
               <input type="checkbox" id="strat-scalping" checked> Scalping
             </label>
             <label class="checkbox-item">
-              <input type="checkbox" id="strat-fno"> F&amp;O
+              <input type="checkbox" id="strat-options"> Options (F&amp;O)
+            </label>
+            <label class="checkbox-item">
+              <input type="checkbox" id="strat-futures"> Futures
             </label>
             <label class="checkbox-item">
               <input type="checkbox" id="strat-swing"> Swing
@@ -1282,6 +1457,22 @@
           <div class="card-title"><i data-lucide="trending-up"></i> Equity Curve — Today</div>
           <div class="analytics-chart-wrap">
             <canvas id="analytics-chart"></canvas>
+          </div>
+        </div>
+
+        <!-- Drawdown Waterfall -->
+        <div class="card section-gap">
+          <div class="card-title"><i data-lucide="trending-down"></i> Drawdown Profile</div>
+          <div class="analytics-chart-wrap">
+            <canvas id="drawdown-chart"></canvas>
+          </div>
+        </div>
+
+        <!-- Rolling Sharpe -->
+        <div class="card row-gap">
+          <div class="card-title"><i data-lucide="activity"></i> Rolling Sharpe (20 trades)</div>
+          <div id="rolling-sharpe-grid" style="display:grid;grid-template-columns:repeat(5,1fr);gap:12px;margin-top:8px">
+            <!-- populated by JS -->
           </div>
         </div>
 
@@ -1429,6 +1620,42 @@
       ═══════════════════════════════════════════════════════════ -->
       <div class="tab-panel" id="tab-settings">
 
+        <!-- Kite Accounts (multi-account) -->
+        <div class="settings-section">
+          <div class="settings-title"><i data-lucide="user-cog"></i> Kite Accounts</div>
+
+          <!-- Add / Update form -->
+          <div class="acct-form-grid">
+            <div>
+              <label style="font-size:12px;color:var(--muted);display:block;margin-bottom:5px">Account Label</label>
+              <input id="acct-name" type="text" class="risk-input" style="width:100%" placeholder="e.g. Main Account">
+            </div>
+            <div></div>
+            <div>
+              <label style="font-size:12px;color:var(--muted);display:block;margin-bottom:5px">API Key</label>
+              <input id="acct-apikey" type="text" class="risk-input" style="width:100%" placeholder="Kite API Key" oninput="acctAutoSave()">
+            </div>
+            <div>
+              <label style="font-size:12px;color:var(--muted);display:block;margin-bottom:5px">API Secret</label>
+              <div style="display:flex;gap:6px">
+                <input id="acct-secret" type="password" class="risk-input" style="flex:1" placeholder="Kite API Secret" oninput="acctAutoSave()">
+                <button class="btn btn-sm" style="padding:0 9px;background:var(--surface2)" onclick="toggleSecretVis()" title="Show/hide">
+                  <i data-lucide="eye" id="acct-eye" style="width:14px;height:14px"></i>
+                </button>
+              </div>
+            </div>
+          </div>
+          <button class="btn btn-blue btn-sm" onclick="saveKiteAccount()">
+            <i data-lucide="save"></i> Save Account
+          </button>
+          <span id="acct-autosave-status" style="font-size:11px;color:var(--muted);margin-left:10px"></span>
+
+          <!-- Saved accounts list -->
+          <div id="acct-list" style="margin-top:18px">
+            <!-- populated by renderKiteAccounts() -->
+          </div>
+        </div>
+
         <!-- Kite Connection -->
         <div class="settings-section">
           <div class="settings-title"><i data-lucide="link"></i> Kite Connection</div>
@@ -1453,10 +1680,75 @@
             <span class="kite-info-label">Email</span>
             <span class="kite-info-val" id="settings-kite-email">—</span>
           </div>
-          <div style="margin-top:14px">
-            <button class="btn btn-blue btn-sm" onclick="window.open('/login','_blank')">
-              <i data-lucide="external-link"></i> Reconnect Kite
+          <div style="margin-top:14px;font-size:12px;color:var(--muted);margin-bottom:8px">
+            Save your API key &amp; secret in <em>Kite Accounts</em> above, then click Authorize.
+          </div>
+          <div style="display:flex;gap:8px;flex-wrap:wrap;margin-top:4px">
+            <button class="btn btn-blue btn-sm" onclick="connectKiteOAuth()">
+              <i data-lucide="log-in"></i> Authorize with Kite
             </button>
+            <button class="btn btn-sm" style="background:var(--surface2)" onclick="fetchKiteStatus()">
+              <i data-lucide="refresh-cw"></i> Refresh Status
+            </button>
+          </div>
+
+          <!-- Manual token paste (for when OAuth callback already ran) -->
+          <div style="margin-top:20px;padding-top:16px;border-top:1px solid var(--border)">
+            <label style="font-size:12px;color:var(--muted);display:block;margin-bottom:6px">
+              Paste Access Token manually (if OAuth callback already ran)
+            </label>
+            <div style="display:flex;gap:8px">
+              <input id="kite-manual-token" type="text" class="risk-input" style="flex:1;font-size:12px"
+                     placeholder="kite access token…" autocomplete="off"/>
+              <button class="btn btn-blue btn-sm" onclick="setKiteManualToken()">Set</button>
+            </div>
+            <div id="kite-manual-msg" style="font-size:11px;margin-top:6px;min-height:16px"></div>
+          </div>
+        </div>
+
+        <!-- Upstox Connection -->
+        <div class="settings-section">
+          <div class="settings-title"><i data-lucide="link-2"></i> Upstox Connection</div>
+          <div class="kite-info-row">
+            <span class="kite-info-label">Status</span>
+            <span class="kite-info-val">
+              <div class="kite-indicator" style="display:inline-flex">
+                <div class="kite-dot" id="settings-upstox-dot"></div>
+                <span id="settings-upstox-status">Checking…</span>
+              </div>
+            </span>
+          </div>
+          <div class="kite-info-row">
+            <span class="kite-info-label">User ID</span>
+            <span class="kite-info-val" id="settings-upstox-uid">—</span>
+          </div>
+          <div class="kite-info-row">
+            <span class="kite-info-label">Name</span>
+            <span class="kite-info-val" id="settings-upstox-name">—</span>
+          </div>
+          <p style="font-size:12px;color:var(--muted);margin:12px 0 8px">
+            Save your Upstox API key &amp; secret in <strong>.env</strong>, then click Authorize.
+          </p>
+          <div style="display:flex;gap:8px;flex-wrap:wrap">
+            <button class="btn btn-blue btn-sm" onclick="connectUpstoxOAuth()">
+              <i data-lucide="log-in"></i> Authorize with Upstox
+            </button>
+            <button class="btn btn-sm" style="background:var(--surface2)" onclick="fetchUpstoxStatus()">
+              <i data-lucide="refresh-cw"></i> Refresh Status
+            </button>
+          </div>
+
+          <!-- Manual token paste -->
+          <div style="margin-top:20px;padding-top:16px;border-top:1px solid var(--border)">
+            <label style="font-size:12px;color:var(--muted);display:block;margin-bottom:6px">
+              Paste Access Token manually (if OAuth callback already ran)
+            </label>
+            <div style="display:flex;gap:8px">
+              <input id="upstox-manual-token" type="text" class="risk-input" style="flex:1;font-size:12px"
+                     placeholder="upstox access token…" autocomplete="off"/>
+              <button class="btn btn-blue btn-sm" onclick="setUpstoxManualToken()">Set</button>
+            </div>
+            <div id="upstox-manual-msg" style="font-size:11px;margin-top:6px;min-height:16px"></div>
           </div>
         </div>
 
@@ -1464,15 +1756,27 @@
         <div class="settings-section">
           <div class="settings-title"><i data-lucide="sliders-horizontal"></i> Intelligence Toggles</div>
           <label class="toggle-wrap" style="margin-bottom:14px">
-            <div class="toggle"><input type="checkbox" id="set-claude-gate" onchange="settingToggle('claude_gate',this.checked)"><span class="toggle-slider"></span></div>
+            <div class="toggle"><input type="checkbox" id="set-claude-gate" onchange="saveIntelligence()"><span class="toggle-slider"></span></div>
             <span class="toggle-label">Claude Trade Gate</span>
           </label>
+          <div style="margin-bottom:14px">
+            <label style="font-size:12px;color:var(--muted);display:block;margin-bottom:6px">Claude Gate Threshold <span id="int-gate-val" style="color:var(--accent)">65</span>%</label>
+            <input type="range" id="int-gate-threshold" min="40" max="90" step="5" value="65" style="width:200px;accent-color:var(--accent)" oninput="document.getElementById('int-gate-val').textContent=this.value" onchange="saveIntelligence()">
+          </div>
           <label class="toggle-wrap" style="margin-bottom:14px">
-            <div class="toggle"><input type="checkbox" id="set-mtf" onchange="settingToggle('mtf',this.checked)"><span class="toggle-slider"></span></div>
+            <div class="toggle"><input type="checkbox" id="set-mtf" onchange="saveIntelligence()"><span class="toggle-slider"></span></div>
             <span class="toggle-label">Multi-Timeframe Alignment</span>
           </label>
+          <div style="margin-bottom:14px">
+            <label style="font-size:12px;color:var(--muted);display:block;margin-bottom:6px">MTF Min Alignment (1–3 timeframes must agree)</label>
+            <select id="int-mtf-align" class="risk-input" style="width:120px" onchange="saveIntelligence()">
+              <option value="1">1 of 3</option>
+              <option value="2" selected>2 of 3</option>
+              <option value="3">3 of 3</option>
+            </select>
+          </div>
           <label class="toggle-wrap" style="margin-bottom:14px">
-            <div class="toggle"><input type="checkbox" id="set-kelly" onchange="settingToggle('kelly',this.checked)"><span class="toggle-slider"></span></div>
+            <div class="toggle"><input type="checkbox" id="set-kelly" onchange="saveIntelligence()"><span class="toggle-slider"></span></div>
             <span class="toggle-label">Kelly Sizing</span>
           </label>
           <label class="toggle-wrap" style="margin-bottom:14px">
@@ -1494,8 +1798,12 @@
               <input type="number" id="tl-intraday" min="1" max="100" class="risk-input" style="width:100%" placeholder="8">
             </div>
             <div>
-              <label style="font-size:12px;color:var(--muted);display:block;margin-bottom:5px">F&amp;O (max trades/day)</label>
-              <input type="number" id="tl-fno" min="1" max="50" class="risk-input" style="width:100%" placeholder="4">
+              <label style="font-size:12px;color:var(--muted);display:block;margin-bottom:5px">Options/F&amp;O (max trades/day)</label>
+              <input type="number" id="tl-options" min="1" max="50" class="risk-input" style="width:100%" placeholder="4">
+            </div>
+            <div>
+              <label style="font-size:12px;color:var(--muted);display:block;margin-bottom:5px">Futures (max trades/day)</label>
+              <input type="number" id="tl-futures" min="1" max="50" class="risk-input" style="width:100%" placeholder="4">
             </div>
             <div>
               <label style="font-size:12px;color:var(--muted);display:block;margin-bottom:5px">Swing (max trades/day)</label>
@@ -1513,6 +1821,79 @@
           <button class="btn btn-blue btn-sm" onclick="saveTradingLimits()">
             <i data-lucide="save"></i> Save Limits
           </button>
+        </div>
+
+        <!-- Per-Agent Risk Parameters -->
+        <div class="settings-section">
+          <div class="settings-title"><i data-lucide="sliders"></i> Per-Agent Risk Parameters</div>
+          <div style="color:var(--muted);font-size:12px;margin-bottom:12px">
+            SL%/TGT% = minimum stop-loss and target as % of entry price. Min Score = entry threshold (higher = fewer but higher-quality trades).
+          </div>
+          <div style="overflow-x:auto">
+            <table style="width:100%;border-collapse:collapse;font-size:13px">
+              <thead>
+                <tr style="color:var(--muted);text-align:left;border-bottom:1px solid var(--border)">
+                  <th style="padding:6px 8px">Agent</th>
+                  <th style="padding:6px 8px">SL %</th>
+                  <th style="padding:6px 8px">Target %</th>
+                  <th style="padding:6px 8px">Min Score</th>
+                  <th style="padding:6px 8px">Cooldown (s)</th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr style="border-bottom:1px solid rgba(255,255,255,.05)">
+                  <td style="padding:8px;color:var(--accent);font-weight:600">Intraday</td>
+                  <td style="padding:8px"><input type="number" id="ar-sl-intraday" step="0.1" min="0.1" max="10" class="risk-input" style="width:70px"></td>
+                  <td style="padding:8px"><input type="number" id="ar-tgt-intraday" step="0.1" min="0.1" max="20" class="risk-input" style="width:70px"></td>
+                  <td style="padding:8px"><input type="number" id="ar-ms-intraday" step="1" min="2" max="10" class="risk-input" style="width:60px"></td>
+                  <td style="padding:8px"><input type="number" id="ar-cd-intraday" step="10" min="30" max="600" class="risk-input" style="width:70px"></td>
+                </tr>
+                <tr style="border-bottom:1px solid rgba(255,255,255,.05)">
+                  <td style="padding:8px;color:var(--accent);font-weight:600">Scalping</td>
+                  <td style="padding:8px"><input type="number" id="ar-sl-scalping" step="0.05" min="0.1" max="5" class="risk-input" style="width:70px"></td>
+                  <td style="padding:8px"><input type="number" id="ar-tgt-scalping" step="0.05" min="0.1" max="10" class="risk-input" style="width:70px"></td>
+                  <td style="padding:8px"><input type="number" id="ar-ms-scalping" step="1" min="2" max="10" class="risk-input" style="width:60px"></td>
+                  <td style="padding:8px"><input type="number" id="ar-cd-scalping" step="10" min="30" max="600" class="risk-input" style="width:70px"></td>
+                </tr>
+                <tr style="border-bottom:1px solid rgba(255,255,255,.05)">
+                  <td style="padding:8px;color:var(--accent);font-weight:600">Options</td>
+                  <td style="padding:8px"><input type="number" id="ar-sl-options" step="1" min="5" max="60" class="risk-input" style="width:70px"></td>
+                  <td style="padding:8px"><input type="number" id="ar-tgt-options" step="1" min="5" max="100" class="risk-input" style="width:70px"></td>
+                  <td style="padding:8px"><input type="number" id="ar-ms-options" step="1" min="2" max="10" class="risk-input" style="width:60px"></td>
+                  <td style="padding:8px" style="color:var(--muted);font-size:11px">IV-adaptive</td>
+                </tr>
+                <tr style="border-bottom:1px solid rgba(255,255,255,.05)">
+                  <td style="padding:8px;color:var(--accent);font-weight:600">Futures</td>
+                  <td style="padding:8px"><input type="number" id="ar-sl-futures" step="0.1" min="0.1" max="5" class="risk-input" style="width:70px"></td>
+                  <td style="padding:8px"><input type="number" id="ar-tgt-futures" step="0.1" min="0.1" max="10" class="risk-input" style="width:70px"></td>
+                  <td style="padding:8px"><input type="number" id="ar-ms-futures" step="1" min="2" max="10" class="risk-input" style="width:60px"></td>
+                  <td style="padding:8px"><input type="number" id="ar-cd-futures" step="10" min="30" max="600" class="risk-input" style="width:70px"></td>
+                </tr>
+                <tr>
+                  <td style="padding:8px;color:var(--accent);font-weight:600">Swing</td>
+                  <td style="padding:8px"><input type="number" id="ar-sl-swing" step="0.5" min="0.5" max="10" class="risk-input" style="width:70px"></td>
+                  <td style="padding:8px"><input type="number" id="ar-tgt-swing" step="0.5" min="0.5" max="20" class="risk-input" style="width:70px"></td>
+                  <td style="padding:8px"><input type="number" id="ar-ms-swing" step="1" min="1" max="10" class="risk-input" style="width:60px"></td>
+                  <td style="padding:8px;color:var(--muted);font-size:11px">per-minute</td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+          <button class="btn btn-blue btn-sm" style="margin-top:12px" onclick="saveAgentRisk()">
+            <i data-lucide="save"></i> Save Risk Parameters
+          </button>
+        </div>
+
+        <!-- Pattern Toggles -->
+        <div class="settings-section">
+          <div class="settings-title"><i data-lucide="grid-3x3"></i> Pattern Toggles</div>
+          <div style="color:var(--muted);font-size:12px;margin-bottom:12px">
+            Disable individual entry patterns per agent. Changes take effect on the next tick.
+          </div>
+          <div id="pattern-toggles-container">
+            <!-- populated by renderPatternToggles() -->
+            <div style="color:var(--muted);font-size:12px">Loading patterns…</div>
+          </div>
         </div>
 
         <!-- Agent Enable / Disable -->
@@ -1773,8 +2154,8 @@ function flashEl(el, direction) {
    TAB SWITCHING
 ═══════════════════════════════════════════════════════════════ */
 const TAB_LABELS = {
-  overview: 'Overview', botcontrol: 'Bot Control',
-  intelligence: 'Intelligence', analytics: 'Analytics',
+  overview: 'Overview', orders: 'Live Orders', options: 'Options Chain',
+  botcontrol: 'Bot Control', intelligence: 'Intelligence', analytics: 'Analytics',
   risk: 'Risk & SEBI', settings: 'Settings',
 };
 
@@ -1784,6 +2165,17 @@ function switchTab(name) {
   document.getElementById(`tab-${name}`).classList.add('active');
   document.querySelector(`[data-tab="${name}"]`).classList.add('active');
   document.getElementById('tab-label').textContent = TAB_LABELS[name] || name;
+
+  // Lazy-load options chain on first open
+  if (name === 'options' && !window._optionsLoaded) {
+    window._optionsLoaded = true;
+    fetchOptionsChain();
+  }
+  // Refresh broker statuses when settings tab opens
+  if (name === 'settings') {
+    fetchKiteStatus();
+    fetchUpstoxStatus();
+  }
 }
 
 /* ═══════════════════════════════════════════════════════════════
@@ -1870,6 +2262,59 @@ function updateCharts() {
     chart.data.datasets[0].borderColor = last >= 0 ? '#10b981' : '#ef4444';
     chart.update('none');
   });
+  updateDrawdownChart(labels, data);
+}
+
+/* ═══════════════════════════════════════════════════════════════
+   CHART.JS — Drawdown Waterfall
+═══════════════════════════════════════════════════════════════ */
+let _drawdownChart = null;
+function updateDrawdownChart(labels, pnlData) {
+  if (!pnlData || pnlData.length < 2) return;
+  // Compute running drawdown from cumulative P&L
+  const cumPnl = pnlData.reduce((acc, v, i) => { acc.push((acc[i-1]||0) + v); return acc; }, []);
+  let peak = -Infinity;
+  const drawdownPct = cumPnl.map(v => { peak = Math.max(peak, v); return peak > 0 ? (v - peak) : 0; });
+
+  const ctx = document.getElementById('drawdown-chart');
+  if (!ctx) return;
+  if (_drawdownChart) {
+    _drawdownChart.data.labels = [...labels];
+    _drawdownChart.data.datasets[0].data = [...drawdownPct];
+    _drawdownChart.update('none');
+    return;
+  }
+  _drawdownChart = new Chart(ctx.getContext('2d'), {
+    type: 'bar',
+    data: {
+      labels,
+      datasets: [{
+        label: 'Drawdown (₹)',
+        data: drawdownPct,
+        backgroundColor: 'rgba(239,68,68,0.55)',
+        borderColor: 'rgba(239,68,68,0.8)',
+        borderWidth: 1,
+        borderRadius: 2,
+      }],
+    },
+    options: {
+      responsive: true,
+      maintainAspectRatio: false,
+      plugins: {
+        legend: { display: false },
+        tooltip: { callbacks: { label: ctx => `₹${Number(ctx.raw).toLocaleString('en-IN')}` },
+          backgroundColor: '#1f2937', borderColor: '#374151', borderWidth: 1,
+          titleColor: '#9ca3af', bodyColor: '#f9fafb' },
+      },
+      scales: {
+        x: { grid: { color: 'rgba(55,65,81,0.4)', drawBorder: false },
+             ticks: { color: '#9ca3af', font: { size: 11 }, maxTicksLimit: 8 } },
+        y: { grid: { color: 'rgba(55,65,81,0.4)', drawBorder: false },
+             ticks: { color: '#9ca3af', font: { size: 11 },
+               callback: v => `₹${Number(v).toLocaleString('en-IN')}` } },
+      },
+    },
+  });
 }
 
 /* ═══════════════════════════════════════════════════════════════
@@ -1939,10 +2384,27 @@ function renderRegime() {
   badge.className   = `regime-badge regime-${regimeKey}`;
 
   const sigs = rg.signals || {};
-  document.getElementById('r-vix').textContent     = sigs.vix     ? fmtNum(sigs.vix, 1) : '—';
-  document.getElementById('r-pcr').textContent     = sigs.pcr     ? fmtNum(sigs.pcr, 2) : '—';
-  document.getElementById('r-adx').textContent     = sigs.adx     ? fmtNum(sigs.adx, 1) : '—';
-  document.getElementById('r-breadth').textContent = sigs.breadth ? fmtNum(sigs.breadth, 2) : '—';
+  const vol  = sigs.volatility || {};
+  const vixVal = vol.india_vix || sigs.vix || 0;
+  const vixZ   = vol.vix_zscore != null ? vol.vix_zscore : null;
+  // VIX Z-score badge color
+  let vixZColor = 'var(--muted)';
+  if (vixZ !== null) {
+    if      (vixZ > 2.0) vixZColor = 'var(--red)';
+    else if (vixZ > 1.0) vixZColor = '#f97316';  // orange
+    else if (vixZ > 0.0) vixZColor = 'var(--yellow)';
+    else                 vixZColor = 'var(--green)';
+  }
+  const vixZBadge = vixZ !== null
+    ? ` <span style="font-size:11px;color:${vixZColor};font-weight:600">[Z:${vixZ.toFixed(2)}]</span>`
+    : '';
+  document.getElementById('r-vix').innerHTML    = (vixVal ? fmtNum(vixVal, 1) : '—') + vixZBadge;
+  const optSigs = sigs.options || {};
+  const niftySigs = sigs.nifty || {};
+  const breadthSigs = sigs.breadth || {};
+  document.getElementById('r-pcr').textContent     = optSigs.pcr    ? fmtNum(optSigs.pcr, 2)    : (sigs.pcr     ? fmtNum(sigs.pcr, 2)     : '—');
+  document.getElementById('r-adx').textContent     = niftySigs.adx  ? fmtNum(niftySigs.adx, 1)  : (sigs.adx     ? fmtNum(sigs.adx, 1)     : '—');
+  document.getElementById('r-breadth').textContent = breadthSigs.ad_ratio != null ? fmtNum(breadthSigs.ad_ratio, 2) : (sigs.breadth ? fmtNum(sigs.breadth, 2) : '—');
 
   const conf = rg.confidence || 0;
   document.getElementById('regime-confidence-bar').style.width  = `${conf}%`;
@@ -2036,7 +2498,7 @@ function renderBotStatus() {
    RENDER: Strategy Cards
 ═══════════════════════════════════════════════════════════════ */
 const STRATEGY_ICONS = {
-  intraday: 'trending-up', scalping: 'zap', fno: 'bar-chart-2', swing: 'wave'
+  intraday: 'trending-up', scalping: 'zap', options: 'bar-chart-2', futures: 'activity', swing: 'wave'
 };
 
 function renderStrategyCards() {
@@ -2045,7 +2507,7 @@ function renderStrategyCards() {
   const names  = Object.keys(agents);
 
   if (names.length === 0) {
-    grid.innerHTML = ['intraday','scalping','fno','swing'].map(name => strategyCardHtml(name, null)).join('');
+    grid.innerHTML = ['intraday','scalping','options','futures','swing'].map(name => strategyCardHtml(name, null)).join('');
     lucide.createIcons({ nodes: [grid] });
     return;
   }
@@ -2293,6 +2755,9 @@ function renderAnalytics() {
     </tr>`;
   }).join('');
   lucide.createIcons({ nodes: [tbody] });
+
+  // Rolling Sharpe cards (from adaptive data)
+  if (ada.strategies) updateRollingSharpCards(ada.strategies);
 }
 
 /* ═══════════════════════════════════════════════════════════════
@@ -2319,6 +2784,228 @@ function renderKiteStatus(data) {
     stxt.textContent = 'Disconnected';
   }
   state.kiteConnected = data.connected;
+}
+
+/* ═══════════════════════════════════════════════════════════════
+   KITE ACCOUNTS: multi-account management
+═══════════════════════════════════════════════════════════════ */
+let _acctSaveTimer = null;
+
+function acctAutoSave() {
+  clearTimeout(_acctSaveTimer);
+  const status = document.getElementById('acct-autosave-status');
+  status.textContent = 'typing…';
+  _acctSaveTimer = setTimeout(() => {
+    const name   = (document.getElementById('acct-name').value   || '').trim();
+    const apiKey = (document.getElementById('acct-apikey').value || '').trim();
+    const secret = (document.getElementById('acct-secret').value || '').trim();
+    if (name && apiKey && secret) {
+      _doSaveAccount(name, apiKey, secret, true);
+    } else if (apiKey || secret) {
+      status.textContent = 'fill in label too…';
+    }
+  }, 800);
+}
+
+function toggleSecretVis() {
+  const inp = document.getElementById('acct-secret');
+  const eye = document.getElementById('acct-eye');
+  if (inp.type === 'password') {
+    inp.type = 'text';
+    eye.setAttribute('data-lucide', 'eye-off');
+  } else {
+    inp.type = 'password';
+    eye.setAttribute('data-lucide', 'eye');
+  }
+  lucide.createIcons({ nodes: [document.getElementById('acct-eye').parentElement] });
+}
+
+async function saveKiteAccount() {
+  const name   = (document.getElementById('acct-name').value   || '').trim();
+  const apiKey = (document.getElementById('acct-apikey').value || '').trim();
+  const secret = (document.getElementById('acct-secret').value || '').trim();
+  if (!name)   { toast('Enter an account label', 'warn'); return; }
+  if (!apiKey) { toast('Enter the API key',       'warn'); return; }
+  if (!secret) { toast('Enter the API secret',    'warn'); return; }
+  await _doSaveAccount(name, apiKey, secret, false);
+}
+
+async function _doSaveAccount(name, apiKey, secret, silent) {
+  const status = document.getElementById('acct-autosave-status');
+  try {
+    const d = await api('POST', '/accounts', { name, api_key: apiKey, api_secret: secret });
+    renderKiteAccounts(d.accounts);
+    if (silent) {
+      status.textContent = 'saved ✓';
+      setTimeout(() => { status.textContent = ''; }, 2000);
+    } else {
+      status.textContent = '';
+      toast(`Account "${name}" saved`, 'ok');
+    }
+  } catch (e) {
+    status.textContent = '';
+    if (!silent) toast(`Save error: ${e.message}`, 'error');
+  }
+}
+
+async function activateKiteAccount(name) {
+  try {
+    const d = await api('POST', `/accounts/${encodeURIComponent(name)}/activate`);
+    renderKiteAccounts(d.accounts);
+    toast(`Account "${name}" is now active`, 'ok');
+  } catch (e) {
+    toast(`Activate error: ${e.message}`, 'error');
+  }
+}
+
+async function deleteKiteAccount(name) {
+  const ok = await showConfirm('Delete account?', `Remove "${name}" from saved accounts?`);
+  if (!ok) return;
+  try {
+    const d = await api('DELETE', `/accounts/${encodeURIComponent(name)}`);
+    renderKiteAccounts(d.accounts);
+    toast(`Account "${name}" deleted`, 'ok');
+  } catch (e) {
+    toast(`Delete error: ${e.message}`, 'error');
+  }
+}
+
+async function fetchKiteAccounts() {
+  try {
+    const d = await api('GET', '/accounts');
+    if (d) renderKiteAccounts(d.accounts);
+  } catch (_) {}
+}
+
+async function connectKiteOAuth() {
+  try {
+    const d = await api('GET', '/auth/login-url');
+    if (d && d.login_url) {
+      window.location.href = d.login_url;
+    } else {
+      showToast('Could not get Kite login URL. Make sure API key is saved.', 'error');
+    }
+  } catch (e) {
+    showToast('Error fetching Kite login URL: ' + e.message, 'error');
+  }
+}
+
+async function fetchKiteStatus() {
+  try {
+    const d = await api('GET', '/auth/kite-status');
+    if (d) {
+      const stxt = document.getElementById('settings-kite-status');
+      if (stxt) stxt.textContent = d.connected ? `Connected (${d.user_id || 'OK'})` : 'Not connected';
+    }
+    updateKiteStatus();
+  } catch (e) {
+    const stxt = document.getElementById('settings-kite-status');
+    if (stxt) stxt.textContent = 'Error: ' + e.message;
+  }
+}
+
+async function setKiteManualToken() {
+  const token = (document.getElementById('kite-manual-token')?.value || '').trim();
+  const msgEl = document.getElementById('kite-manual-msg');
+  if (!token) {
+    msgEl.style.color = 'var(--red)';
+    msgEl.textContent = 'Paste a token first';
+    return;
+  }
+  msgEl.style.color = 'var(--muted)';
+  msgEl.textContent = 'Setting…';
+  try {
+    const d = await api('POST', '/auth/token', { access_token: token });
+    if (d) {
+      msgEl.style.color = 'var(--green)';
+      msgEl.textContent = 'Token set — broker connected';
+      document.getElementById('kite-manual-token').value = '';
+      fetchKiteStatus();
+    }
+  } catch (e) {
+    msgEl.style.color = 'var(--red)';
+    msgEl.textContent = e.message;
+  }
+}
+
+// ── Upstox OAuth helpers ─────────────────────────────────────────────────────
+
+async function fetchUpstoxStatus() {
+  const dot  = document.getElementById('settings-upstox-dot');
+  const stxt = document.getElementById('settings-upstox-status');
+  const uid  = document.getElementById('settings-upstox-uid');
+  const name = document.getElementById('settings-upstox-name');
+  try {
+    const d = await api('GET', '/auth/upstox/status');
+    if (!d) return;
+    if (dot)  { dot.classList.toggle('connected', !!d.connected); dot.classList.toggle('disconnected', !d.connected); }
+    if (stxt) stxt.textContent = d.connected ? `Connected${d.token_loaded && !d.user_id ? ' (token loaded)' : ''}` : (d.message || 'Not connected');
+    if (uid)  uid.textContent  = d.user_id || '—';
+    if (name) name.textContent = d.name    || '—';
+  } catch (e) {
+    if (stxt) stxt.textContent = 'Error: ' + e.message;
+  }
+}
+
+async function connectUpstoxOAuth() {
+  try {
+    const d = await api('GET', '/auth/upstox/login-url');
+    if (d && d.login_url) {
+      window.location.href = d.login_url;
+    } else {
+      showToast('Could not get Upstox login URL. Check API key in .env.', 'error');
+    }
+  } catch (e) {
+    showToast('Error fetching Upstox login URL: ' + e.message, 'error');
+  }
+}
+
+async function setUpstoxManualToken() {
+  const token = (document.getElementById('upstox-manual-token')?.value || '').trim();
+  const msgEl = document.getElementById('upstox-manual-msg');
+  if (!token) {
+    msgEl.style.color = 'var(--red)';
+    msgEl.textContent = 'Paste a token first';
+    return;
+  }
+  msgEl.style.color = 'var(--muted)';
+  msgEl.textContent = 'Setting…';
+  try {
+    const d = await api('POST', '/auth/upstox/token', { access_token: token });
+    if (d) {
+      msgEl.style.color = 'var(--green)';
+      msgEl.textContent = 'Token set — Upstox connected';
+      document.getElementById('upstox-manual-token').value = '';
+      fetchUpstoxStatus();
+    }
+  } catch (e) {
+    msgEl.style.color = 'var(--red)';
+    msgEl.textContent = e.message;
+  }
+}
+
+function renderKiteAccounts(accounts) {
+  const el = document.getElementById('acct-list');
+  if (!accounts || !accounts.length) {
+    el.innerHTML = '<div style="color:var(--muted);font-size:12px">No accounts saved yet.</div>';
+    return;
+  }
+  el.innerHTML = accounts.map(a => `
+    <div class="acct-row">
+      <span class="acct-name">${escHtml(a.name)}</span>
+      ${a.api_key_masked ? `<span class="acct-key">${escHtml(a.api_key_masked)}</span>` : ''}
+      ${a.active ? '<span class="badge-active">ACTIVE</span>' : ''}
+      ${!a.active ? `<button class="btn btn-sm btn-blue" style="padding:2px 10px;font-size:11px" onclick="activateKiteAccount(${JSON.stringify(a.name)})">Activate</button>` : ''}
+      <button class="btn btn-sm" style="padding:2px 8px;font-size:11px;background:rgba(239,68,68,0.15);color:#f87171" onclick="deleteKiteAccount(${JSON.stringify(a.name)})" title="Delete">
+        <i data-lucide="trash-2" style="width:12px;height:12px"></i>
+      </button>
+    </div>
+  `).join('');
+  lucide.createIcons({ nodes: [el] });
+}
+
+function escHtml(s) {
+  return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
 }
 
 /* ═══════════════════════════════════════════════════════════════
@@ -2421,7 +3108,8 @@ async function toggleBot() {
       const strategies = [];
       if (document.getElementById('strat-intraday').checked) strategies.push('intraday');
       if (document.getElementById('strat-scalping').checked) strategies.push('scalping');
-      if (document.getElementById('strat-fno').checked)      strategies.push('fno');
+      if (document.getElementById('strat-options').checked)      strategies.push('options');
+      if (document.getElementById('strat-futures').checked)  strategies.push('futures');
       if (document.getElementById('strat-swing').checked)    strategies.push('swing');
 
       if (strategies.length === 0) {
@@ -2547,7 +3235,8 @@ async function fetchTradingLimits() {
   try {
     const d = await api('GET', '/settings/trading-limits');
     document.getElementById('tl-intraday').value = d.max_trades_intraday  ?? 8;
-    document.getElementById('tl-fno').value      = d.max_trades_fno       ?? 4;
+    document.getElementById('tl-options').value      = d.max_trades_options       ?? 4;
+    document.getElementById('tl-futures').value  = d.max_trades_futures   ?? 4;
     document.getElementById('tl-swing').value    = d.max_trades_swing     ?? 3;
     document.getElementById('tl-scalping').value = d.max_trades_scalping  ?? 20;
     document.getElementById('tl-cooldown').value = d.cooldown_after_loss_sec ?? 300;
@@ -2563,7 +3252,8 @@ async function saveTradingLimits() {
     const _int = id => { const v = parseInt(document.getElementById(id).value); return isNaN(v) ? undefined : v; };
     const body = {
       max_trades_intraday:     _int('tl-intraday'),
-      max_trades_fno:          _int('tl-fno'),
+      max_trades_options:          _int('tl-options'),
+      max_trades_futures:      _int('tl-futures'),
       max_trades_swing:        _int('tl-swing'),
       max_trades_scalping:     _int('tl-scalping'),
       cooldown_after_loss_sec: _int('tl-cooldown'),
@@ -2581,8 +3271,223 @@ async function saveTradingLimits() {
 }
 
 /* ═══════════════════════════════════════════════════════════════
+   AGENT RISK: fetch + save
+═══════════════════════════════════════════════════════════════ */
+async function fetchAgentRisk() {
+  try {
+    const d = await api('GET', '/settings/agent-risk');
+    const _s = (id, v) => { const el = document.getElementById(id); if (el) el.value = v ?? ''; };
+    _s('ar-sl-intraday',  d.sl_pct_intraday);
+    _s('ar-tgt-intraday', d.tgt_pct_intraday);
+    _s('ar-ms-intraday',  d.min_score_intraday);
+    _s('ar-cd-intraday',  d.cooldown_intraday);
+    _s('ar-sl-scalping',  d.sl_pct_scalping);
+    _s('ar-tgt-scalping', d.tgt_pct_scalping);
+    _s('ar-ms-scalping',  d.min_score_scalping);
+    _s('ar-cd-scalping',  d.cooldown_scalping);
+    _s('ar-sl-options',   d.sl_pct_options);
+    _s('ar-tgt-options',  d.tgt_pct_options);
+    _s('ar-ms-options',   d.min_score_options);
+    _s('ar-sl-futures',   d.sl_pct_futures);
+    _s('ar-tgt-futures',  d.tgt_pct_futures);
+    _s('ar-ms-futures',   d.min_score_futures);
+    _s('ar-cd-futures',   d.cooldown_futures);
+    _s('ar-sl-swing',     d.sl_pct_swing);
+    _s('ar-tgt-swing',    d.tgt_pct_swing);
+    _s('ar-ms-swing',     d.min_score_swing);
+  } catch (_) {}
+}
+
+async function saveAgentRisk() {
+  const _f = id => { const v = parseFloat(document.getElementById(id)?.value); return isNaN(v) ? undefined : v; };
+  const _i = id => { const v = parseInt(document.getElementById(id)?.value);   return isNaN(v) ? undefined : v; };
+  const body = {
+    sl_pct_intraday: _f('ar-sl-intraday'),  tgt_pct_intraday: _f('ar-tgt-intraday'),
+    min_score_intraday: _i('ar-ms-intraday'), cooldown_intraday: _i('ar-cd-intraday'),
+    sl_pct_scalping: _f('ar-sl-scalping'),  tgt_pct_scalping: _f('ar-tgt-scalping'),
+    min_score_scalping: _i('ar-ms-scalping'), cooldown_scalping: _i('ar-cd-scalping'),
+    sl_pct_options:  _f('ar-sl-options'),   tgt_pct_options:  _f('ar-tgt-options'),
+    min_score_options:  _i('ar-ms-options'),
+    sl_pct_futures:  _f('ar-sl-futures'),   tgt_pct_futures:  _f('ar-tgt-futures'),
+    min_score_futures:  _i('ar-ms-futures'), cooldown_futures: _i('ar-cd-futures'),
+    sl_pct_swing:    _f('ar-sl-swing'),     tgt_pct_swing:    _f('ar-tgt-swing'),
+    min_score_swing: _i('ar-ms-swing'),
+  };
+  Object.keys(body).forEach(k => body[k] === undefined && delete body[k]);
+  try {
+    await api('PATCH', '/settings/agent-risk', body);
+    toast('Agent risk parameters saved', 'ok');
+  } catch (e) { toast(`Save error: ${e.message}`, 'error'); }
+}
+
+/* ═══════════════════════════════════════════════════════════════
+   INTELLIGENCE: fetch + save
+═══════════════════════════════════════════════════════════════ */
+async function fetchIntelligence() {
+  try {
+    const d = await api('GET', '/settings/intelligence');
+    const chk = (id, v) => { const el = document.getElementById(id); if (el) el.checked = !!v; };
+    chk('set-claude-gate', d.use_claude_trade_gate);
+    chk('set-mtf',         d.use_multi_timeframe);
+    chk('set-kelly',       d.use_kelly_sizing);
+    const th = document.getElementById('int-gate-threshold');
+    if (th) { th.value = d.claude_gate_threshold ?? 65; document.getElementById('int-gate-val').textContent = th.value; }
+    const al = document.getElementById('int-mtf-align');
+    if (al) al.value = d.mtf_min_alignment ?? 2;
+  } catch (_) {}
+}
+
+async function saveIntelligence() {
+  const _b = id => { const el = document.getElementById(id); return el ? el.checked : undefined; };
+  const _i = id => { const v = parseInt(document.getElementById(id)?.value); return isNaN(v) ? undefined : v; };
+  const body = {
+    use_claude_trade_gate: _b('set-claude-gate'),
+    claude_gate_threshold: _i('int-gate-threshold'),
+    use_multi_timeframe:   _b('set-mtf'),
+    mtf_min_alignment:     _i('int-mtf-align'),
+    use_kelly_sizing:      _b('set-kelly'),
+  };
+  Object.keys(body).forEach(k => body[k] === undefined && delete body[k]);
+  try {
+    await api('PATCH', '/settings/intelligence', body);
+    toast('Intelligence settings saved', 'ok');
+  } catch (e) { toast(`Save error: ${e.message}`, 'error'); }
+}
+
+/* ═══════════════════════════════════════════════════════════════
+   PATTERN TOGGLES: fetch + render
+═══════════════════════════════════════════════════════════════ */
+let _patternData = {};
+
+async function fetchPatternToggles() {
+  try {
+    _patternData = await api('GET', '/settings/pattern-toggles');
+    renderPatternToggles();
+  } catch (_) {}
+}
+
+function renderPatternToggles() {
+  const c = document.getElementById('pattern-toggles-container');
+  if (!c) return;
+  const agents = Object.keys(_patternData);
+  if (!agents.length) { c.innerHTML = '<div style="color:var(--muted);font-size:12px">No patterns loaded.</div>'; return; }
+  c.innerHTML = agents.map(agent => {
+    const patterns = _patternData[agent];
+    const total   = Object.keys(patterns).length;
+    const active  = Object.values(patterns).filter(Boolean).length;
+    const rows    = Object.entries(patterns).map(([p, en]) =>
+      `<label style="display:flex;align-items:center;gap:8px;padding:4px 0;cursor:pointer;min-width:180px">
+        <input type="checkbox" ${en ? 'checked' : ''} onchange="togglePattern('${agent}','${p}',this.checked)"
+          style="width:15px;height:15px;accent-color:var(--accent);cursor:pointer">
+        <span style="font-size:12px;color:${en ? 'var(--text-primary)' : 'var(--muted)'}">${p}</span>
+      </label>`
+    ).join('');
+    return `<details style="margin-bottom:10px">
+      <summary style="cursor:pointer;padding:8px 10px;background:rgba(0,212,170,.07);border-radius:6px;
+        font-size:13px;font-weight:600;color:var(--accent);list-style:none;display:flex;justify-content:space-between;align-items:center">
+        <span>${agent.charAt(0).toUpperCase()+agent.slice(1)}</span>
+        <span style="font-size:11px;font-weight:400;color:var(--muted)">${active}/${total} active</span>
+      </summary>
+      <div style="display:flex;flex-wrap:wrap;gap:4px 16px;padding:10px 6px">${rows}</div>
+    </details>`;
+  }).join('');
+}
+
+async function togglePattern(agent, pattern, enabled) {
+  try {
+    await api('PATCH', '/settings/pattern-toggles', { agent, pattern, enabled });
+    if (_patternData[agent]) _patternData[agent][pattern] = enabled;
+    renderPatternToggles();
+    toast(`${pattern} ${enabled ? 'enabled' : 'disabled'}`, enabled ? 'ok' : 'info');
+  } catch (e) { toast(`Toggle error: ${e.message}`, 'error'); }
+}
+
+/* ═══════════════════════════════════════════════════════════════
    POLLING: fetch all state
 ═══════════════════════════════════════════════════════════════ */
+async function fetchActivity() {
+  try {
+    const d = await api('GET', '/agents/activity?n=100');
+    if (d && d.events) renderActivityFeed(d.events);
+  } catch {}
+}
+
+function renderActivityFeed(events) {
+  // Update per-agent summary cards
+  const agents = ['intraday','scalping','options','futures','swing'];
+  const stats = {};
+  agents.forEach(a => { stats[a] = { orders:0, signals:0, vetoed:0 }; });
+
+  events.forEach(e => {
+    const s = stats[e.agent];
+    if (!s) return;
+    if (e.event === 'SIGNAL')       s.signals++;
+    if (e.event === 'GATE_VETO')    s.vetoed++;
+    if (e.event === 'ORDER_ENTRY')  s.orders++;
+  });
+
+  agents.forEach(a => {
+    const s = stats[a];
+    const el = document.getElementById(`ao-${a}-orders`);
+    const sub = document.getElementById(`ao-${a}-sub`);
+    if (el)  el.textContent  = s.orders;
+    if (sub) sub.textContent = `${s.signals} signals · ${s.vetoed} vetoed`;
+  });
+
+  // Event row colours
+  const EVENT_STYLE = {
+    SIGNAL:       { bg:'rgba(99,102,241,0.08)', text:'#818cf8', label:'SIGNAL'    },
+    GATE_APPROVE: { bg:'rgba(16,185,129,0.08)', text:'#34d399', label:'APPROVED'  },
+    GATE_VETO:    { bg:'rgba(239,68,68,0.08)',  text:'#f87171', label:'VETOED'    },
+    ORDER_ENTRY:  { bg:'rgba(59,130,246,0.12)', text:'#60a5fa', label:'ENTRY'     },
+    ORDER_SL:     { bg:'rgba(245,158,11,0.08)', text:'#fbbf24', label:'SL ORDER'  },
+    ORDER_TARGET: { bg:'rgba(16,185,129,0.08)', text:'#34d399', label:'TGT ORDER' },
+    SL_HIT:       { bg:'rgba(239,68,68,0.12)',  text:'#f87171', label:'SL HIT'    },
+    TARGET_HIT:   { bg:'rgba(16,185,129,0.12)', text:'#34d399', label:'TARGET ✓'  },
+    SL_MOVED:     { bg:'rgba(245,158,11,0.06)', text:'#fbbf24', label:'TSL MOVED' },
+  };
+
+  const tbody = document.getElementById('ao-feed-tbody');
+  if (!tbody) return;
+
+  if (!events.length) {
+    tbody.innerHTML = `<tr><td colspan="10" class="no-data"><i data-lucide="radio"></i>&nbsp;Waiting for agent activity…</td></tr>`;
+    lucide.createIcons({ nodes: [tbody] });
+    return;
+  }
+
+  tbody.innerHTML = events.map(e => {
+    const s   = EVENT_STYLE[e.event] || { bg:'transparent', text:'var(--muted)', label: e.event };
+    const pnl = e.pnl != null
+      ? `<span style="color:${e.pnl>=0?'var(--green)':'var(--red)'}">
+           ${e.pnl>=0?'+':''}₹${Math.abs(e.pnl).toLocaleString('en-IN',{maximumFractionDigits:0})}
+         </span>`
+      : '<span style="color:var(--muted)">—</span>';
+    const gc  = e.gate_conf ? `<span style="font-weight:600;color:${e.gate_conf>=70?'var(--green)':'var(--red)'}">
+                                 ${e.gate_conf}%</span>` : '—';
+    const detail = [e.pattern, e.gate_reason, e.detail].filter(Boolean).join(' · ').slice(0,80);
+    return `<tr style="background:${s.bg}">
+      <td style="font-size:11px;color:var(--muted);font-variant-numeric:tabular-nums">${e.time}</td>
+      <td><span style="font-size:11px;font-weight:600;color:${e.color};text-transform:uppercase">${e.agent}</span></td>
+      <td><span style="font-size:11px;font-weight:600;color:${s.text}">${s.label}</span></td>
+      <td style="font-weight:600">${e.symbol}</td>
+      <td><span style="font-size:11px;color:${e.side==='BUY'?'var(--green)':'var(--red)'}">
+            ${e.side || '—'}</span></td>
+      <td style="font-variant-numeric:tabular-nums">${e.price ? '₹'+e.price.toLocaleString('en-IN') : '—'}</td>
+      <td>${e.qty || '—'}</td>
+      <td>${pnl}</td>
+      <td>${gc}</td>
+      <td style="font-size:11px;color:var(--muted);max-width:260px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${detail}">${detail || '—'}</td>
+    </tr>`;
+  }).join('');
+}
+
+function clearActivityFeed() {
+  api('DELETE', '/agents/activity').catch(() => {});
+  document.getElementById('ao-feed-tbody').innerHTML =
+    `<tr><td colspan="10" class="no-data">Feed cleared</td></tr>`;
+}
+
 async function pollAll() {
   await Promise.allSettled([
     fetchRisk(),
@@ -2599,6 +3504,11 @@ async function pollAll() {
     fetchAgentEnables(),
     fetchTSLStatus(),
     fetchCapitalAllocation(),
+    fetchKiteAccounts(),
+    fetchAgentRisk(),
+    fetchIntelligence(),
+    fetchPatternToggles(),
+    fetchActivity(),
   ]);
 
   renderStats();
@@ -2751,6 +3661,11 @@ function connectWS() {
     const srLabel = srK === null ? '—' : srK > 80 ? 'OB' : srK < 20 ? 'OS' : 'MID';
     const srClass = srK === null ? 'radar-neu' : srK > 80 ? 'radar-dn' : srK < 20 ? 'radar-up' : 'radar-neu';
     const srNum   = srK !== null ? srK.toFixed(1) : '';
+    // Williams %R row (range -100 to 0; >-20 overbought, <-80 oversold)
+    const wr = typeof d.williams_r === 'number' ? d.williams_r : null;
+    const wrLabel = wr === null ? '—' : wr > -20 ? 'OB' : wr < -80 ? 'OS' : 'MID';
+    const wrClass = wr === null ? 'radar-neu' : wr > -20 ? 'radar-dn' : wr < -80 ? 'radar-up' : 'radar-neu';
+    const wrNum   = wr !== null ? wr.toFixed(1) : '';
     // VWAP band proximity
     const ltp = d.ltp || 0;
     const u3  = d.vwap_u3 || 0, l3 = d.vwap_l3 || 0;
@@ -2785,6 +3700,11 @@ function connectWS() {
         <span class="radar-val">${srLabel}</span>
         <span class="radar-num">${srNum}</span>
       </div>
+      ${wr !== null ? `<div class="radar-row ${wrClass}">
+        <span class="radar-lbl">W%R</span>
+        <span class="radar-val">${wrLabel}</span>
+        <span class="radar-num">${wrNum}</span>
+      </div>` : ''}
       ${bandLabel ? `<div class="radar-row ${bandClass}">
         <span class="radar-lbl">Band</span>
         <span class="radar-val" style="flex:1;font-size:11px">${bandLabel}</span>
@@ -2825,7 +3745,7 @@ function connectWS() {
           cell.dataset.prev   = curr;
         });
         // Update Abi Indicator Radar
-        if (msg.supertrend !== undefined || msg.hma !== undefined || msg.squeeze_on !== undefined) {
+        if (msg.supertrend !== undefined || msg.hma !== undefined || msg.squeeze_on !== undefined || msg.williams_r !== undefined) {
           updateRadar(sym, msg);
         }
       }
@@ -2905,7 +3825,7 @@ async function fetchAgentEnables() {
 function renderAgentEnables() {
   const container = document.getElementById('agent-enables-list');
   if (!container) return;
-  const names = ['intraday', 'scalping', 'fno', 'swing'];
+  const names = ['intraday', 'scalping', 'options', 'futures', 'swing'];
   container.innerHTML = names.map(name => {
     const enabled = state.agentEnables[name] !== false;
     return `<label class="toggle-wrap" style="margin:0">
@@ -3039,6 +3959,154 @@ function updateCapitalDisplay() {
       (sum < 100 ? ` <span style="color:var(--muted)">(${(100-sum).toFixed(1)}% unallocated reserve)</span>` : '');
   }
 }
+
+// ── Options Chain ─────────────────────────────────────────────────────────────
+async function fetchOptionsChain() {
+  const sym = document.getElementById('oc-symbol').value;
+  try {
+    const data = await api('GET', '/options/chain/' + sym);
+    if (!data) return;
+    document.getElementById('oc-spot').textContent = 'Spot: ₹' + data.spot.toFixed(2);
+    document.getElementById('oc-expiry').textContent = 'Expiry: ' + data.expiry;
+    const tbody = document.getElementById('oc-tbody');
+    tbody.innerHTML = data.chain.map(row => {
+      const pe = row.pe || {};
+      const ce = row.ce || {};
+      const atmStyle = row.atm ? 'style="background:rgba(250,204,21,0.08);font-weight:600"' : '';
+      const atmStrike = row.atm ? '★ ' : '';
+      return `<tr ${atmStyle}>
+        <td>${pe.iv || 0}%</td>
+        <td style="color:#ef4444">${(pe.delta||0).toFixed(3)}</td>
+        <td>${(pe.gamma||0).toFixed(5)}</td>
+        <td style="color:#f59e0b">${(pe.theta||0).toFixed(2)}</td>
+        <td>${(pe.vega||0).toFixed(3)}</td>
+        <td style="text-align:center;font-weight:700;color:${row.atm?'var(--yellow)':'var(--text)'}">${atmStrike}${row.strike}</td>
+        <td>${ce.iv || 0}%</td>
+        <td style="color:#3b82f6">${(ce.delta||0).toFixed(3)}</td>
+        <td>${(ce.gamma||0).toFixed(5)}</td>
+        <td style="color:#f59e0b">${(ce.theta||0).toFixed(2)}</td>
+        <td>${(ce.vega||0).toFixed(3)}</td>
+      </tr>`;
+    }).join('');
+  } catch(e) {
+    const tbody = document.getElementById('oc-tbody');
+    if (tbody) tbody.innerHTML = `<tr><td colspan="11" class="no-data" style="color:var(--red)">Error: ${e.message}</td></tr>`;
+    const spotEl = document.getElementById('oc-spot');
+    const expEl = document.getElementById('oc-expiry');
+    if (spotEl) spotEl.textContent = 'Spot: —';
+    if (expEl) expEl.textContent = 'Expiry: —';
+  }
+}
+
+// ── Trade Journal ─────────────────────────────────────────────────────────────
+async function fetchTradeJournal() {
+  const days  = document.getElementById('tj-days').value;
+  const agent = document.getElementById('tj-agent').value;
+  try {
+    const hist  = await api('GET', `/portfolio/trades/history?days=${days}${agent ? '&agent=' + agent : ''}`);
+    const stats = await api('GET', `/portfolio/stats?days=${days}${agent ? '&strategy=' + agent : ''}`);
+
+    // Summary row
+    const s = stats || {};
+    const summaryEl = document.getElementById('tj-summary');
+    if (summaryEl) {
+      summaryEl.innerHTML = `
+        <div class="stat-card"><div class="stat-label">Net P&amp;L</div>
+          <div class="stat-value ${(s.net_pnl||0)>=0?'profit':'loss'}">₹${(s.net_pnl||0).toFixed(0)}</div></div>
+        <div class="stat-card"><div class="stat-label">Gross P&amp;L</div>
+          <div class="stat-value">₹${(s.gross_pnl||0).toFixed(0)}</div></div>
+        <div class="stat-card"><div class="stat-label">Total Costs</div>
+          <div class="stat-value" style="color:var(--red)">₹${(s.total_cost||0).toFixed(0)}</div></div>
+        <div class="stat-card"><div class="stat-label">Win Rate</div>
+          <div class="stat-value">${(s.win_rate||0).toFixed(1)}%</div></div>`;
+    }
+
+    const trades = (hist && hist.trades) ? hist.trades : [];
+    const tbody = document.getElementById('tj-tbody');
+    if (!trades.length) {
+      tbody.innerHTML = '<tr><td colspan="11" class="no-data">No trades found</td></tr>';
+      return;
+    }
+    tbody.innerHTML = trades.map(t => {
+      const net = t.net_pnl || 0;
+      const cls = net >= 0 ? 'profit' : 'loss';
+      return `<tr>
+        <td style="font-size:11px">${t.trade_date||''}</td>
+        <td><span style="color:${agentColor(t.strategy)}">${t.strategy||''}</span></td>
+        <td style="font-weight:600">${t.symbol||''}</td>
+        <td style="color:${t.side==='BUY'?'var(--green)':'var(--red)'}">${t.side||''}</td>
+        <td>₹${(t.entry_price||0).toFixed(2)}</td>
+        <td>₹${(t.exit_price||0).toFixed(2)}</td>
+        <td>${t.quantity||0}</td>
+        <td>₹${(t.gross_pnl||0).toFixed(0)}</td>
+        <td style="color:var(--red)">₹${(t.cost||0).toFixed(0)}</td>
+        <td class="${cls}" style="font-weight:600">₹${net.toFixed(0)}</td>
+        <td style="font-size:11px;color:var(--muted)">${t.exit_reason||''}</td>
+      </tr>`;
+    }).join('');
+  } catch(e) {
+    console.error('Trade journal error:', e);
+  }
+}
+
+function agentColor(agent) {
+  const colors = {intraday:'#3b82f6',scalping:'#8b5cf6',options:'#f59e0b',futures:'#ef4444',swing:'#10b981'};
+  return colors[agent] || '#6b7280';
+}
+
+async function exportTrades() {
+  const days  = document.getElementById('tj-days').value;
+  const agent = document.getElementById('tj-agent').value;
+  const url = `/portfolio/trades/export?days=${days}${agent ? '&strategy=' + agent : ''}`;
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = `trades_${days}d.csv`;
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+}
+
+// ── Rolling Sharpe Cards ──────────────────────────────────────────────────────
+function updateRollingSharpCards(adaptiveSummary) {
+  const grid = document.getElementById('rolling-sharpe-grid');
+  if (!grid || !adaptiveSummary) return;
+  const strategies = ['intraday','scalping','options','futures','swing'];
+  const colors = {intraday:'#3b82f6',scalping:'#8b5cf6',options:'#f59e0b',futures:'#ef4444',swing:'#10b981'};
+  grid.innerHTML = strategies.map(s => {
+    const d = adaptiveSummary[s] || {};
+    const sharpe = d.sharpe_20 != null ? d.sharpe_20 : null;
+    const wr = d.win_rate_20 != null ? (d.win_rate_20 * 100).toFixed(0) : '—';
+    const sharpeDisplay = sharpe != null ? sharpe.toFixed(2) : '—';
+    const sharpeColor = sharpe == null ? 'var(--muted)' : sharpe >= 1.0 ? 'var(--green)' : sharpe >= 0.5 ? 'var(--yellow)' : 'var(--red)';
+    return `<div class="stat-card">
+      <div class="stat-label" style="color:${colors[s]}">${s.charAt(0).toUpperCase()+s.slice(1)}</div>
+      <div class="stat-value" style="color:${sharpeColor};font-size:22px">${sharpeDisplay}</div>
+      <div class="stat-sub">Win rate: ${wr}%</div>
+      <div class="stat-sub">Trades: ${d.adaptation_count||0}</div>
+    </div>`;
+  }).join('');
+}
+
+// ── Keyboard shortcuts ────────────────────────────────────────────────────────
+document.addEventListener('keydown', function(e) {
+  // Only when not in input/textarea
+  if (['INPUT','TEXTAREA','SELECT'].includes(e.target.tagName)) return;
+  if (e.ctrlKey || e.metaKey || e.altKey) return;
+
+  switch(e.key) {
+    case '1': switchTab('overview');     break;
+    case '2': switchTab('orders');       break;
+    case '3': switchTab('options');      break;
+    case '4': switchTab('analytics');    break;
+    case '5': switchTab('settings');     break;
+    case 'r': case 'R': pollAll();       break;
+    case 'k': case 'K':
+      if (confirm('Activate Kill Switch? This will halt all trading.')) {
+        confirmKillSwitch();
+      }
+      break;
+  }
+});
 
 async function saveCapitalAllocation() {
   const _f  = id => { const v = parseFloat(document.getElementById(id)?.value); return isNaN(v) ? undefined : v; };

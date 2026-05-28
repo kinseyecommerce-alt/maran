@@ -44,11 +44,12 @@ Return ONLY valid JSON — no markdown, no code fences:
   "regime_confidence": 0-100,
   "agent_directives": {
     "intraday":  {"action": "run|pause|reduce_size", "reason": "<specific reason>"},
-    "fno":       {"action": "run|pause|reduce_size", "reason": "<specific reason>"},
+    "options":   {"action": "run|pause|reduce_size", "reason": "<specific reason>"},
+    "futures":   {"action": "run|pause|reduce_size", "reason": "<specific reason>"},
     "swing":     {"action": "run|pause|reduce_size", "reason": "<specific reason>"},
     "scalping":  {"action": "run|pause|reduce_size", "reason": "<specific reason>"}
   },
-  "capital_allocation": {"intraday": 0-100, "fno": 0-100, "swing": 0-100, "scalping": 0-100},
+  "capital_allocation": {"intraday": 0-100, "options": 0-100, "futures": 0-100, "swing": 0-100, "scalping": 0-100},
   "trade_gate_threshold": 55-85,
   "risk_override": {"halt_new_trades": false, "reason": ""},
   "opportunity_alert": "<null or 1-sentence alert about a specific opportunity window>",
@@ -138,11 +139,29 @@ class MasterAgent:
         self.running = False
         self._agent_watchlists: dict[str, list[dict]] = {}
         self.last_directives: dict = {}
+        # Phase 3A: regime hysteresis — require 2 consecutive same-regime reads before switching
+        self._regime_buffer: list[str] = []
+        self._confirmed_regime: Optional[str] = None
+        # Phase 3D: rolling Sharpe tracking — {strategy: [recent sharpes]}
+        self._rolling_sharpe_below_count: dict[str, int] = {}
 
     # ── Lifecycle ──────────────────────────────────────────────────────────────
 
     def start(self, strategies: list[str], watchlist: list[dict]) -> dict:
         self.running = True
+
+        # Pre-flight: verify Kite connection before committing to a live run
+        if settings.trading_mode == "LIVE":
+            try:
+                profile = kite_client.kite.profile()
+                logger.info("[master_v5] Kite connected: {} ({})",
+                            profile.get("user_name", "?"), profile.get("user_id", "?"))
+            except Exception as exc:
+                self.running = False
+                raise RuntimeError(
+                    f"Kite connection failed — check KITE_ACCESS_TOKEN in .env: {exc}"
+                )
+
         report: dict[str, dict] = {}
 
         for strat in strategies:
@@ -218,7 +237,19 @@ class MasterAgent:
             regime = regime_detector.current_regime
             plan   = regime_detector.current_plan
 
-        self._apply_regime_plan(regime, plan)
+        # Phase 3A: Regime hysteresis — only accept a new regime after 2 consecutive confirmations
+        self._regime_buffer.append(regime.value)
+        if len(self._regime_buffer) > 2:
+            self._regime_buffer = self._regime_buffer[-2:]
+        if len(self._regime_buffer) == 2 and self._regime_buffer[0] == self._regime_buffer[1]:
+            if self._confirmed_regime != regime.value:
+                logger.info("[master] Regime confirmed: {} → {} (2-cycle hysteresis)",
+                            self._confirmed_regime, regime.value)
+                self._confirmed_regime = regime.value
+                self._apply_regime_plan(regime, plan)
+        elif self._confirmed_regime is None:
+            self._confirmed_regime = regime.value
+            self._apply_regime_plan(regime, plan)
 
         sigs = regime_detector.current_signals
         live = tick_engine.all_latest()
@@ -294,6 +325,9 @@ class MasterAgent:
                 "summary": f"Regime {regime.value}. {plan.reasoning[:80]}",
             }
 
+        # Phase 3D: Rolling Sharpe alert — warn if a strategy's rolling Sharpe is degrading
+        asyncio.create_task(self._check_rolling_sharpe())
+
         summary = self.last_directives.get("summary", "")
         if summary:
             asyncio.create_task(send_telegram(
@@ -311,6 +345,35 @@ class MasterAgent:
                 "reasoning":   plan.reasoning[:120],
                 "signals":     sigs.to_dict() if sigs else {},
             }))
+
+    async def _check_rolling_sharpe(self) -> None:
+        """Phase 3D: Alert when a strategy's rolling Sharpe drops below threshold for 3 cycles."""
+        threshold = getattr(settings, "min_rolling_sharpe", 0.5)
+        try:
+            summary = adaptive_engine.summary()
+            for strategy, data in summary.items():
+                if not isinstance(data, dict):
+                    continue
+                sharpe = data.get("sharpe_20", None)
+                if sharpe is None:
+                    continue
+                count = self._rolling_sharpe_below_count.get(strategy, 0)
+                if sharpe < threshold:
+                    count += 1
+                    self._rolling_sharpe_below_count[strategy] = count
+                    if count == 3:
+                        msg = (
+                            f"⚠️ <b>Sharpe Alert: {strategy.upper()}</b>\n"
+                            f"Rolling-20 Sharpe: {sharpe:.2f} (threshold: {threshold})\n"
+                            f"Win rate: {data.get('win_rate_20', 0)*100:.0f}% | "
+                            f"Trades: {data.get('adaptation_count', 0)}"
+                        )
+                        logger.warning("[master] {}", msg.replace("<b>", "").replace("</b>", ""))
+                        asyncio.create_task(send_telegram(msg))
+                else:
+                    self._rolling_sharpe_below_count[strategy] = 0
+        except Exception as exc:
+            logger.debug("[master] Sharpe check error: {}", exc)
 
     async def _auto_squareoff(self) -> None:
         ids = kite_client.squareoff_all_positions()

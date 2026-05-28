@@ -12,6 +12,7 @@ from ist_clock import now_ist
 from agents.base_agent import BaseAgent
 from tick_engine import MarketSnapshot, LiveIndicators
 from risk_manager import risk_manager
+from config import settings
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -51,14 +52,18 @@ class IntradayAgent(BaseAgent):
     def __init__(self) -> None:
         super().__init__()
         # Per-symbol rolling state — instance-level so each agent is independent
-        self._prev_above_vwap: dict = {}
-        self._prev_ltp:        dict = {}
-        self._prev_rsi:        dict = {}
-        self._prev_squeeze:    dict = {}   # sym → squeeze_on last tick
-        self._orb_high:        dict = {}
-        self._orb_low:         dict = {}
-        self._orb_fired:       dict = {}
-        self._cool_ts:         dict = {}   # sym → {"BUY": datetime, "SELL": datetime}
+        self._prev_above_vwap:  dict = {}
+        self._prev_ltp:         dict = {}
+        self._prev_rsi:         dict = {}
+        self._prev_rsi7:        dict = {}   # sym → rsi_7 last tick (MOMENTUM_SURGE)
+        self._prev_squeeze:     dict = {}   # sym → squeeze_on last tick
+        self._prev_stochrsi_k:  dict = {}   # sym → StochRSI K last tick
+        self._prev_hma_dir:     dict = {}   # sym → hma_dir last tick
+        self._prev_williams:    dict = {}   # sym → williams_r last tick
+        self._orb_high:         dict = {}
+        self._orb_low:          dict = {}
+        self._orb_fired:        dict = {}
+        self._cool_ts:          dict = {}   # sym → {"BUY": datetime, "SELL": datetime}
 
     def evaluate_tick(self, snap: MarketSnapshot) -> tuple[str, Optional[dict]]:
         ind = snap.indicators
@@ -75,7 +80,10 @@ class IntradayAgent(BaseAgent):
         best_score, best_action, best_pattern = -1, "", ""
         for pat_fn in (self._pat_vwap_trend, self._pat_ema_pullback,
                        self._pat_orb_break, self._pat_breakout, self._pat_vwap_reclaim,
-                       self._pat_ttm_squeeze, self._pat_vwap_band_revert):
+                       self._pat_ttm_squeeze, self._pat_vwap_band_revert,
+                       self._pat_stochrsi_cross, self._pat_hma_flip,
+                       self._pat_williams_reversal, self._pat_gap_play,
+                       self._pat_prev_day_level, self._pat_momentum_surge):
             try:
                 action, base, pname = pat_fn(sym, snap, ind, ltp, t)
             except Exception:
@@ -93,18 +101,18 @@ class IntradayAgent(BaseAgent):
         # a cross by comparing prior VWAP side to current, etc.
         self._update_state(sym, ind, ltp)
 
-        if best_score < self.MIN_SCORE or not best_action:
+        if best_score < settings.min_score_intraday or not best_action:
             return "HOLD", None
 
         cools = self._cool_ts.setdefault(sym, {})
         last  = cools.get(best_action)
-        if last and (now - last).total_seconds() < self.COOL_S:
+        if last and (now - last).total_seconds() < settings.cooldown_intraday:
             return "HOLD", None
         cools[best_action] = now
 
         atr      = ind.atr_14 or ltp * 0.005
-        sl_dist  = max(atr * self.SL_ATR,  ltp * self.SL_MIN_PCT  / 100)
-        tgt_dist = max(atr * self.TGT_ATR, ltp * self.TGT_MIN_PCT / 100)
+        sl_dist  = max(atr * self.SL_ATR,  ltp * settings.sl_pct_intraday  / 100)
+        tgt_dist = max(atr * self.TGT_ATR, ltp * settings.tgt_pct_intraday / 100)
         sf       = 1.0 if best_score >= 7 else (0.75 if best_score >= 5 else 0.5)
 
         if best_action == "BUY":
@@ -239,6 +247,100 @@ class IntradayAgent(BaseAgent):
             return "BUY", 4, "VWAP_BAND_REVERT"
         return "", 0, ""
 
+    # ── Pattern 8: STOCHRSI_CROSS ─────────────────────────────────────────────
+
+    def _pat_stochrsi_cross(self, sym, snap, ind, ltp, t):
+        import bot_state
+        if not bot_state.is_pattern_enabled("intraday", "STOCHRSI_CROSS"):
+            return "", 0, ""
+        prev_k = self._prev_stochrsi_k.get(sym, ind.stoch_rsi_k)
+        # K crosses D from oversold zone (<20): bullish
+        if prev_k < 20 and ind.stoch_rsi_k >= 20 and ind.stoch_rsi_k > ind.stoch_rsi_d and ind.volume_ratio >= 1.2:
+            return "BUY", 4, "STOCHRSI_CROSS"
+        # K crosses D from overbought zone (>80): bearish
+        if prev_k > 80 and ind.stoch_rsi_k <= 80 and ind.stoch_rsi_k < ind.stoch_rsi_d and ind.volume_ratio >= 1.2:
+            return "SELL", 4, "STOCHRSI_CROSS"
+        return "", 0, ""
+
+    # ── Pattern 9: HMA_FLIP ────────────────────────────────────────────────────
+
+    def _pat_hma_flip(self, sym, snap, ind, ltp, t):
+        import bot_state
+        if not bot_state.is_pattern_enabled("intraday", "HMA_FLIP"):
+            return "", 0, ""
+        if not ind.hma or ind.hma <= 0:
+            return "", 0, ""
+        prev_dir = self._prev_hma_dir.get(sym, ind.hma_dir)
+        # HMA direction just flipped to UP with supporting EMA + volume
+        if prev_dir != "UP" and ind.hma_dir == "UP" and ind.ema9 > ind.ema21 > 0 and ind.volume_ratio >= 1.3:
+            return "BUY", 4, "HMA_FLIP"
+        if prev_dir != "DOWN" and ind.hma_dir == "DOWN" and ind.ema9 < ind.ema21 > 0 and ind.volume_ratio >= 1.3:
+            return "SELL", 4, "HMA_FLIP"
+        return "", 0, ""
+
+    # ── Pattern 10: WILLIAMS_REVERSAL ─────────────────────────────────────────
+
+    def _pat_williams_reversal(self, sym, snap, ind, ltp, t):
+        import bot_state
+        if not bot_state.is_pattern_enabled("intraday", "WILLIAMS_REVERSAL"):
+            return "", 0, ""
+        prev_w = self._prev_williams.get(sym, ind.williams_r)
+        # Williams was deeply oversold (<-80), now recovering (>-70) — bullish reversal
+        if prev_w < -80 and ind.williams_r > -70 and ind.macd_hist > 0 and ind.volume_ratio >= 1.1:
+            return "BUY", 4, "WILLIAMS_REVERSAL"
+        # Williams was overbought (>-20), now falling (<-30) — bearish reversal
+        if prev_w > -20 and ind.williams_r < -30 and ind.macd_hist < 0 and ind.volume_ratio >= 1.1:
+            return "SELL", 4, "WILLIAMS_REVERSAL"
+        return "", 0, ""
+
+    # ── Pattern 11: GAP_PLAY ──────────────────────────────────────────────────
+
+    def _pat_gap_play(self, sym, snap, ind, ltp, t):
+        import bot_state
+        if not bot_state.is_pattern_enabled("intraday", "GAP_PLAY"):
+            return "", 0, ""
+        if not (time(9, 15) <= t <= time(10, 0)):
+            return "", 0, ""
+        if not ind.day_open or ind.day_open <= 0:
+            return "", 0, ""
+        # Gap up ≥ 0.5%: day_open > prev_close by enough (use change_pct as proxy)
+        if ind.change_pct >= 0.5 and ltp > ind.day_open and ind.volume_ratio >= 1.4:
+            return "BUY", 5, "GAP_PLAY"
+        if ind.change_pct <= -0.5 and ltp < ind.day_open and ind.volume_ratio >= 1.4:
+            return "SELL", 5, "GAP_PLAY"
+        return "", 0, ""
+
+    def _pat_prev_day_level(self, sym, snap, ind, ltp, t):
+        """15-bar high/low breakout — price breaks recent resistance/support with volume."""
+        import bot_state
+        if not bot_state.is_pattern_enabled("intraday", "PREV_DAY_LEVEL"):
+            return "", 0, ""
+        if len(snap.candles_1min) < 15:
+            return "", 0, ""
+        last15    = snap.candles_1min[-15:]
+        h15       = max(c.high for c in last15)
+        l15       = min(c.low  for c in last15)
+        prev_ltp  = self._prev_ltp.get(sym, ltp)
+        broke_up   = prev_ltp <= h15 and ltp > h15 and ind.volume_ratio >= 1.5 and ind.macd_hist > 0
+        broke_down = prev_ltp >= l15 and ltp < l15 and ind.volume_ratio >= 1.5 and ind.macd_hist < 0
+        if broke_up:   return "BUY",  4, "PREV_DAY_LEVEL"
+        if broke_down: return "SELL", 4, "PREV_DAY_LEVEL"
+        return "", 0, ""
+
+    def _pat_momentum_surge(self, sym, snap, ind, ltp, t):
+        """RSI7 surges into overbought/oversold zone with 2× volume — explosive momentum entry."""
+        import bot_state
+        if not bot_state.is_pattern_enabled("intraday", "MOMENTUM_SURGE"):
+            return "", 0, ""
+        prev_rsi7 = self._prev_rsi7.get(sym, ind.rsi_7)
+        if (prev_rsi7 < 63 and ind.rsi_7 >= 65
+                and ind.volume_ratio >= 2.0 and ind.ema9 > ind.ema21 > 0):
+            return "BUY",  5, "MOMENTUM_SURGE"
+        if (prev_rsi7 > 37 and ind.rsi_7 <= 35
+                and ind.volume_ratio >= 2.0 and ind.ema9 < ind.ema21 > 0):
+            return "SELL", 5, "MOMENTUM_SURGE"
+        return "", 0, ""
+
     # ── Context bonus (+0 to +6 points added to every pattern) ───────────────
 
     def _ctx_bonus(self, action: str, sym: str, ind: LiveIndicators, ltp: float) -> int:
@@ -307,9 +409,13 @@ class IntradayAgent(BaseAgent):
     def _update_state(self, sym: str, ind: LiveIndicators, ltp: float) -> None:
         if ind.vwap and ind.vwap > 0:
             self._prev_above_vwap[sym] = ltp > ind.vwap
-        self._prev_ltp[sym]    = ltp
-        self._prev_rsi[sym]    = ind.rsi_14
-        self._prev_squeeze[sym] = ind.squeeze_on
+        self._prev_ltp[sym]         = ltp
+        self._prev_rsi[sym]         = ind.rsi_14
+        self._prev_rsi7[sym]        = ind.rsi_7
+        self._prev_squeeze[sym]     = ind.squeeze_on
+        self._prev_stochrsi_k[sym]  = ind.stoch_rsi_k
+        self._prev_hma_dir[sym]     = ind.hma_dir
+        self._prev_williams[sym]    = ind.williams_r
 
     def should_exit_position(self, pos: dict, ind: LiveIndicators) -> tuple[bool, str]:
         entry = pos.get("average_price", ind.ltp)
@@ -343,7 +449,7 @@ class IntradayAgent(BaseAgent):
 # 2.  F&O  —  NRML, IV proxy + OI + RSI extremes + Bollinger breakout
 # ═══════════════════════════════════════════════════════════════════════════════
 
-class FnOAgent(BaseAgent):
+class OptionsAgent(BaseAgent):
     """
     Never-miss NSE/NFO options agent — 7 entry patterns, all market conditions covered.
 
@@ -363,7 +469,7 @@ class FnOAgent(BaseAgent):
     Cooldown:       120s per symbol per direction (CE and PE tracked independently)
     IV gate:        hard block if IV rank > 72% (never buy expensive premium)
     """
-    name    = "fno"
+    name    = "options"
     product = "NRML"
     min_candles_1min = 10
 
@@ -374,15 +480,19 @@ class FnOAgent(BaseAgent):
     COOL_S       = 120      # 2-min per symbol per direction
 
     # ── Per-symbol state ──────────────────────────────────────────────────────
-    _orb_high:        dict = {}   # sym → float (ORB high built 9:15-9:30)
-    _orb_low:         dict = {}   # sym → float
-    _orb_fired:       dict = {}   # sym → bool  (prevent ORB retrigger)
-    _last_candle_ts:  dict = {}   # sym → candle ts (SURGE dedup)
-    _prev_above_vwap: dict = {}   # sym → bool (VWAP cross state)
-    _prev_bb_width:   dict = {}   # sym → float (squeeze detection)
-    _prev_ltp:        dict = {}   # sym → float (generic prev price)
-    _prev_rsi:        dict = {}   # sym → float (pullback detection)
-    _cool_ts:         dict = {}   # sym → {"CE": datetime, "PE": datetime}
+    _orb_high:           dict = {}   # sym → float (ORB high built 9:15-9:30)
+    _orb_low:            dict = {}   # sym → float
+    _orb_fired:          dict = {}   # sym → bool  (prevent ORB retrigger)
+    _last_candle_ts:     dict = {}   # sym → candle ts (SURGE dedup)
+    _prev_above_vwap:    dict = {}   # sym → bool (VWAP cross state)
+    _prev_bb_width:      dict = {}   # sym → float (squeeze detection)
+    _prev_ltp:           dict = {}   # sym → float (generic prev price)
+    _prev_rsi:           dict = {}   # sym → float (pullback detection)
+    _prev_stochrsi_k_opt: dict = {}  # sym → float (StochRSI cross detection)
+    _prev_williams_opt:  dict = {}   # sym → float (Williams %R cross detection)
+    _prev_ema9_opt:      dict = {}   # sym → float (EMA_CROSS event detection)
+    _prev_ema21_opt:     dict = {}   # sym → float (EMA_CROSS event detection)
+    _cool_ts:            dict = {}   # sym → {"CE": datetime, "PE": datetime}
 
     # ── Main entry loop ───────────────────────────────────────────────────────
 
@@ -393,8 +503,9 @@ class FnOAgent(BaseAgent):
         now = now_ist()
         t   = now.time().replace(tzinfo=None)
 
-        # Exit-only window
-        if time(14, 50) <= t:
+        # No new entries after 13:00 — a 4% target needs 2+ hours to materialise;
+        # late entries squareoff below target dragging avg win to near zero
+        if t >= time(13, 0):
             return "HOLD", None
 
         # Cached intelligence (sync — zero latency)
@@ -417,7 +528,7 @@ class FnOAgent(BaseAgent):
         # Update ORB range (9:15-9:30 window)
         self._update_orb(sym, snap, t)
 
-        # Run all 7 patterns — collect the best signal
+        # Run all 10 patterns — collect the best signal
         best_score, best_opt, best_pattern = -1, "", ""
         patterns = [
             self._pat_ema_cross,
@@ -427,6 +538,9 @@ class FnOAgent(BaseAgent):
             self._pat_bb_squeeze,
             self._pat_rsi_extreme,
             self._pat_surge,
+            self._pat_ichimoku_cloud,
+            self._pat_stochrsi_options,
+            self._pat_williams_options,
         ]
         for pat_fn in patterns:
             try:
@@ -442,14 +556,24 @@ class FnOAgent(BaseAgent):
 
         # NOTE: _update_state() runs after patterns intentionally — patterns see
         # the PREVIOUS tick's _prev_rsi, _prev_ltp, _prev_above_vwap, _prev_bb_width.
-        if best_score < self.MIN_SCORE:
+        if best_score < settings.min_score_options:
             self._update_state(sym, ind, ltp)
             return "HOLD", None
+
+        # Macro trend filter — don't buy CE in a bearish EMA200 regime or PE in bullish
+        if ind.ema200 > 0:
+            macro_bull = ltp > ind.ema200
+            if best_opt == "CE" and not macro_bull:
+                self._update_state(sym, ind, ltp)
+                return "HOLD", None
+            if best_opt == "PE" and macro_bull:
+                self._update_state(sym, ind, ltp)
+                return "HOLD", None
 
         # Per-direction cooldown
         cools = self._cool_ts.setdefault(sym, {})
         last  = cools.get(best_opt)
-        if last and (now - last).total_seconds() < self.COOL_S:
+        if last and (now - last).total_seconds() < settings.cooldown_options:
             self._update_state(sym, ind, ltp)
             return "HOLD", None
         cools[best_opt] = now
@@ -469,34 +593,40 @@ class FnOAgent(BaseAgent):
 
         self._update_state(sym, ind, ltp)
         return "BUY", {
-            "exchange":          "NFO",
-            "option_symbol":     opt_sym,
-            "option_type":       best_opt,
-            "strike":            strike,
-            "lot_size":          lot_sz,
-            "stop_loss_pct":     sl_pct,
-            "target_pct":        tgt_pct,
-            "iv_rank":           round(iv_rank, 1),
-            "atm_iv":            round(atm_iv, 2),
-            "score":             best_score,
+            "exchange":           "NFO",
+            "option_symbol":      opt_sym,
+            "option_type":        best_opt,
+            "strike":             strike,
+            "lot_size":           lot_sz,
+            "stop_loss_pct":      sl_pct,      # % of option premium (for live bracket)
+            "target_pct":         tgt_pct,     # % of option premium
+            "underlying_sl_pct":  2.0,          # 2% of underlying stock price
+            "underlying_tgt_pct": 4.0,          # 4% of underlying → 2:1 R:R
+            "iv_rank":            round(iv_rank, 1),
+            "atm_iv":             round(atm_iv, 2),
+            "score":              best_score,
             "pattern":           best_pattern,
             "_gate_size_factor": sf,
             "trigger": (
-                f"FNO-{best_opt} [{best_pattern}] score={best_score}/14 "
+                f"OPT-{best_opt} [{best_pattern}] score={best_score}/14 "
                 f"IVr={iv_rank:.0f}% sf={sf} rsi={ind.rsi_14:.0f} "
                 f"trend={ind.trend}"
             ),
         }
 
-    # ── Pattern 1: EMA_CROSS — full 9/21/50 alignment ────────────────────────
+    # ── Pattern 1: EMA_CROSS — detect the crossover event (not persistent state) ─
 
     def _pat_ema_cross(self, sym, snap, ind, ltp, t):
-        ema_bull = ind.ema9 > ind.ema21 > 0 and ind.ema21 > ind.ema50 > 0
-        ema_bear = ind.ema9 < ind.ema21 > 0 and ind.ema21 < ind.ema50 > 0
-        if ema_bull and ind.rsi_14 > 50:
-            return "CE", 5, "EMA_CROSS"
-        if ema_bear and ind.rsi_14 < 50:
-            return "PE", 5, "EMA_CROSS"
+        import bot_state
+        if not bot_state.is_pattern_enabled("options", "EMA_CROSS"): return "", 0, ""
+        if ind.ema21 <= 0 or ind.ema50 <= 0: return "", 0, ""
+        prev9  = self._prev_ema9_opt.get(sym, ind.ema9)
+        prev21 = self._prev_ema21_opt.get(sym, ind.ema21)
+        # Fire ONLY on the bar EMA9 crosses EMA21 — not on every aligned bar
+        cross_up   = prev9 <= prev21 and ind.ema9 > ind.ema21 and ind.ema21 > ind.ema50 and ind.rsi_14 > 52
+        cross_down = prev9 >= prev21 and ind.ema9 < ind.ema21 and ind.ema21 < ind.ema50 and ind.rsi_14 < 48
+        if cross_up:   return "CE", 5, "EMA_CROSS"
+        if cross_down: return "PE", 5, "EMA_CROSS"
         return "", 0, ""
 
     # ── Pattern 2: TREND_PULL — pullback entry in strong trend ───────────────
@@ -557,21 +687,24 @@ class FnOAgent(BaseAgent):
             return "", 0, ""
         bw = (ind.bb_upper - ind.bb_lower) / ind.bb_mid * 100
         prev_bw = self._prev_bb_width.get(sym, bw)
-        # Squeeze was tight and is now expanding
+        # Squeeze was tight and is now expanding — require MACD to confirm direction
         if prev_bw < 1.8 and bw > prev_bw * 1.15:
-            direction = "CE" if ltp > ind.bb_mid else "PE"
-            return direction, 3, "BB_SQUEEZE"
+            if ind.macd_hist > 0 and ltp > ind.bb_mid:
+                return "CE", 3, "BB_SQUEEZE"
+            if ind.macd_hist < 0 and ltp < ind.bb_mid:
+                return "PE", 3, "BB_SQUEEZE"
         return "", 0, ""
 
-    # ── Pattern 6: RSI_EXTREME — extreme RSI momentum continuation ────────────
+    # ── Pattern 6: RSI_MOMENTUM — strong momentum, not at exhaustion ────────────
 
     def _pat_rsi_extreme(self, sym, snap, ind, ltp, t):
-        # Overbought with positive MACD → strong upward momentum, buy CE
-        if ind.rsi_14 > 72 and ind.macd_hist > 0 and ind.volume_ratio > 1.3:
-            return "CE", 3, "RSI_EXTREME"
-        # Oversold with negative MACD → strong downward momentum, buy PE
-        if ind.rsi_14 < 28 and ind.macd_hist < 0 and ind.volume_ratio > 1.3:
-            return "PE", 3, "RSI_EXTREME"
+        # Enter CE when RSI is in strong-but-not-exhausted range (58-70) with vol
+        # Avoids chasing overbought peaks (RSI>72) that are more likely to reverse
+        if 58 <= ind.rsi_14 <= 70 and ind.macd_hist > 0 and ind.volume_ratio > 1.3:
+            return "CE", 3, "RSI_MOMENTUM"
+        # Enter PE when RSI is in strong-downtrend range (30-42), not oversold bounce
+        if 30 <= ind.rsi_14 <= 42 and ind.macd_hist < 0 and ind.volume_ratio > 1.3:
+            return "PE", 3, "RSI_MOMENTUM"
         return "", 0, ""
 
     # ── Pattern 7: SURGE — large candle body + volume ─────────────────────────
@@ -590,6 +723,57 @@ class FnOAgent(BaseAgent):
             self._last_candle_ts[sym] = c_ts
             direction = "CE" if last_c.close > last_c.open else "PE"
             return direction, 3, "SURGE"
+        return "", 0, ""
+
+    # ── Pattern 8: ICHIMOKU_CLOUD — price breaks through cloud ───────────────
+
+    def _pat_ichimoku_cloud(self, sym, snap, ind, ltp, t):
+        import bot_state
+        if not bot_state.is_pattern_enabled("options", "ICHIMOKU_CLOUD"):
+            return "", 0, ""
+        if ind.ichimoku_cloud_dir == "NEUTRAL" or ind.ichimoku_senkou_a <= 0:
+            return "", 0, ""
+        cloud_top = max(ind.ichimoku_senkou_a, ind.ichimoku_senkou_b)
+        cloud_bot = min(ind.ichimoku_senkou_a, ind.ichimoku_senkou_b)
+        prev = self._prev_ltp.get(sym, ltp)
+        if prev < cloud_top and ltp > cloud_top and ind.ichimoku_cloud_dir == "UP":
+            return "CE", 5, "ICHIMOKU_CLOUD"
+        if prev > cloud_bot and ltp < cloud_bot and ind.ichimoku_cloud_dir == "DOWN":
+            return "PE", 5, "ICHIMOKU_CLOUD"
+        return "", 0, ""
+
+    # ── Pattern 9: STOCHRSI_OPTIONS — StochRSI cross from extreme ────────────
+
+    def _pat_stochrsi_options(self, sym, snap, ind, ltp, t):
+        import bot_state
+        if not bot_state.is_pattern_enabled("options", "STOCHRSI_OPTIONS"):
+            return "", 0, ""
+        from options_intelligence import get_cached
+        opts    = get_cached(sym)
+        iv_rank = float(opts.get("iv_rank", 50.0)) if opts else 50.0
+        if iv_rank > 55:
+            return "", 0, ""
+        prev_k = self._prev_stochrsi_k_opt.get(sym, ind.stoch_rsi_k)
+        # Require MACD direction alignment — oversold bounce into an uptrend only
+        if prev_k < 15 and ind.stoch_rsi_k > ind.stoch_rsi_d and ind.macd_hist > 0:
+            return "CE", 4, "STOCHRSI_OPTIONS"
+        if prev_k > 85 and ind.stoch_rsi_k < ind.stoch_rsi_d and ind.macd_hist < 0:
+            return "PE", 4, "STOCHRSI_OPTIONS"
+        return "", 0, ""
+
+    # ── Pattern 10: WILLIAMS_OPTIONS — Williams %R extreme bounce ─────────────
+
+    def _pat_williams_options(self, sym, snap, ind, ltp, t):
+        import bot_state
+        if not bot_state.is_pattern_enabled("options", "WILLIAMS_OPTIONS"):
+            return "", 0, ""
+        prev_w = self._prev_williams_opt.get(sym, ind.williams_r)
+        if (prev_w < -80 and ind.williams_r > -70
+                and ind.macd_hist > 0 and ind.volume_ratio >= 1.3):
+            return "CE", 4, "WILLIAMS_OPTIONS"
+        if (prev_w > -20 and ind.williams_r < -30
+                and ind.macd_hist < 0 and ind.volume_ratio >= 1.3):
+            return "PE", 4, "WILLIAMS_OPTIONS"
         return "", 0, ""
 
     # ── Context bonus (+0 to +6 points added to every pattern) ───────────────
@@ -652,6 +836,10 @@ class FnOAgent(BaseAgent):
             self._prev_bb_width[sym] = (ind.bb_upper - ind.bb_lower) / ind.bb_mid * 100
         self._prev_ltp[sym] = ltp
         self._prev_rsi[sym] = ind.rsi_14
+        self._prev_stochrsi_k_opt[sym] = ind.stoch_rsi_k
+        self._prev_williams_opt[sym]   = ind.williams_r
+        self._prev_ema9_opt[sym]       = ind.ema9
+        self._prev_ema21_opt[sym]      = ind.ema21
 
     # ── IV-adaptive SL / TGT ─────────────────────────────────────────────────
 
@@ -734,14 +922,14 @@ class FnOAgent(BaseAgent):
         )
         if not sebi_ok:
             from loguru import logger
-            logger.warning("[fno] SEBI blocked {} {}: {}", action, opt_sym, sebi_reason)
+            logger.warning("[options] SEBI blocked {} {}: {}", action, opt_sym, sebi_reason)
             return
 
         order_id = kite_client.place_order(
             tradingsymbol=opt_sym, exchange=exch,
             transaction_type=action, quantity=qty,
             order_type="MARKET", product=self.product,
-            tag="Agent-fno",
+            tag="Agent-options",
         )
         sebi_compliance.record_order_id(self.name, opt_sym, order_id)
         order_guard.register_order(underlying, self.name, action, order_id)
@@ -765,11 +953,11 @@ class FnOAgent(BaseAgent):
             tradingsymbol=opt_sym, exchange=exch,
             transaction_type="SELL", quantity=qty,
             order_type="SL-M", product=self.product,
-            trigger_price=sl_px, tag="Agent-fno-SL",
+            trigger_price=sl_px, tag="Agent-options-SL",
         )
 
         await send_telegram(
-            f"<b>[FNO]</b> {action} {opt_sym} ≈₹{opt_price:.1f}\n"
+            f"<b>[OPTIONS]</b> {action} {opt_sym} ≈₹{opt_price:.1f}\n"
             f"Pattern: {signal.get('pattern')} | Score: {signal.get('score')}/14\n"
             f"{signal.get('option_type')} {signal.get('strike')} | IVr={iv_rank:.0f}% sf={sf}\n"
             f"SL: ₹{sl_px:.1f} | TGT: ₹{tgt_px:.1f} | Ord: {order_id}"
@@ -820,19 +1008,26 @@ class FnOAgent(BaseAgent):
 # ═══════════════════════════════════════════════════════════════════════════════
 
 class SwingAgent(BaseAgent):
+    """
+    Multi-pattern swing trader (CNC) covering both bullish and bearish setups.
+
+    Patterns:
+      1. EMA50_BOUNCE — price pullback to EMA50 in EMA200 uptrend (classic swing)
+      2. EMA50_SHORT  — price rally to EMA50 in EMA200 downtrend (bearish swing)
+      3. MACD_SWING   — MACD histogram zero-cross with EMA200 trend alignment
+    """
     name    = "swing"
     product = "CNC"
-    min_candles_1min = 50    # EMA200 needs 200 bars but returns 0 until ready;
-                             # agent checks `if not ind.ema200` and HOLDs until then
+    min_candles_1min = 50
 
-    # Swing only evaluates once per minute (not every tick — saves noise)
-    _last_eval: dict[str, float] = {}
+    _last_eval:      dict[str, float] = {}
+    _prev_macd_hist: dict[str, float] = {}
+    _prev_ltp:       dict[str, float] = {}
 
     def evaluate_tick(self, snap: MarketSnapshot) -> tuple[str, Optional[dict]]:
         import time as _time
         sym = snap.symbol
         now = _time.time()
-        # Throttle: evaluate at most once every 60 seconds per symbol
         if now - self._last_eval.get(sym, 0) < 60:
             return "HOLD", None
         self._last_eval[sym] = now
@@ -840,35 +1035,85 @@ class SwingAgent(BaseAgent):
         ind = snap.indicators
         ltp = snap.tick.ltp
 
-        # Needs EMA200 for long-term trend
         if not ind.ema200:
             return "HOLD", None
 
-        # Long-term uptrend
-        trend_ok   = ltp > ind.ema200
-        # Price pulling back to EMA50 (within 1.5%)
-        ema50_near = ind.ema50 > 0 and abs(ltp - ind.ema50) / ind.ema50 < 0.015
-        # Short EMA above long EMA
-        ema_up     = ind.ema21 > 0 and ind.ema50 > 0 and ind.ema21 > ind.ema50
-        # RSI in accumulation zone
-        rsi_ok     = 40 < ind.rsi_14 < 60
-        # Low volatility pullback (ATR not spiking)
-        low_vol    = ind.volatility != "HIGH"
+        low_vol = ind.volatility != "HIGH"
 
-        if trend_ok and ema50_near and rsi_ok and low_vol:
-            sl  = round(ltp * 0.97, 2)   # 3% SL for swing
-            tgt = round(ltp * 1.08, 2)   # 8% target
-            return "BUY", {
-                "symbol":    sym,
-                "exchange":  "NSE",
-                "side":      "BUY",
-                "price":     ltp,
-                "stop_loss": sl,
-                "target":    tgt,
-                "product":   self.product,
-                "trigger":   f"EMA50-BOUNCE trend=UP rsi={ind.rsi_14:.0f}",
-            }
+        best_side, best_signal = "", None
 
+        # Pattern 1: EMA50_BOUNCE (bullish)
+        import bot_state
+        if bot_state.is_pattern_enabled("swing", "EMA50_BOUNCE"):
+            trend_up   = ltp > ind.ema200
+            ema50_near = ind.ema50 > 0 and abs(ltp - ind.ema50) / ind.ema50 < 0.015
+            ema_up     = ind.ema21 > 0 and ind.ema50 > 0 and ind.ema21 > ind.ema50
+            rsi_ok     = 40 < ind.rsi_14 < 60
+            if trend_up and ema50_near and ema_up and rsi_ok and low_vol:
+                sl  = round(ltp * (1 - settings.sl_pct_swing / 100), 2)
+                tgt = round(ltp * (1 + settings.tgt_pct_swing / 100), 2)
+                best_side   = "BUY"
+                best_signal = {
+                    "symbol": sym, "exchange": "NSE", "side": "BUY",
+                    "price": ltp, "stop_loss": sl, "target": tgt,
+                    "stop_loss_pct": settings.sl_pct_swing,
+                    "target_pct":    settings.tgt_pct_swing,
+                    "product": self.product, "pattern": "EMA50_BOUNCE",
+                    "trigger": f"EMA50-BOUNCE trend=UP rsi={ind.rsi_14:.0f}",
+                }
+
+        # Pattern 2: EMA50_SHORT (bearish)
+        if not best_side and bot_state.is_pattern_enabled("swing", "EMA50_SHORT"):
+            trend_dn     = ltp < ind.ema200
+            ema50_near_b = ind.ema50 > 0 and abs(ltp - ind.ema50) / ind.ema50 < 0.015
+            ema_dn       = ind.ema21 > 0 and ind.ema50 > 0 and ind.ema21 < ind.ema50
+            rsi_mid      = 40 < ind.rsi_14 < 60
+            if trend_dn and ema50_near_b and ema_dn and rsi_mid and low_vol:
+                sl  = round(ltp * (1 + settings.sl_pct_swing / 100), 2)
+                tgt = round(ltp * (1 - settings.tgt_pct_swing / 100), 2)
+                best_side   = "SELL"
+                best_signal = {
+                    "symbol": sym, "exchange": "NSE", "side": "SELL",
+                    "price": ltp, "stop_loss": sl, "target": tgt,
+                    "stop_loss_pct": settings.sl_pct_swing,
+                    "target_pct":    settings.tgt_pct_swing,
+                    "product": self.product, "pattern": "EMA50_SHORT",
+                    "trigger": f"EMA50-SHORT trend=DOWN rsi={ind.rsi_14:.0f}",
+                }
+
+        # Pattern 3: MACD_SWING (momentum zero-cross)
+        if not best_side and bot_state.is_pattern_enabled("swing", "MACD_SWING"):
+            prev_hist = self._prev_macd_hist.get(sym, ind.macd_hist)
+            if prev_hist <= 0 < ind.macd_hist and ltp > ind.ema200:
+                sl  = round(ltp * (1 - settings.sl_pct_swing / 100), 2)
+                tgt = round(ltp * (1 + settings.tgt_pct_swing / 100), 2)
+                best_side   = "BUY"
+                best_signal = {
+                    "symbol": sym, "exchange": "NSE", "side": "BUY",
+                    "price": ltp, "stop_loss": sl, "target": tgt,
+                    "stop_loss_pct": settings.sl_pct_swing,
+                    "target_pct":    settings.tgt_pct_swing,
+                    "product": self.product, "pattern": "MACD_SWING",
+                    "trigger": f"MACD-SWING zero-cross UP rsi={ind.rsi_14:.0f}",
+                }
+            elif prev_hist >= 0 > ind.macd_hist and ltp < ind.ema200:
+                sl  = round(ltp * (1 + settings.sl_pct_swing / 100), 2)
+                tgt = round(ltp * (1 - settings.tgt_pct_swing / 100), 2)
+                best_side   = "SELL"
+                best_signal = {
+                    "symbol": sym, "exchange": "NSE", "side": "SELL",
+                    "price": ltp, "stop_loss": sl, "target": tgt,
+                    "stop_loss_pct": settings.sl_pct_swing,
+                    "target_pct":    settings.tgt_pct_swing,
+                    "product": self.product, "pattern": "MACD_SWING",
+                    "trigger": f"MACD-SWING zero-cross DOWN rsi={ind.rsi_14:.0f}",
+                }
+
+        self._prev_macd_hist[sym] = ind.macd_hist
+        self._prev_ltp[sym]       = ltp
+
+        if best_side and best_signal:
+            return best_side, best_signal
         return "HOLD", None
 
     def should_exit_position(self, pos: dict, ind: LiveIndicators) -> tuple[bool, str]:
@@ -876,11 +1121,19 @@ class SwingAgent(BaseAgent):
         ltp   = ind.ltp
         if not entry:
             return False, ""
-        if ltp <= entry * 0.97:   return True, f"Swing SL ₹{ltp:.2f}"
-        if ltp >= entry * 1.08:   return True, f"Swing target ₹{ltp:.2f}"
-        # Trend broke down
-        if ind.trend == "DOWN" and ind.ema9 < ind.ema21:
-            return True, "Trend breakdown exit"
+        side = pos.get("side", "BUY")
+        sl_pct  = settings.sl_pct_swing  / 100
+        tgt_pct = settings.tgt_pct_swing / 100
+        if side == "BUY":
+            if ltp <= entry * (1 - sl_pct):  return True, f"Swing SL ₹{ltp:.2f}"
+            if ltp >= entry * (1 + tgt_pct): return True, f"Swing TGT ₹{ltp:.2f}"
+            if ind.trend == "DOWN" and ind.ema9 < ind.ema21:
+                return True, "Trend breakdown exit"
+        else:
+            if ltp >= entry * (1 + sl_pct):  return True, f"Swing SL ₹{ltp:.2f}"
+            if ltp <= entry * (1 - tgt_pct): return True, f"Swing TGT ₹{ltp:.2f}"
+            if ind.trend == "UP" and ind.ema9 > ind.ema21:
+                return True, "Trend reversal exit"
         return False, ""
 
 
@@ -911,18 +1164,22 @@ class ScalpingAgent(BaseAgent):
     min_candles_1min = 10
 
     SL_ATR  = 0.6
-    TGT_ATR = 1.2
-    SL_PCT  = 0.25
-    TGT_PCT = 0.50
+    TGT_ATR = 1.4    # → 2.33:1 R:R when ATR-based wins
+    SL_PCT  = 0.30   # tight SL preserves high win rate
+    TGT_PCT = 0.70   # raised from 0.50 → 2.33:1 R:R; better profit per winning trade
 
-    MIN_SCORE = 3     # minimum to fire; Claude gate handles further filtering
+    MIN_SCORE = 3     # keep high volume; Claude gate filters quality
 
     # Per-symbol rolling state
-    _prev_ema9:       dict[str, float]    = {}
-    _prev_ema21:      dict[str, float]    = {}
-    _prev_ltp:        dict[str, float]    = {}
-    _prev_near_vwap:  dict[str, bool]     = {}
-    _prev_st_dir:     dict[str, str]      = {}   # Supertrend direction last tick
+    _prev_ema9:        dict[str, float]    = {}
+    _prev_ema21:       dict[str, float]    = {}
+    _prev_ltp:         dict[str, float]    = {}
+    _prev_near_vwap:   dict[str, bool]     = {}
+    _prev_st_dir:      dict[str, str]      = {}   # Supertrend direction last tick
+    _prev_stochrsi_k:  dict[str, float]    = {}   # StochRSI K last tick
+    _prev_hma_dir_sc:  dict[str, str]      = {}   # HMA direction last tick (scalping)
+    _prev_williams_sc: dict[str, float]    = {}   # Williams %R last tick (scalping)
+    _prev_squeeze_sc:  dict[str, bool]    = {}   # TTM squeeze state last tick (scalping)
     _orb_high:        dict[str, float]    = {}
     _orb_low:         dict[str, float]    = {}
     _last_candle_ts:  dict[str, object]   = {}   # last candle that triggered SURGE
@@ -937,11 +1194,16 @@ class ScalpingAgent(BaseAgent):
         sym = snap.symbol
         ind = snap.indicators
         ltp = snap.tick.ltp
-        now = datetime.now()
-        t   = now.time()
+        now = now_ist()
+        t   = now.time().replace(tzinfo=None)
 
         if not ind.ema9:
             return "HOLD", None
+
+        # Scalping requires 1-minute precision — skip higher timeframe bars
+        if snap.bar_seconds > 60:
+            return "HOLD", None
+
 
         # ── Hard guard 1: chaotic open & wind-down — no new scalps ──────────
         if time(9, 15) <= t < time(9, 30):
@@ -971,10 +1233,14 @@ class ScalpingAgent(BaseAgent):
         prev_ema9  = self._prev_ema9.get(sym, ind.ema9)
         prev_ema21 = self._prev_ema21.get(sym, ind.ema21 or ind.ema9)
         prev_ltp   = self._prev_ltp.get(sym, ltp)
-        self._prev_ema9[sym]   = ind.ema9
-        self._prev_ema21[sym]  = ind.ema21 or ind.ema9
-        self._prev_ltp[sym]    = ltp
-        self._prev_st_dir[sym] = ind.supertrend_dir
+        self._prev_ema9[sym]         = ind.ema9
+        self._prev_ema21[sym]        = ind.ema21 or ind.ema9
+        self._prev_ltp[sym]          = ltp
+        self._prev_st_dir[sym]       = ind.supertrend_dir
+        self._prev_stochrsi_k[sym]   = ind.stoch_rsi_k
+        self._prev_hma_dir_sc[sym]   = ind.hma_dir
+        self._prev_williams_sc[sym]  = ind.williams_r
+        self._prev_squeeze_sc[sym]   = ind.squeeze_on
 
         # ── Build / update opening-range high/low ────────────────────────────
         self._update_orb(sym, snap, t)
@@ -987,15 +1253,15 @@ class ScalpingAgent(BaseAgent):
         if action == "HOLD":
             return "HOLD", None
 
-        # ── Signal deduplication: same symbol+direction within 90s → skip ───
+        # ── Signal deduplication: same symbol+direction within cooldown → skip ─
         last_ts  = self._last_signal_ts.get(sym)
         last_dir = self._last_signal_dir.get(sym)
-        if last_ts and last_dir == action and (now - last_ts).total_seconds() < 90:
+        if last_ts and last_dir == action and (now - last_ts).total_seconds() < settings.cooldown_scalping:
             return "HOLD", None
 
         # ── Scoring for confidence/size ──────────────────────────────────────
         score, reasons = self._score_setup(snap, ind, ltp, action)
-        if score < self.MIN_SCORE:
+        if score < settings.min_score_scalping:
             return "HOLD", None
 
         # ── Level proximity guard ─────────────────────────────────────────────
@@ -1006,8 +1272,8 @@ class ScalpingAgent(BaseAgent):
         sf = 0.5 if score <= 4 else (0.75 if score <= 6 else 1.0)
 
         # ── ATR-based SL & target ────────────────────────────────────────────
-        sl_dist  = max(atr * self.SL_ATR,  ltp * self.SL_PCT  / 100)
-        tgt_dist = max(atr * self.TGT_ATR, ltp * self.TGT_PCT / 100)
+        sl_dist  = max(atr * self.SL_ATR,  ltp * settings.sl_pct_scalping  / 100)
+        tgt_dist = max(atr * self.TGT_ATR, ltp * settings.tgt_pct_scalping / 100)
 
         # ── Record signal timestamp for dedup ────────────────────────────────
         self._last_signal_ts[sym]  = now
@@ -1105,6 +1371,74 @@ class ScalpingAgent(BaseAgent):
             if curr_st_dir == "DOWN":
                 return "SELL", "SUPERTREND_FLIP"
 
+        # Pattern 7: StochRSI extreme cross (fast reversal scalp)
+        import bot_state as _bs
+        if _bs.is_pattern_enabled("scalping", "STOCHRSI_EXTREME"):
+            prev_k = self._prev_stochrsi_k.get(sym, ind.stoch_rsi_k)
+            if prev_k < 15 and ind.stoch_rsi_k > ind.stoch_rsi_d and ind.volume_ratio >= 1.3:
+                return "BUY", "STOCHRSI_EXTREME"
+            if prev_k > 85 and ind.stoch_rsi_k < ind.stoch_rsi_d and ind.volume_ratio >= 1.3:
+                return "SELL", "STOCHRSI_EXTREME"
+
+        # Pattern 8: Williams %R reversal (extreme zone bounce)
+        if _bs.is_pattern_enabled("scalping", "WILLIAMS_SCALP"):
+            prev_w = self._prev_williams_sc.get(sym, ind.williams_r)
+            if prev_w < -80 and ind.williams_r > -75 and ind.volume_ratio >= 1.5:
+                return "BUY", "WILLIAMS_SCALP"
+            if prev_w > -20 and ind.williams_r < -25 and ind.volume_ratio >= 1.5:
+                return "SELL", "WILLIAMS_SCALP"
+
+        # Pattern 9: HMA direction flip with tight spread (micro-trend entry)
+        if _bs.is_pattern_enabled("scalping", "HMA_MICRO"):
+            if ind.hma and ind.hma > 0 and ind.spread > 0:
+                spread_pct = ind.spread / ltp * 100
+                prev_hdir  = self._prev_hma_dir_sc.get(sym, ind.hma_dir)
+                if prev_hdir != "UP" and ind.hma_dir == "UP" and spread_pct < 0.03 and ind.volume_ratio >= 1.2:
+                    return "BUY", "HMA_MICRO"
+                if prev_hdir != "DOWN" and ind.hma_dir == "DOWN" and spread_pct < 0.03 and ind.volume_ratio >= 1.2:
+                    return "SELL", "HMA_MICRO"
+
+        # Pattern 10: VWAP scalp — price within 0.3% of VWAP + EMA direction + volume
+        if _bs.is_pattern_enabled("scalping", "VWAP_SCALP"):
+            if ind.vwap and ind.vwap > 0 and ind.ema21 > 0:
+                dist_pct = abs(ltp - ind.vwap) / ind.vwap
+                if dist_pct < 0.003:
+                    if ltp >= ind.vwap and ind.ema9 > ind.ema21 and ind.volume_ratio >= 1.3:
+                        return "BUY", "VWAP_SCALP"
+                    if ltp < ind.vwap and ind.ema9 < ind.ema21 and ind.volume_ratio >= 1.3:
+                        return "SELL", "VWAP_SCALP"
+
+        # Pattern 11: EMA9 momentum run — 3 consecutive closes same direction + RSI zone
+        if _bs.is_pattern_enabled("scalping", "EMA9_MOMENTUM"):
+            if len(snap.candles_1min) >= 3 and ind.ema21 > 0:
+                last3  = snap.candles_1min[-3:]
+                closes = [c.close for c in last3]
+                if closes[0] < closes[1] < closes[2] and ind.rsi_7 > 60 and ind.ema9 > ind.ema21:
+                    return "BUY",  "EMA9_MOMENTUM"
+                if closes[0] > closes[1] > closes[2] and ind.rsi_7 < 40 and ind.ema9 < ind.ema21:
+                    return "SELL", "EMA9_MOMENTUM"
+
+        # Pattern 12: TTM Squeeze release — first bar squeeze exits with momentum
+        if _bs.is_pattern_enabled("scalping", "SQUEEZE_RELEASE"):
+            prev_sq = self._prev_squeeze_sc.get(sym, True)
+            if prev_sq and not ind.squeeze_on and ind.squeeze_momentum != 0:
+                if ind.squeeze_momentum > 0 and ind.ema9 > ind.ema21 > 0:
+                    return "BUY",  "SQUEEZE_RELEASE"
+                if ind.squeeze_momentum < 0 and ind.ema9 < ind.ema21 > 0:
+                    return "SELL", "SQUEEZE_RELEASE"
+
+        # Pattern 13: Microtrend — 5 consecutive closes with VWAP alignment + volume
+        if _bs.is_pattern_enabled("scalping", "MICROTREND"):
+            if len(snap.candles_1min) >= 5 and ind.vwap > 0 and ind.ema9 > 0:
+                last5  = snap.candles_1min[-5:]
+                closes = [c.close for c in last5]
+                if (all(closes[i] < closes[i+1] for i in range(4))
+                        and ltp > ind.vwap and ind.volume_ratio >= 1.2):
+                    return "BUY",  "MICROTREND"
+                if (all(closes[i] > closes[i+1] for i in range(4))
+                        and ltp < ind.vwap and ind.volume_ratio >= 1.2):
+                    return "SELL", "MICROTREND"
+
         return "HOLD", ""
 
     # ── ORB builder ───────────────────────────────────────────────────────────
@@ -1149,8 +1483,9 @@ class ScalpingAgent(BaseAgent):
             score += 1
 
         # 4. ADX ≥20 (some trend present)
-        if ind.adx_14 >= 20:
-            score += 1; reasons.append(f"ADX{ind.adx_14:.0f}")
+        adx = getattr(ind, 'adx_14', 0.0)
+        if adx >= 20:
+            score += 1; reasons.append(f"ADX{adx:.0f}")
 
         # 5. MACD histogram direction
         if (is_buy and ind.macd_hist > 0) or (not is_buy and ind.macd_hist < 0):
@@ -1272,12 +1607,357 @@ class ScalpingAgent(BaseAgent):
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
+# 5.  FUTURES  —  NFO futures, trend-following + breakout, NRML product
+# ═══════════════════════════════════════════════════════════════════════════════
+
+class FuturesAgent(BaseAgent):
+    """
+    NSE/BSE index & stock futures agent (product=NRML, exchange=NFO).
+
+    Patterns:
+      1. EMA_TREND   — EMA9 > EMA21 > EMA50 full alignment with RSI 50-70
+      2. ORB_FUTURES — Opening range breakout 9:30-10:00, futures margin leverage
+      3. VWAP_PULL   — Price pulls to VWAP from above/below with volume surge
+      4. MACD_CROSS  — MACD histogram crosses zero with Supertrend confirmation
+      5. ATR_BREAK   — Price breaks yesterday high/low by >1.5×ATR
+
+    Sizing: full capital bucket, 1 lot minimum; lot sizes match index lot sizes.
+    Cooldown: 180s per symbol per direction.
+    Time gate: entries only 9:20–14:45 IST.
+    """
+    name    = "futures"
+    product = "NRML"
+    min_candles_1min = 15
+
+    # NSE/BSE index futures lot sizes (same underlying as options)
+    LOT_SIZES: dict = {"NIFTY": 75, "BANKNIFTY": 15, "MIDCPNIFTY": 75,
+                       "FINNIFTY": 40, "SENSEX": 10}
+    MIN_SCORE = 4
+    COOL_S    = 180
+
+    _orb_high:           dict = {}
+    _orb_low:            dict = {}
+    _orb_fired:          dict = {}
+    _prev_above_vwap:    dict = {}
+    _prev_macd_hist:     dict = {}
+    _prev_ltp:           dict = {}
+    _cool_ts:            dict = {}
+    _day_high:           dict = {}   # sym → float (rolling daily high for ATR_BREAK)
+    _day_low:            dict = {}   # sym → float
+    _prev_stochrsi_k_fut: dict = {}  # sym → float (StochRSI cross detection)
+    _prev_hma_dir_fut:   dict = {}   # sym → str (HMA direction)
+    _prev_ema_bull:      dict = {}   # sym → bool (EMA_TREND first-bar detection)
+    _prev_ema_bear:      dict = {}   # sym → bool (EMA_TREND first-bar detection)
+    _ema_bull_streak:    dict = {}   # sym → int (consecutive bull-aligned bars)
+    _ema_bear_streak:    dict = {}   # sym → int (consecutive bear-aligned bars)
+
+    def evaluate_tick(self, snap: MarketSnapshot) -> tuple[str, Optional[dict]]:
+        ind = snap.indicators
+        sym = snap.symbol
+        ltp = snap.tick.ltp
+        now = now_ist()
+        t   = now.time().replace(tzinfo=None)
+
+        if not (time(9, 20) <= t <= time(14, 45)):
+            return "HOLD", None
+
+        self._update_orb(sym, snap, t)
+        self._update_day_range(sym, ltp)
+
+        best_score, best_side, best_pattern = -1, "", ""
+        patterns = [
+            self._pat_ema_trend,
+            self._pat_orb,
+            self._pat_vwap_pull,
+            self._pat_macd_cross,
+            self._pat_atr_break,
+            self._pat_hma_trend,
+            self._pat_stochrsi_futures,
+            self._pat_ichimoku_futures,
+            self._pat_vol_surge,
+            self._pat_multi_tf_align,
+        ]
+        for pat_fn in patterns:
+            try:
+                side, base, pname = pat_fn(sym, snap, ind, ltp, t)
+            except Exception:
+                continue
+            if not side:
+                continue
+            total = base + self._ctx_bonus(side, ind)
+            if total > best_score:
+                best_score, best_side, best_pattern = total, side, pname
+
+        if best_score < settings.min_score_futures:
+            self._update_state(sym, ind, ltp)
+            return "HOLD", None
+
+        # VWAP alignment filter — don't enter long below VWAP or short above VWAP.
+        # VWAP is the fastest reliable intraday direction indicator; counter-VWAP
+        # futures entries on any timeframe have poor follow-through.
+        if ind.vwap and ind.vwap > 0:
+            if best_side == "LONG" and ltp < ind.vwap:
+                self._update_state(sym, ind, ltp)
+                return "HOLD", None
+            if best_side == "SHORT" and ltp > ind.vwap:
+                self._update_state(sym, ind, ltp)
+                return "HOLD", None
+
+        cools = self._cool_ts.setdefault(sym, {})
+        last  = cools.get(best_side)
+        if last and (now - last).total_seconds() < settings.cooldown_futures:
+            self._update_state(sym, ind, ltp)
+            return "HOLD", None
+        cools[best_side] = now
+
+        lot_sz  = self.LOT_SIZES.get(sym, 1)
+        sl_pct  = settings.sl_pct_futures
+        tgt_pct = settings.tgt_pct_futures
+
+        fut_sym = self._futures_symbol(sym)
+
+        self._update_state(sym, ind, ltp)
+        action = "BUY" if best_side == "LONG" else "SELL"
+        return action, {
+            "exchange":       "NFO",
+            "futures_symbol": fut_sym,
+            "side":           best_side,
+            "lot_size":       lot_sz,
+            "stop_loss_pct":  sl_pct,
+            "target_pct":     tgt_pct,
+            "score":          best_score,
+            "pattern":        best_pattern,
+            "trigger": (
+                f"FUT-{best_side} [{best_pattern}] score={best_score} "
+                f"rsi={ind.rsi_14:.0f} trend={ind.trend}"
+            ),
+        }
+
+    def _pat_ema_trend(self, sym, snap, ind, ltp, t):
+        was_bull = self._prev_ema_bull.get(sym, False)
+        was_bear = self._prev_ema_bear.get(sym, False)
+        # MACD histogram must be EXPANDING (momentum accelerating, not just positive)
+        prev_hist  = self._prev_macd_hist.get(sym, ind.macd_hist)
+        macd_accel = abs(ind.macd_hist) > abs(prev_hist)
+        bull = ind.ema9 > ind.ema21 > ind.ema50 > 0 and 50 <= ind.rsi_14 <= 72 and ind.macd_hist > 0 and macd_accel
+        bear = ind.ema9 < ind.ema21 < ind.ema50 > 0 and 28 <= ind.rsi_14 <= 50 and ind.macd_hist < 0 and macd_accel
+        # Fire ONLY on first bar of alignment (state change, not persistent state)
+        if bull and not was_bull: return "LONG",  5, "EMA_TREND"
+        if bear and not was_bear: return "SHORT", 5, "EMA_TREND"
+        return "", 0, ""
+
+    def _pat_orb(self, sym, snap, ind, ltp, t):
+        if not (time(9, 30) <= t <= time(10, 0)):
+            return "", 0, ""
+        orb_h = self._orb_high.get(sym)
+        orb_l = self._orb_low.get(sym)
+        if not (orb_h and orb_l and orb_h > orb_l):
+            return "", 0, ""
+        if self._orb_fired.get(sym):
+            return "", 0, ""
+        prev = self._prev_ltp.get(sym, ltp)
+        if prev <= orb_h and ltp > orb_h * 1.001:
+            self._orb_fired[sym] = True
+            return "LONG", 5, "ORB_FUTURES"
+        if prev >= orb_l and ltp < orb_l * 0.999:
+            self._orb_fired[sym] = True
+            return "SHORT", 5, "ORB_FUTURES"
+        return "", 0, ""
+
+    def _pat_vwap_pull(self, sym, snap, ind, ltp, t):
+        if not ind.vwap or ind.vwap <= 0:
+            return "", 0, ""
+        was_above = self._prev_above_vwap.get(sym, ltp >= ind.vwap)
+        now_above = ltp > ind.vwap
+        if was_above == now_above:
+            return "", 0, ""
+        if ind.volume_ratio < 1.3:
+            return "", 0, ""
+        if now_above and ind.ema9 > ind.ema21:
+            return "LONG", 4, "VWAP_PULL"
+        if not now_above and ind.ema9 < ind.ema21:
+            return "SHORT", 4, "VWAP_PULL"
+        return "", 0, ""
+
+    def _pat_macd_cross(self, sym, snap, ind, ltp, t):
+        prev_hist = self._prev_macd_hist.get(sym, ind.macd_hist)
+        # MACD histogram crosses zero upward
+        if prev_hist <= 0 < ind.macd_hist and ind.supertrend_dir == "UP":
+            return "LONG", 4, "MACD_CROSS"
+        # MACD histogram crosses zero downward
+        if prev_hist >= 0 > ind.macd_hist and ind.supertrend_dir == "DOWN":
+            return "SHORT", 4, "MACD_CROSS"
+        return "", 0, ""
+
+    def _pat_atr_break(self, sym, snap, ind, ltp, t):
+        if not ind.atr_14 or ind.atr_14 <= 0:
+            return "", 0, ""
+        dh = self._day_high.get(sym, ltp)
+        dl = self._day_low.get(sym, ltp)
+        threshold = ind.atr_14 * 1.5
+        if ltp > dh and (ltp - dh) > threshold and ind.volume_ratio > 1.5:
+            return "LONG", 4, "ATR_BREAK"
+        if ltp < dl and (dl - ltp) > threshold and ind.volume_ratio > 1.5:
+            return "SHORT", 4, "ATR_BREAK"
+        return "", 0, ""
+
+    def _pat_hma_trend(self, sym, snap, ind, ltp, t):
+        import bot_state
+        if not bot_state.is_pattern_enabled("futures", "HMA_TREND"):
+            return "", 0, ""
+        if not ind.hma or ind.hma <= 0:
+            return "", 0, ""
+        prev_dir = self._prev_hma_dir_fut.get(sym, ind.hma_dir)
+        # Fire ONLY when HMA direction FLIPS, not on every bar it's UP/DOWN
+        just_flipped_up   = prev_dir != "UP"   and ind.hma_dir == "UP"   and ind.ema9 > ind.ema21 > 0 and 50 <= ind.rsi_14 <= 65
+        just_flipped_down = prev_dir != "DOWN" and ind.hma_dir == "DOWN" and ind.ema9 < ind.ema21 > 0 and 35 <= ind.rsi_14 <= 50
+        if just_flipped_up:
+            return "LONG", 4, "HMA_TREND"
+        if just_flipped_down:
+            return "SHORT", 4, "HMA_TREND"
+        return "", 0, ""
+
+    def _pat_stochrsi_futures(self, sym, snap, ind, ltp, t):
+        import bot_state
+        if not bot_state.is_pattern_enabled("futures", "STOCHRSI_FUTURES"):
+            return "", 0, ""
+        prev_k = self._prev_stochrsi_k_fut.get(sym, ind.stoch_rsi_k)
+        k_cross_up   = prev_k < 20 and ind.stoch_rsi_k > ind.stoch_rsi_d
+        k_cross_down = prev_k > 80 and ind.stoch_rsi_k < ind.stoch_rsi_d
+        if k_cross_up and ind.supertrend_dir == "UP":
+            return "LONG", 4, "STOCHRSI_FUTURES"
+        if k_cross_down and ind.supertrend_dir == "DOWN":
+            return "SHORT", 4, "STOCHRSI_FUTURES"
+        return "", 0, ""
+
+    def _pat_ichimoku_futures(self, sym, snap, ind, ltp, t):
+        import bot_state
+        if not bot_state.is_pattern_enabled("futures", "ICHIMOKU_FUTURES"):
+            return "", 0, ""
+        if ind.ichimoku_cloud_dir == "NEUTRAL" or ind.ichimoku_senkou_a <= 0:
+            return "", 0, ""
+        cloud_top = max(ind.ichimoku_senkou_a, ind.ichimoku_senkou_b)
+        cloud_bot = min(ind.ichimoku_senkou_a, ind.ichimoku_senkou_b)
+        prev = self._prev_ltp.get(sym, ltp)
+        if prev < cloud_top and ltp > cloud_top and ind.ichimoku_cloud_dir == "UP":
+            return "LONG", 5, "ICHIMOKU_FUTURES"
+        if prev > cloud_bot and ltp < cloud_bot and ind.ichimoku_cloud_dir == "DOWN":
+            return "SHORT", 5, "ICHIMOKU_FUTURES"
+        return "", 0, ""
+
+    def _ctx_bonus(self, side: str, ind: LiveIndicators) -> int:
+        b = 0
+        is_long = (side == "LONG")
+        if ind.volume_ratio > 1.4:              b += 1
+        if is_long  and ind.macd_hist > 0:      b += 1
+        if not is_long and ind.macd_hist < 0:   b += 1
+        if is_long  and ind.trend == "UP":      b += 1
+        if not is_long and ind.trend == "DOWN": b += 1
+        return b
+
+    def _update_orb(self, sym: str, snap: MarketSnapshot, t: time) -> None:
+        if not (time(9, 15) <= t <= time(9, 30)):
+            return
+        if sym not in self._orb_high:
+            self._orb_high[sym] = snap.tick.ltp
+            self._orb_low[sym]  = snap.tick.ltp
+            self._orb_fired[sym] = False
+        for c in snap.candles_1min:
+            c_t = getattr(c, "ts", None)
+            if c_t and time(9, 15) <= c_t.time() <= time(9, 30):
+                self._orb_high[sym] = max(self._orb_high[sym], c.high)
+                self._orb_low[sym]  = min(self._orb_low[sym],  c.low)
+
+    def _update_day_range(self, sym: str, ltp: float) -> None:
+        self._day_high[sym] = max(self._day_high.get(sym, ltp), ltp)
+        self._day_low[sym]  = min(self._day_low.get(sym, ltp), ltp)
+
+    def _pat_vol_surge(self, sym, snap, ind, ltp, t):
+        """Volume explosion (≥1.8×) confirming strong EMA trend + MACD."""
+        import bot_state
+        if not bot_state.is_pattern_enabled("futures", "VOL_SURGE"):
+            return "", 0, ""
+        if ind.volume_ratio >= 1.8 and ind.ema9 > ind.ema21 > ind.ema50 > 0 and ind.macd_hist > 0:
+            return "LONG",  5, "VOL_SURGE"
+        if (ind.volume_ratio >= 1.8 and ind.ema9 < ind.ema21
+                and ind.ema21 < ind.ema50 and ind.ema50 > 0 and ind.macd_hist < 0):
+            return "SHORT", 5, "VOL_SURGE"
+        return "", 0, ""
+
+    def _pat_multi_tf_align(self, sym, snap, ind, ltp, t):
+        """EMA alignment sustained exactly 3 bars — momentum entry on persistence."""
+        import bot_state
+        if not bot_state.is_pattern_enabled("futures", "MULTI_TF_ALIGN"):
+            return "", 0, ""
+        streak_bull = self._ema_bull_streak.get(sym, 0)
+        streak_bear = self._ema_bear_streak.get(sym, 0)
+        # Fire on exactly the 3rd consecutive aligned bar (fresh, not late)
+        if streak_bull == 3 and ind.macd_hist > 0 and ind.vwap > 0 and ltp > ind.vwap:
+            return "LONG",  5, "MULTI_TF_ALIGN"
+        if streak_bear == 3 and ind.macd_hist < 0 and ind.vwap > 0 and ltp < ind.vwap:
+            return "SHORT", 5, "MULTI_TF_ALIGN"
+        return "", 0, ""
+
+    def _update_state(self, sym: str, ind: LiveIndicators, ltp: float) -> None:
+        if ind.vwap and ind.vwap > 0:
+            self._prev_above_vwap[sym] = ltp > ind.vwap
+        self._prev_macd_hist[sym]      = ind.macd_hist
+        self._prev_ltp[sym]            = ltp
+        self._prev_stochrsi_k_fut[sym] = ind.stoch_rsi_k
+        self._prev_hma_dir_fut[sym]    = ind.hma_dir
+        # EMA_TREND state — first-bar-only detection
+        self._prev_ema_bull[sym] = (ind.ema9 > ind.ema21 > ind.ema50 > 0
+                                    and 50 <= ind.rsi_14 <= 72 and ind.macd_hist > 0)
+        self._prev_ema_bear[sym] = (ind.ema9 < ind.ema21 < ind.ema50 > 0
+                                    and 28 <= ind.rsi_14 <= 50 and ind.macd_hist < 0)
+        # MULTI_TF_ALIGN streak counters
+        if ind.ema9 > ind.ema21 > ind.ema50 > 0 and 50 <= ind.rsi_14 <= 75:
+            self._ema_bull_streak[sym] = self._ema_bull_streak.get(sym, 0) + 1
+        else:
+            self._ema_bull_streak[sym] = 0
+        if ind.ema9 < ind.ema21 < ind.ema50 and ind.ema50 > 0 and 25 <= ind.rsi_14 <= 50:
+            self._ema_bear_streak[sym] = self._ema_bear_streak.get(sym, 0) + 1
+        else:
+            self._ema_bear_streak[sym] = 0
+
+    def _futures_symbol(self, underlying: str) -> str:
+        from datetime import date, timedelta
+        today  = date.today()
+        expiry = today + timedelta(days=1)
+        # Futures expire on last Thursday of expiry month
+        while expiry.weekday() != 3:
+            expiry += timedelta(days=1)
+        return f"{underlying}{expiry.strftime('%y%b').upper()}FUT"
+
+    def should_exit_position(self, pos: dict, ind: LiveIndicators) -> tuple[bool, str]:
+        entry = pos.get("average_price", 0.0)
+        ltp   = ind.ltp
+        if not entry or entry <= 0:
+            return False, ""
+        side = pos.get("side", "LONG")
+        chg  = ((ltp - entry) / entry * 100) if side == "LONG" else ((entry - ltp) / entry * 100)
+
+        sl_pct  = settings.sl_pct_futures
+        tgt_pct = settings.tgt_pct_futures
+        if chg <= -sl_pct:
+            return True, f"Futures SL -{sl_pct}% ₹{ltp:.2f}"
+        if chg >= tgt_pct:
+            return True, f"Futures TGT +{tgt_pct}% ₹{ltp:.2f}"
+        if chg >= tgt_pct * 0.6 and ind.momentum in ("WEAK_UP", "NEUTRAL", "WEAK_DOWN"):
+            return True, f"Futures +{tgt_pct*0.6:.1f}% momentum fading"
+        if now_ist().time().replace(tzinfo=None) >= time(14, 55):
+            return True, "Auto square-off 2:55 PM"
+        return False, ""
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
 # Registry
 # ═══════════════════════════════════════════════════════════════════════════════
 
 ALL_AGENTS: dict[str, BaseAgent] = {
     "intraday": IntradayAgent(),
-    "fno":      FnOAgent(),
+    "options":  OptionsAgent(),
+    "futures":  FuturesAgent(),
     "swing":    SwingAgent(),
     "scalping": ScalpingAgent(),
 }

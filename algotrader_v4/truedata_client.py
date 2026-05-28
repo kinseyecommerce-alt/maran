@@ -42,7 +42,10 @@ def _get_td():
             logger.debug("[TrueData] credentials not configured")
             return None
         try:
-            from truedata_ws.websockets.TD import TD
+            try:
+                from truedata_ws.websocket.TD import TD   # v5+
+            except ImportError:
+                from truedata_ws.websockets.TD import TD  # v4
             _td_instance = TD(
                 settings.truedata_username,
                 settings.truedata_password,
@@ -192,10 +195,12 @@ class TrueDataHistoricalClient:
     """
 
     _INTERVAL_MAP = {
-        "1m":  "1 min",  "1min": "1 min",
-        "5m":  "5 min",  "5min": "5 min",
+        "1m":  "1 min",  "1min":  "1 min",
+        "5m":  "5 min",  "5min":  "5 min",
         "15m": "15 min", "15min": "15 min",
-        "1h":  "1 hour", "1d":   "1 day",
+        "30m": "30 min", "30min": "30 min",
+        "1h":  "1 hour", "1hour": "1 hour",
+        "1d":  "1 day",  "1day":  "1 day",
     }
 
     def historical(self, symbol: str, exchange: str = "NSE",

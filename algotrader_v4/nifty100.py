@@ -61,7 +61,7 @@ def get_strategy_watchlist(strategy: str) -> list[dict]:
     mapping = {
         "intraday":  INTRADAY_UNIVERSE,
         "scalping":  SCALPING_UNIVERSE,
-        "fno":       FNO_UNIVERSE,
+        "options":       FNO_UNIVERSE,
         "swing":     SWING_UNIVERSE,
     }
     return as_watchlist(mapping.get(strategy, NIFTY_100))

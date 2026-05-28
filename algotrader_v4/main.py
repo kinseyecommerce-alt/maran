@@ -28,6 +28,7 @@ from config import settings
 from auth import authenticate, create_token, decode_token, hash_password
 from market_data import nse_client, yf_client, is_market_open
 from kite_client import kite_client
+import kite_accounts
 from risk_manager import risk_manager
 from order_guard import order_guard
 from backtest_engine import backtest_engine
@@ -144,7 +145,7 @@ async def _rate_limiter(request: Request, call_next):
 
 # ── HIGH-2: Input validation helpers (prompt injection / path traversal) ────────
 _SYMBOL_RE = re.compile(r"^[A-Z0-9\-&]{1,20}$")
-_VALID_STRATEGIES = frozenset({"intraday", "fno", "swing", "scalping"})
+_VALID_STRATEGIES = frozenset({"intraday", "options", "futures", "swing", "scalping"})
 
 def _clean_symbol(sym: str) -> str:
     s = sym.strip().upper()
@@ -251,14 +252,16 @@ class KillSwitchResetRequest(BaseModel):
 
 class TradingLimitsRequest(BaseModel):
     max_trades_intraday:  int | None = Field(default=None, ge=1, le=100)
-    max_trades_fno:       int | None = Field(default=None, ge=1, le=50)
+    max_trades_options:   int | None = Field(default=None, ge=1, le=50)
+    max_trades_futures:   int | None = Field(default=None, ge=1, le=50)
     max_trades_swing:     int | None = Field(default=None, ge=1, le=30)
     max_trades_scalping:  int | None = Field(default=None, ge=1, le=200)
     cooldown_after_loss_sec: int | None = Field(default=None, ge=0, le=3600)
 
 class AgentEnablesRequest(BaseModel):
     intraday: bool | None = None
-    fno:      bool | None = None
+    options:  bool | None = None
+    futures:  bool | None = None
     swing:    bool | None = None
     scalping: bool | None = None
 
@@ -282,6 +285,39 @@ class CredentialsUpdateRequest(BaseModel):
 class AppPasswordRequest(BaseModel):
     username:     str | None = Field(default=None, min_length=1, max_length=50)
     new_password: str        = Field(min_length=8, max_length=128)
+
+class AgentRiskRequest(BaseModel):
+    sl_pct_intraday:    float | None = Field(None, ge=0.1, le=10.0)
+    sl_pct_scalping:    float | None = Field(None, ge=0.1, le=5.0)
+    sl_pct_options:     float | None = Field(None, ge=5.0,  le=60.0)
+    sl_pct_futures:     float | None = Field(None, ge=0.1, le=5.0)
+    sl_pct_swing:       float | None = Field(None, ge=0.5, le=10.0)
+    tgt_pct_intraday:   float | None = Field(None, ge=0.1, le=20.0)
+    tgt_pct_scalping:   float | None = Field(None, ge=0.1, le=10.0)
+    tgt_pct_options:    float | None = Field(None, ge=5.0,  le=100.0)
+    tgt_pct_futures:    float | None = Field(None, ge=0.1, le=10.0)
+    tgt_pct_swing:      float | None = Field(None, ge=0.5, le=20.0)
+    min_score_intraday: int   | None = Field(None, ge=2, le=10)
+    min_score_scalping: int   | None = Field(None, ge=2, le=10)
+    min_score_options:  int   | None = Field(None, ge=2, le=10)
+    min_score_futures:  int   | None = Field(None, ge=2, le=10)
+    min_score_swing:    int   | None = Field(None, ge=1, le=10)
+    cooldown_intraday:  int   | None = Field(None, ge=30, le=600)
+    cooldown_scalping:  int   | None = Field(None, ge=30, le=600)
+    cooldown_options:   int   | None = Field(None, ge=30, le=600)
+    cooldown_futures:   int   | None = Field(None, ge=30, le=600)
+
+class IntelligenceRequest(BaseModel):
+    use_claude_trade_gate: bool | None = None
+    claude_gate_threshold: int  | None = Field(None, ge=40, le=90)
+    use_multi_timeframe:   bool | None = None
+    mtf_min_alignment:     int  | None = Field(None, ge=1, le=3)
+    use_kelly_sizing:      bool | None = None
+
+class PatternToggleRequest(BaseModel):
+    agent:   str
+    pattern: str
+    enabled: bool
 
 
 # ── UI pages ───────────────────────────────────────────────────────────────
@@ -309,6 +345,20 @@ def gate_log(n: int = 50):
     """Last N Claude trade gate decisions (newest first)."""
     from claude_trade_gate import get_gate_log
     return {"decisions": get_gate_log(n), "total": n}
+
+
+@app.get("/agents/activity", tags=["Agents"])
+def agent_activity(n: int = 100):
+    """Live agent order activity feed — signals, gate decisions, entries, SL/target hits."""
+    from agents.activity_log import get as _get
+    return {"events": _get(n), "count": n}
+
+@app.delete("/agents/activity", tags=["Agents"])
+def clear_agent_activity():
+    """Clear the in-memory activity log."""
+    from agents.activity_log import clear as _clear
+    _clear()
+    return {"status": "cleared"}
 
 
 # ── App auth (JWT) ──────────────────────────────────────────────────────────
@@ -348,29 +398,44 @@ def kite_callback(request_token: str = "", action: str = "", status: str = ""):
     """Zerodha redirects here after OAuth. Auto-captures the request_token."""
     if status != "success" or not request_token:
         return HTMLResponse(
-            "<h2 style='font-family:sans-serif;color:#f85149'>Kite login failed or cancelled.</h2>"
-            "<p><a href='/login'>← Back to login</a></p>",
+            "<html><head><meta http-equiv='refresh' content='3;url=/dashboard'></head>"
+            "<body style='font-family:sans-serif;background:#0d1117;color:#e6edf3;"
+            "display:flex;align-items:center;justify-content:center;height:100vh'>"
+            "<div style='text-align:center'><div style='font-size:2.5rem'>❌</div>"
+            "<h2 style='color:#f85149'>Kite login failed or cancelled.</h2>"
+            "<p style='color:#8b949e'>Redirecting to dashboard…</p></div></body></html>",
             status_code=400,
         )
     try:
         token = kite_client.set_access_token(request_token=request_token)
+        # Store access token in the active account if one exists
+        active = kite_accounts.get_active()
+        if active:
+            kite_accounts.update_access_token(active["name"], token)
+        settings.kite_access_token = token
         return HTMLResponse(f"""
-        <html><head><title>Kite Connected</title></head>
+        <html><head><title>Kite Connected</title>
+        <meta http-equiv='refresh' content='2;url=/dashboard'>
+        </head>
         <body style="font-family:sans-serif;background:#0d1117;color:#e6edf3;
                      display:flex;align-items:center;justify-content:center;height:100vh">
           <div style="text-align:center">
             <div style="font-size:3rem">✅</div>
             <h2 style="color:#3fb950">Kite Connected!</h2>
-            <p style="color:#8b949e">Token: {token[:8]}…</p>
-            <p style="margin-top:16px"><a href="/login" style="color:#58a6ff">Back to dashboard</a></p>
+            <p style="color:#8b949e">Token: {token[:8]}… — Redirecting to dashboard…</p>
           </div>
         </body></html>
         """)
     except Exception as e:
         logger.error("Kite callback error: {}", e)
         return HTMLResponse(
-            "<h2 style='font-family:sans-serif;color:#f85149'>Token exchange failed.</h2>"
-            "<p><a href='/login'>← Try again</a></p>",
+            "<html><head><meta http-equiv='refresh' content='3;url=/dashboard'></head>"
+            f"<body style='font-family:sans-serif;background:#0d1117;color:#e6edf3;"
+            f"display:flex;align-items:center;justify-content:center;height:100vh'>"
+            f"<div style='text-align:center'><div style='font-size:2.5rem'>❌</div>"
+            f"<h2 style='color:#f85149'>Token exchange failed.</h2>"
+            f"<p style='color:#8b949e'>{e}</p>"
+            f"<p style='color:#8b949e'>Redirecting to dashboard…</p></div></body></html>",
             status_code=500,
         )
 
@@ -398,6 +463,85 @@ def login_url(): return {"login_url": kite_client.login_url()}
 def set_token(req: TokenRequest):
     t = kite_client.set_access_token(req.request_token, req.access_token)
     return {"status": "ok", "access_token": t[:6] + "…"}
+
+@app.get("/auth/upstox/status", tags=["Auth"])
+def upstox_status():
+    """Check whether a valid Upstox access token is loaded."""
+    if not settings.upstox_access_token:
+        return {"connected": False, "message": "No Upstox token. Use Authorize with Upstox."}
+    try:
+        from brokers.upstox_broker import UpstoxBroker
+        broker = UpstoxBroker()
+        profile = broker.profile() if hasattr(broker, "profile") else {}
+        return {"connected": True,
+                "user_id": profile.get("user_id") or profile.get("data", {}).get("user_id", ""),
+                "name": profile.get("user_name") or profile.get("data", {}).get("user_name", "")}
+    except Exception as e:
+        return {"connected": bool(settings.upstox_access_token),
+                "token_loaded": True, "message": str(e)}
+
+@app.get("/auth/upstox/login-url", tags=["Auth"])
+def upstox_login_url():
+    """Return the Upstox OAuth2 login URL."""
+    from brokers.upstox_broker import UpstoxBroker
+    broker = UpstoxBroker()
+    url = broker.login_url()
+    return {"login_url": url, "broker": "upstox"}
+
+
+@app.get("/auth/upstox/callback", tags=["Auth"], include_in_schema=False)
+async def upstox_callback(code: str = Query(...)):
+    """Upstox redirects here after OAuth with auth code. Exchanges code for access token."""
+    if not code:
+        return HTMLResponse(
+            "<html><head><meta http-equiv='refresh' content='3;url=/dashboard'></head>"
+            "<body style='font-family:sans-serif;background:#0d1117;color:#e6edf3;"
+            "display:flex;align-items:center;justify-content:center;height:100vh'>"
+            "<div style='text-align:center'><div style='font-size:2.5rem'>❌</div>"
+            "<h2 style='color:#f85149'>Upstox login failed.</h2>"
+            "<p style='color:#8b949e'>Redirecting to dashboard…</p></div></body></html>",
+            status_code=400,
+        )
+    try:
+        from brokers.upstox_broker import UpstoxBroker
+        broker = UpstoxBroker()
+        token = broker.set_access_token(request_token=code)
+        settings.upstox_access_token = token
+        return HTMLResponse(f"""
+        <html><head><title>Upstox Connected</title>
+        <meta http-equiv='refresh' content='2;url=/dashboard'>
+        </head>
+        <body style="font-family:sans-serif;background:#0d1117;color:#e6edf3;
+                     display:flex;align-items:center;justify-content:center;height:100vh">
+          <div style="text-align:center">
+            <div style="font-size:3rem">✅</div>
+            <h2 style="color:#3fb950">Upstox Connected!</h2>
+            <p style="color:#8b949e">Token: {token[:8]}… — Redirecting to dashboard…</p>
+          </div>
+        </body></html>
+        """)
+    except Exception as e:
+        logger.error("Upstox callback error: {}", e)
+        return HTMLResponse(
+            "<html><head><meta http-equiv='refresh' content='3;url=/dashboard'></head>"
+            f"<body style='font-family:sans-serif;background:#0d1117;color:#e6edf3;"
+            f"display:flex;align-items:center;justify-content:center;height:100vh'>"
+            f"<div style='text-align:center'><div style='font-size:2.5rem'>❌</div>"
+            f"<h2 style='color:#f85149'>Token exchange failed.</h2>"
+            f"<p style='color:#8b949e'>{e}</p>"
+            f"<p style='color:#8b949e'>Redirecting to dashboard…</p></div></body></html>",
+            status_code=500,
+        )
+
+
+@app.post("/auth/upstox/token", tags=["Auth"])
+async def upstox_set_token(req: TokenRequest):
+    """Set Upstox access token directly (manual paste from dashboard)."""
+    if not req.access_token:
+        raise HTTPException(400, "access_token is required")
+    settings.upstox_access_token = req.access_token
+    return {"status": "ok", "token_preview": req.access_token[:6] + "…"}
+
 
 @app.post("/auth/kite/refresh", tags=["Auth"])
 async def kite_token_refresh():
@@ -433,8 +577,22 @@ async def start_bot(req: BotStartRequest):
             from symbol_scanner import NIFTY_50
             watchlist = [{"symbol": s, "exchange": "NSE"} for s in NIFTY_50[:20]]
             logger.warning("[bot/start] Symbol scanner returned no results — using Nifty 50 fallback ({} symbols)", len(watchlist))
-    report = master_agent.start(strategies, watchlist)
+    try:
+        report = master_agent.start(strategies, watchlist)
+    except RuntimeError as e:
+        raise HTTPException(503, str(e))
+    kite_connected = False
+    kite_user = None
+    if settings.trading_mode == "LIVE":
+        try:
+            p = kite_client.kite.profile()
+            kite_connected = True
+            kite_user = p.get("user_name")
+        except Exception:
+            pass
     return {"status": "started", "architecture": "tick-driven 1s",
+            "trading_mode": settings.trading_mode,
+            "kite_connected": kite_connected, "kite_user": kite_user,
             "symbol_selection": "auto-scanned" if not req.watchlist else "manual",
             "watchlist": [w["symbol"] for w in watchlist], "report": report}
 
@@ -442,6 +600,23 @@ async def start_bot(req: BotStartRequest):
 async def stop_bot():
     await master_agent.stop()
     return {"status": "stopped"}
+
+@app.post("/bot/test-order", tags=["Bot"])
+async def test_order(symbol: str = "SBIN", qty: int = 1):
+    """Place 1-share MARKET BUY to verify Kite connectivity, then immediately cancel."""
+    symbol = _clean_symbol(symbol)
+    order_id = kite_client.place_order(
+        tradingsymbol=symbol, exchange="NSE",
+        transaction_type="BUY", quantity=qty,
+        order_type="MARKET", product="MIS", tag="TestOrder",
+    )
+    if settings.trading_mode == "LIVE":
+        try:
+            kite_client.cancel_order(order_id)
+        except Exception:
+            pass
+    return {"status": "ok", "order_id": order_id, "mode": settings.trading_mode,
+            "note": "PAPER: simulated. LIVE: placed then cancelled."}
 
 @app.get("/bot/status", tags=["Bot"])
 def bot_status(): return master_agent.get_status()
@@ -607,6 +782,7 @@ async def cancel(order_id: str):
 @app.post("/orders/squareoff", tags=["Orders"])
 async def squareoff():
     ids = kite_client.squareoff_all_positions()
+    order_guard.reset_daily()
     return {"status": "ok", "squared_off": len(ids)}
 
 # HIGH-6: generic error messages, raw exceptions logged server-side only
@@ -676,7 +852,8 @@ def risk_update(req: RiskUpdateRequest):
 def get_trading_limits():
     return {
         "max_trades_intraday":     settings.max_trades_intraday,
-        "max_trades_fno":          settings.max_trades_fno,
+        "max_trades_options":      settings.max_trades_options,
+        "max_trades_futures":      settings.max_trades_futures,
         "max_trades_swing":        settings.max_trades_swing,
         "max_trades_scalping":     settings.max_trades_scalping,
         "cooldown_after_loss_sec": settings.cooldown_after_loss_sec,
@@ -685,7 +862,8 @@ def get_trading_limits():
 @app.patch("/settings/trading-limits", tags=["Settings"])
 def patch_trading_limits(req: TradingLimitsRequest):
     if req.max_trades_intraday     is not None: settings.max_trades_intraday     = req.max_trades_intraday
-    if req.max_trades_fno          is not None: settings.max_trades_fno          = req.max_trades_fno
+    if req.max_trades_options      is not None: settings.max_trades_options      = req.max_trades_options
+    if req.max_trades_futures      is not None: settings.max_trades_futures      = req.max_trades_futures
     if req.max_trades_swing        is not None: settings.max_trades_swing        = req.max_trades_swing
     if req.max_trades_scalping     is not None: settings.max_trades_scalping     = req.max_trades_scalping
     if req.cooldown_after_loss_sec is not None: settings.cooldown_after_loss_sec = req.cooldown_after_loss_sec
@@ -741,7 +919,7 @@ def get_capital_allocation():
         },
         "agent_buckets": {
             "intraday": "intraday", "scalping": "intraday",
-            "swing": "swing",       "fno": "options",
+            "swing": "swing",       "options": "options",  "futures": "options",
         }
     }
 
@@ -771,10 +949,65 @@ def update_credentials(req: CredentialsUpdateRequest):
     if req.anthropic_api_key is not None: settings.anthropic_api_key = req.anthropic_api_key
     if req.truedata_username is not None: settings.truedata_username = req.truedata_username
     if req.truedata_password is not None: settings.truedata_password = req.truedata_password
+    # Mirror into the accounts store so the active account stays in sync
+    if req.kite_api_key is not None or req.kite_api_secret is not None:
+        active = kite_accounts.get_active()
+        name = active["name"] if active else "default"
+        kite_accounts.add_or_update(
+            name,
+            settings.kite_api_key or "",
+            settings.kite_api_secret or "",
+        )
+        if not active:
+            kite_accounts.activate(name)
     creds = kite_client.validate_credentials()
     creds["truedata_username"] = bool(settings.truedata_username)
     creds["truedata_password"] = bool(settings.truedata_password)
     return {"status": "updated", "credentials": creds}
+
+
+class AddKiteAccountRequest(BaseModel):
+    name:       str = Field(min_length=1, max_length=50)
+    api_key:    str = Field(min_length=1)
+    api_secret: str = Field(min_length=1)
+
+
+@app.get("/accounts", tags=["Accounts"])
+def list_kite_accounts():
+    """List saved Kite accounts (secrets masked)."""
+    return {"accounts": kite_accounts.list_accounts()}
+
+
+@app.post("/accounts", tags=["Accounts"])
+def add_kite_account(req: AddKiteAccountRequest):
+    """Add or update a named Kite account. Secrets are stored on disk."""
+    kite_accounts.add_or_update(req.name, req.api_key, req.api_secret)
+    return {"status": "saved", "name": req.name, "accounts": kite_accounts.list_accounts()}
+
+
+@app.delete("/accounts/{name}", tags=["Accounts"])
+def delete_kite_account(name: str):
+    """Remove a saved Kite account."""
+    if not kite_accounts.delete(name):
+        raise HTTPException(status_code=404, detail=f"Account '{name}' not found")
+    return {"status": "deleted", "accounts": kite_accounts.list_accounts()}
+
+
+@app.post("/accounts/{name}/activate", tags=["Accounts"])
+def activate_kite_account(name: str):
+    """Switch the active Kite account — updates running credentials immediately."""
+    creds = kite_accounts.activate(name)
+    if creds is None:
+        raise HTTPException(status_code=404, detail=f"Account '{name}' not found")
+    settings.kite_api_key    = creds["api_key"]
+    settings.kite_api_secret = creds["api_secret"]
+    if creds.get("access_token"):
+        settings.kite_access_token = creds["access_token"]
+    return {
+        "status":   "activated",
+        "name":     name,
+        "accounts": kite_accounts.list_accounts(),
+    }
 
 
 @app.post("/settings/app-password", tags=["Settings"])
@@ -784,6 +1017,79 @@ def update_app_password(req: AppPasswordRequest):
         settings.admin_username = req.username
     settings.admin_password_hash = hash_password(req.new_password)
     return {"status": "updated", "admin_username": settings.admin_username}
+
+
+# ── Per-Agent Risk Parameters ────────────────────────────────────────────────
+@app.get("/settings/agent-risk", tags=["Settings"])
+def get_agent_risk():
+    return {
+        "sl_pct_intraday":    settings.sl_pct_intraday,
+        "sl_pct_scalping":    settings.sl_pct_scalping,
+        "sl_pct_options":     settings.sl_pct_options,
+        "sl_pct_futures":     settings.sl_pct_futures,
+        "sl_pct_swing":       settings.sl_pct_swing,
+        "tgt_pct_intraday":   settings.tgt_pct_intraday,
+        "tgt_pct_scalping":   settings.tgt_pct_scalping,
+        "tgt_pct_options":    settings.tgt_pct_options,
+        "tgt_pct_futures":    settings.tgt_pct_futures,
+        "tgt_pct_swing":      settings.tgt_pct_swing,
+        "min_score_intraday": settings.min_score_intraday,
+        "min_score_scalping": settings.min_score_scalping,
+        "min_score_options":  settings.min_score_options,
+        "min_score_futures":  settings.min_score_futures,
+        "min_score_swing":    settings.min_score_swing,
+        "cooldown_intraday":  settings.cooldown_intraday,
+        "cooldown_scalping":  settings.cooldown_scalping,
+        "cooldown_options":   settings.cooldown_options,
+        "cooldown_futures":   settings.cooldown_futures,
+    }
+
+@app.patch("/settings/agent-risk", tags=["Settings"])
+def patch_agent_risk(req: AgentRiskRequest):
+    """Update per-agent SL%, TGT%, min score and cooldown in-memory."""
+    d = req.model_dump(exclude_none=True)
+    for k, v in d.items():
+        setattr(settings, k, v)
+    return get_agent_risk()
+
+
+# ── Intelligence Toggles ─────────────────────────────────────────────────────
+@app.get("/settings/intelligence", tags=["Settings"])
+def get_intelligence():
+    return {
+        "use_claude_trade_gate": settings.use_claude_trade_gate,
+        "claude_gate_threshold": settings.claude_gate_threshold,
+        "use_multi_timeframe":   settings.use_multi_timeframe,
+        "mtf_min_alignment":     settings.mtf_min_alignment,
+        "use_kelly_sizing":      settings.use_kelly_sizing,
+    }
+
+@app.patch("/settings/intelligence", tags=["Settings"])
+def patch_intelligence(req: IntelligenceRequest):
+    """Toggle Claude gate, MTF alignment and Kelly sizing in-memory."""
+    d = req.model_dump(exclude_none=True)
+    for k, v in d.items():
+        setattr(settings, k, v)
+    return get_intelligence()
+
+
+# ── Pattern Toggles ──────────────────────────────────────────────────────────
+@app.get("/settings/pattern-toggles", tags=["Settings"])
+def get_pattern_toggles():
+    return bot_state.get_all_pattern_toggles()
+
+@app.patch("/settings/pattern-toggles", tags=["Settings"])
+def patch_pattern_toggle(req: PatternToggleRequest):
+    """Enable or disable a specific pattern for an agent."""
+    known = bot_state.get_all_pattern_toggles()
+    if req.agent not in known:
+        from fastapi import HTTPException
+        raise HTTPException(status_code=400, detail=f"Unknown agent: {req.agent}")
+    if req.pattern not in known[req.agent]:
+        from fastapi import HTTPException
+        raise HTTPException(status_code=400, detail=f"Unknown pattern '{req.pattern}' for agent '{req.agent}'")
+    bot_state.set_pattern_enabled(req.agent, req.pattern, req.enabled)
+    return {"agent": req.agent, "pattern": req.pattern, "enabled": req.enabled}
 
 
 # ── WebSocket ────────────────────────────────────────────────────────────────────
@@ -1148,9 +1454,169 @@ async def n8n_inbound(request: Request):
         raise HTTPException(422, f"Unknown action: {action!r}")
 
 
+# ── Trade History & Stats (Phase 3 persistence) ──────────────────────────────
+
+@app.get("/portfolio/trades/history", tags=["Portfolio"])
+def trade_history(days: int = Query(default=7, ge=1, le=365),
+                  agent: str = Query(default="")):
+    """Return trade history from SQLite state store."""
+    from state_store import get_trade_history
+    trades = get_trade_history(days)
+    if agent:
+        trades = [t for t in trades if t.get("strategy") == agent]
+    return {"trades": trades, "count": len(trades), "days": days}
+
+
+@app.get("/portfolio/trades/export", tags=["Portfolio"])
+def export_trades(days: int = 30):
+    """Download trade history as CSV."""
+    from state_store import get_trade_history
+    import csv, io
+    trades = get_trade_history(days)
+    output = io.StringIO()
+    if trades:
+        writer = csv.DictWriter(output, fieldnames=list(trades[0].keys()))
+        writer.writeheader()
+        writer.writerows(trades)
+    else:
+        output.write("id,symbol,strategy,side,entry_price,exit_price,quantity,gross_pnl,net_pnl,cost,exit_reason,regime,entry_time,exit_time,gate_confidence,trade_date\n")
+    csv_data = output.getvalue()
+    return StreamingResponse(
+        iter([csv_data]),
+        media_type="text/csv",
+        headers={"Content-Disposition": f"attachment; filename=trades_last_{days}d.csv"},
+    )
+
+
+@app.get("/portfolio/stats", tags=["Portfolio"])
+def portfolio_stats(days: int = Query(default=7, ge=1, le=90),
+                    strategy: str = Query(default="")):
+    """Return aggregated trade statistics from SQLite state store."""
+    from state_store import get_trade_stats, get_daily_pnl
+    stats = get_trade_stats(strategy if strategy else None, days)
+    stats["daily_pnl_today"] = get_daily_pnl()
+    return stats
+
+
+@app.get("/options/chain/{symbol}", tags=["Options"])
+async def options_chain(symbol: str, expiry_offset_days: int = Query(default=0)):
+    """
+    Returns options chain with Black-Scholes Greeks for the given symbol.
+    Uses greeks_engine.py to compute delta/gamma/theta/vega.
+    """
+    from greeks_engine import calculate_greeks
+    from tick_engine import tick_engine
+    from datetime import date, timedelta
+
+    sym = symbol.upper()
+    tick, _ind = tick_engine.latest(sym)
+    spot = tick.ltp if tick else 0.0
+    if spot <= 0:
+        try:
+            q = kite_client.quote_kite([f"NSE:{sym}"])
+            spot = q.get(f"NSE:{sym}", {}).get("last_price", 0.0)
+        except Exception:
+            pass
+
+    if spot <= 0:
+        # Paper-mode fallback: use sensible index defaults so chain still renders
+        _paper_defaults = {"NIFTY": 24000.0, "BANKNIFTY": 52000.0,
+                           "FINNIFTY": 23000.0, "MIDCPNIFTY": 12000.0}
+        spot = _paper_defaults.get(sym, 0.0)
+    if spot <= 0:
+        raise HTTPException(400, f"No live price for {sym} — set up broker credentials or use an index symbol")
+
+    # Generate strikes: ATM ± 5 strikes
+    is_index = sym in ("NIFTY", "BANKNIFTY", "FINNIFTY", "MIDCPNIFTY")
+    step_pct = 0.005 if is_index else 0.01
+    step = max(50 if is_index else 10, round(spot * step_pct / 10) * 10)
+    atm_strike = round(spot / step) * step
+    strikes = [atm_strike + (i - 5) * step for i in range(11)]  # 5 ITM, ATM, 5 OTM
+
+    # Nearest expiry: next Thursday for indices
+    today = date.today()
+    days_to_expiry = (3 - today.weekday()) % 7 + expiry_offset_days * 7
+    if days_to_expiry == 0:
+        days_to_expiry = 7
+    expiry = today + timedelta(days=days_to_expiry)
+
+    chain = []
+    for strike in strikes:
+        row = {"strike": strike, "atm": strike == atm_strike, "expiry": str(expiry)}
+        for opt_type in ("CE", "PE"):
+            try:
+                # Use ATM market price estimate (5% of spot) for IV computation
+                market_price = max(1.0, spot * 0.05)
+                g = calculate_greeks(spot, strike, expiry, opt_type, market_price)
+                row[opt_type.lower()] = {
+                    "delta": round(g.delta, 4),
+                    "gamma": round(g.gamma, 6),
+                    "theta": round(g.theta, 2),
+                    "vega":  round(g.vega, 4),
+                    "iv":    round(g.iv * 100, 1),
+                    "intrinsic": round(max(0, (spot - strike) if opt_type == "CE" else (strike - spot)), 2),
+                }
+            except Exception:
+                row[opt_type.lower()] = {"delta": 0, "gamma": 0, "theta": 0, "vega": 0, "iv": 0, "intrinsic": 0}
+        chain.append(row)
+
+    return {"symbol": sym, "spot": spot, "atm_strike": atm_strike, "expiry": str(expiry), "chain": chain}
+
+
+@app.get("/backtest/stress/{symbol}/{strategy}", tags=["Backtest"])
+def stress_test_endpoint(symbol: str, strategy: str):
+    """Run stress test on a symbol/strategy across adversarial scenarios."""
+    symbol = _clean_symbol(symbol)
+    strategy = _clean_strategy(strategy)
+    result = backtest_engine.stress_test(symbol, strategy)
+    return result
+
+
+@app.get("/broker/status", tags=["System"])
+def broker_status():
+    """Return active broker name and credential check."""
+    active = getattr(settings, "active_broker", "zerodha")
+    if active == "upstox":
+        from brokers.upstox_broker import UpstoxBroker
+        creds = UpstoxBroker().validate_credentials()
+    else:
+        creds = kite_client.validate_credentials()
+    return {
+        "active_broker": active,
+        "credentials":   creds,
+    }
+
+
+@app.get("/sector/map", tags=["System"])
+def sector_map_endpoint():
+    """Return the full sector→symbol mapping."""
+    import json
+    from pathlib import Path
+    p = Path(__file__).parent / "sector_map.json"
+    if not p.exists():
+        raise HTTPException(404, "sector_map.json not found")
+    return json.loads(p.read_text())
+
+
 # ── Startup ───────────────────────────────────────────────────────────────────
 @app.on_event("startup")
 async def on_startup():
+    # Initialise SQLite state store
+    from state_store import init_db, get_daily_pnl
+    init_db()
+    today_pnl = get_daily_pnl()
+    if today_pnl != 0:
+        risk_manager.daily_realised_pnl = today_pnl
+        logger.info("Restored today's P&L from DB: ₹{:.0f}", today_pnl)
+
+    # Load SEBI IP whitelist from env at startup so restarts don't reset it
+    if settings.sebi_whitelisted_ips:
+        for ip in settings.sebi_whitelisted_ips.split(","):
+            ip = ip.strip()
+            if ip:
+                sebi_compliance.add_whitelisted_ip(ip)
+        logger.info("SEBI: loaded {} whitelisted IP(s) from env", len(sebi_compliance._whitelisted_ips))
+
     tick_engine.start_loop()
     atomic_bracket_engine.ws_broadcast = broadcast
     logger.info("FastAPI startup: tick engine + atomic bracket engine launched")

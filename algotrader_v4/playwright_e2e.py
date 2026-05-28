@@ -645,7 +645,9 @@ def test_simulation_orders_flow(page: Page) -> None:
     }}
     """
     try:
-        got_tick = page.evaluate(ws_js, timeout=7000)
+        page.set_default_timeout(8000)
+        got_tick = page.evaluate(ws_js)
+        page.set_default_timeout(15000)
         if got_tick:
             ok("WebSocket received tick event within 5s")
         else:

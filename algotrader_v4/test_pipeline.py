@@ -444,7 +444,7 @@ def t_bt_cache_fast():
     assert _time_mod.monotonic() - t0 < 1.0
 
 def t_bt_fno_strategy():
-    r = be.run("NIFTY","NFO","fno")
+    r = be.run("NIFTY","NFO","options")
     assert r.total_trades >= 0
 
 def t_bt_swing_strategy():
@@ -477,7 +477,7 @@ section("6. TRAILING SL ENGINE")
 from trailing_sl_engine import TrailingSLEngine, TRAIL_CONFIGS, SLMode, SLStatus
 
 def t_tsl_configs_all_strats():
-    for s in ["intraday","fno","swing","scalping"]:
+    for s in ["intraday","options","swing","scalping","futures"]:
         assert s in TRAIL_CONFIGS, f"Missing config: {s}"
 
 def t_tsl_register():
@@ -547,7 +547,7 @@ async def t_tsl_sell_side():
     await tsl.on_tick("ICICIBANK", 880.0, 6.0)
     assert tsl.get_position("oid-t07") is not None
 
-run("TRAIL_CONFIGS has all 4 strategies",      t_tsl_configs_all_strats)
+run("TRAIL_CONFIGS has all 5 strategies",      t_tsl_configs_all_strats)
 run("register() sets entry_price + symbol",    t_tsl_register)
 run("get_position() finds by order_id",        t_tsl_get_position)
 run("all_positions() returns list",            t_tsl_all_positions_list)
@@ -564,7 +564,7 @@ section("7. SEBI COMPLIANCE")
 from sebi_compliance import SEBICompliance, KillSwitchState, APPROVED_ALGO_IDS
 
 def t_sebi_5_algos():
-    assert len(APPROVED_ALGO_IDS) == 5
+    assert len(APPROVED_ALGO_IDS) == 6   # 5 strategies + 1 manual API ID
 
 def t_sebi_algo_id_format():
     assert all(v.startswith("ALGO-") for v in APPROVED_ALGO_IDS.values())
@@ -788,7 +788,7 @@ def t_ae_should_rebacktest():
 
 def t_ae_different_strategies():
     ae = AdaptiveLearningEngine()
-    for s in ["intraday","fno","swing","scalping"]:
+    for s in ["intraday","options","swing","scalping"]:
         p = ae.get_params(s, "RELIANCE")
         assert isinstance(p, AdaptiveParams)
 
@@ -812,7 +812,7 @@ def t_ss_universe_nonempty():
     assert isinstance(FULL_UNIVERSE, list) and len(FULL_UNIVERSE) > 0
 
 def t_ss_criteria_4_strategies():
-    for s in ["intraday","fno","swing","scalping"]:
+    for s in ["intraday","options","swing","scalping"]:
         assert s in CRITERIA
 
 def t_ss_criteria_fields():
@@ -858,7 +858,7 @@ run("all_selected_flat() returns list",        t_ss_flat_list)
 # ══════════════════════════════════════════════════════════════════════════
 section("11. STRATEGY AGENTS")
 from agents.strategy_agents import (
-    ALL_AGENTS, IntradayAgent, FnOAgent, SwingAgent, ScalpingAgent
+    ALL_AGENTS, IntradayAgent, OptionsAgent, SwingAgent, ScalpingAgent, FuturesAgent
 )
 from tick_engine import MarketSnapshot, Tick, LiveIndicators, Candle
 
@@ -889,8 +889,8 @@ def _make_snap(symbol="RELIANCE", ltp=2800.0, rsi=52.0, trend="UP",
                           candles_1min=candles, candles_5min=candles[:6])
 
 def t_agents_4():
-    assert len(ALL_AGENTS) == 4
-    assert set(ALL_AGENTS.keys()) == {"intraday","fno","swing","scalping"}
+    assert len(ALL_AGENTS) == 5
+    assert set(ALL_AGENTS.keys()) == {"intraday","options","futures","swing","scalping"}
 
 def t_intraday_returns_action():
     agent = IntradayAgent()
@@ -931,7 +931,7 @@ def t_intraday_sell_signal():
     assert action == "SELL", f"Expected SELL, got {action}"
 
 def t_fno_valid_action():
-    agent = FnOAgent()
+    agent = OptionsAgent()
     snap = _make_snap(rsi=25.0, volume_ratio=1.2)
     action, _ = agent.evaluate_tick(snap)
     assert action in ("BUY","SELL","HOLD","EXIT")
@@ -978,7 +978,8 @@ def t_scalping_exit_sl():
 def t_scalping_exit_target():
     agent = ScalpingAgent()
     pos = {"tradingsymbol": "RELIANCE", "quantity": 5, "average_price": 2800.0}
-    ind = _make_snap(ltp=2820.0).indicators
+    # tgt_dist = max(atr*1.4=21.0, entry*0.70%=19.6) = 21.0  →  tgt = 2821
+    ind = _make_snap(ltp=2825.0).indicators
     exit_, reason = agent.should_exit_position(pos, ind)
     assert exit_ is True and "target" in reason.lower()
 
@@ -1091,7 +1092,7 @@ run("IntradayAgent.evaluate_tick returns valid", t_intraday_returns_action)
 run("IntradayAgent → BUY on bullish setup",      t_intraday_buy_signal)
 run("IntradayAgent → HOLD on RSI overbought",    t_intraday_hold_overbought)
 run("IntradayAgent → SELL on bearish setup",     t_intraday_sell_signal)
-run("FnOAgent.evaluate_tick valid action",       t_fno_valid_action)
+run("OptionsAgent.evaluate_tick valid action",       t_fno_valid_action)
 run("SwingAgent.evaluate_tick valid action",     t_swing_valid_action)
 run("ScalpingAgent.evaluate_tick valid action",     t_scalping_valid_action)
 run("scalping score threshold suppresses noise",    t_scalping_score_threshold)
@@ -2037,17 +2038,17 @@ run("flow result is cached",                                 t_flow_cached)
 run("flow_context() returns non-empty string",              t_flow_context_nonempty)
 run("call-dominated chain → BULLISH direction",             t_flow_bullish_dominated)
 
-# ── FnOAgent scoring integration ──────────────────────────────────────────
-from agents.strategy_agents import FnOAgent
+# ── OptionsAgent scoring integration ──────────────────────────────────────────
+from agents.strategy_agents import OptionsAgent
 
 def t_fno_agent_instantiates():
-    a = FnOAgent()
-    assert a.name == "fno"
+    a = OptionsAgent()
+    assert a.name == "options"
     assert a.product == "NRML"
 
 def t_fno_ctx_bonus_bull():
     from unittest.mock import MagicMock
-    a = FnOAgent()
+    a = OptionsAgent()
     ind = MagicMock()
     ind.macd_hist = 0.5; ind.volume_ratio = 1.5; ind.bb_upper = 0; ind.bb_lower = 0; ind.bb_mid = 0
     bonus = a._ctx_bonus("CE", ind, 22150.0, 20.0, None, None, None)
@@ -2055,7 +2056,7 @@ def t_fno_ctx_bonus_bull():
 
 def t_fno_ctx_bonus_bear():
     from unittest.mock import MagicMock
-    a = FnOAgent()
+    a = OptionsAgent()
     ind = MagicMock()
     ind.macd_hist = -0.5; ind.volume_ratio = 1.6; ind.bb_upper = 0; ind.bb_lower = 0; ind.bb_mid = 0
     bonus = a._ctx_bonus("PE", ind, 21850.0, 20.0, None, None, None)
@@ -2063,7 +2064,10 @@ def t_fno_ctx_bonus_bear():
 
 def t_fno_pat_ema_cross_ce():
     from unittest.mock import MagicMock
-    a = FnOAgent()
+    a = OptionsAgent()
+    # Prime prev state: EMA9 was BELOW EMA21 (bearish) — crossing above is the event
+    a._prev_ema9_opt["NIFTY"]  = 21990.0   # was below ema21=22000
+    a._prev_ema21_opt["NIFTY"] = 22000.0
     ind = MagicMock()
     ind.ema9 = 22100.0; ind.ema21 = 22000.0; ind.ema50 = 21900.0; ind.rsi_14 = 60.0
     opt, base, pname = a._pat_ema_cross("NIFTY", None, ind, 22150.0, time(10, 0))
@@ -2071,7 +2075,10 @@ def t_fno_pat_ema_cross_ce():
 
 def t_fno_pat_ema_cross_pe():
     from unittest.mock import MagicMock
-    a = FnOAgent()
+    a = OptionsAgent()
+    # Prime prev state: EMA9 was ABOVE EMA21 (bullish) — crossing below is the event
+    a._prev_ema9_opt["NIFTY"]  = 22010.0   # was above ema21=22000
+    a._prev_ema21_opt["NIFTY"] = 22000.0
     ind = MagicMock()
     ind.ema9 = 21900.0; ind.ema21 = 22000.0; ind.ema50 = 22100.0; ind.rsi_14 = 40.0
     opt, base, pname = a._pat_ema_cross("NIFTY", None, ind, 21850.0, time(10, 0))
@@ -2079,23 +2086,25 @@ def t_fno_pat_ema_cross_pe():
 
 def t_fno_pat_rsi_extreme_ce():
     from unittest.mock import MagicMock
-    a = FnOAgent()
+    a = OptionsAgent()
     ind = MagicMock()
-    ind.rsi_14 = 75.0; ind.macd_hist = 0.8; ind.volume_ratio = 1.6
+    # RSI_MOMENTUM fires CE at 58-70 (momentum, not overbought exhaustion)
+    ind.rsi_14 = 64.0; ind.macd_hist = 0.8; ind.volume_ratio = 1.6
     opt, base, pname = a._pat_rsi_extreme("NIFTY", None, ind, 22000.0, time(10, 0))
-    assert opt == "CE" and pname == "RSI_EXTREME"
+    assert opt == "CE" and pname == "RSI_MOMENTUM"
 
 def t_fno_pat_rsi_extreme_pe():
     from unittest.mock import MagicMock
-    a = FnOAgent()
+    a = OptionsAgent()
     ind = MagicMock()
-    ind.rsi_14 = 25.0; ind.macd_hist = -0.8; ind.volume_ratio = 1.5
+    # RSI_MOMENTUM fires PE at 30-42 (strong downtrend, not oversold bounce)
+    ind.rsi_14 = 36.0; ind.macd_hist = -0.8; ind.volume_ratio = 1.5
     opt, base, pname = a._pat_rsi_extreme("NIFTY", None, ind, 22000.0, time(10, 0))
-    assert opt == "PE" and pname == "RSI_EXTREME"
+    assert opt == "PE" and pname == "RSI_MOMENTUM"
 
 def t_fno_pat_vwap_reclaim_ce():
     from unittest.mock import MagicMock
-    a = FnOAgent()
+    a = OptionsAgent()
     a._prev_above_vwap["NIFTY"] = False   # was below
     ind = MagicMock()
     ind.vwap = 21900.0; ind.volume_ratio = 1.5
@@ -2104,7 +2113,7 @@ def t_fno_pat_vwap_reclaim_ce():
 
 def t_fno_pat_vwap_reclaim_no_cross():
     from unittest.mock import MagicMock
-    a = FnOAgent()
+    a = OptionsAgent()
     a._prev_above_vwap["NIFTY"] = True    # was already above
     ind = MagicMock()
     ind.vwap = 21900.0; ind.volume_ratio = 1.5
@@ -2112,7 +2121,7 @@ def t_fno_pat_vwap_reclaim_no_cross():
     assert opt == ""    # no cross = no signal
 
 def t_fno_pat_orb_ce():
-    a = FnOAgent()
+    a = OptionsAgent()
     a._orb_high["NIFTY"] = 22050.0
     a._orb_low["NIFTY"]  = 21950.0
     a._orb_fired["NIFTY"] = False
@@ -2124,7 +2133,7 @@ def t_fno_pat_orb_ce():
     assert opt == "CE" and pname == "ORB"
 
 def t_fno_pat_orb_outside_window():
-    a = FnOAgent()
+    a = OptionsAgent()
     a._orb_high["NIFTY"] = 22050.0; a._orb_low["NIFTY"] = 21950.0
     a._orb_fired["NIFTY"] = False; a._prev_ltp["NIFTY"] = 22045.0
     from unittest.mock import MagicMock
@@ -2134,7 +2143,7 @@ def t_fno_pat_orb_outside_window():
 
 def t_fno_pat_surge_ce():
     from unittest.mock import MagicMock
-    a = FnOAgent()
+    a = OptionsAgent()
     snap = MagicMock()
     candle = MagicMock()
     candle.open = 22000.0; candle.close = 22110.0  # +0.5% body
@@ -2146,7 +2155,7 @@ def t_fno_pat_surge_ce():
 
 def t_fno_trend_pull_ce():
     from unittest.mock import MagicMock
-    a = FnOAgent()
+    a = OptionsAgent()
     a._prev_rsi["NIFTY"] = 66.0   # was extended
     ind = MagicMock()
     ind.ema9 = 22100.0; ind.ema21 = 22000.0; ind.ema50 = 21900.0
@@ -2155,33 +2164,33 @@ def t_fno_trend_pull_ce():
     assert opt == "CE" and pname == "TREND_PULL"
 
 def t_fno_sl_tgt_cheap_iv():
-    a = FnOAgent()
+    a = OptionsAgent()
     sl, tgt = a._iv_sl_tgt(20.0)
     assert sl == 35.0 and tgt == 100.0
 
 def t_fno_sl_tgt_expensive_iv():
-    a = FnOAgent()
+    a = OptionsAgent()
     sl, tgt = a._iv_sl_tgt(75.0)
     assert sl == 20.0 and tgt == 35.0
 
 def t_fno_pick_strike_ce_above():
-    a = FnOAgent()
+    a = OptionsAgent()
     k = a._pick_strike(22000.0, "CE", 22.0)
     assert k > 22000, f"CE strike {k} not above spot"
 
 def t_fno_pick_strike_pe_below():
-    a = FnOAgent()
+    a = OptionsAgent()
     k = a._pick_strike(22000.0, "PE", 22.0)
     assert k < 22000, f"PE strike {k} not below spot"
 
 def t_fno_nfo_symbol_format():
-    a = FnOAgent()
+    a = OptionsAgent()
     sym = a._nfo_symbol("NIFTY", 22000, "CE")
     assert "NIFTY" in sym and "22000" in sym and "CE" in sym
 
 def t_fno_high_iv_blocks_entry():
     from unittest.mock import MagicMock, patch
-    a = FnOAgent()
+    a = OptionsAgent()
     a._approved.add("NIFTY")
     snap = _make_snap(symbol="NIFTY", n_candles=20)
     snap.indicators.rsi_14 = 65; snap.indicators.trend = "UP"
@@ -2196,13 +2205,13 @@ def t_fno_high_iv_blocks_entry():
     assert action == "HOLD", f"High IV rank should block entry, got {action}"
 
 def t_fno_min_score_4_size_025():
-    a = FnOAgent()
+    a = OptionsAgent()
     # score=4 → sf=0.25
     sf = (1.0 if 4 >= 8 else 0.75 if 4 >= 6 else 0.5 if 4 >= 5 else 0.25)
     assert sf == 0.25
 
 def t_fno_cooldown_per_direction():
-    a = FnOAgent()
+    a = OptionsAgent()
     a._cool_ts["NIFTY"] = {"CE": datetime.now(), "PE": datetime.min}
     ce_cool = a._cool_ts["NIFTY"]["CE"]
     pe_cool = a._cool_ts["NIFTY"]["PE"]
@@ -2212,7 +2221,7 @@ def t_fno_cooldown_per_direction():
     assert ce_elapsed < a.COOL_S   # CE still in cooldown
     assert pe_elapsed > a.COOL_S   # PE can fire
 
-run("FnOAgent instantiates with name=fno",                   t_fno_agent_instantiates)
+run("OptionsAgent instantiates with name=fno",                   t_fno_agent_instantiates)
 run("ctx_bonus bullish CE >= 3",                             t_fno_ctx_bonus_bull)
 run("ctx_bonus bearish PE >= 3",                             t_fno_ctx_bonus_bear)
 run("EMA_CROSS pattern → CE on bull",                        t_fno_pat_ema_cross_ce)
@@ -2233,6 +2242,85 @@ run("NFO symbol contains underlying/strike/type",           t_fno_nfo_symbol_for
 run("IV rank >72% blocks entry (no premium buying)",        t_fno_high_iv_blocks_entry)
 run("score=4 → 0.25× size factor",                          t_fno_min_score_4_size_025)
 run("CE and PE cooldown tracked independently",             t_fno_cooldown_per_direction)
+
+
+# ── FuturesAgent tests ────────────────────────────────────────────────────
+
+def t_futures_tsl_config_present():
+    assert "futures" in TRAIL_CONFIGS, "futures key missing from TRAIL_CONFIGS"
+    cfg = TRAIL_CONFIGS["futures"]
+    assert cfg.mode == SLMode.ATR_TRAIL
+    assert cfg.initial_sl_pct == 1.0
+
+def t_futures_tsl_register_uses_futures_config():
+    tsl = TrailingSLEngine()
+    entry = 20000.0
+    pos = tsl.register("NIFTY", "futures", "BUY", entry, 75, "oid-fut01", atr=50.0)
+    expected_sl = entry * (1 - TRAIL_CONFIGS["futures"].initial_sl_pct / 100)
+    assert abs(pos.current_sl - expected_sl) < 0.01, (
+        f"Expected SL {expected_sl:.2f} from futures config, got {pos.current_sl:.2f} "
+        f"(intraday would give {entry * 0.985:.2f})"
+    )
+
+def t_futures_valid_action():
+    agent = FuturesAgent()
+    snap = _make_snap(symbol="NIFTY", ltp=22000.0)
+    action, _ = agent.evaluate_tick(snap)
+    assert action in ("BUY", "SELL", "HOLD", "EXIT")
+
+def t_futures_atr_sl_below_entry():
+    from config import settings as _s
+    assert _s.sl_pct_futures == 1.0
+
+def t_futures_exit_sl_long():
+    from config import settings as _s
+    agent = FuturesAgent()
+    entry = 22000.0
+    ltp_sl = entry * (1 - _s.sl_pct_futures / 100) - 1
+    ind = _make_snap(ltp=ltp_sl).indicators
+    ind.ltp = ltp_sl
+    pos = {"average_price": entry, "side": "LONG"}
+    should_exit, reason = agent.should_exit_position(pos, ind)
+    assert should_exit is True and "Futures SL" in reason
+
+def t_futures_exit_target_long():
+    from config import settings as _s
+    agent = FuturesAgent()
+    entry = 22000.0
+    ltp_tgt = entry * (1 + _s.tgt_pct_futures / 100) + 1
+    ind = _make_snap(ltp=ltp_tgt).indicators
+    ind.ltp = ltp_tgt
+    pos = {"average_price": entry, "side": "LONG"}
+    should_exit, reason = agent.should_exit_position(pos, ind)
+    assert should_exit is True and "Futures TGT" in reason
+
+def t_futures_no_exit_before_sl():
+    from config import settings as _s
+    from unittest.mock import patch
+    agent = FuturesAgent()
+    entry = 22000.0
+    ltp_safe = entry * (1 - (_s.sl_pct_futures / 100) * 0.5)
+    ind = _make_snap(ltp=ltp_safe).indicators
+    ind.ltp = ltp_safe
+    pos = {"average_price": entry, "side": "LONG"}
+    _safe_time = datetime(2026, 1, 15, 11, 0, 0)
+    with patch("agents.strategy_agents.now_ist", return_value=_safe_time):
+        should_exit, reason = agent.should_exit_position(pos, ind)
+    assert should_exit is False, f"Expected no exit but got: {reason}"
+
+def t_futures_10_pattern_methods_exist():
+    import inspect
+    methods = [m for m in dir(FuturesAgent) if m.startswith("_pat_")]
+    assert len(methods) >= 10, f"Expected ≥10 _pat_ methods, found {len(methods)}: {methods}"
+
+run("futures TSL config present in TRAIL_CONFIGS",        t_futures_tsl_config_present)
+run("futures TSL register uses futures initial SL",       t_futures_tsl_register_uses_futures_config)
+run("FuturesAgent.evaluate_tick returns valid action",    t_futures_valid_action)
+run("futures sl_pct_futures default == 1.0%",             t_futures_atr_sl_below_entry)
+run("futures exits long when price hits SL",              t_futures_exit_sl_long)
+run("futures exits long when price hits target",          t_futures_exit_target_long)
+run("futures no exit when price between SL and target",   t_futures_no_exit_before_sl)
+run("FuturesAgent has ≥10 pattern methods",               t_futures_10_pattern_methods_exist)
 
 
 # ══════════════════════════════════════════════════════════════════════════

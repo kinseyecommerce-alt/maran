@@ -12,7 +12,7 @@ import random
 
 # ─── Module imports ─────────────────────────────────────────────────────────
 from tick_engine import MarketSnapshot, LiveIndicators, Tick, Candle
-from agents.strategy_agents import IntradayAgent, FnOAgent, SwingAgent, ScalpingAgent
+from agents.strategy_agents import IntradayAgent, OptionsAgent, SwingAgent, ScalpingAgent
 from risk_manager import risk_manager
 from order_guard import order_guard
 from sebi_compliance import sebi_compliance
@@ -122,7 +122,7 @@ sebi_compliance._state = "ACTIVE"  # ensure not killed
 
 agents = {
     "intraday": IntradayAgent(),
-    "fno":      FnOAgent(),
+    "options":      OptionsAgent(),
     "swing":    SwingAgent(),
     "scalping": ScalpingAgent(),
 }

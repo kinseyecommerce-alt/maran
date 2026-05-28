@@ -64,10 +64,38 @@ class Settings(BaseSettings):
 
     # Overtrade prevention (per strategy per day)
     max_trades_intraday: int = 8
-    max_trades_fno: int = 4
+    max_trades_options: int = 4
+    max_trades_futures: int = 4
     max_trades_swing: int = 3
     max_trades_scalping: int = 20
     cooldown_after_loss_sec: int = 300
+
+    # Per-agent stop-loss % (intraday/scalping/futures/swing = price %; options = premium %)
+    sl_pct_intraday:  float = 1.5
+    sl_pct_scalping:  float = 0.3
+    sl_pct_options:   float = 25.0
+    sl_pct_futures:   float = 1.0
+    sl_pct_swing:     float = 3.0
+
+    # Per-agent target %
+    tgt_pct_intraday: float = 3.0
+    tgt_pct_scalping: float = 0.70
+    tgt_pct_options:  float = 65.0
+    tgt_pct_futures:  float = 2.0
+    tgt_pct_swing:    float = 8.0
+
+    # Per-agent minimum pattern score to fire
+    min_score_intraday: int = 4
+    min_score_scalping: int = 3
+    min_score_options:  int = 6
+    min_score_futures:  int = 4
+    min_score_swing:    int = 1
+
+    # Per-agent entry cooldown (seconds between trades on same symbol)
+    cooldown_intraday: int = 180
+    cooldown_scalping: int = 90
+    cooldown_options:  int = 120
+    cooldown_futures:  int = 180
 
     # Pre-learned system (set after running historical_learner.py)
     skip_startup_backtest: bool = False   # use pre-learned approved_symbols.json
@@ -85,6 +113,41 @@ class Settings(BaseSettings):
     auto_start_strategies: str = ""
     # Comma-separated symbols e.g. "RELIANCE,TCS" — empty = use symbol scanner
     auto_start_watchlist: str = ""
+
+    # Upstox
+    upstox_api_key: str = ""
+    upstox_api_secret: str = ""
+    upstox_access_token: str = ""
+    upstox_redirect_url: str = ""
+
+    # Active broker selection
+    active_broker: Literal["zerodha", "upstox"] = "zerodha"
+
+    # Phase 1: Transaction cost / slippage model
+    bt_slippage_bps_intraday: int = 10
+    bt_slippage_bps_scalping: int = 5
+    bt_slippage_bps_swing: int = 3
+    bt_slippage_bps_options: int = 15
+    bt_apply_tx_costs: bool = True
+
+    # Phase 2: Extended backtest
+    bt_wf_folds: int = 12
+    bt_wf_anchored: bool = True
+    bt_min_oos_trades: int = 15
+
+    # Phase 2: Monte Carlo
+    bt_require_mc_pass: bool = False
+    bt_mc_permutations: int = 500
+
+    # Phase 2/3: Position sizing
+    use_atr_sizing: bool = True
+    risk_per_trade_pct: float = 0.5
+
+    # Phase 3: Intelligence
+    max_positions_per_sector: int = 2
+    min_rolling_sharpe: float = 0.5
+    use_limit_orders: bool = True
+    limit_order_timeout_sec: int = 8
 
     # Real-time tick feed
     use_kite_websocket: bool = True   # use KiteConnect WebSocket for ticks in LIVE mode
@@ -105,6 +168,11 @@ class Settings(BaseSettings):
     host: str = "0.0.0.0"
     port: int = 8000
     allowed_origins: str = "http://localhost:3000,http://localhost:5173"
+
+    # SEBI IP whitelist — comma-separated IPs pre-loaded at startup.
+    # Empty = whitelist disabled (all IPs allowed on order/kill-switch routes).
+    # In production set to your static outbound IP e.g. "1.2.3.4"
+    sebi_whitelisted_ips: str = ""
 
     @field_validator("squareoff_time")
     @classmethod

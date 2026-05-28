@@ -74,36 +74,36 @@ class StrategyPlan:
 
 REGIME_PLANS: dict[Regime, StrategyPlan] = {
     Regime.BULL_TREND: StrategyPlan(
-        active     = ["swing", "intraday", "scalping", "fno"],
+        active     = ["swing", "intraday", "scalping", "options"],
         paused     = [],
-        allocation = {"swing":40, "intraday":35, "scalping":15, "fno":10},
+        allocation = {"swing":40, "intraday":35, "scalping":15, "options":10},
         size_factor= 1.0,
         reasoning  = "Strong uptrend confirmed — favour trend-following. Swing positions hold well. "
                      "Intraday on dips. Scalping for quick BUY entries on pullbacks.",
         regime     = Regime.BULL_TREND,
     ),
     Regime.BEAR_TREND: StrategyPlan(
-        active     = ["scalping", "fno", "intraday"],
+        active     = ["scalping", "options", "intraday"],
         paused     = ["swing"],
-        allocation = {"scalping":40, "fno":30, "intraday":30, "swing":0},
+        allocation = {"scalping":40, "options":30, "intraday":30, "swing":0},
         size_factor= 0.75,
         reasoning  = "Downtrend — swing trades stopped to avoid catching falling knives. "
                      "Scalping short setups. F&O PUT buying on bounces. Intraday SELL side only.",
         regime     = Regime.BEAR_TREND,
     ),
     Regime.BULL_VOLATILE: StrategyPlan(
-        active     = ["intraday", "scalping", "fno"],
+        active     = ["intraday", "scalping", "options"],
         paused     = ["swing"],
-        allocation = {"intraday":40, "scalping":35, "fno":25, "swing":0},
+        allocation = {"intraday":40, "scalping":35, "options":25, "swing":0},
         size_factor= 0.75,
         reasoning  = "Uptrend but VIX elevated — avoid overnight swing risk. "
                      "Intraday and scalping are ideal. F&O straddles for volatility play.",
         regime     = Regime.BULL_VOLATILE,
     ),
     Regime.BEAR_VOLATILE: StrategyPlan(
-        active     = ["scalping", "fno"],
+        active     = ["scalping", "options"],
         paused     = ["swing", "intraday"],
-        allocation = {"scalping":50, "fno":50, "swing":0, "intraday":0},
+        allocation = {"scalping":50, "options":50, "swing":0, "intraday":0},
         size_factor= 0.5,
         reasoning  = "Falling market + high VIX — most dangerous regime. "
                      "Only scalping short setups and protective F&O PUT buying allowed. "
@@ -111,9 +111,9 @@ REGIME_PLANS: dict[Regime, StrategyPlan] = {
         regime     = Regime.BEAR_VOLATILE,
     ),
     Regime.RANGING: StrategyPlan(
-        active     = ["scalping", "fno", "intraday"],
+        active     = ["scalping", "options", "intraday"],
         paused     = ["swing"],
-        allocation = {"scalping":45, "fno":35, "intraday":20, "swing":0},
+        allocation = {"scalping":45, "options":35, "intraday":20, "swing":0},
         size_factor= 0.75,
         reasoning  = "Market consolidating — no clear directional trend. "
                      "Scalping mean-reversion edges. F&O iron condor / strangles for premium. "
@@ -121,9 +121,9 @@ REGIME_PLANS: dict[Regime, StrategyPlan] = {
         regime     = Regime.RANGING,
     ),
     Regime.HIGH_VOLATILE: StrategyPlan(
-        active     = ["fno", "scalping"],
+        active     = ["options", "scalping"],
         paused     = ["swing", "intraday"],
-        allocation = {"fno":50, "scalping":30, "intraday":20, "swing":0},
+        allocation = {"options":50, "scalping":30, "intraday":20, "swing":0},
         size_factor= 0.25,
         reasoning  = "EXTREME VOLATILITY (VIX > 25). Only experienced F&O hedging and "
                      "very tight scalping. Position sizes at 25%. Intraday only if clear signal.",
@@ -131,8 +131,8 @@ REGIME_PLANS: dict[Regime, StrategyPlan] = {
     ),
     Regime.UNKNOWN: StrategyPlan(
         active     = ["scalping"],
-        paused     = ["swing", "intraday", "fno"],
-        allocation = {"scalping":100, "swing":0, "intraday":0, "fno":0},
+        paused     = ["swing", "intraday", "options"],
+        allocation = {"scalping":100, "swing":0, "intraday":0, "options":0},
         size_factor= 0.5,
         reasoning  = "Could not determine market regime. Running only scalping at reduced size.",
         regime     = Regime.UNKNOWN,
@@ -161,6 +161,7 @@ class RegimeSignals:
     india_vix:         float = 0.0   # from NSE API
     vix_prev_close:    float = 0.0
     vix_chg_pct:       float = 0.0
+    vix_zscore:        float = 0.0   # Phase 3B: rolling 20-day Z-score
 
     # Breadth (approximate — from Nifty 50 components)
     advance_count:     int   = 0
@@ -191,6 +192,7 @@ class RegimeSignals:
             "volatility": {
                 "india_vix":   round(self.india_vix, 2),
                 "vix_chg_pct": round(self.vix_chg_pct, 2),
+                "vix_zscore":  round(self.vix_zscore, 3),
             },
             "breadth": {
                 "advance":     self.advance_count,
@@ -237,6 +239,7 @@ class MarketRegimeDetector:
         self.history:         list[dict]        = []    # last 50 regime readings
         self._last_full_update: float           = 0.0
         self._nifty_cache:    Optional[pd.DataFrame] = None
+        self._vix_history:    list[float]       = []   # Phase 3B: rolling 20-day VIX readings
 
     # ── Main update ────────────────────────────────────────────────────
 
@@ -256,6 +259,13 @@ class MarketRegimeDetector:
             self._collect_options(signals),
             return_exceptions=True,
         )
+
+        # Phase 3B: Update rolling VIX history for Z-score computation
+        if signals.india_vix > 0:
+            self._vix_history.append(signals.india_vix)
+            if len(self._vix_history) > 480:  # 480 = 20 trading days × 24 readings/day at 60s interval
+                self._vix_history = self._vix_history[-480:]
+        signals.vix_zscore = self._vix_zscore(signals.india_vix)
 
         regime = self._classify(signals)
         plan   = REGIME_PLANS.get(regime, REGIME_PLANS[Regime.UNKNOWN])
@@ -286,6 +296,20 @@ class MarketRegimeDetector:
             signals.pcr,
         )
         return regime, plan
+
+    # ── Phase 3B: VIX Z-score ─────────────────────────────────────────
+
+    def _vix_zscore(self, vix: float) -> float:
+        """Compute Z-score of current VIX vs rolling 20-day history."""
+        if len(self._vix_history) < 20:
+            return 0.0
+        import numpy as np
+        arr = np.array(self._vix_history)
+        mean = arr.mean()
+        std = arr.std()
+        if std < 0.01:
+            return 0.0
+        return (vix - mean) / std
 
     # ── Signal collectors ──────────────────────────────────────────────
 
@@ -482,8 +506,18 @@ class MarketRegimeDetector:
         ad   = s.advance_decline
         slope= s.nifty_slope_30min
 
+        # Phase 3B: use VIX Z-score for adaptive thresholds when enough history
+        vix_z = self._vix_zscore(vix)
+        # Override extreme/high flags with Z-score when 20+ readings available
+        if len(self._vix_history) >= 20:
+            extreme_vix = vix_z > 2.0   # 2 std devs above recent mean
+            volatile_vix = vix_z > 1.0  # 1 std dev above recent mean
+        else:
+            extreme_vix = vix > self.VIX_EXTREME
+            volatile_vix = vix > self.VIX_HIGH
+
         # STEP 1 — extreme volatility overrides everything
-        if vix > self.VIX_EXTREME:
+        if extreme_vix:
             return Regime.HIGH_VOLATILE
 
         # STEP 2 — determine trend direction
@@ -502,7 +536,7 @@ class MarketRegimeDetector:
         ranging       = adx < 20 or (not bull_trend and not bear_trend)
 
         # STEP 4 — apply VIX overlay
-        volatile = vix > self.VIX_HIGH  # 20+
+        volatile = volatile_vix
 
         if trending_up and volatile:
             return Regime.BULL_VOLATILE

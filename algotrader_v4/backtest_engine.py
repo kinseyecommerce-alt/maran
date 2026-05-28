@@ -59,6 +59,9 @@ class BacktestResult:
     oos_total_pnl: float    = 0.0
     oos_trades: int         = 0
     walk_forward_used: bool = False
+    # Monte Carlo
+    mc_pvalue: float        = 1.0
+    mc_passed: bool         = False
     # Raw trade log and equity curve (not serialised by default)
     trades: list[dict]      = field(default_factory=list)
     equity_curve: list[float] = field(default_factory=list)
@@ -85,6 +88,8 @@ class BacktestResult:
             "oos_win_rate":      round(self.oos_win_rate, 1),
             "oos_total_pnl":     round(self.oos_total_pnl, 0),
             "oos_trades":        self.oos_trades,
+            "mc_pvalue":         round(self.mc_pvalue, 3),
+            "mc_passed":         self.mc_passed,
         }
         if include_trades:
             d["trades"] = self.trades
@@ -93,12 +98,15 @@ class BacktestResult:
     def to_csv(self) -> str:
         """Return the trade log as a CSV string."""
         if not self.trades:
-            return "trade_num,entry,exit,pnl,bars,exit_reason\n"
-        rows = ["trade_num,entry,exit,pnl,bars,exit_reason"]
+            return "trade_num,entry,exit,pnl,net_pnl,cost,bars,exit_reason\n"
+        rows = ["trade_num,entry,exit,pnl,net_pnl,cost,bars,exit_reason"]
         for i, t in enumerate(self.trades, 1):
             rows.append(
                 f"{i},{t['entry']:.2f},{t['exit']:.2f},"
-                f"{t['pnl']:.2f},{t['bars']},{t['exit_reason']}"
+                f"{t['pnl']:.2f},"
+                f"{t.get('net_pnl', t['pnl']):.2f},"
+                f"{t.get('cost', 0.0):.2f},"
+                f"{t['bars']},{t['exit_reason']}"
             )
         return "\n".join(rows)
 
@@ -153,7 +161,7 @@ STRATEGY_PARAMS = {
         "target_pct": 3.0,
         "max_hold_bars": 20,
     },
-    "fno": {
+    "options": {
         "interval": "60minute",
         "sl_pct": 5.0,
         "target_pct": 10.0,
@@ -214,7 +222,7 @@ class BacktestEngine:
             result = self._walk_forward_run(symbol, strategy, df, params)
         else:
             signals = self._generate_signals(df, strategy)
-            trades  = self._simulate_trades(df, signals, params)
+            trades  = self._simulate_trades(df, signals, params, strategy_name=strategy)
             result  = self._compute_metrics(symbol, strategy, trades)
 
         result = self._apply_gate(result)
@@ -330,42 +338,67 @@ class BacktestEngine:
         strategy: str,
         df: pd.DataFrame,
         params: dict,
-        n_splits: int = 5,
+        n_splits: int | None = None,
         train_frac: float = 0.70,
     ) -> BacktestResult:
         """
-        Split data into n_splits windows.
-        Each window: train on first train_frac, validate on remainder.
+        Split data into n_splits windows (default from settings.bt_wf_folds).
+        Supports anchored walk-forward (settings.bt_wf_anchored=True): expanding train window.
         IS result comes from the full dataset; OOS metrics come from OOS folds.
         """
-        n = len(df)
-        window = n // n_splits
+        n_splits    = n_splits or getattr(settings, "bt_wf_folds", 12)
+        anchored    = getattr(settings, "bt_wf_anchored", True)
+        min_oos_t   = getattr(settings, "bt_min_oos_trades", 15)
+        n           = len(df)
+        # Ensure at least 2 folds with enough data
+        n_splits    = max(2, min(n_splits, n // 20))
+        window      = n // n_splits
 
         oos_trades_all: list[dict] = []
 
         for i in range(n_splits):
-            start = i * window
-            end   = start + window if i < n_splits - 1 else n
-            fold  = df.iloc[start:end]
-            split = int(len(fold) * train_frac)
-            oos_df = fold.iloc[split:]
+            if anchored:
+                # Anchored (expanding window): train grows from beginning each fold
+                train_end = int(n * (i + 1) / n_splits * train_frac) + window // n_splits
+                oos_start = train_end
+                oos_end   = int(n * (i + 1) / n_splits)
+                if oos_end <= oos_start:
+                    oos_end = min(oos_start + window, n)
+            else:
+                # Rolling window
+                start     = i * window
+                end       = start + window if i < n_splits - 1 else n
+                fold      = df.iloc[start:end]
+                split_idx = int(len(fold) * train_frac)
+                oos_start = start + split_idx
+                oos_end   = end
+
+            oos_df = df.iloc[oos_start:oos_end]
             if len(oos_df) < 20:
                 continue
             sigs = self._generate_signals(oos_df.copy(), strategy)
-            oos_trades_all.extend(self._simulate_trades(oos_df, sigs, params))
+            fold_trades = self._simulate_trades(oos_df, sigs, params, strategy_name=strategy)
+            oos_trades_all.extend(fold_trades)
 
         # Full-data IS result (for primary metrics)
         signals = self._generate_signals(df, strategy)
-        trades  = self._simulate_trades(df, signals, params)
+        trades  = self._simulate_trades(df, signals, params, strategy_name=strategy)
         result  = self._compute_metrics(symbol, strategy, trades)
 
         # Attach OOS metrics
         if oos_trades_all:
-            oos_pnls = [t["pnl"] for t in oos_trades_all]
+            oos_pnls = [t.get("net_pnl", t["pnl"]) for t in oos_trades_all]
             oos_wins = [p for p in oos_pnls if p > 0]
             result.oos_win_rate  = len(oos_wins) / len(oos_pnls) * 100
             result.oos_total_pnl = sum(oos_pnls)
             result.oos_trades    = len(oos_pnls)
+
+        # Gate: require minimum OOS trades
+        if result.oos_trades < min_oos_t and result.oos_trades > 0:
+            result.fail_reasons.append(
+                f"Insufficient OOS trades ({result.oos_trades} < {min_oos_t})"
+            )
+
         result.walk_forward_used = True
         return result
 
@@ -376,7 +409,15 @@ class BacktestEngine:
         "day": "1d", "minute": "1m",
     }
     _YF_PERIOD = {
-        10: "5d", 30: "1mo", 90: "3mo", 180: "6mo", 365: "1y",
+        10: "5d", 30: "1mo", 90: "3mo", 180: "6mo", 365: "1y", 730: "2y",
+    }
+
+    # ── Slippage BPS per strategy ──────────────────────────────────────────
+    _SLIPPAGE_BPS = {
+        "intraday": 10,
+        "scalping":  5,
+        "swing":     3,
+        "options":  15,
     }
 
     def _fetch_data(self, symbol: str, exchange: str, interval: str, days: int):
@@ -410,7 +451,7 @@ class BacktestEngine:
                 if vwap_cross and ema_bull and rsi_ok:
                     signals.iloc[i] = 1
 
-        elif strategy == "fno":
+        elif strategy == "options":
             rsi    = ta.momentum.RSIIndicator(close, 14).rsi()
             atr    = ta.volatility.AverageTrueRange(high, low, close, 14).average_true_range()
             atr_ma = atr.rolling(30).mean()
@@ -448,44 +489,97 @@ class BacktestEngine:
     # ── Trade simulation ───────────────────────────────────────────────────────
 
     def _simulate_trades(
-        self, df: pd.DataFrame, signals: pd.Series, params: dict
+        self,
+        df: pd.DataFrame,
+        signals: pd.Series,
+        params: dict,
+        strategy_name: str = "",
     ) -> list[dict]:
         sl_pct   = params["sl_pct"] / 100
         tgt_pct  = params["target_pct"] / 100
         max_bars = params["max_hold_bars"]
 
+        # Slippage model
+        apply_costs = getattr(settings, "bt_apply_tx_costs", True)
+        slippage_bps = self._SLIPPAGE_BPS.get(strategy_name, 10)
+        if strategy_name:
+            # Allow per-strategy override from settings
+            attr = f"bt_slippage_bps_{strategy_name}"
+            slippage_bps = getattr(settings, attr, slippage_bps)
+        slip = slippage_bps / 10000
+
+        # Infer product from strategy for tx cost calculation
+        _product_map = {"swing": "CNC", "intraday": "MIS", "scalping": "MIS", "options": "NRML"}
+        product = _product_map.get(strategy_name, "MIS")
+
         trades: list[dict] = []
         in_trade    = False
         entry_price = 0.0
+        entry_fill  = 0.0
         entry_idx   = 0
 
         for i in range(len(df)):
             if in_trade:
                 ltp       = df["close"].iloc[i]
                 bars_held = i - entry_idx
-                sl        = entry_price * (1 - sl_pct)
-                tgt       = entry_price * (1 + tgt_pct)
+                sl        = entry_fill * (1 - sl_pct)
+                tgt       = entry_fill * (1 + tgt_pct)
                 low_i     = df["low"].iloc[i]
                 high_i    = df["high"].iloc[i]
 
                 if low_i <= sl:
-                    pnl = -entry_price * sl_pct
-                    trades.append({"entry": entry_price, "exit": sl,
-                                   "pnl": pnl, "bars": bars_held, "exit_reason": "SL"})
+                    exit_fill = sl * (1 - slip) if apply_costs else sl
+                    gross_pnl = exit_fill - entry_fill
+                    qty = max(1, int(100_000 // entry_fill)) if entry_fill > 0 else 1
+                    cost = 0.0
+                    if apply_costs:
+                        from risk_manager import compute_tx_costs
+                        cost = compute_tx_costs(qty, entry_fill, exit_fill, product)
+                    net_pnl = gross_pnl * qty - cost
+                    trades.append({
+                        "entry": entry_fill, "exit": exit_fill,
+                        "pnl": gross_pnl * qty,
+                        "net_pnl": net_pnl, "cost": cost,
+                        "bars": bars_held, "exit_reason": "SL",
+                    })
                     in_trade = False
                 elif high_i >= tgt:
-                    pnl = entry_price * tgt_pct
-                    trades.append({"entry": entry_price, "exit": tgt,
-                                   "pnl": pnl, "bars": bars_held, "exit_reason": "TGT"})
+                    exit_fill = tgt * (1 - slip) if apply_costs else tgt
+                    gross_pnl = exit_fill - entry_fill
+                    qty = max(1, int(100_000 // entry_fill)) if entry_fill > 0 else 1
+                    cost = 0.0
+                    if apply_costs:
+                        from risk_manager import compute_tx_costs
+                        cost = compute_tx_costs(qty, entry_fill, exit_fill, product)
+                    net_pnl = gross_pnl * qty - cost
+                    trades.append({
+                        "entry": entry_fill, "exit": exit_fill,
+                        "pnl": gross_pnl * qty,
+                        "net_pnl": net_pnl, "cost": cost,
+                        "bars": bars_held, "exit_reason": "TGT",
+                    })
                     in_trade = False
                 elif bars_held >= max_bars:
-                    pnl = ltp - entry_price
-                    trades.append({"entry": entry_price, "exit": ltp,
-                                   "pnl": pnl, "bars": bars_held, "exit_reason": "TIMEOUT"})
+                    exit_fill = ltp * (1 - slip) if apply_costs else ltp
+                    gross_pnl = exit_fill - entry_fill
+                    qty = max(1, int(100_000 // entry_fill)) if entry_fill > 0 else 1
+                    cost = 0.0
+                    if apply_costs:
+                        from risk_manager import compute_tx_costs
+                        cost = compute_tx_costs(qty, entry_fill, exit_fill, product)
+                    net_pnl = gross_pnl * qty - cost
+                    trades.append({
+                        "entry": entry_fill, "exit": exit_fill,
+                        "pnl": gross_pnl * qty,
+                        "net_pnl": net_pnl, "cost": cost,
+                        "bars": bars_held, "exit_reason": "TIMEOUT",
+                    })
                     in_trade = False
 
             elif signals.iloc[i] == 1:
                 entry_price = df["close"].iloc[i]
+                # Apply entry slippage (buy at slightly higher price)
+                entry_fill  = entry_price * (1 + slip) if apply_costs else entry_price
                 entry_idx   = i
                 in_trade    = True
 
@@ -502,7 +596,8 @@ class BacktestEngine:
                 fail_reasons=["Zero trades generated"],
             )
 
-        pnls   = [t["pnl"] for t in trades]
+        # Prefer net_pnl (after tx costs) when available
+        pnls   = [t.get("net_pnl", t["pnl"]) for t in trades]
         wins   = [p for p in pnls if p > 0]
         losses = [p for p in pnls if p <= 0]
 
@@ -560,9 +655,142 @@ class BacktestEngine:
                 reasons.append(
                     f"OOS win rate degraded ({r.oos_win_rate:.0f}% < {oos_floor:.0f}% floor)"
                 )
-        r.passed      = len(reasons) == 0
+        # Carry over OOS trade count failures from walk-forward
+        if r.fail_reasons:
+            for fr in r.fail_reasons:
+                if fr not in reasons:
+                    reasons.append(fr)
+
+        # Monte Carlo test gate
+        require_mc = getattr(settings, "bt_require_mc_pass", False)
+        if require_mc and r.trades:
+            n_perms = getattr(settings, "bt_mc_permutations", 500)
+            mc_result = self._monte_carlo_test(r.trades, n_perms)
+            r.mc_pvalue = mc_result["mc_pvalue"]
+            r.mc_passed = mc_result["mc_passed"]
+            if not r.mc_passed:
+                reasons.append(
+                    f"Monte Carlo failed (p={r.mc_pvalue:.3f} >= 0.10 threshold)"
+                )
+
+        r.passed       = len(reasons) == 0
         r.fail_reasons = reasons
         return r
+
+    # ── Monte Carlo permutation test ───────────────────────────────────────────
+
+    def _monte_carlo_test(
+        self,
+        trades: list[dict],
+        n_permutations: int = 500,
+    ) -> dict:
+        """
+        Permutation test using Calmar ratio (return / max-drawdown).
+        Max-drawdown is path-dependent — shuffling the same P&L sequence
+        changes the drawdown profile, making this a meaningful test.
+        p-value = fraction of shuffled Calmar values >= real Calmar.
+        Passes when p-value < 0.10 (real edge is in top 10% of random).
+        """
+        if len(trades) < 20:
+            return {"mc_pvalue": 1.0, "mc_passed": False}
+
+        def _calmar(pnls: np.ndarray) -> float:
+            cumsum = np.cumsum(pnls)
+            peak   = np.maximum.accumulate(cumsum)
+            max_dd = float(np.max(peak - cumsum)) + 1e-9
+            return float(pnls.sum()) / max_dd
+
+        real_pnls  = np.array([t.get("net_pnl", t["pnl"]) for t in trades])
+        real_calmar = _calmar(real_pnls)
+
+        count_worse = sum(
+            1 for _ in range(n_permutations)
+            if _calmar(np.random.permutation(real_pnls)) >= real_calmar
+        )
+        pvalue = count_worse / n_permutations
+        return {"mc_pvalue": round(pvalue, 3), "mc_passed": pvalue < 0.10}
+
+    # ── Stress test ────────────────────────────────────────────────────────────
+
+    def stress_test(self, symbol: str, strategy: str = "intraday") -> dict:
+        """
+        Replay cached trades under 3 adversarial scenarios:
+          1. Bear market: shift all PnLs down by 30% (simulate trending loss environment)
+          2. High volatility: inflate losses by 50%, reduce wins by 20%
+          3. Slippage shock: add 3× normal slippage to every exit
+        """
+        key    = (symbol, strategy)
+        result = self._cache.get(key)
+        if not result or not result.trades:
+            return {
+                "symbol": symbol, "strategy": strategy,
+                "error": "No cached backtest. Run /backtest/run first.",
+            }
+
+        def _metrics(pnls: list) -> dict:
+            if not pnls:
+                return {"total_pnl": 0, "win_rate": 0.0, "sharpe": 0.0, "max_dd_pct": 0.0}
+            arr  = np.array(pnls)
+            wins = [p for p in pnls if p > 0]
+            cum  = np.cumsum(pnls)
+            peak = np.maximum.accumulate(cum)
+            dd   = peak - cum
+            mx   = float(np.max(dd)) if len(dd) else 0.0
+            pk   = float(peak.max())
+            max_dd = round(mx / max(abs(pk), 1) * 100, 1) if pk != 0 else 0.0
+            return {
+                "total_pnl":   round(float(arr.sum()), 0),
+                "win_rate":    round(len(wins) / len(pnls) * 100, 1),
+                "sharpe":      round(float(arr.mean() / (arr.std() + 1e-9)), 2),
+                "max_dd_pct":  max_dd,
+            }
+
+        base_pnls = [t.get("net_pnl", t["pnl"]) for t in result.trades]
+
+        # Scenario 1: Bear market (-30% bias on all trades)
+        bear_pnls = [p * 0.7 - abs(p) * 0.1 for p in base_pnls]
+
+        # Scenario 2: High volatility (losses ×1.5, wins ×0.8)
+        vol_pnls  = [p * 0.8 if p > 0 else p * 1.5 for p in base_pnls]
+
+        # Scenario 3: Slippage shock (3× slippage applied to each trade)
+        slippage_bps = self._SLIPPAGE_BPS.get(strategy, 10) * 3
+        slip = slippage_bps / 10000
+        shock_pnls = []
+        for t in result.trades:
+            entry     = t.get("entry", 1.0)
+            extra_cost = entry * slip * 2  # extra round-trip slip
+            shock_pnls.append(t.get("net_pnl", t["pnl"]) - extra_cost)
+
+        return {
+            "symbol":    symbol,
+            "strategy":  strategy,
+            "base":      _metrics(base_pnls),
+            "scenarios": {
+                "bear_market": {
+                    "description": "30% adverse PnL bias (bear trending environment)",
+                    **_metrics(bear_pnls),
+                },
+                "high_volatility": {
+                    "description": "Losses ×1.5, wins ×0.8 (volatile choppy market)",
+                    **_metrics(vol_pnls),
+                },
+                "slippage_shock": {
+                    "description": f"3× normal slippage ({slippage_bps} bps) applied",
+                    **_metrics(shock_pnls),
+                },
+            },
+        }
+
+    def _max_dd_pct(self, pnls: list) -> float:
+        if not pnls:
+            return 0.0
+        cum  = np.cumsum(pnls)
+        peak = np.maximum.accumulate(cum)
+        dd   = peak - cum
+        mx   = float(np.max(dd))
+        pk   = float(peak.max())
+        return round(mx / max(abs(pk), 1) * 100, 1) if pk != 0 else 0.0
 
 
 backtest_engine = BacktestEngine()

@@ -2,7 +2,7 @@ name: Auto-merge Claude PRs
 
 on:
   pull_request:
-    types: [opened, reopened, synchronize]
+    types: [opened, reopened, synchronize, ready_for_review]
 
 permissions:
   contents: write
@@ -13,17 +13,29 @@ jobs:
     runs-on: ubuntu-latest
     if: startsWith(github.head_ref, 'claude/')
     steps:
-      - name: Enable auto-merge
+      - name: Convert draft to ready and merge
         uses: actions/github-script@v7
         with:
           github-token: ${{ secrets.GITHUB_TOKEN }}
           script: |
+            const pr = context.payload.pull_request;
+            // If still a draft, convert to ready-for-review first
+            if (pr.draft) {
+              await github.graphql(`
+                mutation($id: ID!) {
+                  markPullRequestReadyForReview(input: { pullRequestId: $id }) {
+                    pullRequest { isDraft }
+                  }
+                }
+              `, { id: pr.node_id });
+              core.info(`PR #${pr.number} converted from draft to ready`);
+            }
             await github.rest.pulls.merge({
               owner: context.repo.owner,
               repo: context.repo.repo,
-              pull_number: context.payload.pull_request.number,
+              pull_number: pr.number,
               merge_method: 'squash',
-              commit_title: context.payload.pull_request.title,
-              commit_message: context.payload.pull_request.body || '',
+              commit_title: pr.title,
+              commit_message: pr.body || '',
             });
-            core.info(`PR #${context.payload.pull_request.number} auto-merged`);
+            core.info(`PR #${pr.number} auto-merged`);

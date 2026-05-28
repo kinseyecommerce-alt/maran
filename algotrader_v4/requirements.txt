@@ -1,20 +1,19 @@
 # ── Broker ──────────────────────────────────────────────────────
 kiteconnect==5.0.1
+# upstox-python>=2.12.0  # optional; broker adapter uses httpx directly
 
 # ── Market data ───────────────────────────────────────────────────
-yfinance==0.2.51
+yfinance==1.4.0
 # TrueData WebSocket feed (live ticks, OHLCV history, options chain)
-# Install only if you have a TrueData subscription:
-#   pip install truedata-ws
-truedata-ws; extra == "truedata"
+truedata-ws
+websocket-client>=0.58.0
 httpx==0.28.1
 
 # ── API server ────────────────────────────────────────────────────
-# NOTE: upgrade fastapi→0.115.x + starlette→0.41.x to fix CVE-2024-47874
-fastapi==0.111.0
-starlette==0.37.2
-uvicorn[standard]==0.34.3
-websockets==12.0
+fastapi==0.136.3
+starlette==1.1.0
+uvicorn[standard]==0.48.0
+websockets==16.0
 
 # ── Security ──────────────────────────────────────────────────────
 slowapi==0.1.9
@@ -29,6 +28,7 @@ anthropic>=0.50.0
 # ── Data / Technical analysis / Charting ─────────────────────────
 pandas==2.2.2
 numpy==1.26.4
+setuptools<60  # required to build ta==0.11.0
 ta==0.11.0
 matplotlib==3.10.9
 
@@ -38,8 +38,8 @@ apscheduler==3.11.2
 # ── Utilities ────────────────────────────────────────────────────
 python-dotenv==1.0.1
 python-telegram-bot==21.3
-pydantic==2.7.3
-pydantic-settings==2.3.4
+pydantic==2.13.4
+pydantic-settings==2.14.1
 loguru==0.7.2
 aiofiles==25.1.0
 
