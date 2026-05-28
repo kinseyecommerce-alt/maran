@@ -22,6 +22,7 @@ from backtest_engine import backtest_engine
 from tick_engine import MarketSnapshot, LiveIndicators
 from trailing_sl_engine import trailing_sl_engine, TrailingSLEngine
 from atomic_bracket import atomic_bracket_engine
+from agents.activity_log import push as _activity
 
 
 # ── TSL callback registry ────────────────────────────────────────────────────
@@ -38,6 +39,13 @@ def _setup_tsl_callbacks() -> None:
     _tsl_callbacks_installed = True
 
     async def _on_sl_moved(pos, old_sl: float, move_type: str) -> None:
+        _activity(
+            agent=pos.strategy, event="SL_MOVED",
+            symbol=pos.symbol, side=pos.side,
+            price=pos.current_sl, qty=pos.quantity,
+            order_id=str(pos.order_id),
+            detail=f"{move_type}: {old_sl:.2f} → {pos.current_sl:.2f}",
+        )
         entry = _tsl_sl_orders.get(pos.order_id)
         if not entry:
             return
@@ -61,6 +69,13 @@ def _setup_tsl_callbacks() -> None:
             entry["sl_order_id"] = new_sl_oid
 
     async def _on_sl_hit(pos, ltp: float, pnl: float) -> None:
+        _activity(
+            agent=pos.strategy, event="SL_HIT",
+            symbol=pos.symbol, side=pos.side,
+            price=ltp, qty=pos.quantity, pnl=pnl,
+            sl=pos.current_sl, order_id=str(pos.order_id),
+            detail=f"entry={pos.entry_price:.2f} sl={pos.current_sl:.2f}",
+        )
         entry = _tsl_sl_orders.pop(pos.order_id, None)
         sl_already_filled = False
         if entry and entry.get("sl_order_id"):
@@ -105,6 +120,14 @@ def _setup_tsl_callbacks() -> None:
         trailing_sl_engine.deregister(pos.order_id)
 
     async def _on_target_hit(pos, ltp: float, level: int) -> None:
+        pnl_est = (ltp - pos.entry_price) * pos.quantity * (1 if pos.side == "BUY" else -1)
+        _activity(
+            agent=pos.strategy, event="TARGET_HIT",
+            symbol=pos.symbol, side=pos.side,
+            price=ltp, qty=pos.quantity, pnl=pnl_est,
+            order_id=str(pos.order_id),
+            detail=f"T{level} hit entry={pos.entry_price:.2f}",
+        )
         if level == 2:
             entry = _tsl_sl_orders.pop(pos.order_id, None)
             kite_client.place_order(
@@ -253,6 +276,18 @@ class BaseAgent(ABC):
                 await self._check_exits_on_tick(snap)
                 action, signal = self.evaluate_tick(snap)
                 if action in ("BUY", "SELL") and signal:
+                    # ── Log signal generated ───────────────────────────
+                    _activity(
+                        agent=self.name, event="SIGNAL",
+                        symbol=snap.symbol, side=action,
+                        price=snap.tick.ltp,
+                        pattern=signal.get("pattern", ""),
+                        score=signal.get("score", 0),
+                        sl=signal.get("stop_loss", 0.0),
+                        target=signal.get("target", 0.0),
+                        detail=f"RSI={getattr(snap.indicators,'rsi',0):.0f} ADX={getattr(snap.indicators,'adx_14',0):.0f}",
+                    )
+
                     # ── Multi-timeframe alignment ──────────────────────
                     if settings.use_multi_timeframe:
                         from multi_timeframe import check as mtf_check
@@ -277,7 +312,23 @@ class BaseAgent(ABC):
                         gate = await gate_assess(snap, action, signal, self.name)
                         record_gate_decision(gate.enter)
                         if not gate.enter:
+                            _activity(
+                                agent=self.name, event="GATE_VETO",
+                                symbol=snap.symbol, side=action,
+                                price=snap.tick.ltp,
+                                pattern=signal.get("pattern", ""),
+                                gate_conf=gate.confidence,
+                                gate_reason=gate.reason,
+                            )
                             continue
+                        _activity(
+                            agent=self.name, event="GATE_APPROVE",
+                            symbol=snap.symbol, side=action,
+                            price=snap.tick.ltp,
+                            pattern=signal.get("pattern", ""),
+                            gate_conf=gate.confidence,
+                            gate_reason=gate.reason,
+                        )
                         # Apply Claude's SL/target/size adjustments
                         if gate.adjusted_sl_pct:
                             signal["stop_loss_pct"]  = gate.adjusted_sl_pct
@@ -360,6 +411,17 @@ class BaseAgent(ABC):
         self.state.trades_today  += 1
         self.state.signals_fired += 1
         self.state.last_signal    = signal
+
+        _activity(
+            agent=self.name, event="ORDER_ENTRY",
+            symbol=sym, side=action, price=ltp, qty=qty,
+            pattern=signal.get("pattern", ""),
+            gate_conf=int(signal.get("_gate_confidence", 0)),
+            sl=signal.get("stop_loss", 0.0),
+            target=signal.get("target", 0.0),
+            order_id=str(order_id),
+            detail=f"product={signal.get('product', self.product)} size_factor={size_factor}",
+        )
 
         # Wire TSL callbacks (idempotent — only installs module-level fallbacks once)
         _setup_tsl_callbacks()

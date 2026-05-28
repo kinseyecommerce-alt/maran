@@ -347,6 +347,20 @@ def gate_log(n: int = 50):
     return {"decisions": get_gate_log(n), "total": n}
 
 
+@app.get("/agents/activity", tags=["Agents"])
+def agent_activity(n: int = 100):
+    """Live agent order activity feed — signals, gate decisions, entries, SL/target hits."""
+    from agents.activity_log import get as _get
+    return {"events": _get(n), "count": n}
+
+@app.delete("/agents/activity", tags=["Agents"])
+def clear_agent_activity():
+    """Clear the in-memory activity log."""
+    from agents.activity_log import clear as _clear
+    _clear()
+    return {"status": "cleared"}
+
+
 # ── App auth (JWT) ──────────────────────────────────────────────────────────
 @app.post("/auth/login", tags=["Auth"])
 def app_login(form: OAuth2PasswordRequestForm = Depends()):

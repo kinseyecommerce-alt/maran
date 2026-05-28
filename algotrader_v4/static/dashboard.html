@@ -954,6 +954,9 @@
       <div class="nav-item active" data-tab="overview"    onclick="switchTab('overview')">
         <i data-lucide="layout-dashboard"></i><span>Overview</span>
       </div>
+      <div class="nav-item" data-tab="orders" onclick="switchTab('orders')">
+        <i data-lucide="activity"></i><span>Live Orders</span>
+      </div>
       <div class="nav-item" data-tab="botcontrol"  onclick="switchTab('botcontrol')">
         <i data-lucide="cpu"></i><span>Bot Control</span>
       </div>
@@ -1128,6 +1131,74 @@
         </div>
 
       </div><!-- /tab-overview -->
+
+
+      <!-- ════════════════════════════════════════════════════════
+           TAB: LIVE ORDERS
+      ═══════════════════════════════════════════════════════════ -->
+      <div class="tab-panel" id="tab-orders">
+
+        <!-- Agent summary cards -->
+        <div class="stat-grid" style="grid-template-columns:repeat(5,1fr);margin-bottom:18px">
+          <div class="stat-card" id="ao-intraday">
+            <div class="stat-label" style="color:#3b82f6"><i data-lucide="zap"></i> Intraday</div>
+            <div class="stat-value" id="ao-intraday-orders">0</div>
+            <div class="stat-sub"  id="ao-intraday-sub">0 signals · 0 vetoed</div>
+          </div>
+          <div class="stat-card" id="ao-scalping">
+            <div class="stat-label" style="color:#8b5cf6"><i data-lucide="zap"></i> Scalping</div>
+            <div class="stat-value" id="ao-scalping-orders">0</div>
+            <div class="stat-sub"  id="ao-scalping-sub">0 signals · 0 vetoed</div>
+          </div>
+          <div class="stat-card" id="ao-options">
+            <div class="stat-label" style="color:#f59e0b"><i data-lucide="zap"></i> Options</div>
+            <div class="stat-value" id="ao-options-orders">0</div>
+            <div class="stat-sub"  id="ao-options-sub">0 signals · 0 vetoed</div>
+          </div>
+          <div class="stat-card" id="ao-futures">
+            <div class="stat-label" style="color:#ef4444"><i data-lucide="zap"></i> Futures</div>
+            <div class="stat-value" id="ao-futures-orders">0</div>
+            <div class="stat-sub"  id="ao-futures-sub">0 signals · 0 vetoed</div>
+          </div>
+          <div class="stat-card" id="ao-swing">
+            <div class="stat-label" style="color:#10b981"><i data-lucide="zap"></i> Swing</div>
+            <div class="stat-value" id="ao-swing-orders">0</div>
+            <div class="stat-sub"  id="ao-swing-sub">0 signals · 0 vetoed</div>
+          </div>
+        </div>
+
+        <!-- Live Activity Feed -->
+        <div class="card">
+          <div class="card-header" style="display:flex;align-items:center;gap:10px">
+            <h3 class="card-title"><i data-lucide="radio"></i> Live Agent Activity Feed</h3>
+            <span class="badge badge-running" id="ao-live-badge" style="font-size:11px;animation:pulse 2s infinite">● LIVE</span>
+            <span style="margin-left:auto;font-size:11px;color:var(--muted)">Updates every 2s · last 100 events</span>
+            <button class="btn btn-sm" onclick="clearActivityFeed()" style="font-size:11px;padding:3px 10px">Clear</button>
+          </div>
+          <div class="table-wrap" style="max-height:520px;overflow-y:auto" id="ao-feed-wrap">
+            <table class="data-table">
+              <thead style="position:sticky;top:0;z-index:2;background:var(--card)">
+                <tr>
+                  <th style="width:70px">Time</th>
+                  <th style="width:80px">Agent</th>
+                  <th style="width:80px">Event</th>
+                  <th style="width:100px">Symbol</th>
+                  <th style="width:55px">Side</th>
+                  <th style="width:80px">Price ₹</th>
+                  <th style="width:55px">Qty</th>
+                  <th style="width:80px">P&amp;L ₹</th>
+                  <th style="width:60px">Gate%</th>
+                  <th>Detail</th>
+                </tr>
+              </thead>
+              <tbody id="ao-feed-tbody">
+                <tr><td colspan="10" class="no-data"><i data-lucide="radio"></i>&nbsp;Waiting for agent activity…</td></tr>
+              </tbody>
+            </table>
+          </div>
+        </div>
+
+      </div><!-- /tab-orders -->
 
 
       <!-- ════════════════════════════════════════════════════════
@@ -2993,6 +3064,89 @@ async function togglePattern(agent, pattern, enabled) {
 /* ═══════════════════════════════════════════════════════════════
    POLLING: fetch all state
 ═══════════════════════════════════════════════════════════════ */
+async function fetchActivity() {
+  try {
+    const d = await api('GET', '/agents/activity?n=100');
+    if (d && d.events) renderActivityFeed(d.events);
+  } catch {}
+}
+
+function renderActivityFeed(events) {
+  // Update per-agent summary cards
+  const agents = ['intraday','scalping','options','futures','swing'];
+  const stats = {};
+  agents.forEach(a => { stats[a] = { orders:0, signals:0, vetoed:0 }; });
+
+  events.forEach(e => {
+    const s = stats[e.agent];
+    if (!s) return;
+    if (e.event === 'SIGNAL')       s.signals++;
+    if (e.event === 'GATE_VETO')    s.vetoed++;
+    if (e.event === 'ORDER_ENTRY')  s.orders++;
+  });
+
+  agents.forEach(a => {
+    const s = stats[a];
+    const el = document.getElementById(`ao-${a}-orders`);
+    const sub = document.getElementById(`ao-${a}-sub`);
+    if (el)  el.textContent  = s.orders;
+    if (sub) sub.textContent = `${s.signals} signals · ${s.vetoed} vetoed`;
+  });
+
+  // Event row colours
+  const EVENT_STYLE = {
+    SIGNAL:       { bg:'rgba(99,102,241,0.08)', text:'#818cf8', label:'SIGNAL'    },
+    GATE_APPROVE: { bg:'rgba(16,185,129,0.08)', text:'#34d399', label:'APPROVED'  },
+    GATE_VETO:    { bg:'rgba(239,68,68,0.08)',  text:'#f87171', label:'VETOED'    },
+    ORDER_ENTRY:  { bg:'rgba(59,130,246,0.12)', text:'#60a5fa', label:'ENTRY'     },
+    ORDER_SL:     { bg:'rgba(245,158,11,0.08)', text:'#fbbf24', label:'SL ORDER'  },
+    ORDER_TARGET: { bg:'rgba(16,185,129,0.08)', text:'#34d399', label:'TGT ORDER' },
+    SL_HIT:       { bg:'rgba(239,68,68,0.12)',  text:'#f87171', label:'SL HIT'    },
+    TARGET_HIT:   { bg:'rgba(16,185,129,0.12)', text:'#34d399', label:'TARGET ✓'  },
+    SL_MOVED:     { bg:'rgba(245,158,11,0.06)', text:'#fbbf24', label:'TSL MOVED' },
+  };
+
+  const tbody = document.getElementById('ao-feed-tbody');
+  if (!tbody) return;
+
+  if (!events.length) {
+    tbody.innerHTML = `<tr><td colspan="10" class="no-data"><i data-lucide="radio"></i>&nbsp;Waiting for agent activity…</td></tr>`;
+    lucide.createIcons({ nodes: [tbody] });
+    return;
+  }
+
+  tbody.innerHTML = events.map(e => {
+    const s   = EVENT_STYLE[e.event] || { bg:'transparent', text:'var(--muted)', label: e.event };
+    const pnl = e.pnl != null
+      ? `<span style="color:${e.pnl>=0?'var(--green)':'var(--red)'}">
+           ${e.pnl>=0?'+':''}₹${Math.abs(e.pnl).toLocaleString('en-IN',{maximumFractionDigits:0})}
+         </span>`
+      : '<span style="color:var(--muted)">—</span>';
+    const gc  = e.gate_conf ? `<span style="font-weight:600;color:${e.gate_conf>=70?'var(--green)':'var(--red)'}">
+                                 ${e.gate_conf}%</span>` : '—';
+    const detail = [e.pattern, e.gate_reason, e.detail].filter(Boolean).join(' · ').slice(0,80);
+    return `<tr style="background:${s.bg}">
+      <td style="font-size:11px;color:var(--muted);font-variant-numeric:tabular-nums">${e.time}</td>
+      <td><span style="font-size:11px;font-weight:600;color:${e.color};text-transform:uppercase">${e.agent}</span></td>
+      <td><span style="font-size:11px;font-weight:600;color:${s.text}">${s.label}</span></td>
+      <td style="font-weight:600">${e.symbol}</td>
+      <td><span style="font-size:11px;color:${e.side==='BUY'?'var(--green)':'var(--red)'}">
+            ${e.side || '—'}</span></td>
+      <td style="font-variant-numeric:tabular-nums">${e.price ? '₹'+e.price.toLocaleString('en-IN') : '—'}</td>
+      <td>${e.qty || '—'}</td>
+      <td>${pnl}</td>
+      <td>${gc}</td>
+      <td style="font-size:11px;color:var(--muted);max-width:260px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${detail}">${detail || '—'}</td>
+    </tr>`;
+  }).join('');
+}
+
+function clearActivityFeed() {
+  api('DELETE', '/agents/activity').catch(() => {});
+  document.getElementById('ao-feed-tbody').innerHTML =
+    `<tr><td colspan="10" class="no-data">Feed cleared</td></tr>`;
+}
+
 async function pollAll() {
   await Promise.allSettled([
     fetchRisk(),
@@ -3013,6 +3167,7 @@ async function pollAll() {
     fetchAgentRisk(),
     fetchIntelligence(),
     fetchPatternToggles(),
+    fetchActivity(),
   ]);
 
   renderStats();
