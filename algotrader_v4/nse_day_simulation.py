@@ -314,11 +314,8 @@ class AgentTracker:
             sl_pct  = float(signal.get("stop_loss_pct", settings.sl_pct_intraday))
             tgt_pct = float(signal.get("target_pct",    settings.tgt_pct_intraday))
         entry_px = ltp
-        # Normalize position size: ₹50,000 per trade (mirrors risk_manager capital
-        # allocation per symbol), capped at 1 share minimum.
-        # This prevents high-priced stocks (BAJFINANCE ₹8950) from having 5-6×
-        # the rupee impact vs low-priced stocks (SBIN ₹798) at qty=1.
-        TRADE_CAPITAL = 50_000
+        # Normalize position size: ₹1,00,000 per trade per agent
+        TRADE_CAPITAL = 1_00_000
         qty = max(1, int(TRADE_CAPITAL / entry_px))
         is_long  = action in ("BUY", "CE", "LONG")
         if is_long:
