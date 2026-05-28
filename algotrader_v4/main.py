@@ -464,6 +464,22 @@ def set_token(req: TokenRequest):
     t = kite_client.set_access_token(req.request_token, req.access_token)
     return {"status": "ok", "access_token": t[:6] + "…"}
 
+@app.get("/auth/upstox/status", tags=["Auth"])
+def upstox_status():
+    """Check whether a valid Upstox access token is loaded."""
+    if not settings.upstox_access_token:
+        return {"connected": False, "message": "No Upstox token. Use Authorize with Upstox."}
+    try:
+        from brokers.upstox_broker import UpstoxBroker
+        broker = UpstoxBroker()
+        profile = broker.profile() if hasattr(broker, "profile") else {}
+        return {"connected": True,
+                "user_id": profile.get("user_id") or profile.get("data", {}).get("user_id", ""),
+                "name": profile.get("user_name") or profile.get("data", {}).get("user_name", "")}
+    except Exception as e:
+        return {"connected": bool(settings.upstox_access_token),
+                "token_loaded": True, "message": str(e)}
+
 @app.get("/auth/upstox/login-url", tags=["Auth"])
 def upstox_login_url():
     """Return the Upstox OAuth2 login URL."""
@@ -516,6 +532,15 @@ async def upstox_callback(code: str = Query(...)):
             f"<p style='color:#8b949e'>Redirecting to dashboard…</p></div></body></html>",
             status_code=500,
         )
+
+
+@app.post("/auth/upstox/token", tags=["Auth"])
+async def upstox_set_token(req: TokenRequest):
+    """Set Upstox access token directly (manual paste from dashboard)."""
+    if not req.access_token:
+        raise HTTPException(400, "access_token is required")
+    settings.upstox_access_token = req.access_token
+    return {"status": "ok", "token_preview": req.access_token[:6] + "…"}
 
 
 @app.post("/auth/kite/refresh", tags=["Auth"])

@@ -1706,6 +1706,52 @@
           </div>
         </div>
 
+        <!-- Upstox Connection -->
+        <div class="settings-section">
+          <div class="settings-title"><i data-lucide="link-2"></i> Upstox Connection</div>
+          <div class="kite-info-row">
+            <span class="kite-info-label">Status</span>
+            <span class="kite-info-val">
+              <div class="kite-indicator" style="display:inline-flex">
+                <div class="kite-dot" id="settings-upstox-dot"></div>
+                <span id="settings-upstox-status">Checking…</span>
+              </div>
+            </span>
+          </div>
+          <div class="kite-info-row">
+            <span class="kite-info-label">User ID</span>
+            <span class="kite-info-val" id="settings-upstox-uid">—</span>
+          </div>
+          <div class="kite-info-row">
+            <span class="kite-info-label">Name</span>
+            <span class="kite-info-val" id="settings-upstox-name">—</span>
+          </div>
+          <p style="font-size:12px;color:var(--muted);margin:12px 0 8px">
+            Save your Upstox API key &amp; secret in <strong>.env</strong>, then click Authorize.
+          </p>
+          <div style="display:flex;gap:8px;flex-wrap:wrap">
+            <button class="btn btn-blue btn-sm" onclick="connectUpstoxOAuth()">
+              <i data-lucide="log-in"></i> Authorize with Upstox
+            </button>
+            <button class="btn btn-sm" style="background:var(--surface2)" onclick="fetchUpstoxStatus()">
+              <i data-lucide="refresh-cw"></i> Refresh Status
+            </button>
+          </div>
+
+          <!-- Manual token paste -->
+          <div style="margin-top:20px;padding-top:16px;border-top:1px solid var(--border)">
+            <label style="font-size:12px;color:var(--muted);display:block;margin-bottom:6px">
+              Paste Access Token manually (if OAuth callback already ran)
+            </label>
+            <div style="display:flex;gap:8px">
+              <input id="upstox-manual-token" type="text" class="risk-input" style="flex:1;font-size:12px"
+                     placeholder="upstox access token…" autocomplete="off"/>
+              <button class="btn btn-blue btn-sm" onclick="setUpstoxManualToken()">Set</button>
+            </div>
+            <div id="upstox-manual-msg" style="font-size:11px;margin-top:6px;min-height:16px"></div>
+          </div>
+        </div>
+
         <!-- Intelligence Toggles -->
         <div class="settings-section">
           <div class="settings-title"><i data-lucide="sliders-horizontal"></i> Intelligence Toggles</div>
@@ -2124,6 +2170,11 @@ function switchTab(name) {
   if (name === 'options' && !window._optionsLoaded) {
     window._optionsLoaded = true;
     fetchOptionsChain();
+  }
+  // Refresh broker statuses when settings tab opens
+  if (name === 'settings') {
+    fetchKiteStatus();
+    fetchUpstoxStatus();
   }
 }
 
@@ -2870,6 +2921,62 @@ async function setKiteManualToken() {
       msgEl.textContent = 'Token set — broker connected';
       document.getElementById('kite-manual-token').value = '';
       fetchKiteStatus();
+    }
+  } catch (e) {
+    msgEl.style.color = 'var(--red)';
+    msgEl.textContent = e.message;
+  }
+}
+
+// ── Upstox OAuth helpers ─────────────────────────────────────────────────────
+
+async function fetchUpstoxStatus() {
+  const dot  = document.getElementById('settings-upstox-dot');
+  const stxt = document.getElementById('settings-upstox-status');
+  const uid  = document.getElementById('settings-upstox-uid');
+  const name = document.getElementById('settings-upstox-name');
+  try {
+    const d = await api('GET', '/auth/upstox/status');
+    if (!d) return;
+    if (dot)  { dot.classList.toggle('connected', !!d.connected); dot.classList.toggle('disconnected', !d.connected); }
+    if (stxt) stxt.textContent = d.connected ? `Connected${d.token_loaded && !d.user_id ? ' (token loaded)' : ''}` : (d.message || 'Not connected');
+    if (uid)  uid.textContent  = d.user_id || '—';
+    if (name) name.textContent = d.name    || '—';
+  } catch (e) {
+    if (stxt) stxt.textContent = 'Error: ' + e.message;
+  }
+}
+
+async function connectUpstoxOAuth() {
+  try {
+    const d = await api('GET', '/auth/upstox/login-url');
+    if (d && d.login_url) {
+      window.location.href = d.login_url;
+    } else {
+      showToast('Could not get Upstox login URL. Check API key in .env.', 'error');
+    }
+  } catch (e) {
+    showToast('Error fetching Upstox login URL: ' + e.message, 'error');
+  }
+}
+
+async function setUpstoxManualToken() {
+  const token = (document.getElementById('upstox-manual-token')?.value || '').trim();
+  const msgEl = document.getElementById('upstox-manual-msg');
+  if (!token) {
+    msgEl.style.color = 'var(--red)';
+    msgEl.textContent = 'Paste a token first';
+    return;
+  }
+  msgEl.style.color = 'var(--muted)';
+  msgEl.textContent = 'Setting…';
+  try {
+    const d = await api('POST', '/auth/upstox/token', { access_token: token });
+    if (d) {
+      msgEl.style.color = 'var(--green)';
+      msgEl.textContent = 'Token set — Upstox connected';
+      document.getElementById('upstox-manual-token').value = '';
+      fetchUpstoxStatus();
     }
   } catch (e) {
     msgEl.style.color = 'var(--red)';
