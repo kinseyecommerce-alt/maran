@@ -957,6 +957,9 @@
       <div class="nav-item" data-tab="orders" onclick="switchTab('orders')">
         <i data-lucide="activity"></i><span>Live Orders</span>
       </div>
+      <div class="nav-item" data-tab="options" onclick="switchTab('options')">
+        <i data-lucide="layers"></i><span>Options</span>
+      </div>
       <div class="nav-item" data-tab="botcontrol"  onclick="switchTab('botcontrol')">
         <i data-lucide="cpu"></i><span>Bot Control</span>
       </div>
@@ -1198,7 +1201,90 @@
           </div>
         </div>
 
+        <!-- Trade Journal (from SQLite persistence) -->
+        <div class="card section-gap">
+          <div class="card-header" style="display:flex;align-items:center;gap:10px">
+            <h3 class="card-title"><i data-lucide="book-open"></i> Trade Journal</h3>
+            <select id="tj-days" class="input" style="width:100px;margin-left:auto">
+              <option value="1">Today</option>
+              <option value="7" selected>7 days</option>
+              <option value="30">30 days</option>
+            </select>
+            <select id="tj-agent" class="input" style="width:120px">
+              <option value="">All agents</option>
+              <option value="intraday">Intraday</option>
+              <option value="scalping">Scalping</option>
+              <option value="options">Options</option>
+              <option value="futures">Futures</option>
+              <option value="swing">Swing</option>
+            </select>
+            <button class="btn btn-sm" onclick="fetchTradeJournal()">Load</button>
+            <button class="btn btn-sm" onclick="exportTrades()" style="margin-left:4px">
+              <i data-lucide="download"></i> CSV
+            </button>
+          </div>
+          <!-- P&L summary row -->
+          <div id="tj-summary" style="display:grid;grid-template-columns:repeat(4,1fr);gap:12px;margin-bottom:12px"></div>
+          <div class="table-wrap" style="max-height:400px;overflow-y:auto">
+            <table class="data-table">
+              <thead style="position:sticky;top:0;z-index:2;background:var(--card)">
+                <tr>
+                  <th>Date</th><th>Agent</th><th>Symbol</th><th>Side</th>
+                  <th>Entry ₹</th><th>Exit ₹</th><th>Qty</th>
+                  <th>Gross ₹</th><th>Cost ₹</th><th>Net ₹</th><th>Exit Reason</th>
+                </tr>
+              </thead>
+              <tbody id="tj-tbody">
+                <tr><td colspan="11" class="no-data">Click Load to fetch trade history</td></tr>
+              </tbody>
+            </table>
+          </div>
+        </div>
+
       </div><!-- /tab-orders -->
+
+
+      <!-- ════════════════════════════════════════════════════════
+           TAB: OPTIONS CHAIN
+      ═══════════════════════════════════════════════════════════ -->
+      <div class="tab-panel" id="tab-options">
+        <div class="card section-gap">
+          <div class="card-header" style="display:flex;align-items:center;gap:10px;flex-wrap:wrap">
+            <h3 class="card-title"><i data-lucide="layers"></i> Options Chain</h3>
+            <div style="display:flex;gap:8px;align-items:center;margin-left:auto">
+              <select id="oc-symbol" class="input" style="width:150px">
+                <option value="NIFTY">NIFTY</option>
+                <option value="BANKNIFTY">BANKNIFTY</option>
+                <option value="RELIANCE">RELIANCE</option>
+                <option value="TCS">TCS</option>
+                <option value="INFY">INFY</option>
+              </select>
+              <button class="btn btn-blue" onclick="fetchOptionsChain()">Refresh</button>
+              <span id="oc-spot" style="font-size:13px;color:var(--muted)">Spot: —</span>
+              <span id="oc-expiry" style="font-size:13px;color:var(--muted)">Expiry: —</span>
+            </div>
+          </div>
+          <div class="table-wrap">
+            <table class="data-table" id="oc-table">
+              <thead>
+                <tr>
+                  <th colspan="5" style="background:rgba(239,68,68,0.1);color:#ef4444;text-align:center">PUT (PE)</th>
+                  <th style="text-align:center;background:var(--surface2)">Strike</th>
+                  <th colspan="5" style="background:rgba(59,130,246,0.1);color:#3b82f6;text-align:center">CALL (CE)</th>
+                </tr>
+                <tr>
+                  <th>IV%</th><th>Delta</th><th>Gamma</th><th>Theta</th><th>Vega</th>
+                  <th style="font-weight:700;text-align:center">STRIKE</th>
+                  <th>IV%</th><th>Delta</th><th>Gamma</th><th>Theta</th><th>Vega</th>
+                </tr>
+              </thead>
+              <tbody id="oc-tbody">
+                <tr><td colspan="11" class="no-data">Select a symbol and click Refresh</td></tr>
+              </tbody>
+            </table>
+          </div>
+        </div>
+      </div><!-- /tab-options -->
 
 
       <!-- ════════════════════════════════════════════════════════
@@ -1372,6 +1458,22 @@
           <div class="card-title"><i data-lucide="trending-up"></i> Equity Curve — Today</div>
           <div class="analytics-chart-wrap">
             <canvas id="analytics-chart"></canvas>
+          </div>
+        </div>
+
+        <!-- Drawdown Waterfall -->
+        <div class="card section-gap">
+          <div class="card-title"><i data-lucide="trending-down"></i> Drawdown Profile</div>
+          <div class="analytics-chart-wrap">
+            <canvas id="drawdown-chart"></canvas>
+          </div>
+        </div>
+
+        <!-- Rolling Sharpe -->
+        <div class="card row-gap">
+          <div class="card-title"><i data-lucide="activity"></i> Rolling Sharpe (20 trades)</div>
+          <div id="rolling-sharpe-grid" style="display:grid;grid-template-columns:repeat(5,1fr);gap:12px;margin-top:8px">
+            <!-- populated by JS -->
           </div>
         </div>
 
@@ -1991,8 +2093,8 @@ function flashEl(el, direction) {
    TAB SWITCHING
 ═══════════════════════════════════════════════════════════════ */
 const TAB_LABELS = {
-  overview: 'Overview', botcontrol: 'Bot Control',
-  intelligence: 'Intelligence', analytics: 'Analytics',
+  overview: 'Overview', orders: 'Live Orders', options: 'Options Chain',
+  botcontrol: 'Bot Control', intelligence: 'Intelligence', analytics: 'Analytics',
   risk: 'Risk & SEBI', settings: 'Settings',
 };
 
@@ -2002,6 +2104,12 @@ function switchTab(name) {
   document.getElementById(`tab-${name}`).classList.add('active');
   document.querySelector(`[data-tab="${name}"]`).classList.add('active');
   document.getElementById('tab-label').textContent = TAB_LABELS[name] || name;
+
+  // Lazy-load options chain on first open
+  if (name === 'options' && !window._optionsLoaded) {
+    window._optionsLoaded = true;
+    fetchOptionsChain();
+  }
 }
 
 /* ═══════════════════════════════════════════════════════════════
@@ -2088,6 +2196,59 @@ function updateCharts() {
     chart.data.datasets[0].borderColor = last >= 0 ? '#10b981' : '#ef4444';
     chart.update('none');
   });
+  updateDrawdownChart(labels, data);
+}
+
+/* ═══════════════════════════════════════════════════════════════
+   CHART.JS — Drawdown Waterfall
+═══════════════════════════════════════════════════════════════ */
+let _drawdownChart = null;
+function updateDrawdownChart(labels, pnlData) {
+  if (!pnlData || pnlData.length < 2) return;
+  // Compute running drawdown from cumulative P&L
+  const cumPnl = pnlData.reduce((acc, v, i) => { acc.push((acc[i-1]||0) + v); return acc; }, []);
+  let peak = -Infinity;
+  const drawdownPct = cumPnl.map(v => { peak = Math.max(peak, v); return peak > 0 ? (v - peak) : 0; });
+
+  const ctx = document.getElementById('drawdown-chart');
+  if (!ctx) return;
+  if (_drawdownChart) {
+    _drawdownChart.data.labels = [...labels];
+    _drawdownChart.data.datasets[0].data = [...drawdownPct];
+    _drawdownChart.update('none');
+    return;
+  }
+  _drawdownChart = new Chart(ctx.getContext('2d'), {
+    type: 'bar',
+    data: {
+      labels,
+      datasets: [{
+        label: 'Drawdown (₹)',
+        data: drawdownPct,
+        backgroundColor: 'rgba(239,68,68,0.55)',
+        borderColor: 'rgba(239,68,68,0.8)',
+        borderWidth: 1,
+        borderRadius: 2,
+      }],
+    },
+    options: {
+      responsive: true,
+      maintainAspectRatio: false,
+      plugins: {
+        legend: { display: false },
+        tooltip: { callbacks: { label: ctx => `₹${Number(ctx.raw).toLocaleString('en-IN')}` },
+          backgroundColor: '#1f2937', borderColor: '#374151', borderWidth: 1,
+          titleColor: '#9ca3af', bodyColor: '#f9fafb' },
+      },
+      scales: {
+        x: { grid: { color: 'rgba(55,65,81,0.4)', drawBorder: false },
+             ticks: { color: '#9ca3af', font: { size: 11 }, maxTicksLimit: 8 } },
+        y: { grid: { color: 'rgba(55,65,81,0.4)', drawBorder: false },
+             ticks: { color: '#9ca3af', font: { size: 11 },
+               callback: v => `₹${Number(v).toLocaleString('en-IN')}` } },
+      },
+    },
+  });
 }
 
 /* ═══════════════════════════════════════════════════════════════
@@ -2157,10 +2318,27 @@ function renderRegime() {
   badge.className   = `regime-badge regime-${regimeKey}`;
 
   const sigs = rg.signals || {};
-  document.getElementById('r-vix').textContent     = sigs.vix     ? fmtNum(sigs.vix, 1) : '—';
-  document.getElementById('r-pcr').textContent     = sigs.pcr     ? fmtNum(sigs.pcr, 2) : '—';
-  document.getElementById('r-adx').textContent     = sigs.adx     ? fmtNum(sigs.adx, 1) : '—';
-  document.getElementById('r-breadth').textContent = sigs.breadth ? fmtNum(sigs.breadth, 2) : '—';
+  const vol  = sigs.volatility || {};
+  const vixVal = vol.india_vix || sigs.vix || 0;
+  const vixZ   = vol.vix_zscore != null ? vol.vix_zscore : null;
+  // VIX Z-score badge color
+  let vixZColor = 'var(--muted)';
+  if (vixZ !== null) {
+    if      (vixZ > 2.0) vixZColor = 'var(--red)';
+    else if (vixZ > 1.0) vixZColor = '#f97316';  // orange
+    else if (vixZ > 0.0) vixZColor = 'var(--yellow)';
+    else                 vixZColor = 'var(--green)';
+  }
+  const vixZBadge = vixZ !== null
+    ? ` <span style="font-size:11px;color:${vixZColor};font-weight:600">[Z:${vixZ.toFixed(2)}]</span>`
+    : '';
+  document.getElementById('r-vix').innerHTML    = (vixVal ? fmtNum(vixVal, 1) : '—') + vixZBadge;
+  const optSigs = sigs.options || {};
+  const niftySigs = sigs.nifty || {};
+  const breadthSigs = sigs.breadth || {};
+  document.getElementById('r-pcr').textContent     = optSigs.pcr    ? fmtNum(optSigs.pcr, 2)    : (sigs.pcr     ? fmtNum(sigs.pcr, 2)     : '—');
+  document.getElementById('r-adx').textContent     = niftySigs.adx  ? fmtNum(niftySigs.adx, 1)  : (sigs.adx     ? fmtNum(sigs.adx, 1)     : '—');
+  document.getElementById('r-breadth').textContent = breadthSigs.ad_ratio != null ? fmtNum(breadthSigs.ad_ratio, 2) : (sigs.breadth ? fmtNum(sigs.breadth, 2) : '—');
 
   const conf = rg.confidence || 0;
   document.getElementById('regime-confidence-bar').style.width  = `${conf}%`;
@@ -2511,6 +2689,9 @@ function renderAnalytics() {
     </tr>`;
   }).join('');
   lucide.createIcons({ nodes: [tbody] });
+
+  // Rolling Sharpe cards (from adaptive data)
+  if (ada.strategies) updateRollingSharpCards(ada.strategies);
 }
 
 /* ═══════════════════════════════════════════════════════════════
@@ -3618,6 +3799,150 @@ function updateCapitalDisplay() {
       (sum < 100 ? ` <span style="color:var(--muted)">(${(100-sum).toFixed(1)}% unallocated reserve)</span>` : '');
   }
 }
+
+// ── Options Chain ─────────────────────────────────────────────────────────────
+async function fetchOptionsChain() {
+  const sym = document.getElementById('oc-symbol').value;
+  try {
+    const data = await api('GET', '/options/chain/' + sym);
+    if (!data) return;
+    document.getElementById('oc-spot').textContent = 'Spot: ₹' + data.spot.toFixed(2);
+    document.getElementById('oc-expiry').textContent = 'Expiry: ' + data.expiry;
+    const tbody = document.getElementById('oc-tbody');
+    tbody.innerHTML = data.chain.map(row => {
+      const pe = row.pe || {};
+      const ce = row.ce || {};
+      const atmStyle = row.atm ? 'style="background:rgba(250,204,21,0.08);font-weight:600"' : '';
+      const atmStrike = row.atm ? '★ ' : '';
+      return `<tr ${atmStyle}>
+        <td>${pe.iv || 0}%</td>
+        <td style="color:#ef4444">${(pe.delta||0).toFixed(3)}</td>
+        <td>${(pe.gamma||0).toFixed(5)}</td>
+        <td style="color:#f59e0b">${(pe.theta||0).toFixed(2)}</td>
+        <td>${(pe.vega||0).toFixed(3)}</td>
+        <td style="text-align:center;font-weight:700;color:${row.atm?'var(--yellow)':'var(--text)'}">${atmStrike}${row.strike}</td>
+        <td>${ce.iv || 0}%</td>
+        <td style="color:#3b82f6">${(ce.delta||0).toFixed(3)}</td>
+        <td>${(ce.gamma||0).toFixed(5)}</td>
+        <td style="color:#f59e0b">${(ce.theta||0).toFixed(2)}</td>
+        <td>${(ce.vega||0).toFixed(3)}</td>
+      </tr>`;
+    }).join('');
+  } catch(e) {
+    const tbody = document.getElementById('oc-tbody');
+    if (tbody) tbody.innerHTML = `<tr><td colspan="11" class="no-data" style="color:var(--red)">Error: ${e.message}</td></tr>`;
+  }
+}
+
+// ── Trade Journal ─────────────────────────────────────────────────────────────
+async function fetchTradeJournal() {
+  const days  = document.getElementById('tj-days').value;
+  const agent = document.getElementById('tj-agent').value;
+  try {
+    const hist  = await api('GET', `/portfolio/trades/history?days=${days}${agent ? '&agent=' + agent : ''}`);
+    const stats = await api('GET', `/portfolio/stats?days=${days}${agent ? '&strategy=' + agent : ''}`);
+
+    // Summary row
+    const s = stats || {};
+    const summaryEl = document.getElementById('tj-summary');
+    if (summaryEl) {
+      summaryEl.innerHTML = `
+        <div class="stat-card"><div class="stat-label">Net P&amp;L</div>
+          <div class="stat-value ${(s.net_pnl||0)>=0?'profit':'loss'}">₹${(s.net_pnl||0).toFixed(0)}</div></div>
+        <div class="stat-card"><div class="stat-label">Gross P&amp;L</div>
+          <div class="stat-value">₹${(s.gross_pnl||0).toFixed(0)}</div></div>
+        <div class="stat-card"><div class="stat-label">Total Costs</div>
+          <div class="stat-value" style="color:var(--red)">₹${(s.total_cost||0).toFixed(0)}</div></div>
+        <div class="stat-card"><div class="stat-label">Win Rate</div>
+          <div class="stat-value">${(s.win_rate||0).toFixed(1)}%</div></div>`;
+    }
+
+    const trades = (hist && hist.trades) ? hist.trades : [];
+    const tbody = document.getElementById('tj-tbody');
+    if (!trades.length) {
+      tbody.innerHTML = '<tr><td colspan="11" class="no-data">No trades found</td></tr>';
+      return;
+    }
+    tbody.innerHTML = trades.map(t => {
+      const net = t.net_pnl || 0;
+      const cls = net >= 0 ? 'profit' : 'loss';
+      return `<tr>
+        <td style="font-size:11px">${t.trade_date||''}</td>
+        <td><span style="color:${agentColor(t.strategy)}">${t.strategy||''}</span></td>
+        <td style="font-weight:600">${t.symbol||''}</td>
+        <td style="color:${t.side==='BUY'?'var(--green)':'var(--red)'}">${t.side||''}</td>
+        <td>₹${(t.entry_price||0).toFixed(2)}</td>
+        <td>₹${(t.exit_price||0).toFixed(2)}</td>
+        <td>${t.quantity||0}</td>
+        <td>₹${(t.gross_pnl||0).toFixed(0)}</td>
+        <td style="color:var(--red)">₹${(t.cost||0).toFixed(0)}</td>
+        <td class="${cls}" style="font-weight:600">₹${net.toFixed(0)}</td>
+        <td style="font-size:11px;color:var(--muted)">${t.exit_reason||''}</td>
+      </tr>`;
+    }).join('');
+  } catch(e) {
+    console.error('Trade journal error:', e);
+  }
+}
+
+function agentColor(agent) {
+  const colors = {intraday:'#3b82f6',scalping:'#8b5cf6',options:'#f59e0b',futures:'#ef4444',swing:'#10b981'};
+  return colors[agent] || '#6b7280';
+}
+
+async function exportTrades() {
+  const days  = document.getElementById('tj-days').value;
+  const agent = document.getElementById('tj-agent').value;
+  const url = `/portfolio/trades/export?days=${days}${agent ? '&strategy=' + agent : ''}`;
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = `trades_${days}d.csv`;
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+}
+
+// ── Rolling Sharpe Cards ──────────────────────────────────────────────────────
+function updateRollingSharpCards(adaptiveSummary) {
+  const grid = document.getElementById('rolling-sharpe-grid');
+  if (!grid || !adaptiveSummary) return;
+  const strategies = ['intraday','scalping','options','futures','swing'];
+  const colors = {intraday:'#3b82f6',scalping:'#8b5cf6',options:'#f59e0b',futures:'#ef4444',swing:'#10b981'};
+  grid.innerHTML = strategies.map(s => {
+    const d = adaptiveSummary[s] || {};
+    const sharpe = d.sharpe_20 != null ? d.sharpe_20 : null;
+    const wr = d.win_rate_20 != null ? (d.win_rate_20 * 100).toFixed(0) : '—';
+    const sharpeDisplay = sharpe != null ? sharpe.toFixed(2) : '—';
+    const sharpeColor = sharpe == null ? 'var(--muted)' : sharpe >= 1.0 ? 'var(--green)' : sharpe >= 0.5 ? 'var(--yellow)' : 'var(--red)';
+    return `<div class="stat-card">
+      <div class="stat-label" style="color:${colors[s]}">${s.charAt(0).toUpperCase()+s.slice(1)}</div>
+      <div class="stat-value" style="color:${sharpeColor};font-size:22px">${sharpeDisplay}</div>
+      <div class="stat-sub">Win rate: ${wr}%</div>
+      <div class="stat-sub">Trades: ${d.adaptation_count||0}</div>
+    </div>`;
+  }).join('');
+}
+
+// ── Keyboard shortcuts ────────────────────────────────────────────────────────
+document.addEventListener('keydown', function(e) {
+  // Only when not in input/textarea
+  if (['INPUT','TEXTAREA','SELECT'].includes(e.target.tagName)) return;
+  if (e.ctrlKey || e.metaKey || e.altKey) return;
+
+  switch(e.key) {
+    case '1': switchTab('overview');     break;
+    case '2': switchTab('orders');       break;
+    case '3': switchTab('options');      break;
+    case '4': switchTab('analytics');    break;
+    case '5': switchTab('settings');     break;
+    case 'r': case 'R': pollAll();       break;
+    case 'k': case 'K':
+      if (confirm('Activate Kill Switch? This will halt all trading.')) {
+        confirmKillSwitch();
+      }
+      break;
+  }
+});
 
 async function saveCapitalAllocation() {
   const _f  = id => { const v = parseFloat(document.getElementById(id)?.value); return isNaN(v) ? undefined : v; };
