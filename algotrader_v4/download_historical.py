@@ -2,7 +2,12 @@
 download_historical.py
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 Download 1 month of OHLCV data for all NSE Top-100 symbols
-across all trading timeframes via TrueData REST.
+across all trading timeframes via Yahoo Finance (yfinance).
+
+Yahoo Finance limits (respected automatically):
+  1m  → max 7 days  (Yahoo hard limit)
+  5m / 15m / 30m → 1 month  (within Yahoo's 60-day limit)
+  1h / 1d        → 1 month
 
 Output:  logs/historical_data/<SYMBOL>/<TIMEFRAME>.csv
          logs/historical_data/download_summary.json
@@ -21,7 +26,6 @@ Timeframes downloaded (by default):
 from __future__ import annotations
 
 import argparse
-import asyncio
 import json
 import sys
 import time
@@ -40,11 +44,28 @@ logger.add(sys.stderr,
 
 ALL_TIMEFRAMES = ["1m", "5m", "15m", "30m", "1h", "1d"]
 
-# Lookback days needed to cover 1 full calendar month (~22 trading days)
-# Use 35 calendar days to guarantee 30 trading-day coverage across weekends/holidays
-LOOKBACK_DAYS = 35
+# Yahoo Finance period string per timeframe
+# 1m is capped at 7d by Yahoo; everything else uses 1mo
+YF_PERIOD: dict[str, str] = {
+    "1m":  "7d",   # Yahoo hard limit for 1-minute data
+    "5m":  "1mo",
+    "15m": "1mo",
+    "30m": "1mo",
+    "1h":  "1mo",
+    "1d":  "1mo",
+}
 
-OUTPUT_DIR = Path("logs/historical_data")
+# Yahoo Finance interval string per timeframe
+YF_INTERVAL: dict[str, str] = {
+    "1m":  "1m",
+    "5m":  "5m",
+    "15m": "15m",
+    "30m": "30m",
+    "1h":  "1h",
+    "1d":  "1d",
+}
+
+OUTPUT_DIR   = Path("logs/historical_data")
 SUMMARY_FILE = OUTPUT_DIR / "download_summary.json"
 
 
@@ -64,6 +85,26 @@ def _save_summary(summary: dict) -> None:
     SUMMARY_FILE.write_text(json.dumps(summary, indent=2, default=str))
 
 
+def _yf_fetch(symbol: str, interval: str, period: str):
+    """Fetch directly from yfinance — no TrueData routing."""
+    import yfinance as yf
+    import pandas as pd
+    ticker = symbol + ".NS"
+    df = yf.download(ticker, period=period, interval=interval,
+                     progress=False, auto_adjust=True)
+    if df.empty:
+        return pd.DataFrame()
+    if isinstance(df.columns, pd.MultiIndex):
+        df.columns = df.columns.get_level_values(0)
+    df = df.rename(columns={"Open": "open", "High": "high", "Low": "low",
+                             "Close": "close", "Volume": "volume"})
+    df.index.name = "date"
+    df = df.reset_index()
+    df["date"] = pd.to_datetime(df["date"])
+    cols = [c for c in ("date", "open", "high", "low", "close", "volume") if c in df.columns]
+    return df[cols].dropna().sort_values("date").reset_index(drop=True)
+
+
 def _download_one(symbol: str, tf: str, resume: bool) -> dict:
     """Download one symbol × timeframe combination. Returns a result dict."""
     out = _out_path(symbol, tf)
@@ -71,10 +112,11 @@ def _download_one(symbol: str, tf: str, resume: bool) -> dict:
     if resume and out.exists() and out.stat().st_size > 100:
         return {"symbol": symbol, "tf": tf, "status": "skipped", "rows": 0}
 
-    from truedata_client import truedata_historical
+    period   = YF_PERIOD.get(tf, "1mo")
+    interval = YF_INTERVAL.get(tf, tf)
 
     t0 = time.monotonic()
-    df = truedata_historical.historical(symbol, "NSE", tf, lookback_days=LOOKBACK_DAYS)
+    df = _yf_fetch(symbol, interval, period)
     elapsed = round(time.monotonic() - t0, 2)
 
     if df.empty:
@@ -84,20 +126,34 @@ def _download_one(symbol: str, tf: str, resume: bool) -> dict:
     out.parent.mkdir(parents=True, exist_ok=True)
     df.to_csv(out, index=False)
 
-    return {"symbol": symbol, "tf": tf, "status": "ok",
-            "rows": len(df), "elapsed_s": elapsed,
-            "from": str(df["date"].iloc[0]) if "date" in df.columns else "",
-            "to":   str(df["date"].iloc[-1]) if "date" in df.columns else ""}
+    return {
+        "symbol":    symbol,
+        "tf":        tf,
+        "status":    "ok",
+        "rows":      len(df),
+        "elapsed_s": elapsed,
+        "from":      str(df["date"].iloc[0])  if "date" in df.columns else "",
+        "to":        str(df["date"].iloc[-1]) if "date" in df.columns else "",
+    }
 
 
 # ── Main ───────────────────────────────────────────────────────────────────────
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Download 1-month historical data from TrueData")
-    parser.add_argument("--symbols",    default="",  help="Comma-separated symbols (default: all NSE Top 100)")
-    parser.add_argument("--timeframes", default=",".join(ALL_TIMEFRAMES), help="Comma-separated timeframes")
-    parser.add_argument("--resume",     action="store_true", help="Skip already-downloaded files")
-    parser.add_argument("--workers",    type=int, default=8, help="Parallel download threads (default 8)")
+    parser = argparse.ArgumentParser(
+        description="Download 1-month historical OHLCV data from Yahoo Finance")
+    parser.add_argument("--symbols",
+                        default="",
+                        help="Comma-separated symbols (default: all NSE Top 100)")
+    parser.add_argument("--timeframes",
+                        default=",".join(ALL_TIMEFRAMES),
+                        help="Comma-separated timeframes")
+    parser.add_argument("--resume",
+                        action="store_true",
+                        help="Skip already-downloaded files")
+    parser.add_argument("--workers",
+                        type=int, default=8,
+                        help="Parallel download threads (default 8)")
     args = parser.parse_args()
 
     # Resolve symbol list
@@ -109,33 +165,35 @@ def main() -> None:
 
     timeframes = [t.strip() for t in args.timeframes.split(",") if t.strip()]
 
+    # Validate timeframes
+    unknown = [t for t in timeframes if t not in YF_PERIOD]
+    if unknown:
+        logger.error("Unknown timeframes: {}. Supported: {}", unknown, list(YF_PERIOD))
+        sys.exit(1)
+
     tasks = [(sym, tf) for sym in symbols for tf in timeframes]
     total = len(tasks)
 
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
     summary = _load_summary()
     summary["started"]    = datetime.now().isoformat()
+    summary["source"]     = "Yahoo Finance (yfinance)"
     summary["symbols"]    = symbols
     summary["timeframes"] = timeframes
     summary["total"]      = total
 
     logger.info("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
-    logger.info("TrueData Historical Downloader")
-    logger.info("  Symbols    : {} ({} total)", len(symbols), "all NSE 100" if not args.symbols else "custom")
+    logger.info("Yahoo Finance Historical Downloader")
+    logger.info("  Symbols    : {} ({})",
+                len(symbols), "all NSE Top 100" if not args.symbols else "custom")
     logger.info("  Timeframes : {}", ", ".join(timeframes))
-    logger.info("  Lookback   : {} calendar days (~1 month)", LOOKBACK_DAYS)
+    logger.info("  Periods    : {}",
+                "  ".join(f"{tf}={YF_PERIOD[tf]}" for tf in timeframes))
     logger.info("  Total tasks: {}", total)
     logger.info("  Output dir : {}", OUTPUT_DIR)
     logger.info("  Resume     : {}", args.resume)
+    logger.info("  Note       : 1m data limited to 7 days (Yahoo Finance hard limit)")
     logger.info("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
-
-    # Check TrueData connectivity
-    from truedata_client import _get_td
-    td = _get_td()
-    if td is None:
-        logger.error("TrueData not connected — check TRUEDATA_USERNAME / TRUEDATA_PASSWORD in .env")
-        sys.exit(1)
-    logger.info("TrueData connected. Starting downloads...")
 
     done = 0
     ok = skipped = empty = failed = 0
@@ -155,40 +213,38 @@ def main() -> None:
 
             done += 1
             st = result["status"]
-            if st == "ok":       ok      += 1
+            if   st == "ok":      ok      += 1
             elif st == "skipped": skipped += 1
-            elif st == "empty":  empty   += 1
+            elif st == "empty":   empty   += 1
             else:                 failed  += 1
 
-            key = f"{sym}_{tf}"
-            summary["results"][key] = result
+            summary["results"][f"{sym}_{tf}"] = result
 
             if st == "ok":
-                logger.info("[{:>4}/{}] ✓  {:>12} {:>4}  {:>5} rows  ({:.1f}s)",
+                logger.info("[{:>4}/{}] ✓  {:>14} {:>4}  {:>5} rows  ({:.1f}s)",
                             done, total, sym, tf,
                             result.get("rows", 0), result.get("elapsed_s", 0))
             elif st == "skipped":
-                logger.info("[{:>4}/{}] –  {:>12} {:>4}  already exists",
+                logger.info("[{:>4}/{}] –  {:>14} {:>4}  already exists",
                             done, total, sym, tf)
             elif st == "empty":
-                logger.warning("[{:>4}/{}] ⚠  {:>12} {:>4}  no data returned",
+                logger.warning("[{:>4}/{}] ⚠  {:>14} {:>4}  no data returned",
                                done, total, sym, tf)
             else:
-                logger.error("[{:>4}/{}] ✗  {:>12} {:>4}  {}",
-                             done, total, sym, tf, result.get("error", "unknown error"))
+                logger.error("[{:>4}/{}] ✗  {:>14} {:>4}  {}",
+                             done, total, sym, tf, result.get("error", "?"))
 
-            # Save running summary every 50 tasks
             if done % 50 == 0:
                 _save_summary(summary)
 
     elapsed_total = round(time.monotonic() - t_start, 1)
 
-    summary["finished"]       = datetime.now().isoformat()
-    summary["elapsed_s"]      = elapsed_total
-    summary["count_ok"]       = ok
-    summary["count_skipped"]  = skipped
-    summary["count_empty"]    = empty
-    summary["count_failed"]   = failed
+    summary["finished"]      = datetime.now().isoformat()
+    summary["elapsed_s"]     = elapsed_total
+    summary["count_ok"]      = ok
+    summary["count_skipped"] = skipped
+    summary["count_empty"]   = empty
+    summary["count_failed"]  = failed
     _save_summary(summary)
 
     logger.info("")
