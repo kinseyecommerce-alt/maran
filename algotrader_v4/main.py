@@ -464,6 +464,60 @@ def set_token(req: TokenRequest):
     t = kite_client.set_access_token(req.request_token, req.access_token)
     return {"status": "ok", "access_token": t[:6] + "…"}
 
+@app.get("/auth/upstox/login-url", tags=["Auth"])
+def upstox_login_url():
+    """Return the Upstox OAuth2 login URL."""
+    from brokers.upstox_broker import UpstoxBroker
+    broker = UpstoxBroker()
+    url = broker.login_url()
+    return {"login_url": url, "broker": "upstox"}
+
+
+@app.get("/auth/upstox/callback", tags=["Auth"], include_in_schema=False)
+async def upstox_callback(code: str = Query(...)):
+    """Upstox redirects here after OAuth with auth code. Exchanges code for access token."""
+    if not code:
+        return HTMLResponse(
+            "<html><head><meta http-equiv='refresh' content='3;url=/dashboard'></head>"
+            "<body style='font-family:sans-serif;background:#0d1117;color:#e6edf3;"
+            "display:flex;align-items:center;justify-content:center;height:100vh'>"
+            "<div style='text-align:center'><div style='font-size:2.5rem'>❌</div>"
+            "<h2 style='color:#f85149'>Upstox login failed.</h2>"
+            "<p style='color:#8b949e'>Redirecting to dashboard…</p></div></body></html>",
+            status_code=400,
+        )
+    try:
+        from brokers.upstox_broker import UpstoxBroker
+        broker = UpstoxBroker()
+        token = broker.set_access_token(request_token=code)
+        settings.upstox_access_token = token
+        return HTMLResponse(f"""
+        <html><head><title>Upstox Connected</title>
+        <meta http-equiv='refresh' content='2;url=/dashboard'>
+        </head>
+        <body style="font-family:sans-serif;background:#0d1117;color:#e6edf3;
+                     display:flex;align-items:center;justify-content:center;height:100vh">
+          <div style="text-align:center">
+            <div style="font-size:3rem">✅</div>
+            <h2 style="color:#3fb950">Upstox Connected!</h2>
+            <p style="color:#8b949e">Token: {token[:8]}… — Redirecting to dashboard…</p>
+          </div>
+        </body></html>
+        """)
+    except Exception as e:
+        logger.error("Upstox callback error: {}", e)
+        return HTMLResponse(
+            "<html><head><meta http-equiv='refresh' content='3;url=/dashboard'></head>"
+            f"<body style='font-family:sans-serif;background:#0d1117;color:#e6edf3;"
+            f"display:flex;align-items:center;justify-content:center;height:100vh'>"
+            f"<div style='text-align:center'><div style='font-size:2.5rem'>❌</div>"
+            f"<h2 style='color:#f85149'>Token exchange failed.</h2>"
+            f"<p style='color:#8b949e'>{e}</p>"
+            f"<p style='color:#8b949e'>Redirecting to dashboard…</p></div></body></html>",
+            status_code=500,
+        )
+
+
 @app.post("/auth/kite/refresh", tags=["Auth"])
 async def kite_token_refresh():
     """Manually trigger Kite auto-login via Playwright (same as 08:50 IST scheduler job).
@@ -1375,9 +1429,91 @@ async def n8n_inbound(request: Request):
         raise HTTPException(422, f"Unknown action: {action!r}")
 
 
+# ── Trade History & Stats (Phase 3 persistence) ──────────────────────────────
+
+@app.get("/portfolio/trades/history", tags=["Portfolio"])
+def trade_history(days: int = 30):
+    """Return trade history from SQLite state store."""
+    from state_store import get_trade_history
+    return {"trades": get_trade_history(days), "days": days}
+
+
+@app.get("/portfolio/trades/export", tags=["Portfolio"])
+def export_trades(days: int = 30):
+    """Download trade history as CSV."""
+    from state_store import get_trade_history
+    import csv, io
+    trades = get_trade_history(days)
+    output = io.StringIO()
+    if trades:
+        writer = csv.DictWriter(output, fieldnames=list(trades[0].keys()))
+        writer.writeheader()
+        writer.writerows(trades)
+    else:
+        output.write("id,symbol,strategy,side,entry_price,exit_price,quantity,gross_pnl,net_pnl,cost,exit_reason,regime,entry_time,exit_time,gate_confidence,trade_date\n")
+    csv_data = output.getvalue()
+    return StreamingResponse(
+        iter([csv_data]),
+        media_type="text/csv",
+        headers={"Content-Disposition": f"attachment; filename=trades_last_{days}d.csv"},
+    )
+
+
+@app.get("/portfolio/stats", tags=["Portfolio"])
+def portfolio_stats(strategy: str | None = None, days: int = 30):
+    """Return aggregated trade statistics from SQLite state store."""
+    from state_store import get_trade_stats, get_daily_pnl
+    stats = get_trade_stats(strategy=strategy, days=days)
+    stats["today_pnl"] = get_daily_pnl()
+    return stats
+
+
+@app.get("/backtest/stress/{symbol}/{strategy}", tags=["Backtest"])
+def stress_test_endpoint(symbol: str, strategy: str):
+    """Run stress test on a symbol/strategy across adversarial scenarios."""
+    symbol = _clean_symbol(symbol)
+    strategy = _clean_strategy(strategy)
+    result = backtest_engine.stress_test(symbol, strategy)
+    return result
+
+
+@app.get("/broker/status", tags=["System"])
+def broker_status():
+    """Return active broker name and credential check."""
+    active = getattr(settings, "active_broker", "zerodha")
+    if active == "upstox":
+        from brokers.upstox_broker import UpstoxBroker
+        creds = UpstoxBroker().validate_credentials()
+    else:
+        creds = kite_client.validate_credentials()
+    return {
+        "active_broker": active,
+        "credentials":   creds,
+    }
+
+
+@app.get("/sector/map", tags=["System"])
+def sector_map_endpoint():
+    """Return the full sector→symbol mapping."""
+    import json
+    from pathlib import Path
+    p = Path(__file__).parent / "sector_map.json"
+    if not p.exists():
+        raise HTTPException(404, "sector_map.json not found")
+    return json.loads(p.read_text())
+
+
 # ── Startup ───────────────────────────────────────────────────────────────────
 @app.on_event("startup")
 async def on_startup():
+    # Initialise SQLite state store
+    from state_store import init_db, get_daily_pnl
+    init_db()
+    today_pnl = get_daily_pnl()
+    if today_pnl != 0:
+        risk_manager.daily_realised_pnl = today_pnl
+        logger.info("Restored today's P&L from DB: ₹{:.0f}", today_pnl)
+
     tick_engine.start_loop()
     atomic_bracket_engine.ws_broadcast = broadcast
     logger.info("FastAPI startup: tick engine + atomic bracket engine launched")
