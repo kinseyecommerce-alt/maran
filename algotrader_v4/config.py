@@ -73,7 +73,7 @@ class Settings(BaseSettings):
     # Per-agent stop-loss % (intraday/scalping/futures/swing = price %; options = premium %)
     sl_pct_intraday:  float = 1.5
     sl_pct_scalping:  float = 0.3
-    sl_pct_options:   float = 30.0
+    sl_pct_options:   float = 25.0
     sl_pct_futures:   float = 1.0
     sl_pct_swing:     float = 3.0
 
