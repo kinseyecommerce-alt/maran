@@ -126,6 +126,8 @@ class LiveIndicators:
     stoch_rsi_d: float = 50.0
     # Williams %R (14) — range -100 to 0; >-20 overbought, <-80 oversold
     williams_r:  float = -50.0
+    # ADX (14) — 0=no trend, 25+=trending, 40+=strong trend
+    adx_14:      float = 0.0
     # Ichimoku Cloud (9/26/52) — cloud_dir: UP / DOWN / NEUTRAL
     ichimoku_tenkan:    float = 0.0
     ichimoku_kijun:     float = 0.0
@@ -388,6 +390,14 @@ class IndicatorCalc:
 
             if n >= 14:
                 ind.williams_r = _williams_r(close, high, low)
+
+            if n >= 14:
+                try:
+                    ind.adx_14 = float(
+                        ta.trend.ADXIndicator(high, low, close, 14).adx().iloc[-1]
+                    )
+                except Exception:
+                    ind.adx_14 = 0.0
 
             if n >= 52:
                 (ind.ichimoku_tenkan, ind.ichimoku_kijun,

@@ -17,10 +17,12 @@ _pattern_enabled: dict[str, dict[str, bool]] = {
         "VWAP_TREND", "EMA_PULLBACK", "ORB_BREAK", "BREAKOUT", "VWAP_RECLAIM",
         "TTM_SQUEEZE", "VWAP_BAND_REVERT",
         "STOCHRSI_CROSS", "HMA_FLIP", "WILLIAMS_REVERSAL", "GAP_PLAY",
+        "PREV_DAY_LEVEL", "MOMENTUM_SURGE",
     ]},
     "scalping": {p: True for p in [
         "EMA9_CROSS", "EMA921_CROSS", "VWAP_BOUNCE", "SURGE", "ORB",
         "SUPERTREND_FLIP", "STOCHRSI_EXTREME", "WILLIAMS_SCALP", "HMA_MICRO",
+        "VWAP_SCALP", "EMA9_MOMENTUM", "SQUEEZE_RELEASE", "MICROTREND",
     ]},
     "options": {p: True for p in [
         "EMA_CROSS", "TREND_PULL", "ORB", "VWAP_RECLAIM", "BB_SQUEEZE",
@@ -30,6 +32,7 @@ _pattern_enabled: dict[str, dict[str, bool]] = {
     "futures": {p: True for p in [
         "EMA_TREND", "ORB_FUTURES", "VWAP_PULL", "MACD_CROSS", "ATR_BREAK",
         "HMA_TREND", "STOCHRSI_FUTURES", "ICHIMOKU_FUTURES",
+        "VOL_SURGE", "MULTI_TF_ALIGN",
     ]},
     "swing": {p: True for p in [
         "EMA50_BOUNCE", "EMA50_SHORT", "MACD_SWING",

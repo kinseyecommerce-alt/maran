@@ -55,6 +55,7 @@ class IntradayAgent(BaseAgent):
         self._prev_above_vwap:  dict = {}
         self._prev_ltp:         dict = {}
         self._prev_rsi:         dict = {}
+        self._prev_rsi7:        dict = {}   # sym → rsi_7 last tick (MOMENTUM_SURGE)
         self._prev_squeeze:     dict = {}   # sym → squeeze_on last tick
         self._prev_stochrsi_k:  dict = {}   # sym → StochRSI K last tick
         self._prev_hma_dir:     dict = {}   # sym → hma_dir last tick
@@ -81,7 +82,8 @@ class IntradayAgent(BaseAgent):
                        self._pat_orb_break, self._pat_breakout, self._pat_vwap_reclaim,
                        self._pat_ttm_squeeze, self._pat_vwap_band_revert,
                        self._pat_stochrsi_cross, self._pat_hma_flip,
-                       self._pat_williams_reversal, self._pat_gap_play):
+                       self._pat_williams_reversal, self._pat_gap_play,
+                       self._pat_prev_day_level, self._pat_momentum_surge):
             try:
                 action, base, pname = pat_fn(sym, snap, ind, ltp, t)
             except Exception:
@@ -308,6 +310,37 @@ class IntradayAgent(BaseAgent):
             return "SELL", 5, "GAP_PLAY"
         return "", 0, ""
 
+    def _pat_prev_day_level(self, sym, snap, ind, ltp, t):
+        """15-bar high/low breakout — price breaks recent resistance/support with volume."""
+        import bot_state
+        if not bot_state.is_pattern_enabled("intraday", "PREV_DAY_LEVEL"):
+            return "", 0, ""
+        if len(snap.candles_1min) < 15:
+            return "", 0, ""
+        last15    = snap.candles_1min[-15:]
+        h15       = max(c.high for c in last15)
+        l15       = min(c.low  for c in last15)
+        prev_ltp  = self._prev_ltp.get(sym, ltp)
+        broke_up   = prev_ltp <= h15 and ltp > h15 and ind.volume_ratio >= 1.5 and ind.macd_hist > 0
+        broke_down = prev_ltp >= l15 and ltp < l15 and ind.volume_ratio >= 1.5 and ind.macd_hist < 0
+        if broke_up:   return "BUY",  4, "PREV_DAY_LEVEL"
+        if broke_down: return "SELL", 4, "PREV_DAY_LEVEL"
+        return "", 0, ""
+
+    def _pat_momentum_surge(self, sym, snap, ind, ltp, t):
+        """RSI7 surges into overbought/oversold zone with 2× volume — explosive momentum entry."""
+        import bot_state
+        if not bot_state.is_pattern_enabled("intraday", "MOMENTUM_SURGE"):
+            return "", 0, ""
+        prev_rsi7 = self._prev_rsi7.get(sym, ind.rsi_7)
+        if (prev_rsi7 < 63 and ind.rsi_7 >= 65
+                and ind.volume_ratio >= 2.0 and ind.ema9 > ind.ema21 > 0):
+            return "BUY",  5, "MOMENTUM_SURGE"
+        if (prev_rsi7 > 37 and ind.rsi_7 <= 35
+                and ind.volume_ratio >= 2.0 and ind.ema9 < ind.ema21 > 0):
+            return "SELL", 5, "MOMENTUM_SURGE"
+        return "", 0, ""
+
     # ── Context bonus (+0 to +6 points added to every pattern) ───────────────
 
     def _ctx_bonus(self, action: str, sym: str, ind: LiveIndicators, ltp: float) -> int:
@@ -378,6 +411,7 @@ class IntradayAgent(BaseAgent):
             self._prev_above_vwap[sym] = ltp > ind.vwap
         self._prev_ltp[sym]         = ltp
         self._prev_rsi[sym]         = ind.rsi_14
+        self._prev_rsi7[sym]        = ind.rsi_7
         self._prev_squeeze[sym]     = ind.squeeze_on
         self._prev_stochrsi_k[sym]  = ind.stoch_rsi_k
         self._prev_hma_dir[sym]     = ind.hma_dir
@@ -1144,6 +1178,7 @@ class ScalpingAgent(BaseAgent):
     _prev_stochrsi_k:  dict[str, float]    = {}   # StochRSI K last tick
     _prev_hma_dir_sc:  dict[str, str]      = {}   # HMA direction last tick (scalping)
     _prev_williams_sc: dict[str, float]    = {}   # Williams %R last tick (scalping)
+    _prev_squeeze_sc:  dict[str, bool]    = {}   # TTM squeeze state last tick (scalping)
     _orb_high:        dict[str, float]    = {}
     _orb_low:         dict[str, float]    = {}
     _last_candle_ts:  dict[str, object]   = {}   # last candle that triggered SURGE
@@ -1158,8 +1193,8 @@ class ScalpingAgent(BaseAgent):
         sym = snap.symbol
         ind = snap.indicators
         ltp = snap.tick.ltp
-        now = datetime.now()
-        t   = now.time()
+        now = now_ist()
+        t   = now.time().replace(tzinfo=None)
 
         if not ind.ema9:
             return "HOLD", None
@@ -1199,6 +1234,7 @@ class ScalpingAgent(BaseAgent):
         self._prev_stochrsi_k[sym]   = ind.stoch_rsi_k
         self._prev_hma_dir_sc[sym]   = ind.hma_dir
         self._prev_williams_sc[sym]  = ind.williams_r
+        self._prev_squeeze_sc[sym]   = ind.squeeze_on
 
         # ── Build / update opening-range high/low ────────────────────────────
         self._update_orb(sym, snap, t)
@@ -1356,6 +1392,47 @@ class ScalpingAgent(BaseAgent):
                 if prev_hdir != "DOWN" and ind.hma_dir == "DOWN" and spread_pct < 0.03 and ind.volume_ratio >= 1.2:
                     return "SELL", "HMA_MICRO"
 
+        # Pattern 10: VWAP scalp — price within 0.3% of VWAP + EMA direction + volume
+        if _bs.is_pattern_enabled("scalping", "VWAP_SCALP"):
+            if ind.vwap and ind.vwap > 0 and ind.ema21 > 0:
+                dist_pct = abs(ltp - ind.vwap) / ind.vwap
+                if dist_pct < 0.003:
+                    if ltp >= ind.vwap and ind.ema9 > ind.ema21 and ind.volume_ratio >= 1.3:
+                        return "BUY", "VWAP_SCALP"
+                    if ltp < ind.vwap and ind.ema9 < ind.ema21 and ind.volume_ratio >= 1.3:
+                        return "SELL", "VWAP_SCALP"
+
+        # Pattern 11: EMA9 momentum run — 3 consecutive closes same direction + RSI zone
+        if _bs.is_pattern_enabled("scalping", "EMA9_MOMENTUM"):
+            if len(snap.candles_1min) >= 3 and ind.ema21 > 0:
+                last3  = snap.candles_1min[-3:]
+                closes = [c.close for c in last3]
+                if closes[0] < closes[1] < closes[2] and ind.rsi_7 > 60 and ind.ema9 > ind.ema21:
+                    return "BUY",  "EMA9_MOMENTUM"
+                if closes[0] > closes[1] > closes[2] and ind.rsi_7 < 40 and ind.ema9 < ind.ema21:
+                    return "SELL", "EMA9_MOMENTUM"
+
+        # Pattern 12: TTM Squeeze release — first bar squeeze exits with momentum
+        if _bs.is_pattern_enabled("scalping", "SQUEEZE_RELEASE"):
+            prev_sq = self._prev_squeeze_sc.get(sym, True)
+            if prev_sq and not ind.squeeze_on and ind.squeeze_momentum != 0:
+                if ind.squeeze_momentum > 0 and ind.ema9 > ind.ema21 > 0:
+                    return "BUY",  "SQUEEZE_RELEASE"
+                if ind.squeeze_momentum < 0 and ind.ema9 < ind.ema21 > 0:
+                    return "SELL", "SQUEEZE_RELEASE"
+
+        # Pattern 13: Microtrend — 5 consecutive closes with VWAP alignment + volume
+        if _bs.is_pattern_enabled("scalping", "MICROTREND"):
+            if len(snap.candles_1min) >= 5 and ind.vwap > 0 and ind.ema9 > 0:
+                last5  = snap.candles_1min[-5:]
+                closes = [c.close for c in last5]
+                if (all(closes[i] < closes[i+1] for i in range(4))
+                        and ltp > ind.vwap and ind.volume_ratio >= 1.2):
+                    return "BUY",  "MICROTREND"
+                if (all(closes[i] > closes[i+1] for i in range(4))
+                        and ltp < ind.vwap and ind.volume_ratio >= 1.2):
+                    return "SELL", "MICROTREND"
+
         return "HOLD", ""
 
     # ── ORB builder ───────────────────────────────────────────────────────────
@@ -1400,8 +1477,9 @@ class ScalpingAgent(BaseAgent):
             score += 1
 
         # 4. ADX ≥20 (some trend present)
-        if ind.adx_14 >= 20:
-            score += 1; reasons.append(f"ADX{ind.adx_14:.0f}")
+        adx = getattr(ind, 'adx_14', 0.0)
+        if adx >= 20:
+            score += 1; reasons.append(f"ADX{adx:.0f}")
 
         # 5. MACD histogram direction
         if (is_buy and ind.macd_hist > 0) or (not is_buy and ind.macd_hist < 0):
@@ -1564,6 +1642,8 @@ class FuturesAgent(BaseAgent):
     _prev_hma_dir_fut:   dict = {}   # sym → str (HMA direction)
     _prev_ema_bull:      dict = {}   # sym → bool (EMA_TREND first-bar detection)
     _prev_ema_bear:      dict = {}   # sym → bool (EMA_TREND first-bar detection)
+    _ema_bull_streak:    dict = {}   # sym → int (consecutive bull-aligned bars)
+    _ema_bear_streak:    dict = {}   # sym → int (consecutive bear-aligned bars)
 
     def evaluate_tick(self, snap: MarketSnapshot) -> tuple[str, Optional[dict]]:
         ind = snap.indicators
@@ -1588,6 +1668,8 @@ class FuturesAgent(BaseAgent):
             self._pat_hma_trend,
             self._pat_stochrsi_futures,
             self._pat_ichimoku_futures,
+            self._pat_vol_surge,
+            self._pat_multi_tf_align,
         ]
         for pat_fn in patterns:
             try:
@@ -1784,6 +1866,32 @@ class FuturesAgent(BaseAgent):
         self._day_high[sym] = max(self._day_high.get(sym, ltp), ltp)
         self._day_low[sym]  = min(self._day_low.get(sym, ltp), ltp)
 
+    def _pat_vol_surge(self, sym, snap, ind, ltp, t):
+        """Volume explosion (≥1.8×) confirming strong EMA trend + MACD."""
+        import bot_state
+        if not bot_state.is_pattern_enabled("futures", "VOL_SURGE"):
+            return "", 0, ""
+        if ind.volume_ratio >= 1.8 and ind.ema9 > ind.ema21 > ind.ema50 > 0 and ind.macd_hist > 0:
+            return "LONG",  5, "VOL_SURGE"
+        if (ind.volume_ratio >= 1.8 and ind.ema9 < ind.ema21
+                and ind.ema21 < ind.ema50 and ind.ema50 > 0 and ind.macd_hist < 0):
+            return "SHORT", 5, "VOL_SURGE"
+        return "", 0, ""
+
+    def _pat_multi_tf_align(self, sym, snap, ind, ltp, t):
+        """EMA alignment sustained exactly 3 bars — momentum entry on persistence."""
+        import bot_state
+        if not bot_state.is_pattern_enabled("futures", "MULTI_TF_ALIGN"):
+            return "", 0, ""
+        streak_bull = self._ema_bull_streak.get(sym, 0)
+        streak_bear = self._ema_bear_streak.get(sym, 0)
+        # Fire on exactly the 3rd consecutive aligned bar (fresh, not late)
+        if streak_bull == 3 and ind.macd_hist > 0 and ind.vwap > 0 and ltp > ind.vwap:
+            return "LONG",  5, "MULTI_TF_ALIGN"
+        if streak_bear == 3 and ind.macd_hist < 0 and ind.vwap > 0 and ltp < ind.vwap:
+            return "SHORT", 5, "MULTI_TF_ALIGN"
+        return "", 0, ""
+
     def _update_state(self, sym: str, ind: LiveIndicators, ltp: float) -> None:
         if ind.vwap and ind.vwap > 0:
             self._prev_above_vwap[sym] = ltp > ind.vwap
@@ -1796,6 +1904,15 @@ class FuturesAgent(BaseAgent):
                                     and 50 <= ind.rsi_14 <= 72 and ind.macd_hist > 0)
         self._prev_ema_bear[sym] = (ind.ema9 < ind.ema21 < ind.ema50 > 0
                                     and 28 <= ind.rsi_14 <= 50 and ind.macd_hist < 0)
+        # MULTI_TF_ALIGN streak counters
+        if ind.ema9 > ind.ema21 > ind.ema50 > 0 and 50 <= ind.rsi_14 <= 75:
+            self._ema_bull_streak[sym] = self._ema_bull_streak.get(sym, 0) + 1
+        else:
+            self._ema_bull_streak[sym] = 0
+        if ind.ema9 < ind.ema21 < ind.ema50 and ind.ema50 > 0 and 25 <= ind.rsi_14 <= 50:
+            self._ema_bear_streak[sym] = self._ema_bear_streak.get(sym, 0) + 1
+        else:
+            self._ema_bear_streak[sym] = 0
 
     def _futures_symbol(self, underlying: str) -> str:
         from datetime import date, timedelta
@@ -1814,13 +1931,15 @@ class FuturesAgent(BaseAgent):
         side = pos.get("side", "LONG")
         chg  = ((ltp - entry) / entry * 100) if side == "LONG" else ((entry - ltp) / entry * 100)
 
-        if chg <= -0.5:
-            return True, f"Futures SL -0.5% ₹{ltp:.2f}"
-        if chg >= 1.2:
-            return True, f"Futures TGT +1.2% ₹{ltp:.2f}"
-        if chg >= 0.8 and ind.momentum in ("WEAK_UP", "NEUTRAL", "WEAK_DOWN"):
-            return True, f"Futures +0.8% momentum fading"
-        if datetime.now().time() >= time(14, 55):
+        sl_pct  = settings.sl_pct_futures
+        tgt_pct = settings.tgt_pct_futures
+        if chg <= -sl_pct:
+            return True, f"Futures SL -{sl_pct}% ₹{ltp:.2f}"
+        if chg >= tgt_pct:
+            return True, f"Futures TGT +{tgt_pct}% ₹{ltp:.2f}"
+        if chg >= tgt_pct * 0.6 and ind.momentum in ("WEAK_UP", "NEUTRAL", "WEAK_DOWN"):
+            return True, f"Futures +{tgt_pct*0.6:.1f}% momentum fading"
+        if now_ist().time().replace(tzinfo=None) >= time(14, 55):
             return True, "Auto square-off 2:55 PM"
         return False, ""
 
