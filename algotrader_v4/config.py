@@ -169,6 +169,11 @@ class Settings(BaseSettings):
     port: int = 8000
     allowed_origins: str = "http://localhost:3000,http://localhost:5173"
 
+    # SEBI IP whitelist — comma-separated IPs pre-loaded at startup.
+    # Empty = whitelist disabled (all IPs allowed on order/kill-switch routes).
+    # In production set to your static outbound IP e.g. "1.2.3.4"
+    sebi_whitelisted_ips: str = ""
+
     @field_validator("squareoff_time")
     @classmethod
     def validate_squareoff_time(cls, v: str) -> str:

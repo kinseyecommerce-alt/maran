@@ -1609,6 +1609,14 @@ async def on_startup():
         risk_manager.daily_realised_pnl = today_pnl
         logger.info("Restored today's P&L from DB: ₹{:.0f}", today_pnl)
 
+    # Load SEBI IP whitelist from env at startup so restarts don't reset it
+    if settings.sebi_whitelisted_ips:
+        for ip in settings.sebi_whitelisted_ips.split(","):
+            ip = ip.strip()
+            if ip:
+                sebi_compliance.add_whitelisted_ip(ip)
+        logger.info("SEBI: loaded {} whitelisted IP(s) from env", len(sebi_compliance._whitelisted_ips))
+
     tick_engine.start_loop()
     atomic_bracket_engine.ws_broadcast = broadcast
     logger.info("FastAPI startup: tick engine + atomic bracket engine launched")
