@@ -1683,10 +1683,26 @@
           <div style="margin-top:14px;font-size:12px;color:var(--muted);margin-bottom:8px">
             Save your API key &amp; secret in <em>Kite Accounts</em> above, then click Authorize.
           </div>
-          <div style="margin-top:4px">
+          <div style="display:flex;gap:8px;flex-wrap:wrap;margin-top:4px">
             <button class="btn btn-blue btn-sm" onclick="connectKiteOAuth()">
               <i data-lucide="log-in"></i> Authorize with Kite
             </button>
+            <button class="btn btn-sm" style="background:var(--surface2)" onclick="fetchKiteStatus()">
+              <i data-lucide="refresh-cw"></i> Refresh Status
+            </button>
+          </div>
+
+          <!-- Manual token paste (for when OAuth callback already ran) -->
+          <div style="margin-top:20px;padding-top:16px;border-top:1px solid var(--border)">
+            <label style="font-size:12px;color:var(--muted);display:block;margin-bottom:6px">
+              Paste Access Token manually (if OAuth callback already ran)
+            </label>
+            <div style="display:flex;gap:8px">
+              <input id="kite-manual-token" type="text" class="risk-input" style="flex:1;font-size:12px"
+                     placeholder="kite access token…" autocomplete="off"/>
+              <button class="btn btn-blue btn-sm" onclick="setKiteManualToken()">Set</button>
+            </div>
+            <div id="kite-manual-msg" style="font-size:11px;margin-top:6px;min-height:16px"></div>
           </div>
         </div>
 
@@ -2820,6 +2836,44 @@ async function connectKiteOAuth() {
     }
   } catch (e) {
     showToast('Error fetching Kite login URL: ' + e.message, 'error');
+  }
+}
+
+async function fetchKiteStatus() {
+  try {
+    const d = await api('GET', '/auth/kite-status');
+    if (d) {
+      const stxt = document.getElementById('settings-kite-status');
+      if (stxt) stxt.textContent = d.connected ? `Connected (${d.user_id || 'OK'})` : 'Not connected';
+    }
+    updateKiteStatus();
+  } catch (e) {
+    const stxt = document.getElementById('settings-kite-status');
+    if (stxt) stxt.textContent = 'Error: ' + e.message;
+  }
+}
+
+async function setKiteManualToken() {
+  const token = (document.getElementById('kite-manual-token')?.value || '').trim();
+  const msgEl = document.getElementById('kite-manual-msg');
+  if (!token) {
+    msgEl.style.color = 'var(--red)';
+    msgEl.textContent = 'Paste a token first';
+    return;
+  }
+  msgEl.style.color = 'var(--muted)';
+  msgEl.textContent = 'Setting…';
+  try {
+    const d = await api('POST', '/auth/token', { access_token: token });
+    if (d) {
+      msgEl.style.color = 'var(--green)';
+      msgEl.textContent = 'Token set — broker connected';
+      document.getElementById('kite-manual-token').value = '';
+      fetchKiteStatus();
+    }
+  } catch (e) {
+    msgEl.style.color = 'var(--red)';
+    msgEl.textContent = e.message;
   }
 }
 
