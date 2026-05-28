@@ -1,0 +1,38 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<link rel="stylesheet" href="../colors_and_type.css">
+<style>
+  body { margin:0; font-family:var(--font-sans); background:var(--bg-app); padding:18px; display:flex; gap:28px; }
+  .block { }
+  .lbl { font-size:11px; font-weight:600; color:var(--fg2); margin-bottom:10px; }
+  .scale .bar { display:flex; align-items:center; gap:10px; margin-bottom:6px; }
+  .scale .swatch { height:14px; background:var(--brand-tint-line); border-radius:2px; }
+  .scale .t { font-family:var(--font-mono); font-size:10px; color:var(--fg3); }
+  .dims div { font-family:var(--font-mono); font-size:11px; color:var(--fg2); padding:4px 0; border-bottom:1px solid var(--line-subtle); }
+  .dims b { color:var(--fg1); }
+</style>
+</head>
+<body>
+  <div class="block">
+    <div class="lbl">Spacing scale (4px base)</div>
+    <div class="scale">
+      <div class="bar"><div class="swatch" style="width:4px"></div><span class="t">1 · 4px</span></div>
+      <div class="bar"><div class="swatch" style="width:8px"></div><span class="t">2 · 8px</span></div>
+      <div class="bar"><div class="swatch" style="width:12px"></div><span class="t">3 · 12px</span></div>
+      <div class="bar"><div class="swatch" style="width:16px"></div><span class="t">4 · 16px · card pad</span></div>
+      <div class="bar"><div class="swatch" style="width:24px"></div><span class="t">6 · 24px</span></div>
+    </div>
+  </div>
+  <div class="block">
+    <div class="lbl">Fixed chrome dimensions</div>
+    <div class="dims">
+      <div>Header&nbsp;&nbsp;&nbsp;&nbsp;<b>56px</b> (h-14)</div>
+      <div>Watchlist&nbsp;<b>208px</b> (w-52)</div>
+      <div>Order panel&nbsp;<b>256px</b> (w-64)</div>
+      <div>Bottom tabs&nbsp;<b>224px</b> (h-56)</div>
+    </div>
+  </div>
+</body>
+</html>

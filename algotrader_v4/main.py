@@ -178,6 +178,7 @@ async def broadcast(data: dict) -> None:
             ws_clients.remove(ws)
 
 tick_engine.ws_broadcast = broadcast
+risk_manager.ws_broadcast = broadcast
 
 
 # ── Pydantic models ────────────────────────────────────────────────────────────
@@ -1122,6 +1123,11 @@ def regime_status(): return regime_detector.status()
 @app.post("/regime/refresh", tags=["Market Regime"])
 async def regime_refresh():
     regime, plan = await regime_detector.update()
+    await broadcast({
+        "event": "regime_change",
+        "regime": regime.value,
+        "ts": datetime.utcnow().isoformat() + "Z",
+    })
     return {"regime": regime.value, "label": regime_detector._regime_label(),
             "active": plan.active, "paused": plan.paused,
             "allocation": plan.allocation, "size_factor": plan.size_factor,

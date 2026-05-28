@@ -96,6 +96,7 @@ class RiskManager:
         self.open_position_count: int  = 0
         self.trades_today: int         = 0
         self.is_trading_halted: bool   = False
+        self.ws_broadcast = None  # async broadcast callback, wired in main.py
 
     def check_before_order(
         self,
@@ -276,9 +277,26 @@ class RiskManager:
         return True, "OK"
 
     def record_trade(self, pnl: float) -> None:
+        prev_pnl = self.daily_realised_pnl
         self.daily_realised_pnl += pnl
         self.trades_today += 1
         logger.info("Trade P&L ₹{:.0f} | Day total ₹{:.0f}", pnl, self.daily_realised_pnl)
+        # Broadcast risk_alert when daily loss crosses 50% of max_daily_loss
+        max_loss = settings.max_daily_loss or 0
+        if max_loss > 0:
+            threshold = -0.5 * max_loss
+            if self.daily_realised_pnl < threshold <= prev_pnl and self.ws_broadcast is not None:
+                import asyncio
+                payload = {
+                    "event": "risk_alert",
+                    "type":  "daily_loss_50pct",
+                    "pnl":   self.daily_realised_pnl,
+                }
+                try:
+                    loop = asyncio.get_running_loop()
+                    loop.create_task(self.ws_broadcast(payload))
+                except RuntimeError:
+                    pass
 
     def position_opened(self) -> None:
         self.open_position_count += 1
