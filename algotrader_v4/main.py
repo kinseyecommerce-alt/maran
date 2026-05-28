@@ -1432,10 +1432,14 @@ async def n8n_inbound(request: Request):
 # ── Trade History & Stats (Phase 3 persistence) ──────────────────────────────
 
 @app.get("/portfolio/trades/history", tags=["Portfolio"])
-def trade_history(days: int = 30):
+def trade_history(days: int = Query(default=7, ge=1, le=365),
+                  agent: str = Query(default="")):
     """Return trade history from SQLite state store."""
     from state_store import get_trade_history
-    return {"trades": get_trade_history(days), "days": days}
+    trades = get_trade_history(days)
+    if agent:
+        trades = [t for t in trades if t.get("strategy") == agent]
+    return {"trades": trades, "count": len(trades), "days": days}
 
 
 @app.get("/portfolio/trades/export", tags=["Portfolio"])
@@ -1460,12 +1464,73 @@ def export_trades(days: int = 30):
 
 
 @app.get("/portfolio/stats", tags=["Portfolio"])
-def portfolio_stats(strategy: str | None = None, days: int = 30):
+def portfolio_stats(days: int = Query(default=7, ge=1, le=90),
+                    strategy: str = Query(default="")):
     """Return aggregated trade statistics from SQLite state store."""
     from state_store import get_trade_stats, get_daily_pnl
-    stats = get_trade_stats(strategy=strategy, days=days)
-    stats["today_pnl"] = get_daily_pnl()
+    stats = get_trade_stats(strategy if strategy else None, days)
+    stats["daily_pnl_today"] = get_daily_pnl()
     return stats
+
+
+@app.get("/options/chain/{symbol}", tags=["Options"])
+async def options_chain(symbol: str, expiry_offset_days: int = Query(default=0)):
+    """
+    Returns options chain with Black-Scholes Greeks for the given symbol.
+    Uses greeks_engine.py to compute delta/gamma/theta/vega.
+    """
+    from greeks_engine import calculate_greeks
+    from tick_engine import tick_engine
+    from datetime import date, timedelta
+
+    sym = symbol.upper()
+    snap = tick_engine.latest(sym)
+    spot = snap.tick.ltp if snap else 0.0
+    if spot <= 0:
+        try:
+            q = kite_client.quote_kite([f"NSE:{sym}"])
+            spot = q.get(f"NSE:{sym}", {}).get("last_price", 0.0)
+        except Exception:
+            pass
+
+    if spot <= 0:
+        raise HTTPException(400, f"No live price for {sym}")
+
+    # Generate strikes: ATM ± 5 strikes
+    is_index = sym in ("NIFTY", "BANKNIFTY", "FINNIFTY", "MIDCPNIFTY")
+    step_pct = 0.005 if is_index else 0.01
+    step = max(50 if is_index else 10, round(spot * step_pct / 10) * 10)
+    atm_strike = round(spot / step) * step
+    strikes = [atm_strike + (i - 5) * step for i in range(11)]  # 5 ITM, ATM, 5 OTM
+
+    # Nearest expiry: next Thursday for indices
+    today = date.today()
+    days_to_expiry = (3 - today.weekday()) % 7 + expiry_offset_days * 7
+    if days_to_expiry == 0:
+        days_to_expiry = 7
+    expiry = today + timedelta(days=days_to_expiry)
+
+    chain = []
+    for strike in strikes:
+        row = {"strike": strike, "atm": strike == atm_strike, "expiry": str(expiry)}
+        for opt_type in ("CE", "PE"):
+            try:
+                # Use ATM market price estimate (5% of spot) for IV computation
+                market_price = max(1.0, spot * 0.05)
+                g = calculate_greeks(spot, strike, expiry, opt_type, market_price)
+                row[opt_type.lower()] = {
+                    "delta": round(g.delta, 4),
+                    "gamma": round(g.gamma, 6),
+                    "theta": round(g.theta, 2),
+                    "vega":  round(g.vega, 4),
+                    "iv":    round(g.iv * 100, 1),
+                    "intrinsic": round(max(0, (spot - strike) if opt_type == "CE" else (strike - spot)), 2),
+                }
+            except Exception:
+                row[opt_type.lower()] = {"delta": 0, "gamma": 0, "theta": 0, "vega": 0, "iv": 0, "intrinsic": 0}
+        chain.append(row)
+
+    return {"symbol": sym, "spot": spot, "atm_strike": atm_strike, "expiry": str(expiry), "chain": chain}
 
 
 @app.get("/backtest/stress/{symbol}/{strategy}", tags=["Backtest"])
