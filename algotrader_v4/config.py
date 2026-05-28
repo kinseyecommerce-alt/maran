@@ -74,14 +74,14 @@ class Settings(BaseSettings):
     sl_pct_intraday:  float = 1.5
     sl_pct_scalping:  float = 0.3
     sl_pct_options:   float = 30.0
-    sl_pct_futures:   float = 0.5
+    sl_pct_futures:   float = 1.0
     sl_pct_swing:     float = 3.0
 
     # Per-agent target %
     tgt_pct_intraday: float = 3.0
     tgt_pct_scalping: float = 0.5
     tgt_pct_options:  float = 65.0
-    tgt_pct_futures:  float = 1.2
+    tgt_pct_futures:  float = 2.0
     tgt_pct_swing:    float = 8.0
 
     # Per-agent minimum pattern score to fire

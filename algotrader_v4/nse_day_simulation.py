@@ -26,6 +26,10 @@ import numpy as np
 os.chdir(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, ".")
 
+# Fixed seed for reproducible GBM paths — change to explore different market days
+random.seed(42)
+np.random.seed(42)
+
 # ── Suppress loguru noise ────────────────────────────────────────────────────
 import loguru
 loguru.logger.remove()
@@ -309,6 +313,12 @@ class AgentTracker:
             sl_pct  = float(signal.get("stop_loss_pct", settings.sl_pct_intraday))
             tgt_pct = float(signal.get("target_pct",    settings.tgt_pct_intraday))
         entry_px = ltp
+        # Normalize position size: ₹50,000 per trade (mirrors risk_manager capital
+        # allocation per symbol), capped at 1 share minimum.
+        # This prevents high-priced stocks (BAJFINANCE ₹8950) from having 5-6×
+        # the rupee impact vs low-priced stocks (SBIN ₹798) at qty=1.
+        TRADE_CAPITAL = 50_000
+        qty = max(1, int(TRADE_CAPITAL / entry_px))
         is_long  = action in ("BUY", "CE", "LONG")
         if is_long:
             sl_px  = entry_px * (1 - sl_pct / 100)
@@ -322,7 +332,7 @@ class AgentTracker:
             action=action, pattern=signal.get("pattern", "?"),
             entry_ts=ts, entry_px=entry_px,
             sl_px=sl_px, tgt_px=tgt_px,
-            sl_pct=sl_pct, tgt_pct=tgt_pct,
+            sl_pct=sl_pct, tgt_pct=tgt_pct, qty=qty,
         )
         self._open[sym] = tr
         self.trades.append(tr)

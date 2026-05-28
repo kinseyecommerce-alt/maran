@@ -652,21 +652,24 @@ class OptionsAgent(BaseAgent):
             return "", 0, ""
         bw = (ind.bb_upper - ind.bb_lower) / ind.bb_mid * 100
         prev_bw = self._prev_bb_width.get(sym, bw)
-        # Squeeze was tight and is now expanding
+        # Squeeze was tight and is now expanding — require MACD to confirm direction
         if prev_bw < 1.8 and bw > prev_bw * 1.15:
-            direction = "CE" if ltp > ind.bb_mid else "PE"
-            return direction, 3, "BB_SQUEEZE"
+            if ind.macd_hist > 0 and ltp > ind.bb_mid:
+                return "CE", 3, "BB_SQUEEZE"
+            if ind.macd_hist < 0 and ltp < ind.bb_mid:
+                return "PE", 3, "BB_SQUEEZE"
         return "", 0, ""
 
-    # ── Pattern 6: RSI_EXTREME — extreme RSI momentum continuation ────────────
+    # ── Pattern 6: RSI_MOMENTUM — strong momentum, not at exhaustion ────────────
 
     def _pat_rsi_extreme(self, sym, snap, ind, ltp, t):
-        # Overbought with positive MACD → strong upward momentum, buy CE
-        if ind.rsi_14 > 72 and ind.macd_hist > 0 and ind.volume_ratio > 1.3:
-            return "CE", 3, "RSI_EXTREME"
-        # Oversold with negative MACD → strong downward momentum, buy PE
-        if ind.rsi_14 < 28 and ind.macd_hist < 0 and ind.volume_ratio > 1.3:
-            return "PE", 3, "RSI_EXTREME"
+        # Enter CE when RSI is in strong-but-not-exhausted range (58-70) with vol
+        # Avoids chasing overbought peaks (RSI>72) that are more likely to reverse
+        if 58 <= ind.rsi_14 <= 70 and ind.macd_hist > 0 and ind.volume_ratio > 1.3:
+            return "CE", 3, "RSI_MOMENTUM"
+        # Enter PE when RSI is in strong-downtrend range (30-42), not oversold bounce
+        if 30 <= ind.rsi_14 <= 42 and ind.macd_hist < 0 and ind.volume_ratio > 1.3:
+            return "PE", 3, "RSI_MOMENTUM"
         return "", 0, ""
 
     # ── Pattern 7: SURGE — large candle body + volume ─────────────────────────
@@ -716,9 +719,10 @@ class OptionsAgent(BaseAgent):
         if iv_rank > 55:
             return "", 0, ""
         prev_k = self._prev_stochrsi_k_opt.get(sym, ind.stoch_rsi_k)
-        if prev_k < 15 and ind.stoch_rsi_k > ind.stoch_rsi_d:
+        # Require MACD direction alignment — oversold bounce into an uptrend only
+        if prev_k < 15 and ind.stoch_rsi_k > ind.stoch_rsi_d and ind.macd_hist > 0:
             return "CE", 4, "STOCHRSI_OPTIONS"
-        if prev_k > 85 and ind.stoch_rsi_k < ind.stoch_rsi_d:
+        if prev_k > 85 and ind.stoch_rsi_k < ind.stoch_rsi_d and ind.macd_hist < 0:
             return "PE", 4, "STOCHRSI_OPTIONS"
         return "", 0, ""
 
@@ -1599,6 +1603,17 @@ class FuturesAgent(BaseAgent):
         if best_score < settings.min_score_futures:
             self._update_state(sym, ind, ltp)
             return "HOLD", None
+
+        # VWAP alignment filter — don't enter long below VWAP or short above VWAP.
+        # VWAP is the fastest reliable intraday direction indicator; counter-VWAP
+        # futures entries on any timeframe have poor follow-through.
+        if ind.vwap and ind.vwap > 0:
+            if best_side == "LONG" and ltp < ind.vwap:
+                self._update_state(sym, ind, ltp)
+                return "HOLD", None
+            if best_side == "SHORT" and ltp > ind.vwap:
+                self._update_state(sym, ind, ltp)
+                return "HOLD", None
 
         cools = self._cool_ts.setdefault(sym, {})
         last  = cools.get(best_side)
