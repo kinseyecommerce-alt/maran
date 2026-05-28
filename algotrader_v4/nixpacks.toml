@@ -1,0 +1,11 @@
+[phases.setup]
+nixPkgs = ["python311", "gcc", "libffi"]
+
+[phases.install]
+cmds = [
+  "pip install --upgrade 'setuptools<60' wheel --quiet",
+  "pip install -r requirements.txt --quiet"
+]
+
+[start]
+cmd = "uvicorn main:app --host 0.0.0.0 --port $PORT --workers 1 --log-level warning"

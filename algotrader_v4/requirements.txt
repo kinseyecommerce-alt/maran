@@ -28,6 +28,7 @@ anthropic>=0.50.0
 # ── Data / Technical analysis / Charting ─────────────────────────
 pandas==2.2.2
 numpy==1.26.4
+setuptools<60  # required to build ta==0.11.0
 ta==0.11.0
 matplotlib==3.10.9
 
