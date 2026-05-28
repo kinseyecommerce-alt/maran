@@ -4,10 +4,7 @@ download_historical.py
 Download 1 month of OHLCV data for all NSE Top-100 symbols
 across all trading timeframes via Yahoo Finance (yfinance).
 
-Yahoo Finance limits (respected automatically):
-  1m  → max 7 days  (Yahoo hard limit)
-  5m / 15m / 30m → 1 month  (within Yahoo's 60-day limit)
-  1h / 1d        → 1 month
+Downloads last 7 days across all timeframes.
 
 Output:  logs/historical_data/<SYMBOL>/<TIMEFRAME>.csv
          logs/historical_data/download_summary.json
@@ -47,12 +44,12 @@ ALL_TIMEFRAMES = ["1m", "5m", "15m", "30m", "1h", "1d"]
 # Yahoo Finance period string per timeframe
 # 1m is capped at 7d by Yahoo; everything else uses 1mo
 YF_PERIOD: dict[str, str] = {
-    "1m":  "7d",   # Yahoo hard limit for 1-minute data
-    "5m":  "1mo",
-    "15m": "1mo",
-    "30m": "1mo",
-    "1h":  "1mo",
-    "1d":  "1mo",
+    "1m":  "7d",
+    "5m":  "7d",
+    "15m": "7d",
+    "30m": "7d",
+    "1h":  "7d",
+    "1d":  "7d",
 }
 
 # Yahoo Finance interval string per timeframe
@@ -192,7 +189,7 @@ def main() -> None:
     logger.info("  Total tasks: {}", total)
     logger.info("  Output dir : {}", OUTPUT_DIR)
     logger.info("  Resume     : {}", args.resume)
-    logger.info("  Note       : 1m data limited to 7 days (Yahoo Finance hard limit)")
+    logger.info("  Lookback   : 7 days (all timeframes)")
     logger.info("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
 
     done = 0
