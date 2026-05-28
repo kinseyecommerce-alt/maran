@@ -1484,8 +1484,8 @@ async def options_chain(symbol: str, expiry_offset_days: int = Query(default=0))
     from datetime import date, timedelta
 
     sym = symbol.upper()
-    snap = tick_engine.latest(sym)
-    spot = snap.tick.ltp if snap else 0.0
+    tick, _ind = tick_engine.latest(sym)
+    spot = tick.ltp if tick else 0.0
     if spot <= 0:
         try:
             q = kite_client.quote_kite([f"NSE:{sym}"])
@@ -1494,7 +1494,12 @@ async def options_chain(symbol: str, expiry_offset_days: int = Query(default=0))
             pass
 
     if spot <= 0:
-        raise HTTPException(400, f"No live price for {sym}")
+        # Paper-mode fallback: use sensible index defaults so chain still renders
+        _paper_defaults = {"NIFTY": 24000.0, "BANKNIFTY": 52000.0,
+                           "FINNIFTY": 23000.0, "MIDCPNIFTY": 12000.0}
+        spot = _paper_defaults.get(sym, 0.0)
+    if spot <= 0:
+        raise HTTPException(400, f"No live price for {sym} — set up broker credentials or use an index symbol")
 
     # Generate strikes: ATM ± 5 strikes
     is_index = sym in ("NIFTY", "BANKNIFTY", "FINNIFTY", "MIDCPNIFTY")

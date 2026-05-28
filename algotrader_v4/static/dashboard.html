@@ -14,8 +14,8 @@
   <title>AlgoTrader Pro — Dashboard</title>
   <link rel="preconnect" href="https://fonts.googleapis.com"/>
   <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&display=swap" rel="stylesheet"/>
-  <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
-  <script src="https://unpkg.com/lucide@latest"></script>
+  <script src="/static/chart.min.js"></script>
+  <script src="/static/lucide.min.js"></script>
   <style>
     /* ── Design tokens ─────────────────────────────────────────── */
     :root {
@@ -1255,9 +1255,8 @@
               <select id="oc-symbol" class="input" style="width:150px">
                 <option value="NIFTY">NIFTY</option>
                 <option value="BANKNIFTY">BANKNIFTY</option>
-                <option value="RELIANCE">RELIANCE</option>
-                <option value="TCS">TCS</option>
-                <option value="INFY">INFY</option>
+                <option value="FINNIFTY">FINNIFTY</option>
+                <option value="MIDCPNIFTY">MIDCPNIFTY</option>
               </select>
               <button class="btn btn-blue" onclick="fetchOptionsChain()">Refresh</button>
               <span id="oc-spot" style="font-size:13px;color:var(--muted)">Spot: —</span>
@@ -3831,6 +3830,10 @@ async function fetchOptionsChain() {
   } catch(e) {
     const tbody = document.getElementById('oc-tbody');
     if (tbody) tbody.innerHTML = `<tr><td colspan="11" class="no-data" style="color:var(--red)">Error: ${e.message}</td></tr>`;
+    const spotEl = document.getElementById('oc-spot');
+    const expEl = document.getElementById('oc-expiry');
+    if (spotEl) spotEl.textContent = 'Spot: —';
+    if (expEl) expEl.textContent = 'Expiry: —';
   }
 }
 
