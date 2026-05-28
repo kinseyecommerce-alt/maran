@@ -114,6 +114,41 @@ class Settings(BaseSettings):
     # Comma-separated symbols e.g. "RELIANCE,TCS" — empty = use symbol scanner
     auto_start_watchlist: str = ""
 
+    # Upstox
+    upstox_api_key: str = ""
+    upstox_api_secret: str = ""
+    upstox_access_token: str = ""
+    upstox_redirect_url: str = ""
+
+    # Active broker selection
+    active_broker: Literal["zerodha", "upstox"] = "zerodha"
+
+    # Phase 1: Transaction cost / slippage model
+    bt_slippage_bps_intraday: int = 10
+    bt_slippage_bps_scalping: int = 5
+    bt_slippage_bps_swing: int = 3
+    bt_slippage_bps_options: int = 15
+    bt_apply_tx_costs: bool = True
+
+    # Phase 2: Extended backtest
+    bt_wf_folds: int = 12
+    bt_wf_anchored: bool = True
+    bt_min_oos_trades: int = 15
+
+    # Phase 2: Monte Carlo
+    bt_require_mc_pass: bool = False
+    bt_mc_permutations: int = 500
+
+    # Phase 2/3: Position sizing
+    use_atr_sizing: bool = True
+    risk_per_trade_pct: float = 0.5
+
+    # Phase 3: Intelligence
+    max_positions_per_sector: int = 2
+    min_rolling_sharpe: float = 0.5
+    use_limit_orders: bool = True
+    limit_order_timeout_sec: int = 8
+
     # Real-time tick feed
     use_kite_websocket: bool = True   # use KiteConnect WebSocket for ticks in LIVE mode
 
