@@ -1,0 +1,110 @@
+/* ============================================================
+   AlgoTrader Pro — Color & Type Foundations
+   Algorithmic trading dashboard for NSE/BSE (Nirma Trade v4)
+   Light theme. Indigo brand, green/red trade semantics, slate neutrals.
+   Source of truth: algotrader_v4/frontend (Tailwind + index.css)
+   ============================================================ */
+
+/* Fonts: Inter (UI) + JetBrains Mono (numbers/prices). These are the
+   ACTUAL fonts used in the product, loaded from Google Fonts. */
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600;700&display=swap');
+
+:root {
+  /* ---- Brand ---- */
+  --brand:            #4F46E5; /* indigo-600 — logo, primary actions, active states */
+  --brand-hover:      #4338CA; /* indigo-700 */
+  --brand-tint:       #EEF2FF; /* indigo-50  — active tab / selected row wash */
+  --brand-tint-line:  #6366F1; /* indigo-500 — selected accent border, progress */
+
+  /* ---- Trade semantics (directional) ---- */
+  --buy:        #16A34A; /* green-600  — BUY, gains, uptrend */
+  --buy-hover:  #15803D; /* green-700 */
+  --buy-tint:   #DCFCE7; /* green-100  — buy badge bg */
+  --buy-strong: #166534; /* green-800  — buy badge text */
+  --buy-dot:    #22C55E; /* green-500  — live/market-open dot */
+
+  --sell:        #DC2626; /* red-600   — SELL, losses, downtrend */
+  --sell-hover:  #B91C1C; /* red-700 */
+  --sell-tint:   #FEE2E2; /* red-100   — sell badge bg */
+  --sell-strong: #991B1B; /* red-800   — sell badge text */
+  --sell-bg:     #FEF2F2; /* red-50    — halt/kill banner bg */
+
+  --warn:        #F59E0B; /* amber-500 — approaching-limit gauges */
+  --warn-tint:   #FEF3C7; /* amber-100 — paper-mode + warning badge bg */
+  --warn-strong: #92400E; /* amber-800 — warning badge text */
+  --warn-bg:     #FFFBEB; /* amber-50  — caution inline blocks */
+
+  /* ---- Neutrals (slate scale) ---- */
+  --bg-app:    #F8FAFC; /* slate-50  — app canvas, sidebars */
+  --bg-card:   #FFFFFF; /* white     — cards, header, panels */
+  --bg-subtle: #F1F5F9; /* slate-100 — table-head, toggle track, scrollbar track */
+
+  --fg1: #0F172A; /* slate-900 — primary text, prices, headings */
+  --fg2: #334155; /* slate-700 — secondary text, labels, body */
+  --fg3: #64748B; /* slate-500 — tertiary / muted labels, captions */
+  --fg4: #94A3B8; /* slate-400 — placeholder, disabled, empty states */
+
+  --line:        #E2E8F0; /* slate-200 — card & structural borders */
+  --line-subtle: #F1F5F9; /* slate-100 — inner dividers, table rows */
+
+  /* ---- Type families ---- */
+  --font-sans: 'Inter', system-ui, -apple-system, sans-serif;
+  --font-mono: 'JetBrains Mono', 'Fira Code', ui-monospace, monospace;
+
+  /* ---- Radii ---- */
+  --r-sm:   4px;  /* rounded   — badges, tag chips */
+  --r-md:   8px;  /* rounded-lg — buttons, inputs, selects */
+  --r-lg:   12px; /* rounded-xl — cards, panels, toggles */
+  --r-xl:   16px; /* rounded-2xl — modals */
+  --r-full: 9999px;
+
+  /* ---- Shadows (light, restrained) ---- */
+  --shadow-sm: 0 1px 2px 0 rgba(15,23,42,.05);                 /* cards */
+  --shadow-lg: 0 10px 15px -3px rgba(15,23,42,.1),
+               0 4px 6px -4px rgba(15,23,42,.1);               /* toasts */
+  --shadow-2xl: 0 25px 50px -12px rgba(15,23,42,.25);          /* modals */
+  --ring: 0 0 0 2px #fff, 0 0 0 4px #6366F1;                   /* focus ring */
+
+  /* ---- Spacing scale (Tailwind-derived, 4px base) ---- */
+  --space-1: 4px;
+  --space-2: 8px;
+  --space-3: 12px;
+  --space-4: 16px;
+  --space-6: 24px;
+
+  /* ---- Fixed layout dimensions (dashboard chrome) ---- */
+  --h-header:      56px; /* h-14 */
+  --w-watchlist:  208px; /* w-52 */
+  --w-orderpanel: 256px; /* w-64 */
+  --h-tabs:       224px; /* h-56 */
+}
+
+/* ============================================================
+   SEMANTIC TYPE TOKENS
+   Apply these classes for consistent specimens across designs.
+   ============================================================ */
+
+.ds-h1 { font-family: var(--font-sans); font-weight: 700; font-size: 18px; line-height: 1.2;  color: var(--fg1); letter-spacing: -0.01em; } /* modal / section title */
+.ds-h2 { font-family: var(--font-sans); font-weight: 700; font-size: 14px; line-height: 1.3;  color: var(--fg1); }                          /* card / panel title (text-sm bold) */
+.ds-h3 { font-family: var(--font-sans); font-weight: 600; font-size: 12px; line-height: 1.3;  color: var(--fg2); }                          /* sub-head (text-xs semibold) */
+
+.ds-body  { font-family: var(--font-sans); font-weight: 400; font-size: 14px; line-height: 1.5; color: var(--fg2); }  /* text-sm */
+.ds-label { font-family: var(--font-sans); font-weight: 500; font-size: 12px; line-height: 1.4; color: var(--fg3); }  /* field labels */
+.ds-caption { font-family: var(--font-sans); font-weight: 400; font-size: 12px; line-height: 1.4; color: var(--fg4); } /* hints, meta */
+
+/* Uppercase eyebrow — used on watchlist header & cred-group labels */
+.ds-eyebrow {
+  font-family: var(--font-sans); font-weight: 600; font-size: 12px;
+  text-transform: uppercase; letter-spacing: 0.05em; color: var(--fg3);
+}
+
+/* Numeric / data — ALWAYS monospace + tabular */
+.ds-num      { font-family: var(--font-mono); font-weight: 600; font-variant-numeric: tabular-nums; color: var(--fg1); }
+.ds-num-lg   { font-family: var(--font-mono); font-weight: 700; font-size: 24px; font-variant-numeric: tabular-nums; color: var(--fg1); } /* big stat */
+.ds-price    { font-family: var(--font-mono); font-weight: 600; font-variant-numeric: tabular-nums; }
+.ds-price-up   { color: var(--buy); }
+.ds-price-down { color: var(--sell); }
+
+/* Tick flash helpers (from index.css) */
+.tick-up   { color: var(--buy)  !important; }
+.tick-down { color: var(--sell) !important; }

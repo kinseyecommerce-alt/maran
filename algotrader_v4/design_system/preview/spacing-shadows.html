@@ -1,0 +1,22 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<link rel="stylesheet" href="../colors_and_type.css">
+<style>
+  body { margin:0; font-family:var(--font-sans); background:var(--bg-app); padding:24px; }
+  .row { display:flex; gap:24px; }
+  .item { text-align:center; }
+  .box { width:120px; height:64px; background:var(--bg-card); border-radius:var(--r-lg); border:1px solid var(--line); }
+  .name { font-size:11px; font-weight:600; color:var(--fg1); margin-top:12px; }
+  .val { font-family:var(--font-mono); font-size:10px; color:var(--fg3); margin-top:1px; }
+</style>
+</head>
+<body>
+  <div class="row">
+    <div class="item"><div class="box" style="box-shadow:var(--shadow-sm)"></div><div class="name">shadow-sm</div><div class="val">cards</div></div>
+    <div class="item"><div class="box" style="box-shadow:var(--shadow-lg)"></div><div class="name">shadow-lg</div><div class="val">toasts</div></div>
+    <div class="item"><div class="box" style="box-shadow:var(--shadow-2xl)"></div><div class="name">shadow-2xl</div><div class="val">modals</div></div>
+  </div>
+</body>
+</html>

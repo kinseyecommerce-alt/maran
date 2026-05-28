@@ -1,0 +1,33 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<link rel="stylesheet" href="../colors_and_type.css">
+<script src="https://unpkg.com/lucide@latest"></script>
+<style>
+  body { margin:0; font-family:var(--font-sans); background:var(--bg-card); padding:20px; }
+  .lbl { font-size:11px; font-weight:600; color:var(--fg3); text-transform:uppercase; letter-spacing:.04em; margin-bottom:10px; }
+  .icons { display:flex; gap:18px; flex-wrap:wrap; color:var(--fg2); }
+  .icons svg { width:22px; height:22px; }
+  .emoji { display:flex; gap:14px; font-size:22px; margin-top:18px; }
+</style>
+</head>
+<body>
+  <div class="lbl">Lucide · 2px stroke line icons</div>
+  <div class="icons">
+    <i data-lucide="activity"></i>
+    <i data-lucide="trending-up"></i>
+    <i data-lucide="trending-down"></i>
+    <i data-lucide="shopping-cart"></i>
+    <i data-lucide="zap"></i>
+    <i data-lucide="wifi"></i>
+    <i data-lucide="settings"></i>
+    <i data-lucide="shield"></i>
+    <i data-lucide="alert-triangle"></i>
+    <i data-lucide="eye"></i>
+  </div>
+  <div class="lbl" style="margin-top:20px">Emoji · functional status glyphs</div>
+  <div class="emoji"><span>📋</span><span>📝</span><span>🎯</span><span>⚠️</span><span>🤖</span><span>🛡️</span><span>⚡</span><span>🌊</span><span>🛑</span></div>
+  <script>lucide.createIcons();</script>
+</body>
+</html>

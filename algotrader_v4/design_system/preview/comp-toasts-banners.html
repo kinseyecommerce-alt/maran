@@ -1,0 +1,21 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<link rel="stylesheet" href="../colors_and_type.css">
+<style>
+  body { margin:0; font-family:var(--font-sans); background:var(--bg-app); padding:18px; display:flex; flex-direction:column; gap:10px; }
+  .toast { align-self:flex-start; display:flex; align-items:center; gap:10px; padding:10px 16px; border-radius:var(--r-lg); color:#fff; font-size:14px; font-weight:500; box-shadow:var(--shadow-lg); }
+  .t-buy { background:var(--buy); } .t-sell { background:var(--sell); } .t-info { background:var(--brand); }
+  .banner { display:flex; align-items:center; gap:10px; padding:12px 14px; border-radius:var(--r-lg); border:1px solid; font-size:13px; }
+  .b-halt { background:var(--sell-bg); border-color:#FECACA; color:var(--sell-strong); font-weight:600; }
+  .b-ok { background:#F0FDF4; border-color:#BBF7D0; color:var(--buy-strong); font-weight:600; }
+</style>
+</head>
+<body>
+  <div class="toast t-buy">BUY 5 RELIANCE → 240517000123456</div>
+  <div class="toast t-info">Bot stopped</div>
+  <div class="banner b-halt">🛑 Trading HALTED — daily loss limit reached.</div>
+  <div class="banner b-ok">🛡️ SEBI Compliance: ACTIVE · Orders logged: 142</div>
+</body>
+</html>
