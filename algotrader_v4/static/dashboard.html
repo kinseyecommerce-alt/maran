@@ -2268,6 +2268,8 @@ function switchTab(name) {
     window._optionsLoaded = true;
     fetchOptionsChain();
   }
+  // Load regime history chart when analytics tab opens
+  if (name === 'analytics') fetchRegimeHistory();
   // Refresh broker statuses when settings tab opens
   if (name === 'settings') {
     fetchKiteStatus();
@@ -2506,6 +2508,130 @@ function renderRegime() {
   const conf = rg.confidence || 0;
   document.getElementById('regime-confidence-bar').style.width  = `${conf}%`;
   document.getElementById('regime-confidence-label').textContent = `Confidence: ${conf.toFixed(0)}%`;
+
+  renderMarketPulse(rg);
+}
+
+/* ═══════════════════════════════════════════════════════════════
+   RENDER: Market Pulse widget
+═══════════════════════════════════════════════════════════════ */
+function renderMarketPulse(d) {
+  if (!d) return;
+  const ind     = d.indicators  || d.signals?.volatility || {};
+  const breadth = d.breadth     || d.signals?.breadth    || {};
+  const trend   = d.trend       || d.signals?.nifty      || {};
+  const optSigs = d.signals?.options || {};
+
+  // VIX
+  const vix = ind.vix ?? d.signals?.volatility?.india_vix ?? d.signals?.vix ?? null;
+  const vixZ = ind.vix_zscore ?? d.signals?.volatility?.vix_zscore ?? null;
+  const vixEl = document.getElementById('mp-vix');
+  const vixZEl = document.getElementById('mp-vix-zscore');
+  if (vixEl) {
+    vixEl.firstChild.textContent = vix != null ? fmtNum(vix, 1) : '—';
+    let vixColor = 'var(--green)';
+    if (vix != null) {
+      if (vix > 20) vixColor = 'var(--red)';
+      else if (vix > 15) vixColor = 'var(--yellow)';
+    }
+    vixEl.style.color = vixColor;
+  }
+  if (vixZEl) vixZEl.textContent = vixZ != null ? `Z:${vixZ.toFixed(2)}` : '';
+
+  // PCR
+  const pcr = breadth.pcr ?? optSigs.pcr ?? d.signals?.pcr ?? null;
+  const pcrEl = document.getElementById('mp-pcr');
+  const pcrTrendEl = document.getElementById('mp-pcr-trend');
+  if (pcrEl) {
+    pcrEl.firstChild.textContent = pcr != null ? fmtNum(pcr, 2) : '—';
+    let pcrLabel = '', pcrColor = 'var(--text)';
+    if (pcr != null) {
+      if (pcr > 1.2) { pcrLabel = 'Bearish'; pcrColor = 'var(--red)'; }
+      else if (pcr < 0.7) { pcrLabel = 'Bullish'; pcrColor = 'var(--green)'; }
+      else { pcrLabel = 'Neutral'; pcrColor = 'var(--yellow)'; }
+    }
+    pcrEl.style.color = pcrColor;
+    if (pcrTrendEl) pcrTrendEl.textContent = pcrLabel;
+  }
+
+  // ADX
+  const adx = trend.adx ?? d.signals?.adx ?? null;
+  const adxEl = document.getElementById('mp-adx');
+  const adxStrEl = document.getElementById('mp-adx-strength');
+  if (adxEl) {
+    adxEl.firstChild.textContent = adx != null ? fmtNum(adx, 1) : '—';
+    let adxLabel = '', adxColor = 'var(--text)';
+    if (adx != null) {
+      if (adx > 25) { adxLabel = 'Strong'; adxColor = '#58a6ff'; }
+      else if (adx > 15) { adxLabel = 'Moderate'; adxColor = 'var(--yellow)'; }
+      else { adxLabel = 'Weak'; adxColor = 'var(--muted)'; }
+    }
+    adxEl.style.color = adxColor;
+    if (adxStrEl) adxStrEl.textContent = adxLabel;
+  }
+
+  // Breadth A/D ratio
+  const ad = breadth.advance_decline_ratio ?? breadth.ad_ratio ?? d.signals?.breadth ?? null;
+  const breadthEl = document.getElementById('mp-breadth');
+  const breadthLblEl = document.getElementById('mp-breadth-label');
+  if (breadthEl) {
+    breadthEl.firstChild.textContent = ad != null ? fmtNum(ad, 2) : '—';
+    let adLabel = '', adColor = 'var(--text)';
+    if (ad != null) {
+      if (ad > 1.5) { adLabel = 'Bullish'; adColor = 'var(--green)'; }
+      else if (ad < 0.7) { adLabel = 'Bearish'; adColor = 'var(--red)'; }
+      else { adLabel = 'Neutral'; adColor = 'var(--yellow)'; }
+    }
+    breadthEl.style.color = adColor;
+    if (breadthLblEl) breadthLblEl.textContent = adLabel;
+  }
+}
+
+/* ═══════════════════════════════════════════════════════════════
+   TOPBAR LIVE: Market Hours + P&L chip
+═══════════════════════════════════════════════════════════════ */
+function updateTopbarLive() {
+  // IST = UTC + 5:30
+  const nowUtc = new Date();
+  const istMs = nowUtc.getTime() + (5.5 * 60 * 60 * 1000);
+  const ist = new Date(istMs);
+  const h = ist.getUTCHours();
+  const m = ist.getUTCMinutes();
+  const totalMin = h * 60 + m;
+  const OPEN_MIN  = 9 * 60 + 15;   // 09:15
+  const CLOSE_MIN = 15 * 60 + 30;  // 15:30
+
+  const chip = document.getElementById('market-status-chip');
+  const txt  = document.getElementById('market-status-text');
+  if (chip && txt) {
+    if (totalMin >= OPEN_MIN && totalMin < CLOSE_MIN) {
+      chip.className = 'market-status-chip open';
+      txt.textContent = 'Market Open';
+    } else if (totalMin < OPEN_MIN) {
+      const diff = OPEN_MIN - totalMin;
+      const hh = Math.floor(diff / 60).toString().padStart(2, '0');
+      const mm = (diff % 60).toString().padStart(2, '0');
+      chip.className = 'market-status-chip soon';
+      txt.textContent = `Opens in ${hh}:${mm}`;
+    } else {
+      chip.className = 'market-status-chip closed';
+      txt.textContent = 'Market Closed';
+    }
+  }
+
+  // P&L chip
+  const pnl = state.risk?.daily_pnl ?? null;
+  const pnlChip = document.getElementById('pnl-chip');
+  const pnlTxt  = document.getElementById('topbar-pnl-text');
+  if (pnlChip && pnlTxt) {
+    if (pnl != null) {
+      pnlTxt.textContent = `P&L: ${fmtINR(pnl)}`;
+      pnlChip.className = `pnl-chip ${pnl >= 0 ? 'positive' : 'negative'}`;
+    } else {
+      pnlTxt.textContent = 'P&L: ₹—';
+      pnlChip.className = 'pnl-chip';
+    }
+  }
 }
 
 /* ═══════════════════════════════════════════════════════════════
@@ -2855,6 +2981,96 @@ function renderAnalytics() {
 
   // Rolling Sharpe cards (from adaptive data)
   if (ada.strategies) updateRollingSharpCards(ada.strategies);
+
+  // Agent P&L chart
+  renderAgentPnlChart(state.agents);
+}
+
+/* ═══════════════════════════════════════════════════════════════
+   CHART: Agent P&L Today (horizontal bar)
+═══════════════════════════════════════════════════════════════ */
+let _agentPnlChart = null;
+function renderAgentPnlChart(agents) {
+  if (!agents) return;
+  const names  = Object.keys(agents);
+  const pnls   = names.map(n => agents[n].pnl_today || 0);
+  const colors = pnls.map(v => v >= 0 ? '#3fb950' : '#f85149');
+  const ctx = document.getElementById('agent-pnl-chart')?.getContext('2d');
+  if (!ctx) return;
+  if (_agentPnlChart) {
+    _agentPnlChart.data.labels = names;
+    _agentPnlChart.data.datasets[0].data = pnls;
+    _agentPnlChart.data.datasets[0].backgroundColor = colors;
+    _agentPnlChart.update('none');
+    return;
+  }
+  _agentPnlChart = new Chart(ctx, {
+    type: 'bar',
+    data: {
+      labels: names,
+      datasets: [{ label: 'P&L (₹)', data: pnls, backgroundColor: colors, borderRadius: 4, borderWidth: 0 }]
+    },
+    options: {
+      responsive: true, maintainAspectRatio: false,
+      plugins: { legend: { display: false } },
+      scales: {
+        x: { ticks: { color: '#8b949e', font: { size: 11 } }, grid: { display: false } },
+        y: { ticks: { color: '#8b949e', font: { size: 10 }, callback: v => '₹' + v.toLocaleString('en-IN') },
+             grid: { color: 'rgba(48,54,61,0.5)' } }
+      }
+    }
+  });
+}
+
+/* ═══════════════════════════════════════════════════════════════
+   CHART: Regime History bar chart
+═══════════════════════════════════════════════════════════════ */
+let _regimeHistChart = null;
+const REGIME_COLORS = {
+  TRENDING_BULL: '#3fb950', TRENDING_BEAR: '#f85149',
+  RANGING: '#58a6ff',       VOLATILE: '#f0883e',
+  HIGH_VOLATILE: '#ff7b72', UNKNOWN: '#8b949e'
+};
+
+async function fetchRegimeHistory() {
+  try {
+    const d = await api('GET', '/regime/history');
+    if (d && d.history) renderRegimeHistory(d.history);
+  } catch {}
+}
+
+function renderRegimeHistory(history) {
+  if (!history || history.length < 2) return;
+  const labels   = history.map(h => h.ts ? new Date(h.ts).toLocaleTimeString('en-IN', { hour: '2-digit', minute: '2-digit' }) : '');
+  const vixData  = history.map(h => h.vix || 0);
+  const bgColors = history.map(h => REGIME_COLORS[h.regime] || '#8b949e');
+
+  const ctx = document.getElementById('regime-history-chart')?.getContext('2d');
+  if (!ctx) return;
+  if (_regimeHistChart) { _regimeHistChart.destroy(); _regimeHistChart = null; }
+  _regimeHistChart = new Chart(ctx, {
+    type: 'bar',
+    data: {
+      labels,
+      datasets: [{ label: 'VIX', data: vixData, backgroundColor: bgColors, borderRadius: 3, borderWidth: 0 }]
+    },
+    options: {
+      responsive: true, maintainAspectRatio: false,
+      plugins: {
+        legend: { display: false },
+        tooltip: {
+          callbacks: {
+            title: (items) => history[items[0].dataIndex]?.regime || '',
+            label: (item)  => `VIX: ${item.raw}`
+          }
+        }
+      },
+      scales: {
+        x: { ticks: { color: '#8b949e', font: { size: 10 }, maxTicksLimit: 10 }, grid: { display: false } },
+        y: { ticks: { color: '#8b949e', font: { size: 10 } }, grid: { color: 'rgba(48,54,61,0.5)' } }
+      }
+    }
+  });
 }
 
 /* ═══════════════════════════════════════════════════════════════
@@ -3609,6 +3825,7 @@ async function pollAll() {
   ]);
 
   renderStats();
+  updateTopbarLive();
   renderRegime();
   renderPositions();
   renderBotStatus();
@@ -3845,6 +4062,13 @@ function connectWS() {
         if (msg.supertrend !== undefined || msg.hma !== undefined || msg.squeeze_on !== undefined || msg.williams_r !== undefined) {
           updateRadar(sym, msg);
         }
+      }
+      if (msg.event === 'regime_change') {
+        toast(`Regime changed → ${msg.regime}`, 'info');
+        fetchRegimeHistory();
+      }
+      if (msg.event === 'risk_alert') {
+        toast(`⚠ Risk alert: ${msg.type} — P&L ₹${msg.pnl != null ? msg.pnl.toFixed(0) : '—'}`, 'error');
       }
     } catch {}
   };
