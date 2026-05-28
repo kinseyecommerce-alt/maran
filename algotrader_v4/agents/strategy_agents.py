@@ -503,8 +503,9 @@ class OptionsAgent(BaseAgent):
         now = now_ist()
         t   = now.time().replace(tzinfo=None)
 
-        # Exit-only window
-        if time(14, 50) <= t:
+        # No new entries after 13:00 — a 4% target needs 2+ hours to materialise;
+        # late entries squareoff below target dragging avg win to near zero
+        if t >= time(13, 0):
             return "HOLD", None
 
         # Cached intelligence (sync — zero latency)
@@ -599,8 +600,8 @@ class OptionsAgent(BaseAgent):
             "lot_size":           lot_sz,
             "stop_loss_pct":      sl_pct,      # % of option premium (for live bracket)
             "target_pct":         tgt_pct,     # % of option premium
-            "underlying_sl_pct":  2.0,          # 2% of underlying — for simulation tracking
-            "underlying_tgt_pct": 4.0,          # 4% of underlying — for simulation tracking
+            "underlying_sl_pct":  2.0,          # 2% of underlying stock price
+            "underlying_tgt_pct": 4.0,          # 4% of underlying → 2:1 R:R
             "iv_rank":            round(iv_rank, 1),
             "atm_iv":             round(atm_iv, 2),
             "score":              best_score,
@@ -1163,11 +1164,11 @@ class ScalpingAgent(BaseAgent):
     min_candles_1min = 10
 
     SL_ATR  = 0.6
-    TGT_ATR = 1.2
-    SL_PCT  = 0.25
-    TGT_PCT = 0.50
+    TGT_ATR = 1.4    # → 2.33:1 R:R when ATR-based wins
+    SL_PCT  = 0.30   # tight SL preserves high win rate
+    TGT_PCT = 0.70   # raised from 0.50 → 2.33:1 R:R; better profit per winning trade
 
-    MIN_SCORE = 3     # minimum to fire; Claude gate handles further filtering
+    MIN_SCORE = 3     # keep high volume; Claude gate filters quality
 
     # Per-symbol rolling state
     _prev_ema9:        dict[str, float]    = {}

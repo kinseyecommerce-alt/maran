@@ -79,7 +79,7 @@ class Settings(BaseSettings):
 
     # Per-agent target %
     tgt_pct_intraday: float = 3.0
-    tgt_pct_scalping: float = 0.5
+    tgt_pct_scalping: float = 0.70
     tgt_pct_options:  float = 65.0
     tgt_pct_futures:  float = 2.0
     tgt_pct_swing:    float = 8.0
