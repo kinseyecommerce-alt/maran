@@ -456,6 +456,8 @@ class OptionsAgent(BaseAgent):
     _prev_rsi:           dict = {}   # sym → float (pullback detection)
     _prev_stochrsi_k_opt: dict = {}  # sym → float (StochRSI cross detection)
     _prev_williams_opt:  dict = {}   # sym → float (Williams %R cross detection)
+    _prev_ema9_opt:      dict = {}   # sym → float (EMA_CROSS event detection)
+    _prev_ema21_opt:     dict = {}   # sym → float (EMA_CROSS event detection)
     _cool_ts:            dict = {}   # sym → {"CE": datetime, "PE": datetime}
 
     # ── Main entry loop ───────────────────────────────────────────────────────
@@ -523,6 +525,16 @@ class OptionsAgent(BaseAgent):
             self._update_state(sym, ind, ltp)
             return "HOLD", None
 
+        # Macro trend filter — don't buy CE in a bearish EMA200 regime or PE in bullish
+        if ind.ema200 > 0:
+            macro_bull = ltp > ind.ema200
+            if best_opt == "CE" and not macro_bull:
+                self._update_state(sym, ind, ltp)
+                return "HOLD", None
+            if best_opt == "PE" and macro_bull:
+                self._update_state(sym, ind, ltp)
+                return "HOLD", None
+
         # Per-direction cooldown
         cools = self._cool_ts.setdefault(sym, {})
         last  = cools.get(best_opt)
@@ -546,16 +558,18 @@ class OptionsAgent(BaseAgent):
 
         self._update_state(sym, ind, ltp)
         return "BUY", {
-            "exchange":          "NFO",
-            "option_symbol":     opt_sym,
-            "option_type":       best_opt,
-            "strike":            strike,
-            "lot_size":          lot_sz,
-            "stop_loss_pct":     sl_pct,
-            "target_pct":        tgt_pct,
-            "iv_rank":           round(iv_rank, 1),
-            "atm_iv":            round(atm_iv, 2),
-            "score":             best_score,
+            "exchange":           "NFO",
+            "option_symbol":      opt_sym,
+            "option_type":        best_opt,
+            "strike":             strike,
+            "lot_size":           lot_sz,
+            "stop_loss_pct":      sl_pct,      # % of option premium (for live bracket)
+            "target_pct":         tgt_pct,     # % of option premium
+            "underlying_sl_pct":  2.0,          # 2% of underlying — for simulation tracking
+            "underlying_tgt_pct": 4.0,          # 4% of underlying — for simulation tracking
+            "iv_rank":            round(iv_rank, 1),
+            "atm_iv":             round(atm_iv, 2),
+            "score":              best_score,
             "pattern":           best_pattern,
             "_gate_size_factor": sf,
             "trigger": (
@@ -565,15 +579,19 @@ class OptionsAgent(BaseAgent):
             ),
         }
 
-    # ── Pattern 1: EMA_CROSS — full 9/21/50 alignment ────────────────────────
+    # ── Pattern 1: EMA_CROSS — detect the crossover event (not persistent state) ─
 
     def _pat_ema_cross(self, sym, snap, ind, ltp, t):
-        ema_bull = ind.ema9 > ind.ema21 > 0 and ind.ema21 > ind.ema50 > 0
-        ema_bear = ind.ema9 < ind.ema21 > 0 and ind.ema21 < ind.ema50 > 0
-        if ema_bull and ind.rsi_14 > 50:
-            return "CE", 5, "EMA_CROSS"
-        if ema_bear and ind.rsi_14 < 50:
-            return "PE", 5, "EMA_CROSS"
+        import bot_state
+        if not bot_state.is_pattern_enabled("options", "EMA_CROSS"): return "", 0, ""
+        if ind.ema21 <= 0 or ind.ema50 <= 0: return "", 0, ""
+        prev9  = self._prev_ema9_opt.get(sym, ind.ema9)
+        prev21 = self._prev_ema21_opt.get(sym, ind.ema21)
+        # Fire ONLY on the bar EMA9 crosses EMA21 — not on every aligned bar
+        cross_up   = prev9 <= prev21 and ind.ema9 > ind.ema21 and ind.ema21 > ind.ema50 and ind.rsi_14 > 52
+        cross_down = prev9 >= prev21 and ind.ema9 < ind.ema21 and ind.ema21 < ind.ema50 and ind.rsi_14 < 48
+        if cross_up:   return "CE", 5, "EMA_CROSS"
+        if cross_down: return "PE", 5, "EMA_CROSS"
         return "", 0, ""
 
     # ── Pattern 2: TREND_PULL — pullback entry in strong trend ───────────────
@@ -781,6 +799,8 @@ class OptionsAgent(BaseAgent):
         self._prev_rsi[sym] = ind.rsi_14
         self._prev_stochrsi_k_opt[sym] = ind.stoch_rsi_k
         self._prev_williams_opt[sym]   = ind.williams_r
+        self._prev_ema9_opt[sym]       = ind.ema9
+        self._prev_ema21_opt[sym]      = ind.ema21
 
     # ── IV-adaptive SL / TGT ─────────────────────────────────────────────────
 
@@ -1538,6 +1558,8 @@ class FuturesAgent(BaseAgent):
     _day_low:            dict = {}   # sym → float
     _prev_stochrsi_k_fut: dict = {}  # sym → float (StochRSI cross detection)
     _prev_hma_dir_fut:   dict = {}   # sym → str (HMA direction)
+    _prev_ema_bull:      dict = {}   # sym → bool (EMA_TREND first-bar detection)
+    _prev_ema_bear:      dict = {}   # sym → bool (EMA_TREND first-bar detection)
 
     def evaluate_tick(self, snap: MarketSnapshot) -> tuple[str, Optional[dict]]:
         ind = snap.indicators
@@ -1609,12 +1631,16 @@ class FuturesAgent(BaseAgent):
         }
 
     def _pat_ema_trend(self, sym, snap, ind, ltp, t):
-        bull = ind.ema9 > ind.ema21 > 0 and ind.ema21 > ind.ema50 > 0
-        bear = ind.ema9 < ind.ema21 > 0 and ind.ema21 < ind.ema50 > 0
-        if bull and 50 <= ind.rsi_14 <= 72 and ind.macd_hist > 0:
-            return "LONG", 5, "EMA_TREND"
-        if bear and 28 <= ind.rsi_14 <= 50 and ind.macd_hist < 0:
-            return "SHORT", 5, "EMA_TREND"
+        was_bull = self._prev_ema_bull.get(sym, False)
+        was_bear = self._prev_ema_bear.get(sym, False)
+        # MACD histogram must be EXPANDING (momentum accelerating, not just positive)
+        prev_hist  = self._prev_macd_hist.get(sym, ind.macd_hist)
+        macd_accel = abs(ind.macd_hist) > abs(prev_hist)
+        bull = ind.ema9 > ind.ema21 > ind.ema50 > 0 and 50 <= ind.rsi_14 <= 72 and ind.macd_hist > 0 and macd_accel
+        bear = ind.ema9 < ind.ema21 < ind.ema50 > 0 and 28 <= ind.rsi_14 <= 50 and ind.macd_hist < 0 and macd_accel
+        # Fire ONLY on first bar of alignment (state change, not persistent state)
+        if bull and not was_bull: return "LONG",  5, "EMA_TREND"
+        if bear and not was_bear: return "SHORT", 5, "EMA_TREND"
         return "", 0, ""
 
     def _pat_orb(self, sym, snap, ind, ltp, t):
@@ -1678,11 +1704,13 @@ class FuturesAgent(BaseAgent):
             return "", 0, ""
         if not ind.hma or ind.hma <= 0:
             return "", 0, ""
-        bull = ind.hma_dir == "UP" and ind.ema9 > ind.ema21 > 0 and 50 <= ind.rsi_14 <= 65
-        bear = ind.hma_dir == "DOWN" and ind.ema9 < ind.ema21 > 0 and 35 <= ind.rsi_14 <= 50
-        if bull:
+        prev_dir = self._prev_hma_dir_fut.get(sym, ind.hma_dir)
+        # Fire ONLY when HMA direction FLIPS, not on every bar it's UP/DOWN
+        just_flipped_up   = prev_dir != "UP"   and ind.hma_dir == "UP"   and ind.ema9 > ind.ema21 > 0 and 50 <= ind.rsi_14 <= 65
+        just_flipped_down = prev_dir != "DOWN" and ind.hma_dir == "DOWN" and ind.ema9 < ind.ema21 > 0 and 35 <= ind.rsi_14 <= 50
+        if just_flipped_up:
             return "LONG", 4, "HMA_TREND"
-        if bear:
+        if just_flipped_down:
             return "SHORT", 4, "HMA_TREND"
         return "", 0, ""
 
@@ -1748,6 +1776,11 @@ class FuturesAgent(BaseAgent):
         self._prev_ltp[sym]            = ltp
         self._prev_stochrsi_k_fut[sym] = ind.stoch_rsi_k
         self._prev_hma_dir_fut[sym]    = ind.hma_dir
+        # EMA_TREND state — first-bar-only detection
+        self._prev_ema_bull[sym] = (ind.ema9 > ind.ema21 > ind.ema50 > 0
+                                    and 50 <= ind.rsi_14 <= 72 and ind.macd_hist > 0)
+        self._prev_ema_bear[sym] = (ind.ema9 < ind.ema21 < ind.ema50 > 0
+                                    and 28 <= ind.rsi_14 <= 50 and ind.macd_hist < 0)
 
     def _futures_symbol(self, underlying: str) -> str:
         from datetime import date, timedelta

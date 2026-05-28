@@ -87,7 +87,7 @@ class Settings(BaseSettings):
     # Per-agent minimum pattern score to fire
     min_score_intraday: int = 4
     min_score_scalping: int = 3
-    min_score_options:  int = 4
+    min_score_options:  int = 6
     min_score_futures:  int = 4
     min_score_swing:    int = 1
 

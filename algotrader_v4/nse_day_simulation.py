@@ -300,8 +300,14 @@ class AgentTracker:
             return   # already in position
         if action in ("HOLD", None, ""):
             return
-        sl_pct  = float(signal.get("stop_loss_pct", settings.sl_pct_intraday))
-        tgt_pct = float(signal.get("target_pct",    settings.tgt_pct_intraday))
+        # Options signal uses premium-based sl/tgt (30%/65% of premium) which can't be
+        # applied to the underlying stock price in simulation — use the stock-price proxy
+        if self.name == "Options":
+            sl_pct  = float(signal.get("underlying_sl_pct",  2.0))
+            tgt_pct = float(signal.get("underlying_tgt_pct", 4.0))
+        else:
+            sl_pct  = float(signal.get("stop_loss_pct", settings.sl_pct_intraday))
+            tgt_pct = float(signal.get("target_pct",    settings.tgt_pct_intraday))
         entry_px = ltp
         is_long  = action in ("BUY", "CE", "LONG")
         if is_long:
