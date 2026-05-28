@@ -42,7 +42,10 @@ def _get_td():
             logger.debug("[TrueData] credentials not configured")
             return None
         try:
-            from truedata_ws.websockets.TD import TD
+            try:
+                from truedata_ws.websocket.TD import TD   # v5+
+            except ImportError:
+                from truedata_ws.websockets.TD import TD  # v4
             _td_instance = TD(
                 settings.truedata_username,
                 settings.truedata_password,
