@@ -22,6 +22,7 @@ from __future__ import annotations
 import asyncio
 from dataclasses import dataclass, field
 from datetime import datetime, time
+from pathlib import Path
 from typing import Optional
 
 import pandas as pd
@@ -322,9 +323,14 @@ class SymbolScanner:
 
         async def fetch_one(sym: str):
             async with sem:
-                sc = await asyncio.get_event_loop().run_in_executor(
-                    None, self._score_symbol, sym
-                )
+                try:
+                    sc = await asyncio.wait_for(
+                        asyncio.get_event_loop().run_in_executor(None, self._score_symbol, sym),
+                        timeout=12.0,
+                    )
+                except asyncio.TimeoutError:
+                    logger.debug("Symbol scan skip (timeout): {}", sym)
+                    sc = None
                 if sc:
                     scores[sym] = sc
 
@@ -334,12 +340,28 @@ class SymbolScanner:
         return scores
 
     def _score_symbol(self, symbol: str) -> Optional[SymbolScore]:
-        """Compute indicators and scores for one symbol using TrueData."""
+        """Compute indicators and scores for one symbol. TrueData first, CSV cache fallback."""
         try:
             # 20 days daily for trend / swing
             df_d  = truedata_historical.historical(symbol, "NSE", "1d",  lookback_days=30)
             # 5 days 15-min for intraday / scalping indicators
             df_15 = truedata_historical.historical(symbol, "NSE", "15m", lookback_days=5)
+
+            # Fallback: local CSV cache only (no yfinance network call — avoids hanging when
+            # network is blocked). Production callers that need yfinance should call
+            # yf_client.historical() directly.
+            if df_d.empty:
+                _csv = Path(f"logs/historical_data/{symbol}/1d.csv")
+                if _csv.exists():
+                    _df = pd.read_csv(_csv, parse_dates=["date"])
+                    _cols = [c for c in ("date","open","high","low","close","volume") if c in _df.columns]
+                    df_d = _df[_cols].dropna().sort_values("date").reset_index(drop=True)
+            if df_15.empty:
+                _csv = Path(f"logs/historical_data/{symbol}/15m.csv")
+                if _csv.exists():
+                    _df = pd.read_csv(_csv, parse_dates=["date"])
+                    _cols = [c for c in ("date","open","high","low","close","volume") if c in _df.columns]
+                    df_15 = _df[_cols].dropna().sort_values("date").reset_index(drop=True)
 
             if df_d.empty or len(df_d) < 10:
                 return None
