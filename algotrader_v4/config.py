@@ -168,6 +168,10 @@ class Settings(BaseSettings):
     max_scalping_positions: int = 5
     max_swing_positions:    int = 3
 
+    # Phase 4: Persistence backends (empty = use SQLite in-memory fallback)
+    database_url: str = ""   # e.g. postgresql+asyncpg://user:pass@host/db
+    redis_url:    str = ""   # e.g. redis://localhost:6379/0
+
     # Server
     host: str = "0.0.0.0"
     port: int = 8000

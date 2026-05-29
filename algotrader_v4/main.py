@@ -789,6 +789,52 @@ async def squareoff():
     order_guard.reset_daily()
     return {"status": "ok", "squared_off": len(ids)}
 
+
+class MultiLegRequest(BaseModel):
+    underlying: str
+    strategy_type: Literal["bull_call_spread", "bear_put_spread", "strangle", "iron_condor"]
+    lots: int = Field(default=1, ge=1, le=50)
+    legs: list[dict]  # [{symbol, side, lots}]
+
+
+@app.post("/orders/multi-leg", tags=["Orders"])
+async def multi_leg_order(req: MultiLegRequest):
+    """
+    Place a multi-leg options strategy (spread/strangle/iron condor).
+    Each leg is placed as a separate MARKET NRML order on NFO.
+    Returns the list of order IDs for each leg.
+    """
+    order_ids = []
+    errors    = []
+    for leg in req.legs:
+        sym  = _clean_symbol(leg.get("symbol", ""))
+        side = leg.get("side", "BUY").upper()
+        if side not in ("BUY", "SELL"):
+            errors.append(f"{sym}: invalid side {side}")
+            continue
+        qty = int(leg.get("lots", req.lots))
+        if qty <= 0:
+            errors.append(f"{sym}: invalid qty {qty}")
+            continue
+        try:
+            oid = kite_client.place_order(
+                tradingsymbol=sym, exchange="NFO",
+                transaction_type=side, quantity=qty,
+                order_type="MARKET", product="NRML",
+                tag=f"MultiLeg-{req.strategy_type}",
+            )
+            order_ids.append(oid)
+        except Exception as exc:
+            logger.error("Multi-leg leg failed {}: {}", sym, exc)
+            errors.append(f"{sym}: {exc}")
+    return {
+        "status":   "ok" if not errors else "partial",
+        "order_ids": order_ids,
+        "errors":    errors,
+        "legs_placed": len(order_ids),
+        "legs_total":  len(req.legs),
+    }
+
 # HIGH-6: generic error messages, raw exceptions logged server-side only
 @app.get("/portfolio/positions", tags=["Portfolio"])
 def positions():

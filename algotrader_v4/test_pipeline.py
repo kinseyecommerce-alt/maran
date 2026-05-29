@@ -12,6 +12,7 @@ import uuid
 import numpy as np
 import pandas as pd
 from datetime import datetime, timedelta, time
+from pathlib import Path
 
 # ── Test harness ───────────────────────────────────────────────────────────
 
@@ -2653,6 +2654,108 @@ run("sharpe_percentile is in [0, 100]",                            t_mc_sharpe_p
 run("min_sharpe_5pct is a float for ≥20 trades",                   t_mc_min_sharpe_5pct_is_float)
 run("max_drawdown_95pct is a non-negative float for ≥20 trades",   t_mc_max_drawdown_95pct_is_float)
 run("to_dict() has 'monte_carlo' dict with is_significant key",    t_mc_to_dict_nested_monte_carlo)
+
+
+# ══════════════════════════════════════════════════════════════════════════
+# 17. PHASE 3-5 COVERAGE
+# ══════════════════════════════════════════════════════════════════════════
+
+def t_sector_limit_blocks_third_same_sector():
+    """check_sector_limit blocks when 2 positions already open in same sector."""
+    from risk_manager import risk_manager
+    from config import settings
+    settings.max_positions_per_sector = 2
+    ok, reason = risk_manager.check_sector_limit("HDFCBANK", ["ICICIBANK", "SBIN"])
+    assert not ok, f"Expected blocked, got allowed: {reason}"
+    assert "BANKING" in reason
+
+def t_sector_limit_allows_first_in_sector():
+    """check_sector_limit allows when no other positions in the same sector."""
+    from risk_manager import risk_manager
+    from config import settings
+    settings.max_positions_per_sector = 2
+    ok, reason = risk_manager.check_sector_limit("HDFCBANK", [])
+    assert ok, f"Expected allowed, got: {reason}"
+
+def t_sector_limit_others_exempt():
+    """Symbols not in sector_map (OTHERS) are always allowed."""
+    from risk_manager import risk_manager
+    from config import settings
+    settings.max_positions_per_sector = 1
+    # UNKNOWNSYM won't be in sector_map → OTHERS → exempt
+    ok, _ = risk_manager.check_sector_limit("UNKNOWNSYM", ["RELIANCE", "TCS", "HDFCBANK"])
+    assert ok
+
+def t_rolling_sharpe_below_count_initialises():
+    """MasterAgent._rolling_sharpe_below_count starts empty."""
+    from master_agent_v5 import MasterAgent
+    ma = MasterAgent.__new__(MasterAgent)
+    ma._rolling_sharpe_below_count = {}
+    assert isinstance(ma._rolling_sharpe_below_count, dict)
+    assert len(ma._rolling_sharpe_below_count) == 0
+
+def t_config_database_url_default_empty():
+    """database_url defaults to empty string (SQLite fallback)."""
+    from config import settings
+    assert hasattr(settings, "database_url")
+    assert settings.database_url == ""
+
+def t_config_redis_url_default_empty():
+    """redis_url defaults to empty string (in-memory fallback)."""
+    from config import settings
+    assert hasattr(settings, "redis_url")
+    assert settings.redis_url == ""
+
+def t_state_store_write_read():
+    """state_store.upsert_position and get_open_positions round-trip correctly."""
+    from state_store import init_db, upsert_position, get_open_positions, close_position
+    import time
+    init_db()
+    oid = f"TEST-{int(time.time())}"
+    upsert_position(
+        order_id=oid, symbol="RELIANCE", strategy="intraday",
+        side="BUY", entry_price=2800.0, quantity=5,
+        sl_price=2772.0, target=2884.0, product="MIS",
+    )
+    positions = get_open_positions()
+    found = any(p["order_id"] == oid for p in positions)
+    assert found, f"Position {oid} not found in open positions"
+    close_position(oid)
+    positions_after = get_open_positions()
+    assert not any(p["order_id"] == oid for p in positions_after), "Position still open after close"
+
+def t_multi_leg_request_model_valid():
+    """MultiLegRequest model accepts valid iron_condor input."""
+    import sys
+    sys.path.insert(0, str(Path(__file__).parent))
+    try:
+        from main import MultiLegRequest
+        req = MultiLegRequest(
+            underlying="NIFTY",
+            strategy_type="iron_condor",
+            lots=2,
+            legs=[
+                {"symbol": "NIFTY2406024200CE", "side": "SELL", "lots": 2},
+                {"symbol": "NIFTY2406024300CE", "side": "BUY",  "lots": 2},
+            ],
+        )
+        assert req.lots == 2
+        assert req.strategy_type == "iron_condor"
+        assert len(req.legs) == 2
+    except Exception as e:
+        raise AssertionError(f"MultiLegRequest import/init failed: {e}")
+
+
+print()
+print("── 17. PHASE 3-5 COVERAGE ───────────────────────────────────────────────")
+run("sector limit blocks 3rd position in same sector",             t_sector_limit_blocks_third_same_sector)
+run("sector limit allows first position in a sector",              t_sector_limit_allows_first_in_sector)
+run("OTHERS sector is always exempt from sector limit",            t_sector_limit_others_exempt)
+run("MasterAgent._rolling_sharpe_below_count initialises empty",   t_rolling_sharpe_below_count_initialises)
+run("config.database_url defaults to empty string",                t_config_database_url_default_empty)
+run("config.redis_url defaults to empty string",                   t_config_redis_url_default_empty)
+run("state_store upsert→get→close round-trip",                     t_state_store_write_read)
+run("MultiLegRequest model accepts iron_condor legs",              t_multi_leg_request_model_valid)
 
 
 # ══════════════════════════════════════════════════════════════════════════

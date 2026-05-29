@@ -1427,6 +1427,43 @@
             </table>
           </div>
         </div>
+        <!-- Multi-Leg Builder (Phase 5E) -->
+        <div class="card section-gap">
+          <div class="card-header" style="display:flex;align-items:center;gap:10px;flex-wrap:wrap">
+            <h3 class="card-title"><i data-lucide="git-branch"></i> Multi-Leg Builder</h3>
+            <span style="font-size:12px;color:var(--fg3);margin-left:auto">Spread / Strangle / Iron Condor</span>
+          </div>
+          <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(160px,1fr));gap:12px;margin-top:8px">
+            <div>
+              <label class="field-label">Strategy</label>
+              <select id="ml-strategy" class="input" onchange="mlAutoFill()">
+                <option value="bull_call_spread">Bull Call Spread</option>
+                <option value="bear_put_spread">Bear Put Spread</option>
+                <option value="strangle">Strangle</option>
+                <option value="iron_condor">Iron Condor</option>
+              </select>
+            </div>
+            <div>
+              <label class="field-label">Underlying</label>
+              <select id="ml-underlying" class="input" onchange="mlAutoFill()">
+                <option value="NIFTY">NIFTY</option>
+                <option value="BANKNIFTY">BANKNIFTY</option>
+                <option value="FINNIFTY">FINNIFTY</option>
+                <option value="MIDCPNIFTY">MIDCPNIFTY</option>
+              </select>
+            </div>
+            <div>
+              <label class="field-label">Lots</label>
+              <input id="ml-lots" type="number" class="input" value="1" min="1" max="10">
+            </div>
+            <div style="display:flex;align-items:flex-end;gap:8px">
+              <button class="btn btn-blue" style="flex:1" onclick="mlAutoFill()">Auto-Fill</button>
+              <button class="btn btn-green" style="flex:1" onclick="mlSubmit()">Place</button>
+            </div>
+          </div>
+          <div id="ml-legs" style="margin-top:12px;display:grid;gap:6px"></div>
+          <div id="ml-result" style="margin-top:8px;font-size:12px;color:var(--fg3)"></div>
+        </div>
       </div><!-- /tab-options -->
 
 
@@ -4480,7 +4517,8 @@ document.addEventListener('keydown', function(e) {
     case '3': switchTab('options');      break;
     case '4': switchTab('analytics');    break;
     case '5': switchTab('settings');     break;
-    case 'r': case 'R': pollAll();       break;
+    case 'r': case 'R': pollAll();                  break;
+    case 'b': case 'B': promptRunBacktest();         break;
     case 'k': case 'K':
       if (confirm('Activate Kill Switch? This will halt all trading.')) {
         confirmKillSwitch();
@@ -4488,6 +4526,92 @@ document.addEventListener('keydown', function(e) {
       break;
   }
 });
+
+function promptRunBacktest() {
+  const sym = prompt('Run backtest — symbol (e.g. RELIANCE):');
+  if (!sym) return;
+  const strat = prompt('Strategy (intraday/scalping/swing/options/futures):', 'intraday');
+  if (!strat) return;
+  switchTab('analytics');
+  toast(`Running backtest: ${sym.trim().toUpperCase()} / ${strat}…`, 'info');
+  api('POST', '/backtest/run', { symbol: sym.trim().toUpperCase(), strategy: strat, walk_forward: true })
+    .then(d => {
+      if (!d) return;
+      toast(`${d.symbol} ${d.strategy}: ${d.passed ? 'PASS ✓' : 'FAIL ✗'} | WR=${d.win_rate}% Sharpe=${d.sharpe_ratio}`, d.passed ? 'ok' : 'error');
+    })
+    .catch(e => toast(`Backtest error: ${e.message}`, 'error'));
+}
+
+// ── Multi-Leg Builder ──────────────────────────────────────────────────────────
+const ML_TEMPLATES = {
+  bull_call_spread: (atm, step) => [
+    { label: 'Buy CE (ATM)',        strike: atm,        type: 'CE', side: 'BUY'  },
+    { label: 'Sell CE (ATM+1)',     strike: atm + step, type: 'CE', side: 'SELL' },
+  ],
+  bear_put_spread: (atm, step) => [
+    { label: 'Buy PE (ATM)',        strike: atm,        type: 'PE', side: 'BUY'  },
+    { label: 'Sell PE (ATM-1)',     strike: atm - step, type: 'PE', side: 'SELL' },
+  ],
+  strangle: (atm, step) => [
+    { label: 'Buy CE (ATM+1)',      strike: atm + step, type: 'CE', side: 'BUY'  },
+    { label: 'Buy PE (ATM-1)',      strike: atm - step, type: 'PE', side: 'BUY'  },
+  ],
+  iron_condor: (atm, step) => [
+    { label: 'Sell CE (ATM+1)',     strike: atm + step,     type: 'CE', side: 'SELL' },
+    { label: 'Buy CE (ATM+2)',      strike: atm + 2 * step, type: 'CE', side: 'BUY'  },
+    { label: 'Sell PE (ATM-1)',     strike: atm - step,     type: 'PE', side: 'SELL' },
+    { label: 'Buy PE (ATM-2)',      strike: atm - 2 * step, type: 'PE', side: 'BUY'  },
+  ],
+};
+
+let _mlLegs = [];
+
+async function mlAutoFill() {
+  const sym  = document.getElementById('ml-underlying').value;
+  const tmpl = document.getElementById('ml-strategy').value;
+  const legsEl = document.getElementById('ml-legs');
+  legsEl.innerHTML = '<div style="color:var(--fg3);font-size:12px">Loading chain…</div>';
+  try {
+    const data = await api('GET', `/options/chain/${sym}`);
+    const atm   = data.atm_strike;
+    const step  = data.chain.length >= 2 ? Math.abs(data.chain[1].strike - data.chain[0].strike) : 50;
+    const expiry = data.expiry;
+    _mlLegs = ML_TEMPLATES[tmpl](atm, step).map(l => ({
+      ...l,
+      symbol: `${sym}${expiry.replace(/-/g, '').slice(2)}${l.strike}${l.type}`,
+      expiry,
+    }));
+    legsEl.innerHTML = _mlLegs.map((l, i) => `
+      <div style="display:flex;align-items:center;gap:8px;background:var(--surface2);border-radius:6px;padding:6px 10px;font-size:12px">
+        <span style="color:${l.side==='BUY'?'var(--green)':'var(--red)'}">● ${l.side}</span>
+        <span style="font-weight:600">${l.symbol}</span>
+        <span style="color:var(--fg3)">${l.label}</span>
+      </div>`).join('');
+  } catch(e) {
+    legsEl.innerHTML = `<div style="color:var(--red);font-size:12px">Error: ${e.message}</div>`;
+  }
+}
+
+async function mlSubmit() {
+  if (!_mlLegs.length) { toast('Click Auto-Fill first', 'error'); return; }
+  const lots = parseInt(document.getElementById('ml-lots').value) || 1;
+  const underlying = document.getElementById('ml-underlying').value;
+  const stratType  = document.getElementById('ml-strategy').value;
+  const resultEl   = document.getElementById('ml-result');
+  resultEl.textContent = 'Placing legs…';
+  try {
+    const d = await api('POST', '/orders/multi-leg', {
+      underlying, strategy_type: stratType, lots,
+      legs: _mlLegs.map(l => ({ symbol: l.symbol, side: l.side, lots })),
+    });
+    const ids = (d.order_ids || []).join(', ');
+    toast(`${_mlLegs.length} legs placed`, 'ok');
+    resultEl.textContent = `Orders: ${ids}`;
+  } catch(e) {
+    toast(`Multi-leg error: ${e.message}`, 'error');
+    resultEl.textContent = `Error: ${e.message}`;
+  }
+}
 
 async function saveCapitalAllocation() {
   const _f  = id => { const v = parseFloat(document.getElementById(id)?.value); return isNaN(v) ? undefined : v; };
