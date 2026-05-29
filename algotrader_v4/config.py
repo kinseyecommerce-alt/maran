@@ -130,6 +130,8 @@ class Settings(BaseSettings):
     bt_slippage_bps_options: int = 15
     bt_apply_tx_costs: bool = True
     use_transaction_costs: bool = True  # deduct Zerodha fees from P&L in PAPER + LIVE
+    apply_slippage: bool = True          # apply ATR-proportional slippage in PAPER mode
+    slippage_bps_override: int = 0       # 0 = use volume-tier table; >0 = fixed bps for all
 
     # Phase 2: Extended backtest
     bt_wf_folds: int = 12

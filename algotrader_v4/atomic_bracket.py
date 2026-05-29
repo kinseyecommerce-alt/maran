@@ -40,10 +40,44 @@ from typing import Optional, Callable
 
 from loguru import logger
 
+from config import settings
 from kite_client import kite_client
 from trailing_sl_engine import trailing_sl_engine, TRAIL_CONFIGS
 from order_guard import order_guard
 from risk_manager import risk_manager, compute_round_trip_cost
+
+_SLIPPAGE_BPS: dict[str, int] = {"large": 3, "mid": 7, "small": 15}
+
+
+def _estimate_fill_price(
+    signal_price: float,
+    side: str,
+    avg_volume: float = 0.0,
+    atr: float = 0.0,
+) -> float:
+    """ATR-proportional slippage for PAPER/backtest fills.
+
+    Only applied when settings.apply_slippage is True and trading_mode is PAPER.
+    Uses volume tier to pick bps: large (>1M vol) = 3 bps, mid (>200K) = 7 bps,
+    small = 15 bps. Override via settings.slippage_bps_override > 0.
+    """
+    if not settings.apply_slippage or settings.trading_mode != "PAPER":
+        return signal_price
+    if settings.slippage_bps_override > 0:
+        bps = settings.slippage_bps_override
+    else:
+        if avg_volume > 1_000_000:
+            tier = "large"
+        elif avg_volume > 200_000:
+            tier = "mid"
+        else:
+            tier = "small"
+        bps = _SLIPPAGE_BPS[tier]
+    if side == "BUY":
+        fill = signal_price * (1 + bps / 10_000)
+    else:
+        fill = signal_price * (1 - bps / 10_000)
+    return round(fill, 2)
 
 
 class BracketStatus(str, Enum):
@@ -132,7 +166,8 @@ class AtomicBracketEngine:
                       quantity: int, signal_price: float, product: str = "MIS",
                       stop_loss: Optional[float] = None, target_1: Optional[float] = None,
                       target_2: Optional[float] = None, sub_strategy: str = "",
-                      trigger: str = "") -> Optional[BracketOrder]:
+                      trigger: str = "", avg_volume: float = 0.0,
+                      atr: float = 0.0) -> Optional[BracketOrder]:
         bracket_id = f"BRK-{uuid.uuid4().hex[:8].upper()}"
         cfg = TRAIL_CONFIGS.get(strategy, TRAIL_CONFIGS["intraday"])
         entry_est = signal_price
@@ -168,6 +203,13 @@ class AtomicBracketEngine:
             bracket.status = BracketStatus.CANCELLED
             await self._broadcast_update(bracket)
             return None
+        adjusted = _estimate_fill_price(fill_price, side, avg_volume, atr)
+        if adjusted != fill_price:
+            tier = ("large" if avg_volume > 1_000_000 else "mid" if avg_volume > 200_000 else "small")
+            bps  = settings.slippage_bps_override or _SLIPPAGE_BPS[tier]
+            logger.info("Slippage applied: {} {} signal={} fill={} ({} bps, {} tier)",
+                        symbol, side, fill_price, adjusted, bps, tier)
+            fill_price = adjusted
         bracket.entry_price = fill_price
         bracket.best_price  = fill_price
         bracket.filled_at   = time.time()

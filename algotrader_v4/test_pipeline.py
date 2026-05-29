@@ -2375,6 +2375,83 @@ run("use_transaction_costs=False returns zero-cost object",        t_tc_disabled
 
 
 # ══════════════════════════════════════════════════════════════════════════
+# 13. SLIPPAGE MODEL
+# ══════════════════════════════════════════════════════════════════════════
+section("13. SLIPPAGE MODEL")
+from atomic_bracket import _estimate_fill_price
+
+def t_slip_buy_increases_price():
+    from config import settings as _s
+    orig_slip, orig_mode = _s.apply_slippage, _s.trading_mode
+    try:
+        _s.apply_slippage = True
+        _s.trading_mode   = "PAPER"
+        for vol in (2_000_000, 500_000, 50_000):
+            fp = _estimate_fill_price(1000.0, "BUY", avg_volume=vol)
+            assert fp > 1000.0, f"BUY fill {fp} should exceed signal 1000 at vol={vol}"
+    finally:
+        _s.apply_slippage = orig_slip
+        _s.trading_mode   = orig_mode
+
+def t_slip_sell_decreases_price():
+    from config import settings as _s
+    orig_slip, orig_mode = _s.apply_slippage, _s.trading_mode
+    try:
+        _s.apply_slippage = True
+        _s.trading_mode   = "PAPER"
+        for vol in (2_000_000, 500_000, 50_000):
+            fp = _estimate_fill_price(1000.0, "SELL", avg_volume=vol)
+            assert fp < 1000.0, f"SELL fill {fp} should be below signal 1000 at vol={vol}"
+    finally:
+        _s.apply_slippage = orig_slip
+        _s.trading_mode   = orig_mode
+
+def t_slip_large_cap_3bps():
+    from config import settings as _s
+    orig_slip, orig_mode, orig_override = _s.apply_slippage, _s.trading_mode, _s.slippage_bps_override
+    try:
+        _s.apply_slippage = True
+        _s.trading_mode   = "PAPER"
+        _s.slippage_bps_override = 0
+        fp = _estimate_fill_price(1000.0, "BUY", avg_volume=2_000_000)
+        assert abs(fp - 1000.30) < 0.01, f"Large cap BUY: expected 1000.30, got {fp}"
+    finally:
+        _s.apply_slippage = orig_slip
+        _s.trading_mode   = orig_mode
+        _s.slippage_bps_override = orig_override
+
+def t_slip_small_cap_15bps():
+    from config import settings as _s
+    orig_slip, orig_mode, orig_override = _s.apply_slippage, _s.trading_mode, _s.slippage_bps_override
+    try:
+        _s.apply_slippage = True
+        _s.trading_mode   = "PAPER"
+        _s.slippage_bps_override = 0
+        fp = _estimate_fill_price(1000.0, "BUY", avg_volume=50_000)
+        assert abs(fp - 1001.50) < 0.01, f"Small cap BUY: expected 1001.50, got {fp}"
+    finally:
+        _s.apply_slippage = orig_slip
+        _s.trading_mode   = orig_mode
+        _s.slippage_bps_override = orig_override
+
+def t_slip_disabled_returns_signal():
+    from config import settings as _s
+    orig_slip = _s.apply_slippage
+    try:
+        _s.apply_slippage = False
+        fp = _estimate_fill_price(2800.0, "BUY", avg_volume=50_000)
+        assert fp == 2800.0, f"Expected signal_price 2800.0, got {fp}"
+    finally:
+        _s.apply_slippage = orig_slip
+
+run("BUY slippage raises fill above signal for all volume tiers",  t_slip_buy_increases_price)
+run("SELL slippage lowers fill below signal for all volume tiers", t_slip_sell_decreases_price)
+run("large cap (vol=2M) uses 3 bps → BUY fill=1000.30",           t_slip_large_cap_3bps)
+run("small cap (vol=50K) uses 15 bps → BUY fill=1001.50",         t_slip_small_cap_15bps)
+run("apply_slippage=False returns signal_price unchanged",          t_slip_disabled_returns_signal)
+
+
+# ══════════════════════════════════════════════════════════════════════════
 # FINAL SUMMARY
 # ══════════════════════════════════════════════════════════════════════════
 failed = summary()
