@@ -60,7 +60,7 @@ class Settings(BaseSettings):
     bt_min_sharpe: float = 1.0
     bt_max_drawdown_pct: float = 15.0
     bt_min_trades: int = 20
-    bt_lookback_days: int = 180
+    bt_lookback_days: int = 730
 
     # Overtrade prevention (per strategy per day)
     max_trades_intraday: int = 8

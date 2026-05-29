@@ -55,10 +55,11 @@ class BacktestResult:
     worst_trade: float      = 0.0
     fail_reasons: list[str] = field(default_factory=list)
     # Walk-forward OOS metrics
-    oos_win_rate: float     = 0.0
-    oos_total_pnl: float    = 0.0
-    oos_trades: int         = 0
-    walk_forward_used: bool = False
+    oos_win_rate: float          = 0.0
+    oos_total_pnl: float         = 0.0
+    oos_trades: int              = 0
+    oos_sharpe: float | None     = None
+    walk_forward_used: bool      = False
     # Monte Carlo
     mc_pvalue: float        = 1.0
     mc_passed: bool         = False
@@ -88,6 +89,7 @@ class BacktestResult:
             "oos_win_rate":      round(self.oos_win_rate, 1),
             "oos_total_pnl":     round(self.oos_total_pnl, 0),
             "oos_trades":        self.oos_trades,
+            "oos_sharpe":        round(self.oos_sharpe, 2) if self.oos_sharpe is not None else None,
             "mc_pvalue":         round(self.mc_pvalue, 3),
             "mc_passed":         self.mc_passed,
         }
@@ -201,6 +203,8 @@ class BacktestEngine:
         lookback_days: int | None = None,
         force: bool = False,
         walk_forward: bool = True,
+        n_folds: int | None = None,
+        out_of_sample_pct: float | None = None,
     ) -> BacktestResult:
         key = (symbol, strategy)
         if not force and key in self._cache:
@@ -218,8 +222,13 @@ class BacktestEngine:
             self._cache[key] = result
             return result
 
+        oos_pct = out_of_sample_pct if out_of_sample_pct is not None else 0.30
         if walk_forward and len(df) >= 120:
-            result = self._walk_forward_run(symbol, strategy, df, params)
+            result = self._walk_forward_run(
+                symbol, strategy, df, params,
+                n_splits=n_folds,
+                out_of_sample_pct=oos_pct,
+            )
         else:
             signals = self._generate_signals(df, strategy)
             trades  = self._simulate_trades(df, signals, params, strategy_name=strategy)
@@ -339,15 +348,18 @@ class BacktestEngine:
         df: pd.DataFrame,
         params: dict,
         n_splits: int | None = None,
-        train_frac: float = 0.70,
+        train_frac: float | None = None,
+        out_of_sample_pct: float = 0.30,
     ) -> BacktestResult:
         """
         Split data into n_splits windows (default from settings.bt_wf_folds).
         Supports anchored walk-forward (settings.bt_wf_anchored=True): expanding train window.
         IS result comes from the full dataset; OOS metrics come from OOS folds.
+        out_of_sample_pct controls the OOS fraction (default 0.30 → train_frac=0.70).
         """
         n_splits    = n_splits or getattr(settings, "bt_wf_folds", 12)
         anchored    = getattr(settings, "bt_wf_anchored", True)
+        train_frac  = train_frac if train_frac is not None else (1.0 - out_of_sample_pct)
         min_oos_t   = getattr(settings, "bt_min_oos_trades", 15)
         n           = len(df)
         # Ensure at least 2 folds with enough data
@@ -392,6 +404,13 @@ class BacktestEngine:
             result.oos_win_rate  = len(oos_wins) / len(oos_pnls) * 100
             result.oos_total_pnl = sum(oos_pnls)
             result.oos_trades    = len(oos_pnls)
+            if len(oos_pnls) >= 2:
+                arr = np.array(oos_pnls, dtype=float)
+                std = float(arr.std())
+                if std > 0:
+                    result.oos_sharpe = round(
+                        float(arr.mean()) / std * math.sqrt(len(arr)), 2
+                    )
 
         # Gate: require minimum OOS trades
         if result.oos_trades < min_oos_t and result.oos_trades > 0:

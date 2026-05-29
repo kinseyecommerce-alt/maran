@@ -196,6 +196,7 @@ class TokenRequest(BaseModel):
 class BacktestRequest(BaseModel):
     symbol: str; exchange: str = "NSE"; strategy: str = "intraday"
     lookback_days: int | None = None; walk_forward: bool = True
+    n_folds: int | None = None; out_of_sample_pct: float | None = None
 
 class BatchBacktestRequest(BaseModel):
     symbols: list[dict]; strategy: str = "intraday"; walk_forward: bool = True
@@ -691,7 +692,9 @@ def run_bt(req: BacktestRequest):
     sym = _clean_symbol(req.symbol)
     strat = _clean_strategy(req.strategy)
     return backtest_engine.run(sym, req.exchange, strat, req.lookback_days,
-                               force=True, walk_forward=req.walk_forward).to_dict()
+                               force=True, walk_forward=req.walk_forward,
+                               n_folds=req.n_folds,
+                               out_of_sample_pct=req.out_of_sample_pct).to_dict()
 
 @app.post("/backtest/batch", tags=["Backtest"])
 def batch_bt(req: BatchBacktestRequest):

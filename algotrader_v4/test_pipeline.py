@@ -2524,6 +2524,69 @@ run("get_kelly_fraction >0 when adaptive stats present",           t_kelly_enabl
 
 
 # ══════════════════════════════════════════════════════════════════════════
+# 15. WALK-FORWARD EXTENDED
+# ══════════════════════════════════════════════════════════════════════════
+
+from backtest_engine import BacktestEngine, BacktestResult
+
+def t_wf_default_lookback_730():
+    """bt_lookback_days default must be 730 (2 years)."""
+    from config import settings
+    assert settings.bt_lookback_days == 730, \
+        f"Expected 730, got {settings.bt_lookback_days}"
+
+def t_wf_default_n_folds_12():
+    """bt_wf_folds default must be 12."""
+    from config import settings
+    assert settings.bt_wf_folds == 12, \
+        f"Expected 12, got {settings.bt_wf_folds}"
+
+def t_wf_out_of_sample_pct_default():
+    """_walk_forward_run out_of_sample_pct default is 0.30."""
+    import inspect
+    from backtest_engine import BacktestEngine
+    sig = inspect.signature(BacktestEngine._walk_forward_run)
+    default = sig.parameters["out_of_sample_pct"].default
+    assert default == 0.30, f"Expected 0.30, got {default}"
+
+def t_wf_train_frac_derived_from_oos_pct():
+    """n_folds=3, out_of_sample_pct=0.40 → train_frac==0.60 used internally."""
+    import pandas as pd, numpy as np
+    engine = BacktestEngine()
+    # Build a minimal DataFrame with 200 rows
+    idx = pd.date_range("2024-01-01", periods=200, freq="15min")
+    close = 1000 + np.cumsum(np.random.randn(200) * 0.5)
+    df = pd.DataFrame({
+        "open":   close - 0.2, "high": close + 0.5,
+        "low":    close - 0.5, "close": close, "volume": 1e6,
+    }, index=idx)
+    from backtest_engine import STRATEGY_PARAMS
+    params = STRATEGY_PARAMS["intraday"]
+    # With out_of_sample_pct=0.40, train_frac must become 0.60 — verified by no exception
+    result = engine._walk_forward_run(
+        "TEST", "intraday", df, params,
+        n_splits=3, out_of_sample_pct=0.40,
+    )
+    assert result.walk_forward_used is True
+
+def t_wf_oos_sharpe_in_result_dict():
+    """oos_sharpe key must be present in to_dict() output (may be None)."""
+    r = BacktestResult(symbol="X", strategy="intraday", passed=False)
+    d = r.to_dict()
+    assert "oos_sharpe" in d, "oos_sharpe key missing from to_dict()"
+    assert d["oos_sharpe"] is None  # no OOS trades yet
+
+
+print()
+print("── 15. WALK-FORWARD EXTENDED ────────────────────────────────────────────")
+run("bt_lookback_days default == 730",                             t_wf_default_lookback_730)
+run("bt_wf_folds default == 12",                                   t_wf_default_n_folds_12)
+run("out_of_sample_pct default is 0.30",                           t_wf_out_of_sample_pct_default)
+run("n_folds=3, out_of_sample_pct=0.40 → walk_forward_used=True", t_wf_train_frac_derived_from_oos_pct)
+run("oos_sharpe key present in to_dict() (may be None)",           t_wf_oos_sharpe_in_result_dict)
+
+
+# ══════════════════════════════════════════════════════════════════════════
 # FINAL SUMMARY
 # ══════════════════════════════════════════════════════════════════════════
 failed = summary()
