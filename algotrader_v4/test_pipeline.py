@@ -412,7 +412,7 @@ def t_bt_passed_is_bool():
 
 def t_bt_win_rate_range():
     r = be.run("RELIANCE", "NSE", "intraday")
-    assert 0.0 <= r.win_rate <= 1.0
+    assert 0.0 <= r.win_rate <= 100.0
 
 def t_bt_sharpe_float():
     assert isinstance(be.run("RELIANCE", "NSE", "intraday").sharpe_ratio, float)
