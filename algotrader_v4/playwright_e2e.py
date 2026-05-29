@@ -46,18 +46,24 @@ def snap(page: Page, name: str) -> None:
 
 # ── Test helpers ─────────────────────────────────────────────────────────────
 
-def api(page: Page, method: str, path: str, body: dict | None = None) -> tuple[int, dict]:
+def api(page: Page, method: str, path: str, body: dict | None = None,
+        timeout_ms: int = 30000) -> tuple[int, dict]:
     js = f"""
     async () => {{
-        const r = await fetch('{BASE}{path}', {{
-            method: '{method}',
-            headers: {{'Content-Type': 'application/json', 'X-API-Key': '{API_KEY}'}},
-            body: {json.dumps(json.dumps(body)) if body else 'undefined'}
-        }});
-        const text = await r.text();
-        let data;
-        try {{ data = JSON.parse(text); }} catch(e) {{ data = {{_raw: text}}; }}
-        return {{status: r.status, data}};
+        try {{
+            const r = await fetch('{BASE}{path}', {{
+                method: '{method}',
+                headers: {{'Content-Type': 'application/json', 'X-API-Key': '{API_KEY}'}},
+                body: {json.dumps(json.dumps(body)) if body else 'undefined'},
+                signal: AbortSignal.timeout({timeout_ms})
+            }});
+            const text = await r.text();
+            let data;
+            try {{ data = JSON.parse(text); }} catch(e) {{ data = {{_raw: text}}; }}
+            return {{status: r.status, data}};
+        }} catch(e) {{
+            return {{status: 0, data: {{_error: e.message}}}};
+        }}
     }}
     """
     result = page.evaluate(js)
@@ -69,15 +75,20 @@ def api_form(page: Page, method: str, path: str, fields: dict) -> tuple[int, dic
     encoded = "&".join(f"{k}={v}" for k, v in fields.items())
     js = f"""
     async () => {{
-        const r = await fetch('{BASE}{path}', {{
-            method: '{method}',
-            headers: {{'Content-Type': 'application/x-www-form-urlencoded', 'X-API-Key': '{API_KEY}'}},
-            body: '{encoded}'
-        }});
-        const text = await r.text();
-        let data;
-        try {{ data = JSON.parse(text); }} catch(e) {{ data = {{_raw: text}}; }}
-        return {{status: r.status, data}};
+        try {{
+            const r = await fetch('{BASE}{path}', {{
+                method: '{method}',
+                headers: {{'Content-Type': 'application/x-www-form-urlencoded', 'X-API-Key': '{API_KEY}'}},
+                body: '{encoded}',
+                signal: AbortSignal.timeout(15000)
+            }});
+            const text = await r.text();
+            let data;
+            try {{ data = JSON.parse(text); }} catch(e) {{ data = {{_raw: text}}; }}
+            return {{status: r.status, data}};
+        }} catch(e) {{
+            return {{status: 0, data: {{_error: e.message}}}};
+        }}
     }}
     """
     result = page.evaluate(js)
@@ -183,8 +194,15 @@ def test_bot_lifecycle(page: Page) -> None:
     # Ensure clean state — stop if already running
     api(page, "POST", "/bot/stop")
 
-    # Start bot
-    status, body = api(page, "POST", "/bot/start", {"strategies": ["intraday", "scalping"]})
+    # Start bot — supply a small watchlist to skip the TrueData symbol scan
+    status, body = api(page, "POST", "/bot/start", {
+        "strategies": ["intraday", "scalping"],
+        "watchlist": [
+            {"symbol": "RELIANCE", "exchange": "NSE"},
+            {"symbol": "TCS",      "exchange": "NSE"},
+            {"symbol": "HDFCBANK", "exchange": "NSE"},
+        ]
+    })
     if status == 200 and body.get("status") == "started":
         ok(f"POST /bot/start → started ({len(body.get('watchlist', []))} symbols)")
         snap(page, "04_bot_started")
@@ -192,7 +210,10 @@ def test_bot_lifecycle(page: Page) -> None:
         fail("Bot start", f"HTTP {status}: {body}")
 
     # Already running → 400
-    status, body = api(page, "POST", "/bot/start", {"strategies": ["intraday"]})
+    status, body = api(page, "POST", "/bot/start", {
+        "strategies": ["intraday"],
+        "watchlist": [{"symbol": "RELIANCE", "exchange": "NSE"}]
+    })
     if status == 400:
         ok("POST /bot/start while running → 400 Already running")
     else:

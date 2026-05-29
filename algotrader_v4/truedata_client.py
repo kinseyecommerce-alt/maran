@@ -26,39 +26,58 @@ from config import settings
 
 # ── Lazy shared TD connection ──────────────────────────────────────────────────
 
-_td_instance = None
+_td_instance = None      # None = not yet tried; False = tried and failed; TD = connected
 _td_lock     = threading.Lock()
+_TD_SENTINEL = False     # marks a permanent failure — no more retries this session
 
 
 def _get_td():
-    """Return a shared TD instance, initialised once."""
+    """Return a shared TD instance, initialised once.
+    Returns None on first call; False (falsy) permanently after a connection failure.
+    Callers check truthiness: `if not td: return empty`
+    """
     global _td_instance
-    if _td_instance is not None:
-        return _td_instance
+    if _td_instance is not None:          # True (connected) or False (failed) — either way, done
+        return _td_instance if _td_instance is not _TD_SENTINEL else None
     with _td_lock:
         if _td_instance is not None:
-            return _td_instance
+            return _td_instance if _td_instance is not _TD_SENTINEL else None
         if not settings.truedata_username or not settings.truedata_password:
             logger.debug("[TrueData] credentials not configured")
+            _td_instance = _TD_SENTINEL
             return None
-        try:
+        import concurrent.futures as _cf
+
+        def _connect():
             try:
                 from truedata_ws.websocket.TD import TD   # v5+
             except ImportError:
                 from truedata_ws.websockets.TD import TD  # v4
-            _td_instance = TD(
+            return TD(
                 settings.truedata_username,
                 settings.truedata_password,
                 live_port=8082,
                 url="push.truedata.in",
                 log_level="ERROR",
             )
+
+        try:
+            pool = _cf.ThreadPoolExecutor(max_workers=1)
+            fut = pool.submit(_connect)
+            pool.shutdown(wait=False)
+            td = fut.result(timeout=5)
+            _td_instance = td
             logger.info("[TrueData] Connected as {}", settings.truedata_username)
+        except _cf.TimeoutError:
+            logger.warning("[TrueData] Connection timed out (5s) — disabling for this session")
+            _td_instance = _TD_SENTINEL
         except ImportError:
             logger.error("[TrueData] truedata-ws not installed — run: pip install truedata-ws")
+            _td_instance = _TD_SENTINEL
         except Exception as exc:
             logger.error("[TrueData] Connection error: {}", exc)
-    return _td_instance
+            _td_instance = _TD_SENTINEL
+    return _td_instance if _td_instance is not _TD_SENTINEL else None
 
 
 def _td_symbol(symbol: str, exchange: str = "NSE") -> str:
