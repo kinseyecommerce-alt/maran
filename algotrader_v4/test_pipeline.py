@@ -1087,7 +1087,7 @@ def t_intraday_buy_has_target():
     if action == "BUY" and sig:
         assert "target" in sig or "stop_loss" in sig
 
-run("ALL_AGENTS has 4 strategy agents",          t_agents_4)
+run("ALL_AGENTS has 5 strategy agents",          t_agents_4)
 run("IntradayAgent.evaluate_tick returns valid", t_intraday_returns_action)
 run("IntradayAgent → BUY on bullish setup",      t_intraday_buy_signal)
 run("IntradayAgent → HOLD on RSI overbought",    t_intraday_hold_overbought)
