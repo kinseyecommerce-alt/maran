@@ -61,8 +61,11 @@ class BacktestResult:
     oos_sharpe: float | None     = None
     walk_forward_used: bool      = False
     # Monte Carlo
-    mc_pvalue: float        = 1.0
-    mc_passed: bool         = False
+    mc_pvalue: float             = 1.0
+    mc_passed: bool              = False
+    sharpe_percentile: float | None  = None   # % of permutations with Sharpe ≤ real
+    min_sharpe_5pct: float | None    = None   # 5th pct of permuted Sharpes
+    max_drawdown_95pct: float | None = None   # 95th pct of permuted max drawdowns
     # Raw trade log and equity curve (not serialised by default)
     trades: list[dict]      = field(default_factory=list)
     equity_curve: list[float] = field(default_factory=list)
@@ -92,6 +95,13 @@ class BacktestResult:
             "oos_sharpe":        round(self.oos_sharpe, 2) if self.oos_sharpe is not None else None,
             "mc_pvalue":         round(self.mc_pvalue, 3),
             "mc_passed":         self.mc_passed,
+            "monte_carlo": {
+                "sharpe_percentile":  self.sharpe_percentile,
+                "min_sharpe_5pct":    self.min_sharpe_5pct,
+                "max_drawdown_95pct": self.max_drawdown_95pct,
+                "mc_pvalue":          round(self.mc_pvalue, 3),
+                "is_significant":     self.mc_passed,
+            },
         }
         if include_trades:
             d["trades"] = self.trades
@@ -680,14 +690,17 @@ class BacktestEngine:
                 if fr not in reasons:
                     reasons.append(fr)
 
-        # Monte Carlo test gate
-        require_mc = getattr(settings, "bt_require_mc_pass", False)
-        if require_mc and r.trades:
-            n_perms = getattr(settings, "bt_mc_permutations", 500)
+        # Always run Monte Carlo to populate stats; gate on bt_require_mc_pass
+        if r.trades:
+            n_perms = getattr(settings, "bt_mc_permutations", 1000)
             mc_result = self._monte_carlo_test(r.trades, n_perms)
-            r.mc_pvalue = mc_result["mc_pvalue"]
-            r.mc_passed = mc_result["mc_passed"]
-            if not r.mc_passed:
+            r.mc_pvalue          = mc_result["mc_pvalue"]
+            r.mc_passed          = mc_result["mc_passed"]
+            r.sharpe_percentile  = mc_result.get("sharpe_percentile")
+            r.min_sharpe_5pct    = mc_result.get("min_sharpe_5pct")
+            r.max_drawdown_95pct = mc_result.get("max_drawdown_95pct")
+            require_mc = getattr(settings, "bt_require_mc_pass", False)
+            if require_mc and not r.mc_passed:
                 reasons.append(
                     f"Monte Carlo failed (p={r.mc_pvalue:.3f} >= 0.10 threshold)"
                 )
@@ -701,17 +714,23 @@ class BacktestEngine:
     def _monte_carlo_test(
         self,
         trades: list[dict],
-        n_permutations: int = 500,
+        n_permutations: int = 1000,
     ) -> dict:
         """
         Permutation test using Calmar ratio (return / max-drawdown).
-        Max-drawdown is path-dependent — shuffling the same P&L sequence
-        changes the drawdown profile, making this a meaningful test.
         p-value = fraction of shuffled Calmar values >= real Calmar.
         Passes when p-value < 0.10 (real edge is in top 10% of random).
+        Also reports Sharpe-based stats across permutations:
+          sharpe_percentile  — % of permutations with Sharpe ≤ real Sharpe
+          min_sharpe_5pct    — 5th percentile of permuted Sharpes
+          max_drawdown_95pct — 95th percentile of permuted max drawdowns
         """
+        _no_data = {
+            "mc_pvalue": 1.0, "mc_passed": False,
+            "sharpe_percentile": None, "min_sharpe_5pct": None, "max_drawdown_95pct": None,
+        }
         if len(trades) < 20:
-            return {"mc_pvalue": 1.0, "mc_passed": False}
+            return _no_data
 
         def _calmar(pnls: np.ndarray) -> float:
             cumsum = np.cumsum(pnls)
@@ -719,15 +738,40 @@ class BacktestEngine:
             max_dd = float(np.max(peak - cumsum)) + 1e-9
             return float(pnls.sum()) / max_dd
 
-        real_pnls  = np.array([t.get("net_pnl", t["pnl"]) for t in trades])
-        real_calmar = _calmar(real_pnls)
+        def _sharpe(pnls: np.ndarray) -> float:
+            std = float(pnls.std())
+            return float(pnls.mean()) / std * math.sqrt(len(pnls)) if std > 1e-9 else 0.0
 
-        count_worse = sum(
-            1 for _ in range(n_permutations)
-            if _calmar(np.random.permutation(real_pnls)) >= real_calmar
-        )
-        pvalue = count_worse / n_permutations
-        return {"mc_pvalue": round(pvalue, 3), "mc_passed": pvalue < 0.10}
+        def _max_dd(pnls: np.ndarray) -> float:
+            cum  = np.cumsum(pnls)
+            peak = np.maximum.accumulate(cum)
+            return float(np.max(peak - cum))
+
+        real_pnls   = np.array([t.get("net_pnl", t["pnl"]) for t in trades])
+        real_calmar = _calmar(real_pnls)
+        real_sharpe = _sharpe(real_pnls)
+
+        perm_calmars:   list[float] = []
+        perm_sharpes:   list[float] = []
+        perm_drawdowns: list[float] = []
+
+        for _ in range(n_permutations):
+            p = np.random.permutation(real_pnls)
+            perm_calmars.append(_calmar(p))
+            perm_sharpes.append(_sharpe(p))
+            perm_drawdowns.append(_max_dd(p))
+
+        pvalue = sum(1 for c in perm_calmars if c >= real_calmar) / n_permutations
+
+        ps = np.array(perm_sharpes)
+        pd_arr = np.array(perm_drawdowns)
+        return {
+            "mc_pvalue":          round(pvalue, 3),
+            "mc_passed":          pvalue < 0.10,
+            "sharpe_percentile":  round(float(np.mean(ps <= real_sharpe) * 100), 1),
+            "min_sharpe_5pct":    round(float(np.percentile(ps, 5)), 2),
+            "max_drawdown_95pct": round(float(np.percentile(pd_arr, 95)), 2),
+        }
 
     # ── Stress test ────────────────────────────────────────────────────────────
 

@@ -141,7 +141,7 @@ class Settings(BaseSettings):
 
     # Phase 2: Monte Carlo
     bt_require_mc_pass: bool = False
-    bt_mc_permutations: int = 500
+    bt_mc_permutations: int = 1000
 
     # Phase 2/3: Position sizing
     use_atr_sizing: bool = True

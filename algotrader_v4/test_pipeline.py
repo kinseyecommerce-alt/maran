@@ -2587,6 +2587,75 @@ run("oos_sharpe key present in to_dict() (may be None)",           t_wf_oos_shar
 
 
 # ══════════════════════════════════════════════════════════════════════════
+# 16. MONTE CARLO PERMUTATION TEST
+# ══════════════════════════════════════════════════════════════════════════
+
+def _make_mc_trades(n=50, seed=42):
+    rng = __import__("numpy").random.default_rng(seed)
+    pnls = rng.normal(50, 200, n).tolist()
+    return [{"pnl": p, "net_pnl": p} for p in pnls]
+
+def t_mc_returns_sharpe_percentile():
+    """_monte_carlo_test includes sharpe_percentile key (float, not None) for ≥20 trades."""
+    from backtest_engine import BacktestEngine
+    engine = BacktestEngine()
+    result = engine._monte_carlo_test(_make_mc_trades(), n_permutations=200)
+    assert "sharpe_percentile" in result, "sharpe_percentile key missing"
+    assert result["sharpe_percentile"] is not None, "sharpe_percentile is None"
+    assert isinstance(result["sharpe_percentile"], float)
+
+def t_mc_sharpe_percentile_in_range():
+    """sharpe_percentile must be in [0, 100]."""
+    from backtest_engine import BacktestEngine
+    engine = BacktestEngine()
+    result = engine._monte_carlo_test(_make_mc_trades(), n_permutations=200)
+    sp = result["sharpe_percentile"]
+    assert 0.0 <= sp <= 100.0, f"sharpe_percentile {sp} outside [0, 100]"
+
+def t_mc_min_sharpe_5pct_is_float():
+    """min_sharpe_5pct is a float for ≥20 trades."""
+    from backtest_engine import BacktestEngine
+    engine = BacktestEngine()
+    result = engine._monte_carlo_test(_make_mc_trades(), n_permutations=200)
+    assert result["min_sharpe_5pct"] is not None
+    assert isinstance(result["min_sharpe_5pct"], float)
+
+def t_mc_max_drawdown_95pct_is_float():
+    """max_drawdown_95pct is a float for ≥20 trades."""
+    from backtest_engine import BacktestEngine
+    engine = BacktestEngine()
+    result = engine._monte_carlo_test(_make_mc_trades(), n_permutations=200)
+    assert result["max_drawdown_95pct"] is not None
+    assert isinstance(result["max_drawdown_95pct"], float)
+    assert result["max_drawdown_95pct"] >= 0.0
+
+def t_mc_to_dict_nested_monte_carlo():
+    """to_dict() must include a 'monte_carlo' nested dict with is_significant key."""
+    from backtest_engine import BacktestResult
+    r = BacktestResult(
+        symbol="TEST", strategy="intraday", passed=False,
+        sharpe_percentile=82.0, min_sharpe_5pct=-0.5, max_drawdown_95pct=1200.0,
+        mc_pvalue=0.06, mc_passed=True,
+    )
+    d = r.to_dict()
+    assert "monte_carlo" in d, "'monte_carlo' key missing from to_dict()"
+    mc = d["monte_carlo"]
+    assert "is_significant" in mc, "'is_significant' missing from monte_carlo dict"
+    assert "sharpe_percentile" in mc
+    assert mc["is_significant"] is True
+    assert mc["sharpe_percentile"] == 82.0
+
+
+print()
+print("── 16. MONTE CARLO PERMUTATION TEST ────────────────────────────────────")
+run("_monte_carlo_test returns sharpe_percentile for ≥20 trades",  t_mc_returns_sharpe_percentile)
+run("sharpe_percentile is in [0, 100]",                            t_mc_sharpe_percentile_in_range)
+run("min_sharpe_5pct is a float for ≥20 trades",                   t_mc_min_sharpe_5pct_is_float)
+run("max_drawdown_95pct is a non-negative float for ≥20 trades",   t_mc_max_drawdown_95pct_is_float)
+run("to_dict() has 'monte_carlo' dict with is_significant key",    t_mc_to_dict_nested_monte_carlo)
+
+
+# ══════════════════════════════════════════════════════════════════════════
 # FINAL SUMMARY
 # ══════════════════════════════════════════════════════════════════════════
 failed = summary()
