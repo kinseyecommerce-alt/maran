@@ -27,13 +27,13 @@ logs/
 .DS_Store
 Thumbs.db
 
-# Ruflo / Claude-Flow runtime
+# Ruflo / Claude-Flow runtime (any directory depth)
 .claude/memory.db
-.claude-flow/data/
-.claude-flow/logs/
-.claude-flow/sessions/
-.claude-flow/neural/
-.swarm/
+**/.claude-flow/data/
+**/.claude-flow/logs/
+**/.claude-flow/sessions/
+**/.claude-flow/neural/
+**/.swarm/
 ruvector.db
 agentdb.rvf
 agentdb.rvf.lock
