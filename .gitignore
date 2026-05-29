@@ -26,3 +26,14 @@ logs/
 # OS
 .DS_Store
 Thumbs.db
+
+# Ruflo / Claude-Flow runtime
+.claude/memory.db
+.claude-flow/data/
+.claude-flow/logs/
+.claude-flow/sessions/
+.claude-flow/neural/
+.swarm/
+ruvector.db
+*.db-shm
+*.db-wal
