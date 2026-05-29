@@ -79,6 +79,45 @@ def compute_round_trip_cost(
     return round(leg.total * 2, 4)
 
 
+def _compute_kelly(win_rate: float, avg_win: float, avg_loss: float) -> float:
+    """Pure half-Kelly formula → fraction of capital in [0.0, 0.25].
+
+    Args:
+        win_rate: fraction of winning trades (0.0–1.0)
+        avg_win:  average winning trade magnitude (positive)
+        avg_loss: average losing trade magnitude (positive)
+    Returns float in [0.0, 0.25]; 0.0 when inputs are invalid or edge < 0.
+    """
+    if avg_loss <= 0 or avg_win <= 0:
+        return 0.0
+    win_loss_ratio = avg_win / avg_loss
+    kelly_f = win_rate - (1 - win_rate) / win_loss_ratio
+    kelly_f = kelly_f * 0.5                    # half-Kelly
+    return max(0.0, min(kelly_f, 0.25))
+
+
+def get_kelly_fraction(agent_name: str) -> float:
+    """Aggregate half-Kelly fraction across all symbols for an agent.
+
+    Pulls win_rate_20, avg_win_pct, avg_loss_pct from adaptive_engine params.
+    Returns 0.0 when < 10 trades recorded (fall back to fixed sizing).
+    """
+    try:
+        from adaptive_engine import adaptive_engine as _ae
+        prefix = f"{agent_name}::"
+        params_list = [v for k, v in _ae._params.items() if k.startswith(prefix)]
+        trades_total = sum(len(t) for k, t in _ae._trades.items() if k.startswith(prefix))
+        if trades_total < 10 or not params_list:
+            return 0.0
+        n = len(params_list)
+        win_rate = sum(p.win_rate_20 for p in params_list) / n
+        avg_win  = sum(p.avg_win_pct for p in params_list) / n
+        avg_loss = abs(sum(p.avg_loss_pct for p in params_list) / n)
+        return _compute_kelly(win_rate, avg_win, avg_loss)
+    except Exception:
+        return 0.0
+
+
 def compute_tx_costs(
     qty: int,
     entry_price: float,
@@ -240,6 +279,11 @@ class RiskManager:
             cap = self.max_capital_for_agent(agent)
         else:
             cap = settings.max_position_size
+        if settings.use_kelly_capital_sizing and agent:
+            kf = get_kelly_fraction(agent)
+            if kf > 0:
+                cap = settings.total_capital * kf
+                logger.debug("Kelly sizing: agent={} kf={:.3f} cap=₹{:.0f}", agent, kf, cap)
         if risk_pct and price > 0:
             sl_amount = price * (settings.stop_loss_pct / 100)
             cap = min(cap, (cap * risk_pct / 100) / sl_amount * price)

@@ -2452,6 +2452,78 @@ run("apply_slippage=False returns signal_price unchanged",          t_slip_disab
 
 
 # ══════════════════════════════════════════════════════════════════════════
+# 14. KELLY CRITERION
+# ══════════════════════════════════════════════════════════════════════════
+section("14. KELLY CRITERION")
+from risk_manager import _compute_kelly, get_kelly_fraction
+
+def t_kelly_positive_edge():
+    # win_rate=0.6, avg_win=200, avg_loss=100 → win_loss=2.0
+    # kelly = 0.6 - 0.4/2.0 = 0.4; half = 0.20; clamped = 0.20
+    kf = _compute_kelly(win_rate=0.6, avg_win=200.0, avg_loss=100.0)
+    assert abs(kf - 0.20) < 0.001, f"Expected 0.20, got {kf}"
+
+def t_kelly_negative_edge_clamped():
+    # win_rate=0.3, win_loss=50/200=0.25 → kelly = 0.3 - 0.7/0.25 = 0.3-2.8 = -2.5 → clamp to 0
+    kf = _compute_kelly(win_rate=0.3, avg_win=50.0, avg_loss=200.0)
+    assert kf == 0.0, f"Expected 0.0 for negative edge, got {kf}"
+
+def t_kelly_zero_avg_loss():
+    kf = _compute_kelly(win_rate=0.6, avg_win=100.0, avg_loss=0.0)
+    assert kf == 0.0, "Expected 0.0 when avg_loss=0 (guard div-by-zero)"
+
+def t_kelly_always_in_range():
+    for wr, aw, al in [(0.9, 500, 10), (0.1, 1000, 1), (0.5, 100, 100), (0.0, 50, 50)]:
+        kf = _compute_kelly(wr, aw, al)
+        assert 0.0 <= kf <= 0.25, f"Out of range: {kf} for wr={wr} aw={aw} al={al}"
+
+def t_kelly_disabled_uses_fixed_cap():
+    from config import settings as _s
+    from risk_manager import risk_manager as _rm
+    orig = _s.use_kelly_capital_sizing
+    try:
+        _s.use_kelly_capital_sizing = False
+        qty_fixed = _rm.calculate_quantity(price=2800.0, agent="intraday")
+        assert qty_fixed > 0
+        # With kelly disabled, qty should not depend on adaptive stats
+        qty_fixed2 = _rm.calculate_quantity(price=2800.0, agent="intraday")
+        assert qty_fixed == qty_fixed2
+    finally:
+        _s.use_kelly_capital_sizing = orig
+
+def t_kelly_enabled_changes_qty_with_stats():
+    from config import settings as _s
+    from risk_manager import risk_manager as _rm
+    from adaptive_engine import adaptive_engine as _ae
+    orig_kelly = _s.use_kelly_capital_sizing
+    try:
+        _s.use_kelly_capital_sizing = True
+        # Inject synthetic params for 'intraday' strategy
+        from adaptive_engine import AdaptiveParams
+        from collections import deque
+        key = "intraday::RELIANCE"
+        _ae._params[key] = AdaptiveParams(
+            strategy="intraday", symbol="RELIANCE",
+            win_rate_20=0.65, avg_win_pct=2.5, avg_loss_pct=-1.0
+        )
+        _ae._trades[key] = deque([object()] * 15, maxlen=20)  # 15 dummy trades
+        kf = get_kelly_fraction("intraday")
+        assert kf > 0, f"Expected positive Kelly fraction, got {kf}"
+        assert 0.0 < kf <= 0.25
+    finally:
+        _s.use_kelly_capital_sizing = orig_kelly
+        _ae._params.pop("intraday::RELIANCE", None)
+        _ae._trades.pop("intraday::RELIANCE", None)
+
+run("_compute_kelly positive edge → 0.20",                        t_kelly_positive_edge)
+run("_compute_kelly negative edge → clamped to 0.0",              t_kelly_negative_edge_clamped)
+run("_compute_kelly avg_loss=0 → 0.0 (no div-by-zero)",           t_kelly_zero_avg_loss)
+run("_compute_kelly always returns value in [0.0, 0.25]",         t_kelly_always_in_range)
+run("use_kelly_capital_sizing=False uses fixed capital",           t_kelly_disabled_uses_fixed_cap)
+run("get_kelly_fraction >0 when adaptive stats present",           t_kelly_enabled_changes_qty_with_stats)
+
+
+# ══════════════════════════════════════════════════════════════════════════
 # FINAL SUMMARY
 # ══════════════════════════════════════════════════════════════════════════
 failed = summary()
