@@ -33,6 +33,7 @@ import httpx
 import yfinance as yf
 import pandas as pd
 from loguru import logger
+from pathlib import Path
 
 from config import settings
 
@@ -228,6 +229,14 @@ class YFinanceClient:
         return symbol + suffix
 
     def historical(self, symbol, exchange="NSE", interval="1m", period="5d") -> pd.DataFrame:
+        _CACHE_ALIASES = {"60m": "1h", "60min": "1h", "1hour": "1h"}
+        _cache_tf = _CACHE_ALIASES.get(interval, interval)
+        _cache = Path(f"logs/historical_data/{symbol}/{_cache_tf}.csv")
+        if _cache.exists():
+            df = pd.read_csv(_cache, parse_dates=["date"])
+            cols = [c for c in ("date", "open", "high", "low", "close", "volume") if c in df.columns]
+            return df[cols].dropna().sort_values("date").reset_index(drop=True)
+
         from config import settings as _s
         if _s.use_truedata_historical:
             try:
