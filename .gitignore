@@ -35,5 +35,7 @@ Thumbs.db
 .claude-flow/neural/
 .swarm/
 ruvector.db
+agentdb.rvf
+agentdb.rvf.lock
 *.db-shm
 *.db-wal
