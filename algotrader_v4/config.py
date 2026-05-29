@@ -129,6 +129,7 @@ class Settings(BaseSettings):
     bt_slippage_bps_swing: int = 3
     bt_slippage_bps_options: int = 15
     bt_apply_tx_costs: bool = True
+    use_transaction_costs: bool = True  # deduct Zerodha fees from P&L in PAPER + LIVE
 
     # Phase 2: Extended backtest
     bt_wf_folds: int = 12

@@ -7,6 +7,7 @@ the trade is skipped and a reason is logged / alerted.
 from __future__ import annotations
 
 import json as _json
+from dataclasses import dataclass
 from datetime import time
 from pathlib import Path
 from loguru import logger
@@ -25,6 +26,58 @@ except Exception:
 
 
 # ── Transaction cost model (Zerodha structure) ──────────────────────────────
+
+@dataclass
+class TransactionCost:
+    brokerage:    float
+    stt:          float
+    exchange_txn: float
+    sebi_charges: float
+    gst:          float
+    stamp_duty:   float
+    total:        float
+
+
+def compute_costs(
+    symbol: str,
+    qty: int,
+    price: float,
+    order_type: str = "MARKET",
+    product: str = "MIS",
+) -> TransactionCost:
+    """Single-leg Zerodha transaction cost for one order."""
+    if not settings.use_transaction_costs:
+        return TransactionCost(0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0)
+
+    value        = qty * price
+    brokerage    = min(value * 0.0003, 20.0)
+    stt          = value * 0.00025
+    exchange_txn = value * 0.0000345
+    sebi_charges = value * 0.000001
+    gst          = (brokerage + exchange_txn) * 0.18
+    stamp_duty   = value * (0.00015 if product == "CNC" else 0.00003)
+    total        = brokerage + stt + exchange_txn + sebi_charges + gst + stamp_duty
+    return TransactionCost(
+        brokerage=round(brokerage, 4),
+        stt=round(stt, 4),
+        exchange_txn=round(exchange_txn, 4),
+        sebi_charges=round(sebi_charges, 4),
+        gst=round(gst, 4),
+        stamp_duty=round(stamp_duty, 4),
+        total=round(total, 4),
+    )
+
+
+def compute_round_trip_cost(
+    symbol: str,
+    qty: int,
+    price: float,
+    product: str = "MIS",
+) -> float:
+    """Full entry+exit round-trip cost (2× single-leg total)."""
+    leg = compute_costs(symbol, qty, price, product=product)
+    return round(leg.total * 2, 4)
+
 
 def compute_tx_costs(
     qty: int,

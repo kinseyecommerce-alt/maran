@@ -2324,6 +2324,57 @@ run("FuturesAgent has ≥10 pattern methods",               t_futures_10_pattern
 
 
 # ══════════════════════════════════════════════════════════════════════════
+# 12. TRANSACTION COSTS
+# ══════════════════════════════════════════════════════════════════════════
+section("12. TRANSACTION COSTS")
+from risk_manager import compute_costs, compute_round_trip_cost, TransactionCost
+
+def t_tc_returns_dataclass():
+    cost = compute_costs("RELIANCE", 10, 2800.0)
+    assert isinstance(cost, TransactionCost)
+    for field in (cost.brokerage, cost.stt, cost.exchange_txn,
+                  cost.sebi_charges, cost.gst, cost.stamp_duty):
+        assert field > 0, f"Expected >0, got {field}"
+
+def t_tc_brokerage_capped():
+    cost = compute_costs("RELIANCE", 10000, 100.0)
+    assert cost.brokerage == 20.0, f"Expected ₹20 cap, got {cost.brokerage}"
+
+def t_tc_total_sanity_reliance():
+    cost = compute_costs("RELIANCE", 1, 2800.0)
+    assert 1.0 <= cost.total <= 5.0, f"Expected ₹1–₹5, got {cost.total}"
+
+def t_tc_round_trip_is_double():
+    single = compute_costs("RELIANCE", 10, 2800.0).total
+    rt = compute_round_trip_cost("RELIANCE", 10, 2800.0)
+    assert abs(rt - single * 2) < 0.01, f"Expected 2×{single}={single*2}, got {rt}"
+
+def t_tc_cnc_stamp_higher():
+    mis = compute_costs("HDFCBANK", 10, 1700.0, product="MIS")
+    cnc = compute_costs("HDFCBANK", 10, 1700.0, product="CNC")
+    assert cnc.stamp_duty > mis.stamp_duty, (
+        f"CNC stamp {cnc.stamp_duty} should exceed MIS {mis.stamp_duty}"
+    )
+
+def t_tc_disabled_returns_zero():
+    from config import settings as _s
+    orig = _s.use_transaction_costs
+    try:
+        _s.use_transaction_costs = False
+        cost = compute_costs("RELIANCE", 10, 2800.0)
+        assert cost.total == 0.0, f"Expected 0 when disabled, got {cost.total}"
+    finally:
+        _s.use_transaction_costs = orig
+
+run("compute_costs returns TransactionCost with all fields > 0",  t_tc_returns_dataclass)
+run("brokerage capped at ₹20 for large orders",                   t_tc_brokerage_capped)
+run("total cost for 1 share RELIANCE@2800 is ₹1–₹5",             t_tc_total_sanity_reliance)
+run("round_trip_cost == 2× single-leg total",                     t_tc_round_trip_is_double)
+run("CNC stamp_duty > MIS stamp_duty",                            t_tc_cnc_stamp_higher)
+run("use_transaction_costs=False returns zero-cost object",        t_tc_disabled_returns_zero)
+
+
+# ══════════════════════════════════════════════════════════════════════════
 # FINAL SUMMARY
 # ══════════════════════════════════════════════════════════════════════════
 failed = summary()

@@ -43,7 +43,7 @@ from loguru import logger
 from kite_client import kite_client
 from trailing_sl_engine import trailing_sl_engine, TRAIL_CONFIGS
 from order_guard import order_guard
-from risk_manager import risk_manager
+from risk_manager import risk_manager, compute_round_trip_cost
 
 
 class BracketStatus(str, Enum):
@@ -80,6 +80,9 @@ class BracketOrder:
     sl_moves:      int   = 0
     locked_profit: float = 0.0
     pnl:           float = 0.0
+    gross_pnl:     float = 0.0
+    tx_cost:       float = 0.0
+    net_pnl:       float = 0.0
     sub_strategy:  str   = ""
     trigger_reason:str   = ""
 
@@ -105,6 +108,9 @@ class BracketOrder:
             "sl_moves":      self.sl_moves,
             "locked_profit": round(self.locked_profit, 2),
             "pnl":           round(self.pnl, 2),
+            "gross_pnl":     round(self.gross_pnl, 2),
+            "tx_cost":       round(self.tx_cost, 2),
+            "net_pnl":       round(self.net_pnl, 2),
             "sub_strategy":  self.sub_strategy,
             "trigger":       self.trigger_reason,
             "created_at":    datetime.fromtimestamp(self.created_at).isoformat(),
@@ -255,8 +261,12 @@ class AtomicBracketEngine:
     async def _on_tsl_sl_hit(self, pos, ltp: float, pnl: float) -> None:
         bracket = self._find_by_symbol_strategy(pos.symbol, pos.strategy)
         if not bracket: return
-        bracket.status = BracketStatus.SL_HIT
-        bracket.pnl    = pnl
+        bracket.status    = BracketStatus.SL_HIT
+        bracket.gross_pnl = pnl
+        bracket.tx_cost   = compute_round_trip_cost(bracket.symbol, bracket.quantity,
+                                                    bracket.entry_price, bracket.product)
+        bracket.net_pnl   = round(bracket.gross_pnl - bracket.tx_cost, 2)
+        bracket.pnl       = bracket.net_pnl
         bracket.closed_at = time.time()
 
         # Check if the SL-M order already executed on the exchange.
@@ -293,8 +303,8 @@ class AtomicBracketEngine:
         else:
             logger.info("SL-M {} already COMPLETE on exchange — skipping MARKET exit",
                         bracket.sl_order_id)
-        order_guard.release_order(bracket.symbol, bracket.strategy, bracket.side, pnl)
-        risk_manager.record_trade(pnl)
+        order_guard.release_order(bracket.symbol, bracket.strategy, bracket.side, bracket.net_pnl)
+        risk_manager.record_trade(bracket.net_pnl)
         risk_manager.position_closed()
         trailing_sl_engine.deregister(bracket.bracket_id)
         await self._broadcast_update(bracket)
@@ -303,8 +313,12 @@ class AtomicBracketEngine:
         bracket = self._find_by_symbol_strategy(pos.symbol, pos.strategy)
         if not bracket: return
         if level == 2:
-            bracket.status = BracketStatus.TARGET_HIT
-            bracket.pnl = (ltp - bracket.entry_price) * bracket.quantity * (1 if bracket.side == "BUY" else -1)
+            bracket.status    = BracketStatus.TARGET_HIT
+            bracket.gross_pnl = (ltp - bracket.entry_price) * bracket.quantity * (1 if bracket.side == "BUY" else -1)
+            bracket.tx_cost   = compute_round_trip_cost(bracket.symbol, bracket.quantity,
+                                                        bracket.entry_price, bracket.product)
+            bracket.net_pnl   = round(bracket.gross_pnl - bracket.tx_cost, 2)
+            bracket.pnl       = bracket.net_pnl
             bracket.closed_at = time.time()
             exit_side = "SELL" if bracket.side == "BUY" else "BUY"
             try:
@@ -316,8 +330,8 @@ class AtomicBracketEngine:
                     except: pass
             except Exception as exc:
                 logger.error("Target exit failed: {}", exc)
-            order_guard.release_order(bracket.symbol, bracket.strategy, bracket.side, bracket.pnl)
-            risk_manager.record_trade(bracket.pnl)
+            order_guard.release_order(bracket.symbol, bracket.strategy, bracket.side, bracket.net_pnl)
+            risk_manager.record_trade(bracket.net_pnl)
             risk_manager.position_closed()
             trailing_sl_engine.deregister(bracket.bracket_id)
             await self._broadcast_update(bracket)
