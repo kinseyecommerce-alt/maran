@@ -48,13 +48,14 @@ def snap(page: Page, name: str):
     print(f"       📸  {path}")
 
 def goto_dashboard(page: Page, jwt: str):
-    """Land on the dashboard with auth already set in localStorage."""
-    # Set JWT on the login page (same origin), then navigate to /dashboard.
-    page.goto(f"{BASE}/login", wait_until="domcontentloaded")
-    page.evaluate(f"""() => {{
+    """Land on the dashboard with auth already set in localStorage.
+    Uses add_init_script so credentials are written before any page JS runs,
+    avoiding the login auto-redirect race condition.
+    """
+    page.add_init_script(f"""
         localStorage.setItem('jwtToken', '{jwt}');
         localStorage.setItem('apiKey', '{API_KEY}');
-    }}""")
+    """)
     page.goto(f"{BASE}/dashboard", wait_until="networkidle")
     page.wait_for_timeout(1200)
 
@@ -428,13 +429,14 @@ def test_settings_tab(page: Page, jwt: str):
             first_cb = details.first.locator("input[type=checkbox]").first
             if first_cb.count() > 0:
                 before = first_cb.is_checked()
-                first_cb.click()
+                # Pattern toggles use visually-hidden <input> + styled label — force=True bypasses visibility check
+                first_cb.click(force=True)
                 page.wait_for_timeout(800)
                 after = first_cb.is_checked()
                 if before != after:
                     ok(f"Pattern toggle checkbox toggled ({before} → {after})")
                     # Toggle back
-                    first_cb.click()
+                    first_cb.click(force=True)
                     page.wait_for_timeout(600)
                 else:
                     warn("Pattern checkbox", "state did not change")

@@ -288,11 +288,33 @@ class PaperTickSimulator:
         self._yf = YFinanceClient()
 
     def seed(self, symbols: list[str], exchanges: dict[str, str]) -> None:
-        for sym in symbols:
+        import concurrent.futures as _cf
+
+        def _fetch(sym: str) -> tuple[str, float]:
             exch = exchanges.get(sym, "NSE")
-            price = self._yf.current_price(sym, exch)
-            self._prices[sym] = price if price > 0 else 1000.0
-            logger.info("Paper seed {} @ ₹{:.2f}", sym, self._prices[sym])
+            try:
+                price = self._yf.current_price(sym, exch)
+                return sym, price if price > 0 else 1000.0
+            except Exception:
+                return sym, 1000.0
+
+        # Run fetches concurrently; abandon after 4s and fall back to ₹1000 default.
+        # pool.shutdown(wait=False) prevents blocking on slow/blocked network calls.
+        pool = _cf.ThreadPoolExecutor(max_workers=min(len(symbols), 8))
+        try:
+            futs = {pool.submit(_fetch, s): s for s in symbols}
+            done, pending = _cf.wait(futs, timeout=4)
+            for fut in done:
+                sym, price = fut.result()
+                self._prices[sym] = price
+                logger.info("Paper seed {} @ ₹{:.2f}", sym, price)
+            for fut in pending:
+                sym = futs[fut]
+                self._prices[sym] = 1000.0
+                logger.info("Paper seed {} @ ₹1000.00 (network timeout)", sym)
+                fut.cancel()
+        finally:
+            pool.shutdown(wait=False)
 
     def next_tick(self, symbol: str) -> Quote:
         price = self._prices.get(symbol, 1000.0)

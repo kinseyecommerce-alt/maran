@@ -4,13 +4,15 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
   <title>AlgoTrader Pro — Login</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600;700&display=swap" rel="stylesheet">
   <style>
     *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
 
     body {
-      font-family: 'Segoe UI', system-ui, sans-serif;
-      background: #0d1117;
-      color: #e6edf3;
+      font-family: 'Inter', system-ui, sans-serif;
+      background: #F8FAFC;
+      color: #0F172A;
       min-height: 100vh;
       display: flex;
       flex-direction: column;
@@ -19,115 +21,82 @@
       padding: 24px;
     }
 
-    .logo {
-      font-size: 1.6rem;
-      font-weight: 700;
-      letter-spacing: 0.5px;
-      margin-bottom: 6px;
-      color: #58a6ff;
+    .logo-mark {
+      width: 48px; height: 48px;
+      background: #4F46E5;
+      border-radius: 12px;
+      display: flex; align-items: center; justify-content: center;
+      margin: 0 auto 12px;
     }
-    .logo span { color: #3fb950; }
+    .logo-mark svg { width: 26px; height: 26px; stroke: #fff; fill: none; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; }
 
-    .subtitle {
-      color: #8b949e;
-      font-size: 0.82rem;
-      margin-bottom: 36px;
-    }
+    .logo { font-size: 1.4rem; font-weight: 700; color: #0F172A; text-align: center; margin-bottom: 4px; }
+    .subtitle { color: #64748B; font-size: 0.82rem; margin-bottom: 32px; text-align: center; }
 
     .card {
-      width: 100%;
-      max-width: 360px;
-      background: #161b22;
-      border: 1px solid #30363d;
-      border-radius: 12px;
+      width: 100%; max-width: 360px;
+      background: #fff;
+      border: 1px solid #E2E8F0;
+      border-radius: 16px;
       padding: 32px;
+      box-shadow: 0 1px 2px 0 rgba(15,23,42,.05);
     }
 
     .card-title {
-      font-size: 0.95rem;
-      font-weight: 600;
-      color: #e6edf3;
-      margin-bottom: 6px;
-      display: flex;
-      align-items: center;
-      gap: 8px;
-    }
-
-    .card-desc {
-      font-size: 0.8rem;
-      color: #8b949e;
-      margin-bottom: 24px;
-    }
-
-    label {
-      display: block;
-      font-size: 0.8rem;
-      color: #8b949e;
+      font-size: 1rem; font-weight: 700; color: #0F172A;
       margin-bottom: 4px;
     }
+    .card-desc { font-size: 0.8rem; color: #64748B; margin-bottom: 24px; }
 
-    input[type="text"],
-    input[type="password"] {
+    label { display: block; font-size: 0.78rem; font-weight: 500; color: #334155; margin-bottom: 4px; }
+
+    input[type="text"], input[type="password"] {
       width: 100%;
-      background: #0d1117;
-      border: 1px solid #30363d;
-      border-radius: 6px;
-      color: #e6edf3;
+      background: #F8FAFC;
+      border: 1px solid #E2E8F0;
+      border-radius: 8px;
+      color: #0F172A;
       font-size: 0.9rem;
+      font-family: inherit;
       padding: 10px 12px;
       outline: none;
-      transition: border-color 0.15s;
+      transition: border-color 0.15s, box-shadow 0.15s;
       margin-bottom: 16px;
     }
-    input:focus { border-color: #58a6ff; }
+    input:focus { border-color: #4F46E5; box-shadow: 0 0 0 3px #EEF2FF; }
 
     .btn {
-      width: 100%;
-      padding: 11px;
-      border: none;
-      border-radius: 6px;
-      font-size: 0.9rem;
-      font-weight: 600;
+      width: 100%; padding: 11px;
+      border: none; border-radius: 8px;
+      font-size: 0.9rem; font-weight: 600; font-family: inherit;
       cursor: pointer;
-      transition: opacity 0.15s, transform 0.1s;
+      transition: background 0.15s, transform 0.1s;
     }
     .btn:active { transform: scale(0.98); }
     .btn:disabled { opacity: 0.5; cursor: not-allowed; }
-    .btn-blue { background: #1f6feb; color: #fff; }
-    .btn-blue:hover:not(:disabled) { background: #388bfd; }
+    .btn-primary { background: #4F46E5; color: #fff; }
+    .btn-primary:hover:not(:disabled) { background: #4338CA; }
 
-    .status {
-      margin-top: 14px;
-      font-size: 0.8rem;
-      min-height: 20px;
-      text-align: center;
-    }
-    .status.ok   { color: #3fb950; }
-    .status.err  { color: #f85149; }
-    .status.info { color: #58a6ff; }
+    .status { margin-top: 14px; font-size: 0.8rem; min-height: 20px; text-align: center; }
+    .status.ok   { color: #16A34A; }
+    .status.err  { color: #DC2626; }
+    .status.info { color: #4F46E5; }
 
-    .footer-link {
-      margin-top: 20px;
-      font-size: 0.75rem;
-      color: #8b949e;
-      text-align: center;
-    }
-    .footer-link a { color: #58a6ff; text-decoration: none; }
+    .footer-link { margin-top: 20px; font-size: 0.75rem; color: #64748B; text-align: center; }
+    .footer-link a { color: #4F46E5; text-decoration: none; }
     .footer-link a:hover { text-decoration: underline; }
   </style>
 </head>
 <body>
 
-  <div class="logo">AlgoTrader <span>Pro</span></div>
+  <div class="logo-mark">
+    <svg viewBox="0 0 24 24"><polyline points="22 12 18 12 15 21 9 3 6 12 2 12"></polyline></svg>
+  </div>
+  <div class="logo">AlgoTrader Pro</div>
   <p class="subtitle">NSE · Tick-driven · SEBI Compliant</p>
 
   <div class="card">
-    <div class="card-title">
-      <svg width="16" height="16" viewBox="0 0 16 16" fill="#58a6ff">
-        <path d="M8 0a4 4 0 1 0 0 8A4 4 0 0 0 8 0zm0 10c-4 0-6 1.8-6 2.7V14h12v-1.3C14 11.8 12 10 8 10z"/>
-      </svg>
-      Sign In
-    </div>
+    <div class="card-title">Sign In</div>
     <p class="card-desc">Enter your credentials to access the dashboard</p>
 
     <label for="username">Username</label>
@@ -136,7 +105,7 @@
     <label for="password">Password</label>
     <input id="password" type="password" placeholder="••••••••" autocomplete="current-password"/>
 
-    <button class="btn btn-blue" id="login-btn" onclick="doLogin()">Sign In</button>
+    <button class="btn btn-primary" id="login-btn" onclick="doLogin()">Sign In</button>
 
     <div class="status" id="login-status"></div>
   </div>
