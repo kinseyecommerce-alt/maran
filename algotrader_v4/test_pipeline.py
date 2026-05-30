@@ -2798,28 +2798,34 @@ def t_mean_reversion_evaluate_hold_no_bb():
     from agents.strategy_agents import MeanReversionAgent
     from tick_engine import MarketSnapshot, LiveIndicators, Tick
     from datetime import datetime
+    from unittest.mock import patch
+    _mkt_dt = datetime(2026, 1, 15, 10, 30, 0)
     agent = MeanReversionAgent()
     ind = LiveIndicators(symbol="TEST")
-    ind.bb_upper = 0.0; ind.bb_lower = 0.0  # no BB yet
+    ind.bb_upper = 0.0; ind.bb_lower = 0.0  # no BB yet → must HOLD
     tick = Tick("TEST", 100.0, 99.9, 100.1, 1000, 0.0, 0.0, 101.0, 99.0, 100.0, datetime.now())
     snap = MarketSnapshot(symbol="TEST", tick=tick, indicators=ind, candles_1min=[], candles_5min=[])
-    action, _ = agent.evaluate_tick(snap)
+    with patch("agents.strategy_agents.now_ist", return_value=_mkt_dt):
+        action, _ = agent.evaluate_tick(snap)
     assert action == "HOLD"
 
 def t_mean_reversion_bb_lower_bounce_signal():
     from agents.strategy_agents import MeanReversionAgent
     from tick_engine import MarketSnapshot, LiveIndicators, Tick
     from datetime import datetime
+    from unittest.mock import patch
+    _mkt_dt = datetime(2026, 1, 15, 10, 30, 0)
     agent = MeanReversionAgent()
     ind = LiveIndicators(symbol="TEST")
     ind.bb_upper = 110.0; ind.bb_lower = 95.0; ind.bb_mid = 102.5
-    ind.rsi_14 = 29.0; ind.volume_ratio = 1.3
+    ind.rsi_14 = 29.0; ind.volume_ratio = 1.3; ind.atr_14 = 0.5
     tick = Tick("TEST", 94.0, 93.9, 94.1, 5000, -1.0, -1.0, 101.0, 93.0, 100.0, datetime.now())
     snap = MarketSnapshot(symbol="TEST", tick=tick, indicators=ind,
                           candles_1min=[type("C", (), {"high":101,"low":93,"open":100,"close":94,"volume":5000,"ts":datetime.now()})()]*16,
                           candles_5min=[])
-    action, details = agent.evaluate_tick(snap)
-    assert action == "BUY"
+    with patch("agents.strategy_agents.now_ist", return_value=_mkt_dt):
+        action, details = agent.evaluate_tick(snap)
+    assert action == "BUY", f"Expected BUY got {action}"
     assert details is not None
     assert details["stop_loss"] < 94.0
 
@@ -2827,29 +2833,35 @@ def t_momentum_evaluate_hold_no_ema():
     from agents.strategy_agents import MomentumAgent
     from tick_engine import MarketSnapshot, LiveIndicators, Tick
     from datetime import datetime
+    from unittest.mock import patch
+    _mkt_dt = datetime(2026, 1, 15, 10, 30, 0)
     agent = MomentumAgent()
     ind = LiveIndicators(symbol="TEST")
-    ind.ema9 = 0.0  # no EMAs computed yet
+    ind.ema9 = 0.0  # no EMAs yet → must HOLD
     tick = Tick("TEST", 100.0, 99.9, 100.1, 1000, 0.0, 0.0, 101.0, 99.0, 100.0, datetime.now())
     snap = MarketSnapshot(symbol="TEST", tick=tick, indicators=ind, candles_1min=[], candles_5min=[])
-    action, _ = agent.evaluate_tick(snap)
+    with patch("agents.strategy_agents.now_ist", return_value=_mkt_dt):
+        action, _ = agent.evaluate_tick(snap)
     assert action == "HOLD"
 
 def t_momentum_vol_surge_trend_buy():
     from agents.strategy_agents import MomentumAgent
     from tick_engine import MarketSnapshot, LiveIndicators, Tick
     from datetime import datetime
+    from unittest.mock import patch
+    _mkt_dt = datetime(2026, 1, 15, 10, 30, 0)
     agent = MomentumAgent()
     ind = LiveIndicators(symbol="TEST")
     ind.ema9 = 105.0; ind.ema21 = 103.0; ind.ema50 = 100.0
     ind.volume_ratio = 2.5; ind.macd_hist = 0.5; ind.adx_14 = 30.0
-    ind.rsi_14 = 60.0
+    ind.rsi_14 = 60.0; ind.atr_14 = 0.5
     tick = Tick("TEST", 106.0, 105.9, 106.1, 8000, 1.0, 1.0, 108.0, 99.0, 100.0, datetime.now())
     C = type("C", (), {"high":108,"low":99,"open":100,"close":106,"volume":8000,"ts":datetime.now()})
     snap = MarketSnapshot(symbol="TEST", tick=tick, indicators=ind,
                           candles_1min=[C()]*23, candles_5min=[])
-    action, details = agent.evaluate_tick(snap)
-    assert action == "BUY"
+    with patch("agents.strategy_agents.now_ist", return_value=_mkt_dt):
+        action, details = agent.evaluate_tick(snap)
+    assert action == "BUY", f"Expected BUY got {action}"
     assert details["stop_loss"] < 106.0
     assert details["target"] > 106.0
 
