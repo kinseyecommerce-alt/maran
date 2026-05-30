@@ -577,7 +577,7 @@ async def start_bot(req: BotStartRequest):
         watchlist = symbol_scanner.all_selected_flat()
         if not watchlist:
             from symbol_scanner import NIFTY_50
-            watchlist = [{"symbol": s, "exchange": "NSE"} for s in NIFTY_50[:20]]
+            watchlist = [{"symbol": s, "exchange": "NSE"} for s in NIFTY_50]
             logger.warning("[bot/start] Symbol scanner returned no results — using Nifty 50 fallback ({} symbols)", len(watchlist))
     try:
         report = master_agent.start(strategies, watchlist)

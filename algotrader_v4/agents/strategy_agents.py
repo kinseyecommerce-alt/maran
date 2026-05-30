@@ -1951,13 +1951,342 @@ class FuturesAgent(BaseAgent):
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
+# 6.  MEAN REVERSION  —  Bollinger Band extremes + RSI reversal (MIS)
+# ═══════════════════════════════════════════════════════════════════════════════
+
+class MeanReversionAgent(BaseAgent):
+    """
+    Mean-reversion intraday agent — 5 patterns targeting BB extreme + RSI reversal.
+
+    Patterns:
+      1. BB_LOWER_BOUNCE  — price < BB_lower + RSI < 32 + volume surge → BUY
+      2. BB_UPPER_REJECT  — price > BB_upper + RSI > 68 + volume surge → SELL
+      3. RSI_EXTREME      — RSI < 28 or RSI > 72 + VWAP confirmation
+      4. BB_MID_REVERT    — price reclaims BB_mid after extreme touch
+      5. STOCHRSI_CROSS   — StochRSI K crosses from oversold/overbought zone
+
+    SL/TGT: ATR-based (tighter than intraday; reversion moves are quick).
+    """
+    name    = "mean_reversion"
+    product = "MIS"
+    min_candles_1min = 15
+
+    SL_ATR  = 1.0
+    TGT_ATR = 1.8
+
+    def __init__(self) -> None:
+        super().__init__()
+        self._prev_ltp:         dict = {}
+        self._prev_rsi:         dict = {}
+        self._prev_above_bb_mid:dict = {}
+        self._prev_stochrsi_k:  dict = {}
+        self._cool_ts:          dict = {}
+
+    def evaluate_tick(self, snap: MarketSnapshot) -> tuple[str, Optional[dict]]:
+        ind = snap.indicators
+        sym = snap.symbol
+        ltp = snap.tick.ltp
+        now = now_ist()
+        t   = now.time().replace(tzinfo=None)
+
+        if t >= time(14, 45) or time(9, 15) <= t < time(9, 25):
+            return "HOLD", None
+        if not ind.bb_upper or ind.bb_upper <= 0 or not ind.bb_lower or ind.bb_lower <= 0:
+            return "HOLD", None
+
+        best_score, best_action, best_pattern = -1, "", ""
+        for pat_fn in (self._pat_bb_lower_bounce, self._pat_bb_upper_reject,
+                       self._pat_rsi_extreme, self._pat_bb_mid_revert,
+                       self._pat_stochrsi_cross):
+            try:
+                action, base, pname = pat_fn(sym, snap, ind, ltp, t)
+            except Exception:
+                continue
+            if not action:
+                continue
+            if base > best_score:
+                best_score, best_action, best_pattern = base, action, pname
+
+        self._prev_ltp[sym]          = ltp
+        self._prev_rsi[sym]          = ind.rsi_14
+        self._prev_above_bb_mid[sym] = ltp > ind.bb_mid if ind.bb_mid else None
+        self._prev_stochrsi_k[sym]   = ind.stoch_rsi_k
+
+        if best_score < settings.min_score_mean_reversion or not best_action:
+            return "HOLD", None
+
+        cools = self._cool_ts.setdefault(sym, {})
+        last  = cools.get(best_action)
+        if last and (now - last).total_seconds() < settings.cooldown_mean_reversion:
+            return "HOLD", None
+        cools[best_action] = now
+
+        atr      = ind.atr_14 or ltp * 0.005
+        sl_dist  = max(atr * self.SL_ATR,  ltp * settings.sl_pct_mean_reversion  / 100)
+        tgt_dist = max(atr * self.TGT_ATR, ltp * settings.tgt_pct_mean_reversion / 100)
+
+        if best_action == "BUY":
+            sl  = round(ltp - sl_dist, 2)
+            tgt = round(ltp + tgt_dist, 2)
+        else:
+            sl  = round(ltp + sl_dist, 2)
+            tgt = round(ltp - tgt_dist, 2)
+
+        return best_action, {
+            "symbol": sym, "exchange": "NSE", "side": best_action,
+            "price": ltp, "stop_loss": sl, "target": tgt,
+            "stop_loss_pct": round(sl_dist / ltp * 100, 3),
+            "target_pct":    round(tgt_dist / ltp * 100, 3),
+            "product": self.product,
+            "trigger": (
+                f"MEANREV-{best_action} [{best_pattern}] score={best_score} "
+                f"rsi={ind.rsi_14:.0f} bb_pos={round((ltp-ind.bb_lower)/(ind.bb_upper-ind.bb_lower)*100) if ind.bb_upper != ind.bb_lower else 50:.0f}%"
+            ),
+        }
+
+    def _pat_bb_lower_bounce(self, sym, snap, ind, ltp, t):
+        if ltp < ind.bb_lower and ind.rsi_14 < 32 and ind.volume_ratio >= 1.1:
+            score = 4
+            if ind.rsi_14 < 28:      score += 1
+            if ind.volume_ratio > 1.5: score += 1
+            if ind.macd_hist > -0.001: score += 1  # MACD flattening
+            return "BUY", score, "BB_LOWER_BOUNCE"
+        return "", 0, ""
+
+    def _pat_bb_upper_reject(self, sym, snap, ind, ltp, t):
+        if ltp > ind.bb_upper and ind.rsi_14 > 68 and ind.volume_ratio >= 1.1:
+            score = 4
+            if ind.rsi_14 > 72:       score += 1
+            if ind.volume_ratio > 1.5: score += 1
+            if ind.macd_hist < 0.001:  score += 1  # MACD flattening
+            return "SELL", score, "BB_UPPER_REJECT"
+        return "", 0, ""
+
+    def _pat_rsi_extreme(self, sym, snap, ind, ltp, t):
+        if ind.rsi_14 < 28 and ind.vwap and ltp < ind.vwap:
+            return "BUY", 3, "RSI_EXTREME"
+        if ind.rsi_14 > 72 and ind.vwap and ltp > ind.vwap:
+            return "SELL", 3, "RSI_EXTREME"
+        return "", 0, ""
+
+    def _pat_bb_mid_revert(self, sym, snap, ind, ltp, t):
+        prev_above = self._prev_above_bb_mid.get(sym)
+        if prev_above is None or not ind.bb_mid:
+            return "", 0, ""
+        now_above = ltp > ind.bb_mid
+        prev_rsi  = self._prev_rsi.get(sym, 50.0)
+        # Crossed back through mid from below (was below mid, oversold, now reclaiming)
+        if not prev_above and now_above and prev_rsi < 45:
+            return "BUY", 3, "BB_MID_REVERT"
+        # Crossed back through mid from above (was above mid, overbought, now declining)
+        if prev_above and not now_above and prev_rsi > 55:
+            return "SELL", 3, "BB_MID_REVERT"
+        return "", 0, ""
+
+    def _pat_stochrsi_cross(self, sym, snap, ind, ltp, t):
+        prev_k = self._prev_stochrsi_k.get(sym, 50.0)
+        curr_k = ind.stoch_rsi_k
+        if prev_k < 20 and curr_k >= 20 and ind.rsi_14 < 50:
+            return "BUY", 4, "STOCHRSI_CROSS"
+        if prev_k > 80 and curr_k <= 80 and ind.rsi_14 > 50:
+            return "SELL", 4, "STOCHRSI_CROSS"
+        return "", 0, ""
+
+    def should_exit_position(self, pos: dict, ind: LiveIndicators) -> tuple[bool, str]:
+        entry = pos.get("average_price", 0.0)
+        ltp   = ind.ltp
+        if not entry or entry <= 0:
+            return False, ""
+        side = pos.get("side", "LONG")
+        chg  = ((ltp - entry) / entry * 100) if side == "LONG" else ((entry - ltp) / entry * 100)
+        sl_pct  = settings.sl_pct_mean_reversion
+        tgt_pct = settings.tgt_pct_mean_reversion
+        if chg <= -sl_pct:  return True, f"MeanRev SL -{sl_pct}%"
+        if chg >= tgt_pct:  return True, f"MeanRev TGT +{tgt_pct}%"
+        if now_ist().time().replace(tzinfo=None) >= time(14, 55):
+            return True, "Auto square-off 2:55 PM"
+        return False, ""
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# 7.  MOMENTUM  —  Breakout + volume surge + ADX confirmation (MIS)
+# ═══════════════════════════════════════════════════════════════════════════════
+
+class MomentumAgent(BaseAgent):
+    """
+    Momentum breakout agent — 5 patterns targeting confirmed trend accelerations.
+
+    Patterns:
+      1. HL_BREAKOUT     — price exceeds 20-bar high + volume ≥1.5× + ADX > 25
+      2. LL_BREAKDOWN    — price breaks 20-bar low  + volume ≥1.5× + ADX > 25
+      3. VOL_SURGE_TREND — volume ≥2.0× + 3-EMA bullish/bearish alignment + MACD
+      4. SQUEEZE_RELEASE — TTM squeeze releases with directional momentum
+      5. SUPERTREND_FLIP — Supertrend direction just flipped with MACD confirmation
+
+    Wider SL/TGT than intraday to ride the momentum run.
+    """
+    name    = "momentum"
+    product = "MIS"
+    min_candles_1min = 22
+
+    SL_ATR  = 1.5
+    TGT_ATR = 2.8
+
+    LOOKBACK = 20  # bars for high/low breakout
+
+    def __init__(self) -> None:
+        super().__init__()
+        self._prev_st_dir:   dict = {}
+        self._prev_squeeze:  dict = {}
+        self._cool_ts:       dict = {}
+
+    def evaluate_tick(self, snap: MarketSnapshot) -> tuple[str, Optional[dict]]:
+        ind = snap.indicators
+        sym = snap.symbol
+        ltp = snap.tick.ltp
+        now = now_ist()
+        t   = now.time().replace(tzinfo=None)
+
+        if t >= time(14, 50) or time(9, 15) <= t < time(9, 30):
+            return "HOLD", None
+        if not ind.ema9:
+            return "HOLD", None
+
+        best_score, best_action, best_pattern = -1, "", ""
+        for pat_fn in (self._pat_hl_breakout, self._pat_ll_breakdown,
+                       self._pat_vol_surge_trend, self._pat_squeeze_release,
+                       self._pat_supertrend_flip):
+            try:
+                action, base, pname = pat_fn(sym, snap, ind, ltp, t)
+            except Exception:
+                continue
+            if not action:
+                continue
+            if base > best_score:
+                best_score, best_action, best_pattern = base, action, pname
+
+        self._prev_st_dir[sym]  = ind.supertrend_dir
+        self._prev_squeeze[sym] = ind.squeeze_on
+
+        if best_score < settings.min_score_momentum or not best_action:
+            return "HOLD", None
+
+        cools = self._cool_ts.setdefault(sym, {})
+        last  = cools.get(best_action)
+        if last and (now - last).total_seconds() < settings.cooldown_momentum:
+            return "HOLD", None
+        cools[best_action] = now
+
+        atr      = ind.atr_14 or ltp * 0.005
+        sl_dist  = max(atr * self.SL_ATR,  ltp * settings.sl_pct_momentum  / 100)
+        tgt_dist = max(atr * self.TGT_ATR, ltp * settings.tgt_pct_momentum / 100)
+
+        if best_action in ("BUY", "LONG"):
+            best_action = "BUY"
+            sl  = round(ltp - sl_dist, 2)
+            tgt = round(ltp + tgt_dist, 2)
+        else:
+            best_action = "SELL"
+            sl  = round(ltp + sl_dist, 2)
+            tgt = round(ltp - tgt_dist, 2)
+
+        return best_action, {
+            "symbol": sym, "exchange": "NSE", "side": best_action,
+            "price": ltp, "stop_loss": sl, "target": tgt,
+            "stop_loss_pct": round(sl_dist / ltp * 100, 3),
+            "target_pct":    round(tgt_dist / ltp * 100, 3),
+            "product": self.product,
+            "trigger": (
+                f"MOM-{best_action} [{best_pattern}] score={best_score} "
+                f"vol_ratio={ind.volume_ratio:.1f} adx={ind.adx_14:.0f} trend={ind.trend}"
+            ),
+        }
+
+    def _rolling_high_low(self, snap: MarketSnapshot) -> tuple[float, float]:
+        candles = snap.candles_1min[-self.LOOKBACK:]
+        if not candles:
+            return 0.0, 0.0
+        highs = [c.high for c in candles]
+        lows  = [c.low  for c in candles]
+        return max(highs), min(lows)
+
+    def _pat_hl_breakout(self, sym, snap, ind, ltp, t):
+        roll_high, _ = self._rolling_high_low(snap)
+        if roll_high <= 0:
+            return "", 0, ""
+        if (ltp > roll_high and ind.volume_ratio >= 1.5
+                and getattr(ind, "adx_14", 0) > 25 and ind.macd_hist > 0):
+            score = 5
+            if ind.volume_ratio > 2.0:  score += 1
+            if ind.ema9 > ind.ema21:    score += 1
+            return "BUY", score, "HL_BREAKOUT"
+        return "", 0, ""
+
+    def _pat_ll_breakdown(self, sym, snap, ind, ltp, t):
+        _, roll_low = self._rolling_high_low(snap)
+        if roll_low <= 0:
+            return "", 0, ""
+        if (ltp < roll_low and ind.volume_ratio >= 1.5
+                and getattr(ind, "adx_14", 0) > 25 and ind.macd_hist < 0):
+            score = 5
+            if ind.volume_ratio > 2.0:  score += 1
+            if ind.ema9 < ind.ema21:    score += 1
+            return "SELL", score, "LL_BREAKDOWN"
+        return "", 0, ""
+
+    def _pat_vol_surge_trend(self, sym, snap, ind, ltp, t):
+        if ind.volume_ratio >= 2.0 and ind.ema9 > ind.ema21 > ind.ema50 > 0 and ind.macd_hist > 0:
+            return "BUY", 5, "VOL_SURGE_TREND"
+        if (ind.volume_ratio >= 2.0 and ind.ema9 < ind.ema21
+                and ind.ema21 < ind.ema50 and ind.ema50 > 0 and ind.macd_hist < 0):
+            return "SELL", 5, "VOL_SURGE_TREND"
+        return "", 0, ""
+
+    def _pat_squeeze_release(self, sym, snap, ind, ltp, t):
+        was_squeeze = self._prev_squeeze.get(sym, True)
+        if was_squeeze and not ind.squeeze_on:
+            # Squeeze just released — trade in momentum direction
+            if ind.squeeze_momentum > 0 and ind.macd_hist > 0:
+                return "BUY",  5, "SQUEEZE_RELEASE"
+            if ind.squeeze_momentum < 0 and ind.macd_hist < 0:
+                return "SELL", 5, "SQUEEZE_RELEASE"
+        return "", 0, ""
+
+    def _pat_supertrend_flip(self, sym, snap, ind, ltp, t):
+        prev_dir = self._prev_st_dir.get(sym, "NEUTRAL")
+        curr_dir = ind.supertrend_dir
+        if prev_dir != "UP" and curr_dir == "UP" and ind.macd_hist > 0:
+            return "BUY",  5, "SUPERTREND_FLIP"
+        if prev_dir != "DOWN" and curr_dir == "DOWN" and ind.macd_hist < 0:
+            return "SELL", 5, "SUPERTREND_FLIP"
+        return "", 0, ""
+
+    def should_exit_position(self, pos: dict, ind: LiveIndicators) -> tuple[bool, str]:
+        entry = pos.get("average_price", 0.0)
+        ltp   = ind.ltp
+        if not entry or entry <= 0:
+            return False, ""
+        side = pos.get("side", "LONG")
+        chg  = ((ltp - entry) / entry * 100) if side == "LONG" else ((entry - ltp) / entry * 100)
+        sl_pct  = settings.sl_pct_momentum
+        tgt_pct = settings.tgt_pct_momentum
+        if chg <= -sl_pct:  return True, f"Momentum SL -{sl_pct}%"
+        if chg >= tgt_pct:  return True, f"Momentum TGT +{tgt_pct}%"
+        if now_ist().time().replace(tzinfo=None) >= time(14, 55):
+            return True, "Auto square-off 2:55 PM"
+        return False, ""
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
 # Registry
 # ═══════════════════════════════════════════════════════════════════════════════
 
 ALL_AGENTS: dict[str, BaseAgent] = {
-    "intraday": IntradayAgent(),
-    "options":  OptionsAgent(),
-    "futures":  FuturesAgent(),
-    "swing":    SwingAgent(),
-    "scalping": ScalpingAgent(),
+    "intraday":      IntradayAgent(),
+    "options":       OptionsAgent(),
+    "futures":       FuturesAgent(),
+    "swing":         SwingAgent(),
+    "scalping":      ScalpingAgent(),
+    "mean_reversion": MeanReversionAgent(),
+    "momentum":      MomentumAgent(),
 }

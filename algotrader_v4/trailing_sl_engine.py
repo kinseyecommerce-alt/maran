@@ -115,6 +115,26 @@ TRAIL_CONFIGS: dict[str, TrailConfig] = {
         mode            = SLMode.ATR_TRAIL,
         atr_multiplier  = 1.2,
     ),
+    "mean_reversion": TrailConfig(
+        initial_sl_pct  = 1.20,
+        trail_pct       = 0.40,
+        breakeven_pct   = 0.60,
+        activation_pct  = 0.80,
+        target1_pct     = 1.50,
+        target2_pct     = 2.50,
+        mode            = SLMode.ATR_TRAIL,
+        atr_multiplier  = 1.0,
+    ),
+    "momentum": TrailConfig(
+        initial_sl_pct  = 1.50,
+        trail_pct       = 0.60,
+        breakeven_pct   = 0.80,
+        activation_pct  = 1.20,
+        target1_pct     = 2.50,
+        target2_pct     = 4.00,
+        mode            = SLMode.ATR_TRAIL,
+        atr_multiplier  = 1.3,
+    ),
 }
 
 

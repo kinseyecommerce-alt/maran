@@ -2759,6 +2759,136 @@ run("MultiLegRequest model accepts iron_condor legs",              t_multi_leg_r
 
 
 # ══════════════════════════════════════════════════════════════════════════
+# 18. NEW AGENTS — MEAN REVERSION + MOMENTUM
+# ══════════════════════════════════════════════════════════════════════════
+
+def t_mean_reversion_in_all_agents():
+    from agents.strategy_agents import ALL_AGENTS
+    assert "mean_reversion" in ALL_AGENTS
+
+def t_momentum_in_all_agents():
+    from agents.strategy_agents import ALL_AGENTS
+    assert "momentum" in ALL_AGENTS
+
+def t_mean_reversion_tsl_config():
+    from trailing_sl_engine import TRAIL_CONFIGS
+    assert "mean_reversion" in TRAIL_CONFIGS
+    cfg = TRAIL_CONFIGS["mean_reversion"]
+    assert cfg.initial_sl_pct > 0
+    assert cfg.target1_pct > 0
+
+def t_momentum_tsl_config():
+    from trailing_sl_engine import TRAIL_CONFIGS
+    assert "momentum" in TRAIL_CONFIGS
+    cfg = TRAIL_CONFIGS["momentum"]
+    assert cfg.initial_sl_pct > 0
+    assert cfg.target1_pct > 0
+
+def t_mean_reversion_config_sl_tgt():
+    from config import settings
+    assert settings.sl_pct_mean_reversion > 0
+    assert settings.tgt_pct_mean_reversion > settings.sl_pct_mean_reversion
+
+def t_momentum_config_sl_tgt():
+    from config import settings
+    assert settings.sl_pct_momentum > 0
+    assert settings.tgt_pct_momentum > settings.sl_pct_momentum
+
+def t_mean_reversion_evaluate_hold_no_bb():
+    from agents.strategy_agents import MeanReversionAgent
+    from tick_engine import MarketSnapshot, LiveIndicators, Tick
+    from datetime import datetime
+    agent = MeanReversionAgent()
+    ind = LiveIndicators(symbol="TEST")
+    ind.bb_upper = 0.0; ind.bb_lower = 0.0  # no BB yet
+    tick = Tick("TEST", 100.0, 99.9, 100.1, 1000, 0.0, 0.0, 101.0, 99.0, 100.0, datetime.now())
+    snap = MarketSnapshot(symbol="TEST", tick=tick, indicators=ind, candles_1min=[], candles_5min=[])
+    action, _ = agent.evaluate_tick(snap)
+    assert action == "HOLD"
+
+def t_mean_reversion_bb_lower_bounce_signal():
+    from agents.strategy_agents import MeanReversionAgent
+    from tick_engine import MarketSnapshot, LiveIndicators, Tick
+    from datetime import datetime
+    agent = MeanReversionAgent()
+    ind = LiveIndicators(symbol="TEST")
+    ind.bb_upper = 110.0; ind.bb_lower = 95.0; ind.bb_mid = 102.5
+    ind.rsi_14 = 29.0; ind.volume_ratio = 1.3
+    tick = Tick("TEST", 94.0, 93.9, 94.1, 5000, -1.0, -1.0, 101.0, 93.0, 100.0, datetime.now())
+    snap = MarketSnapshot(symbol="TEST", tick=tick, indicators=ind,
+                          candles_1min=[type("C", (), {"high":101,"low":93,"open":100,"close":94,"volume":5000,"ts":datetime.now()})()]*16,
+                          candles_5min=[])
+    action, details = agent.evaluate_tick(snap)
+    assert action == "BUY"
+    assert details is not None
+    assert details["stop_loss"] < 94.0
+
+def t_momentum_evaluate_hold_no_ema():
+    from agents.strategy_agents import MomentumAgent
+    from tick_engine import MarketSnapshot, LiveIndicators, Tick
+    from datetime import datetime
+    agent = MomentumAgent()
+    ind = LiveIndicators(symbol="TEST")
+    ind.ema9 = 0.0  # no EMAs computed yet
+    tick = Tick("TEST", 100.0, 99.9, 100.1, 1000, 0.0, 0.0, 101.0, 99.0, 100.0, datetime.now())
+    snap = MarketSnapshot(symbol="TEST", tick=tick, indicators=ind, candles_1min=[], candles_5min=[])
+    action, _ = agent.evaluate_tick(snap)
+    assert action == "HOLD"
+
+def t_momentum_vol_surge_trend_buy():
+    from agents.strategy_agents import MomentumAgent
+    from tick_engine import MarketSnapshot, LiveIndicators, Tick
+    from datetime import datetime
+    agent = MomentumAgent()
+    ind = LiveIndicators(symbol="TEST")
+    ind.ema9 = 105.0; ind.ema21 = 103.0; ind.ema50 = 100.0
+    ind.volume_ratio = 2.5; ind.macd_hist = 0.5; ind.adx_14 = 30.0
+    ind.rsi_14 = 60.0
+    tick = Tick("TEST", 106.0, 105.9, 106.1, 8000, 1.0, 1.0, 108.0, 99.0, 100.0, datetime.now())
+    C = type("C", (), {"high":108,"low":99,"open":100,"close":106,"volume":8000,"ts":datetime.now()})
+    snap = MarketSnapshot(symbol="TEST", tick=tick, indicators=ind,
+                          candles_1min=[C()]*23, candles_5min=[])
+    action, details = agent.evaluate_tick(snap)
+    assert action == "BUY"
+    assert details["stop_loss"] < 106.0
+    assert details["target"] > 106.0
+
+def t_momentum_order_guard_max_trades():
+    from config import settings
+    assert settings.max_trades_momentum == 6
+
+def t_mean_reversion_order_guard_max_trades():
+    from config import settings
+    assert settings.max_trades_mean_reversion == 6
+
+def t_momentum_order_guard_registered():
+    from order_guard import order_guard
+    limit = order_guard._max_trades("momentum")
+    assert limit == 6
+
+def t_mean_reversion_order_guard_registered():
+    from order_guard import order_guard
+    limit = order_guard._max_trades("mean_reversion")
+    assert limit == 6
+
+print("── 18. NEW AGENTS — MEAN REVERSION + MOMENTUM ──────────────────────────")
+run("mean_reversion agent in ALL_AGENTS",                        t_mean_reversion_in_all_agents)
+run("momentum agent in ALL_AGENTS",                              t_momentum_in_all_agents)
+run("mean_reversion TSL config present",                         t_mean_reversion_tsl_config)
+run("momentum TSL config present",                               t_momentum_tsl_config)
+run("mean_reversion config sl_pct < tgt_pct",                   t_mean_reversion_config_sl_tgt)
+run("momentum config sl_pct < tgt_pct",                         t_momentum_config_sl_tgt)
+run("mean_reversion: HOLD when no BB data",                      t_mean_reversion_evaluate_hold_no_bb)
+run("mean_reversion: BB_LOWER_BOUNCE fires BUY below lower BB",  t_mean_reversion_bb_lower_bounce_signal)
+run("momentum: HOLD when no EMA data",                           t_momentum_evaluate_hold_no_ema)
+run("momentum: VOL_SURGE_TREND fires BUY on volume + EMA align", t_momentum_vol_surge_trend_buy)
+run("momentum max_trades_momentum == 6",                          t_momentum_order_guard_max_trades)
+run("mean_reversion max_trades_mean_reversion == 6",             t_mean_reversion_order_guard_max_trades)
+run("momentum registered in order_guard._max_trades",            t_momentum_order_guard_registered)
+run("mean_reversion registered in order_guard._max_trades",      t_mean_reversion_order_guard_registered)
+
+
+# ══════════════════════════════════════════════════════════════════════════
 # FINAL SUMMARY
 # ══════════════════════════════════════════════════════════════════════════
 failed = summary()

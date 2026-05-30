@@ -40,11 +40,13 @@ class OrderGuard:
     @staticmethod
     def _max_trades(strategy: str) -> int:
         return {
-            "intraday": settings.max_trades_intraday,
-            "options":  settings.max_trades_options,
-            "futures":  settings.max_trades_futures,
-            "swing":    settings.max_trades_swing,
-            "scalping": settings.max_trades_scalping,
+            "intraday":       settings.max_trades_intraday,
+            "options":        settings.max_trades_options,
+            "futures":        settings.max_trades_futures,
+            "swing":          settings.max_trades_swing,
+            "scalping":       settings.max_trades_scalping,
+            "mean_reversion": settings.max_trades_mean_reversion,
+            "momentum":       settings.max_trades_momentum,
         }.get(strategy, 10)
 
     def can_place(self, symbol: str, strategy: str, side: str) -> tuple[bool, str]:

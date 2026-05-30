@@ -63,39 +63,49 @@ class Settings(BaseSettings):
     bt_lookback_days: int = 730
 
     # Overtrade prevention (per strategy per day)
-    max_trades_intraday: int = 8
-    max_trades_options: int = 4
-    max_trades_futures: int = 4
-    max_trades_swing: int = 3
-    max_trades_scalping: int = 20
-    cooldown_after_loss_sec: int = 300
+    max_trades_intraday:       int = 8
+    max_trades_options:        int = 4
+    max_trades_futures:        int = 4
+    max_trades_swing:          int = 3
+    max_trades_scalping:       int = 20
+    max_trades_mean_reversion: int = 6
+    max_trades_momentum:       int = 6
+    cooldown_after_loss_sec:   int = 300
 
     # Per-agent stop-loss % (intraday/scalping/futures/swing = price %; options = premium %)
-    sl_pct_intraday:  float = 1.5
-    sl_pct_scalping:  float = 0.3
-    sl_pct_options:   float = 25.0
-    sl_pct_futures:   float = 1.0
-    sl_pct_swing:     float = 3.0
+    sl_pct_intraday:       float = 1.5
+    sl_pct_scalping:       float = 0.3
+    sl_pct_options:        float = 25.0
+    sl_pct_futures:        float = 1.0
+    sl_pct_swing:          float = 3.0
+    sl_pct_mean_reversion: float = 1.2
+    sl_pct_momentum:       float = 1.5
 
     # Per-agent target %
-    tgt_pct_intraday: float = 3.0
-    tgt_pct_scalping: float = 0.70
-    tgt_pct_options:  float = 65.0
-    tgt_pct_futures:  float = 2.0
-    tgt_pct_swing:    float = 8.0
+    tgt_pct_intraday:       float = 3.0
+    tgt_pct_scalping:       float = 0.70
+    tgt_pct_options:        float = 65.0
+    tgt_pct_futures:        float = 2.0
+    tgt_pct_swing:          float = 8.0
+    tgt_pct_mean_reversion: float = 2.0
+    tgt_pct_momentum:       float = 3.0
 
     # Per-agent minimum pattern score to fire
-    min_score_intraday: int = 4
-    min_score_scalping: int = 3
-    min_score_options:  int = 6
-    min_score_futures:  int = 4
-    min_score_swing:    int = 1
+    min_score_intraday:       int = 4
+    min_score_scalping:       int = 3
+    min_score_options:        int = 6
+    min_score_futures:        int = 4
+    min_score_swing:          int = 1
+    min_score_mean_reversion: int = 3
+    min_score_momentum:       int = 4
 
     # Per-agent entry cooldown (seconds between trades on same symbol)
-    cooldown_intraday: int = 180
-    cooldown_scalping: int = 90
-    cooldown_options:  int = 120
-    cooldown_futures:  int = 180
+    cooldown_intraday:       int = 180
+    cooldown_scalping:       int = 90
+    cooldown_options:        int = 120
+    cooldown_futures:        int = 180
+    cooldown_mean_reversion: int = 180
+    cooldown_momentum:       int = 180
 
     # Pre-learned system (set after running historical_learner.py)
     skip_startup_backtest: bool = False   # use pre-learned approved_symbols.json

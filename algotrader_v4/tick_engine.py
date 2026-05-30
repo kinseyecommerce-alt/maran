@@ -476,6 +476,10 @@ class TickEngine:
         self._loop: Optional[asyncio.AbstractEventLoop] = None
         self._task: Optional[asyncio.Task]              = None
 
+        # Duplicate-tick deduplication — skip indicator recompute when same LTP within 100ms
+        self._last_tick_ltp: dict[str, float] = {}
+        self._last_tick_ts:  dict[str, float] = {}   # monotonic seconds
+
         # KiteConnect WebSocket state
         self._kite_ticker = None
         self._use_ws: bool = False
@@ -568,6 +572,14 @@ class TickEngine:
         """Candle buffer push → indicator calc → snapshot broadcast. Used by both WS and REST paths."""
         if symbol not in self._bufs_1min:
             return
+
+        # Skip indicator recompute for duplicate LTP within 100ms (WS fires rapidly)
+        now_mono = time.monotonic()
+        if (self._last_tick_ltp.get(symbol) == tick.ltp
+                and now_mono - self._last_tick_ts.get(symbol, 0.0) < 0.1):
+            return
+        self._last_tick_ltp[symbol] = tick.ltp
+        self._last_tick_ts[symbol]  = now_mono
 
         self._bufs_1min[symbol].push(tick.ltp, tick.volume, tick.timestamp)
         self._bufs_5min[symbol].push(tick.ltp, tick.volume, tick.timestamp)
