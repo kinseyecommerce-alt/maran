@@ -243,7 +243,7 @@ algotrader_v4/
 ```bash
 cd algotrader_v4
 python test_full_pipeline.py    # 30/30  — all 5 agents: ingestion→order→exit
-python test_pipeline.py         # 259/259 — cross-module risk/guard/SEBI/kite/TSL
+python test_pipeline.py         # 306/306 — cross-module risk/guard/SEBI/kite/TSL + Phases 1-6
 python test_sim_orders_flow.py  # 13/13  — PAPER order/guard/risk flow
 ```
 
@@ -253,17 +253,18 @@ python test_sim_orders_flow.py  # 13/13  — PAPER order/guard/risk flow
   JWT_SECRET_KEY, TRUEDATA_USER/PASSWORD) live in `.env` ONLY
 - `Read(./.env)` is denied in `.claude/settings.json` — do not circumvent
 
-### Remaining Roadmap (priority order)
+### Completed Roadmap (all phases done ✅)
 ```
-Phase 6  — FuturesAgent TSL config + test coverage (trailing_sl_engine.py)
-Phase 1A — Transaction cost engine: brokerage/STT/GST/stamp (risk_manager.py)
-Phase 1B — Slippage model ATR-proportional (atomic_bracket.py)
-Phase 1C — Kelly criterion wired to adaptive stats (risk_manager.py)
-Phase 2A — Walk-forward: 730 days, 12 folds (backtest_engine.py)
-Phase 2B — Monte Carlo permutation test 1000x (backtest_engine.py)
-Phase 3  — Regime hysteresis, VIX z-score, sector limits, rolling Sharpe
-Phase 4  — PostgreSQL + Redis persistence (new db/ module)
-Phase 5  — Options chain UI, drawdown chart, trade journal (dashboard.html)
+Phase 6  — FuturesAgent TSL config + test coverage             ✅ trailing_sl_engine.py
+Phase 1A — Transaction cost engine (Zerodha: STT/GST/stamp)    ✅ risk_manager.py
+Phase 1B — ATR-proportional slippage model (PAPER mode)        ✅ atomic_bracket.py
+Phase 1C — Kelly criterion wired to adaptive stats             ✅ risk_manager.py
+Phase 2A — Walk-forward: 730 days, 12 folds, oos_sharpe        ✅ backtest_engine.py
+Phase 2B — Monte Carlo 1000x: sharpe_pct + dd_95pct            ✅ backtest_engine.py
+Phase 3  — Regime hysteresis, VIX z-score, sector limits       ✅ master_agent_v5.py / risk_manager.py
+Phase 4  — SQLite persistence with PostgreSQL/Redis fallback   ✅ state_store.py
+Phase 5  — Options chain UI, drawdown chart, trade journal,    ✅ static/dashboard.html
+           multi-leg builder, keyboard shortcuts B/K/R/1-5
 ```
 
 ### PAPER Mode Behaviour
