@@ -503,9 +503,8 @@ class OptionsAgent(BaseAgent):
         now = now_ist()
         t   = now.time().replace(tzinfo=None)
 
-        # No new entries after 13:00 — a 4% target needs 2+ hours to materialise;
-        # late entries squareoff below target dragging avg win to near zero
-        if t >= time(13, 0):
+        # Hard stop at 14:00 — no options entries after this (theta decay too aggressive)
+        if t >= time(14, 0):
             return "HOLD", None
 
         # Cached intelligence (sync — zero latency)
@@ -528,7 +527,7 @@ class OptionsAgent(BaseAgent):
         # Update ORB range (9:15-9:30 window)
         self._update_orb(sym, snap, t)
 
-        # Run all 10 patterns — collect the best signal
+        # Run all 12 patterns — collect the best signal
         best_score, best_opt, best_pattern = -1, "", ""
         patterns = [
             self._pat_ema_cross,
@@ -541,6 +540,8 @@ class OptionsAgent(BaseAgent):
             self._pat_ichimoku_cloud,
             self._pat_stochrsi_options,
             self._pat_williams_options,
+            self._pat_oi_surge,
+            self._pat_expiry_scalp,
         ]
         for pat_fn in patterns:
             try:
@@ -550,13 +551,19 @@ class OptionsAgent(BaseAgent):
             if not opt_type:
                 continue
             # Add context bonuses
-            total = base + self._ctx_bonus(opt_type, ind, ltp, iv_rank, surf, gex, flow)
+            total = base + self._ctx_bonus(opt_type, snap, ind, ltp, iv_rank, surf, gex, flow, opts)
             if total > best_score:
                 best_score, best_opt, best_pattern = total, opt_type, pname
 
         # NOTE: _update_state() runs after patterns intentionally — patterns see
         # the PREVIOUS tick's _prev_rsi, _prev_ltp, _prev_above_vwap, _prev_bb_width.
         if best_score < settings.min_score_options:
+            self._update_state(sym, ind, ltp)
+            return "HOLD", None
+
+        # After 13:00 only high-conviction signals (≥8/17) are taken —
+        # lower-scored setups need more time than remains to reach target
+        if t >= time(13, 0) and best_score < 8:
             self._update_state(sym, ind, ltp)
             return "HOLD", None
 
@@ -776,9 +783,57 @@ class OptionsAgent(BaseAgent):
             return "PE", 4, "WILLIAMS_OPTIONS"
         return "", 0, ""
 
-    # ── Context bonus (+0 to +6 points added to every pattern) ───────────────
+    # ── Pattern 11: OI_SURGE — institutional OI buildup at nearby strikes ────
 
-    def _ctx_bonus(self, opt_type, ind, ltp, iv_rank, surf, gex, flow) -> int:
+    def _pat_oi_surge(self, sym, snap, ind, ltp, t):
+        """Large OI accumulation at nearby strikes reveals institutional conviction."""
+        from options_intelligence import get_cached
+        opts = get_cached(sym)
+        if not opts:
+            return "", 0, ""
+        oi_buildup = opts.get("oi_buildup", [])
+        if not oi_buildup:
+            return "", 0, ""
+        for item in oi_buildup[:2]:
+            strike  = item.get("strike", 0)
+            side    = item.get("side", "")
+            oi_chg  = item.get("oi_change", 0)
+            if not strike or abs(oi_chg) < 50000:
+                continue
+            # Heavy call writing above spot → resistance wall → PE entry
+            if side == "CE" and strike > ltp * 1.005 and oi_chg > 0:
+                if ind.ema9 < ind.ema21 > 0 or ind.rsi_14 < 55:
+                    return "PE", 4, "OI_SURGE"
+            # Heavy put writing below spot → support floor → CE entry
+            if side == "PE" and strike < ltp * 0.995 and oi_chg > 0:
+                if ind.ema9 > ind.ema21 > 0 or ind.rsi_14 > 45:
+                    return "CE", 4, "OI_SURGE"
+        return "", 0, ""
+
+    # ── Pattern 12: EXPIRY_SCALP — expiry-Thursday momentum burst ────────────
+
+    def _pat_expiry_scalp(self, sym, snap, ind, ltp, t):
+        """On F&O expiry day, theta decay accelerates — ride sharp 9:30-11:00 move."""
+        try:
+            from alt_data import alt_data_engine
+            is_exp, event_name = alt_data_engine.is_event_day()
+            if not is_exp or "expiry" not in event_name.lower():
+                return "", 0, ""
+        except Exception:
+            return "", 0, ""
+        if not (time(9, 30) <= t <= time(11, 30)):
+            return "", 0, ""
+        if (ind.ema9 > ind.ema21 > 0 and ind.rsi_14 > 55
+                and ind.volume_ratio >= 1.5 and ind.macd_hist > 0):
+            return "CE", 5, "EXPIRY_SCALP"
+        if (ind.ema9 < ind.ema21 > 0 and ind.rsi_14 < 45
+                and ind.volume_ratio >= 1.5 and ind.macd_hist < 0):
+            return "PE", 5, "EXPIRY_SCALP"
+        return "", 0, ""
+
+    # ── Context bonus (+0 to +9 points added to every pattern) ───────────────
+
+    def _ctx_bonus(self, opt_type, snap, ind, ltp, iv_rank, surf, gex, flow, opts=None) -> int:
         b = 0
         is_call = (opt_type == "CE")
 
@@ -809,6 +864,26 @@ class OptionsAgent(BaseAgent):
         if surf:
             if is_call  and surf.risk_reversal > -0.005: b += 1
             if not is_call and surf.put_skew > 0.005:     b += 1
+
+        # PCR — Put-Call Ratio from options chain (0-1)
+        if opts:
+            pcr = float(opts.get("pcr", 1.0))
+            if is_call  and pcr > 1.2:  b += 1   # put writers dominant → smart money bullish
+            if not is_call and pcr < 0.8: b += 1  # call writers dominant → smart money bearish
+
+        # Max Pain gravity — price tends toward max pain on expiry (0-1)
+        if opts:
+            max_pain = float(opts.get("max_pain", 0.0))
+            if max_pain > 0 and ltp > 0:
+                dist_pct = (ltp - max_pain) / ltp * 100
+                if is_call  and dist_pct < -1.0:  b += 1  # LTP below max pain → upward pull
+                if not is_call and dist_pct > 1.0: b += 1  # LTP above max pain → downward pull
+
+        # 5-min candle trend alignment (0-1)
+        if len(snap.candles_5min) >= 3:
+            c5 = snap.candles_5min[-3:]
+            if is_call  and c5[-1].close > c5[0].close: b += 1
+            if not is_call and c5[-1].close < c5[0].close: b += 1
 
         return b
 
