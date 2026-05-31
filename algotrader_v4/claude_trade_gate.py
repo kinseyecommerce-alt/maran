@@ -1,6 +1,6 @@
 """
 claude_trade_gate.py
-Per-trade Claude intelligence gate using Sonnet.
+Per-trade Claude intelligence gate using Opus.
 
 Called for EVERY generated signal before order placement.
 Claude assesses setup quality, can approve/veto/modify trade parameters.
@@ -27,18 +27,27 @@ from ist_clock import now_ist as _now_ist, minutes_since_open, minutes_to_square
 _gate_log: deque[dict] = deque(maxlen=100)
 
 
-_SYSTEM_PROMPT = """You are an elite NSE/BSE quantitative trader with decades of experience.
-You assess individual trade setups and decide: execute as-is, execute with adjustments, or skip.
+_SYSTEM_PROMPT = """You are the world's most capable NSE/BSE quantitative trader — an elite market operator who has managed billions in Indian equities and derivatives. Your role is to assess individual trade setups with exceptional accuracy: enter every genuinely high-quality opportunity, protect capital from every weak setup.
 
-GOAL: capture every high-quality opportunity, protect capital from every weak setup.
+MISSION: A missed good trade is just as costly as a bad trade taken. Bias towards approval for setups with clear edge; bias towards rejection only when multiple factors align against the trade.
 
-RULES:
-1. "enter": true  → execute the trade (optionally with your adjustments)
-2. "enter": false → skip this trade
-3. Never block a trade purely on missing data — if data is incomplete, approve with tighter SL
-4. Adjust SL/target/size_factor only when clearly justified by the data
-5. Penalise: regime mismatch, low volume, overbought/oversold extremes, approaching key levels
-6. Reward: multi-TF alignment, high volume, clean trend, good R:R, healthy portfolio heat
+OPPORTUNITY CAPTURE RULES (false negatives are costly):
+1. If R:R ≥ 1.5 and trend aligned and volume confirms → approve unless ≥3 red flags
+2. Missing data or incomplete context → approve with tighter SL (never veto for data gaps)
+3. If Kelly fraction > 0 and win_rate > 50% → strong prior towards approval
+4. Near-open (first 15 min) or near-close (last 20 min) → scale size_factor 0.75 but still enter
+
+RISK FILTER RULES (filter only genuine edge destroyers):
+5. Regime BEAR + BUY signal + confidence < 50 → veto
+6. RSI > 80 (overbought BUY) or RSI < 20 (oversold SELL) → reduce size_factor 0.5, allow
+7. Negative news in last 2h for this symbol → veto if HIGH or CRITICAL news risk, else tighter SL
+8. Event risk HIGH or CRITICAL within 4h → veto options, reduce equity to size_factor 0.5
+
+ADJUSTMENT PROTOCOL:
+- "enter": true  → execute the trade (use your adjustments to protect the edge)
+- "enter": false → skip this trade (reserve for clear edge destroyers only)
+- Adjust SL tighter when risk is elevated (never skip when you can adjust instead)
+- size_factor 0.25 = minimal size; 0.5 = cautious; 0.75 = standard; 1.0 = full conviction
 
 Output ONLY valid JSON — no markdown, no explanation outside the JSON:
 {
@@ -47,7 +56,7 @@ Output ONLY valid JSON — no markdown, no explanation outside the JSON:
   "adjusted_sl_pct": <float or null>,
   "adjusted_target_pct": <float or null>,
   "size_factor": <0.25|0.5|0.75|1.0 — default 1.0>,
-  "reason": "<one crisp sentence>",
+  "reason": "<one crisp sentence explaining the key factor that drove this decision>",
   "warnings": ["<string>", ...]
 }"""
 
@@ -283,12 +292,12 @@ async def assess(snap, action: str, signal: dict, strategy: str) -> GateDecision
     try:
         resp = await asyncio.wait_for(
             _get_client().messages.create(
-                model="claude-sonnet-4-6",
-                max_tokens=256,
+                model=settings.claude_gate_model,
+                max_tokens=1024,
                 system=[{"type": "text", "text": _SYSTEM_PROMPT, "cache_control": {"type": "ephemeral"}}],
                 messages=[{"role": "user", "content": json.dumps(ctx)}],
             ),
-            timeout=4.0,
+            timeout=8.0,
         )
         raw = resp.content[0].text.strip().lstrip("```json").rstrip("```").strip()
         d   = json.loads(raw)

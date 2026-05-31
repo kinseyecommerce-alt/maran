@@ -128,7 +128,8 @@ class Settings(BaseSettings):
     use_nifty100_watchlist: bool = False  # auto-use full Nifty 100 as watchlist
 
     # Intelligence layer
-    use_claude_trade_gate: bool = True    # per-trade Claude assessment via Sonnet
+    use_claude_trade_gate: bool = True    # per-trade Claude assessment via Opus
+    claude_gate_model: str = "claude-opus-4-8"  # model for trade gate (Opus = max accuracy)
     claude_gate_threshold: int = 65       # min confidence to enter (master raises/lowers dynamically)
     use_multi_timeframe: bool = True      # require 5m/15m alignment with entry direction
     mtf_min_alignment: int = 2            # how many of 3 TFs must agree (1, 2, or 3)
