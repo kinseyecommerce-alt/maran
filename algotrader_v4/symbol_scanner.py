@@ -151,8 +151,8 @@ class SelectionCriteria:
 
 CRITERIA: dict[str, SelectionCriteria] = {
     "intraday": SelectionCriteria(
-        universe        = NSE_TOP_100,          # all 100 — scanner picks best 8
-        top_n           = 8,
+        universe        = NSE_TOP_100,
+        top_n           = 15,               # expanded: more coverage, scanner filters quality
         min_avg_volume  = 500_000,
         min_atr_pct     = 0.8,
         max_atr_pct     = 4.0,
@@ -165,8 +165,8 @@ CRITERIA: dict[str, SelectionCriteria] = {
         description     = "Top-100 NSE stocks — trending + high-volume for intraday momentum",
     ),
     "options": SelectionCriteria(
-        universe        = NSE_TOP_100,          # F&O gate applied inside scorer
-        top_n           = 6,
+        universe        = NSE_TOP_100,
+        top_n           = 12,               # expanded: F&O universe has 150+ eligible
         min_avg_volume  = 1_000_000,
         min_atr_pct     = 1.0,
         max_atr_pct     = 6.0,
@@ -179,8 +179,8 @@ CRITERIA: dict[str, SelectionCriteria] = {
         description     = "Top-100 NSE F&O-eligible stocks with high OI and liquid options",
     ),
     "swing": SelectionCriteria(
-        universe        = NSE_TOP_100,          # full 100 for swing diversity
-        top_n           = 6,
+        universe        = NSE_TOP_100,
+        top_n           = 10,               # expanded: swing holds 3-7 days, more diversity
         min_avg_volume  = 200_000,
         min_atr_pct     = 1.5,
         max_atr_pct     = 5.0,
@@ -193,8 +193,8 @@ CRITERIA: dict[str, SelectionCriteria] = {
         description     = "Top-100 NSE stocks in RSI pullback zone for 3-7 day holds",
     ),
     "scalping": SelectionCriteria(
-        universe        = NIFTY_50,             # Nifty 50 only — tightest spreads
-        top_n           = 5,
+        universe        = NSE_TOP_100,      # expanded from Nifty50 to top 100
+        top_n           = 10,               # expanded: scanner filters by highest liquidity
         min_avg_volume  = 2_000_000,
         min_atr_pct     = 0.5,
         max_atr_pct     = 2.5,
@@ -204,7 +204,63 @@ CRITERIA: dict[str, SelectionCriteria] = {
         min_adx         = 0,
         fo_eligible_only= False,
         score_weights   = {"liquidity":50, "trend":15, "momentum":15, "volatility":20},
-        description     = "Nifty 50 only — highest liquidity for tight bid-ask scalping",
+        description     = "NSE top 100 by liquidity — highest volume for tight bid-ask scalping",
+    ),
+    "futures": SelectionCriteria(
+        universe        = list(set(NIFTY_50 + ["NIFTY50","BANKNIFTY","FINNIFTY","MIDCPNIFTY"])),
+        top_n           = 10,
+        min_avg_volume  = 1_000_000,
+        min_atr_pct     = 1.0,
+        max_atr_pct     = 5.0,
+        require_trend   = True,
+        rsi_min         = 30,
+        rsi_max         = 70,
+        min_adx         = 20,
+        fo_eligible_only= True,
+        score_weights   = {"liquidity":30, "trend":40, "momentum":20, "volatility":10},
+        description     = "Nifty50 + indices — high-volume F&O for futures trend trading",
+    ),
+    "mean_reversion": SelectionCriteria(
+        universe        = NSE_TOP_100,
+        top_n           = 12,
+        min_avg_volume  = 300_000,
+        min_atr_pct     = 0.8,
+        max_atr_pct     = 4.0,
+        require_trend   = False,             # mean reversion PREFERS ranging markets
+        rsi_min         = 0,
+        rsi_max         = 100,
+        min_adx         = 0,
+        fo_eligible_only= False,
+        score_weights   = {"liquidity":30, "trend":10, "momentum":30, "volatility":30},
+        description     = "NSE top 100 — ranging stocks with high momentum for mean reversion",
+    ),
+    "momentum": SelectionCriteria(
+        universe        = NSE_TOP_100,
+        top_n           = 12,
+        min_avg_volume  = 500_000,
+        min_atr_pct     = 1.2,
+        max_atr_pct     = 6.0,
+        require_trend   = True,
+        rsi_min         = 40,
+        rsi_max         = 80,
+        min_adx         = 25,               # momentum needs strong trending markets
+        fo_eligible_only= False,
+        score_weights   = {"liquidity":25, "trend":40, "momentum":25, "volatility":10},
+        description     = "NSE top 100 — strong trending stocks for breakout momentum",
+    ),
+    "pairs": SelectionCriteria(
+        universe        = NSE_TOP_100,
+        top_n           = 16,               # pairs need both legs — 8 pairs × 2 symbols
+        min_avg_volume  = 500_000,
+        min_atr_pct     = 0.5,
+        max_atr_pct     = 5.0,
+        require_trend   = False,
+        rsi_min         = 0,
+        rsi_max         = 100,
+        min_adx         = 0,
+        fo_eligible_only= False,
+        score_weights   = {"liquidity":40, "trend":15, "momentum":25, "volatility":20},
+        description     = "NSE top 100 — highly liquid pairs for statistical arbitrage",
     ),
 }
 

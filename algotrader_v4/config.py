@@ -70,6 +70,7 @@ class Settings(BaseSettings):
     max_trades_scalping:       int = 20
     max_trades_mean_reversion: int = 6
     max_trades_momentum:       int = 6
+    max_trades_pairs:          int = 8
     cooldown_after_loss_sec:   int = 300
 
     # Per-agent stop-loss % (intraday/scalping/futures/swing = price %; options = premium %)
@@ -80,6 +81,7 @@ class Settings(BaseSettings):
     sl_pct_swing:          float = 3.0
     sl_pct_mean_reversion: float = 1.2
     sl_pct_momentum:       float = 1.5
+    sl_pct_pairs:          float = 0.8
 
     # Per-agent target %
     tgt_pct_intraday:       float = 3.0
@@ -89,6 +91,7 @@ class Settings(BaseSettings):
     tgt_pct_swing:          float = 8.0
     tgt_pct_mean_reversion: float = 2.0
     tgt_pct_momentum:       float = 3.0
+    tgt_pct_pairs:          float = 1.5
 
     # Per-agent minimum pattern score to fire
     min_score_intraday:       int = 4
@@ -98,6 +101,7 @@ class Settings(BaseSettings):
     min_score_swing:          int = 1
     min_score_mean_reversion: int = 3
     min_score_momentum:       int = 4
+    min_score_pairs:          int = 4
 
     # Per-agent entry cooldown (seconds between trades on same symbol)
     cooldown_intraday:       int = 180
@@ -106,6 +110,7 @@ class Settings(BaseSettings):
     cooldown_futures:        int = 180
     cooldown_mean_reversion: int = 180
     cooldown_momentum:       int = 180
+    cooldown_pairs:          int = 120
 
     # Pre-learned system (set after running historical_learner.py)
     skip_startup_backtest: bool = False   # use pre-learned approved_symbols.json
@@ -156,6 +161,7 @@ class Settings(BaseSettings):
     # Phase 2/3: Position sizing
     use_atr_sizing: bool = True
     risk_per_trade_pct: float = 0.5
+    use_conviction_sizing: bool = True  # score-proportional size: low=0.5×, mid=0.75×, high=1.0×
 
     # Phase 3: Intelligence
     max_positions_per_sector: int = 2

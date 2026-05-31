@@ -434,6 +434,13 @@ class BaseAgent(ABC):
             kf  = risk_manager.kelly_fraction(self.name, snap.symbol)
             qty = max(1, int(qty * kf))
 
+        # Universal conviction sizing: score 4-5=0.5×, 6-7=0.75×, 8-9=1.0×, 10+=1.25×
+        # Deploys more capital on high-confidence signals across all agents uniformly
+        if settings.use_conviction_sizing:
+            _sig_score = signal.get("score", 0)
+            _conv = 0.50 if _sig_score <= 5 else (0.75 if _sig_score <= 7 else (1.0 if _sig_score <= 9 else 1.25))
+            qty = max(1, int(qty * _conv))
+
         # Phase 3E: Apply adaptive engine's size_factor (from online learning)
         if self._adaptive_min_score_override is not None and isinstance(
             self._adaptive_min_score_override, float
@@ -444,6 +451,18 @@ class BaseAgent(ABC):
         size_factor = signal.pop("_gate_size_factor", 1.0)
         if size_factor < 1.0:
             qty = max(1, int(qty * size_factor))
+
+        # Consensus signal boost: when 2+ agents independently flag same symbol/direction
+        try:
+            from signal_aggregator import signal_aggregator as _sig_agg
+            _score = signal.get("score", 0)
+            _boost = _sig_agg.register(self.name, sym, action, _score)
+            if _boost > 0:
+                _max = int(settings.max_position_size // max(ltp, 1))
+                qty  = min(int(qty * (1 + _boost)), _max)
+                logger.info("[{}] {} CONSENSUS boost {:.0%} → qty={}", self.name, sym, _boost, qty)
+        except Exception:
+            pass
 
         # Sector limit check — run in executor so it doesn't block the event loop
         loop = asyncio.get_event_loop()

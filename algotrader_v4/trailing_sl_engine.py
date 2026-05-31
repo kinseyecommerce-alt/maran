@@ -135,6 +135,13 @@ TRAIL_CONFIGS: dict[str, TrailConfig] = {
         mode            = SLMode.ATR_TRAIL,
         atr_multiplier  = 1.3,
     ),
+    "pairs": TrailConfig(
+        initial_sl_pct  = 0.8,   trail_pct      = 0.4,
+        breakeven_pct   = 0.4,   activation_pct = 0.8,
+        target1_pct     = 1.5,   target2_pct    = 2.5,
+        mode            = SLMode.ATR_TRAIL,
+        atr_multiplier  = 1.0,
+    ),
 }
 
 

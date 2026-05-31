@@ -47,6 +47,7 @@ class OrderGuard:
             "scalping":       settings.max_trades_scalping,
             "mean_reversion": settings.max_trades_mean_reversion,
             "momentum":       settings.max_trades_momentum,
+            "pairs":          settings.max_trades_pairs,
         }.get(strategy, 10)
 
     def can_place(self, symbol: str, strategy: str, side: str) -> tuple[bool, str]:

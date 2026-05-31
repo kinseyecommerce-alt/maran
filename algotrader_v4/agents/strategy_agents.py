@@ -2495,6 +2495,169 @@ class MomentumAgent(BaseAgent):
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
+# 8.  PAIRS  —  Statistical arbitrage on correlated NSE stock pairs
+# ═══════════════════════════════════════════════════════════════════════════════
+
+class PairsAgent(BaseAgent):
+    """
+    Pairs trading agent: tracks price-ratio Z-score between correlated stock pairs.
+    When ratio diverges > 2σ → bet on mean reversion of the expensive leg.
+
+    Pairs tracked (4):
+      HDFCBANK / ICICIBANK   — large-cap private banking
+      TCS      / INFY        — large-cap IT services
+      SBIN     / BANKBARODA  — PSU banking
+      TATAMOTORS / M&M       — large-cap auto OEM
+
+    Entry: ratio Z-score > +2σ → SHORT expensive; Z-score < -2σ → BUY cheap
+    Exit:  ratio returns to 0.5σ of mean, or SL/TGT from TSL engine
+    Time:  09:30 – 14:30 IST (exclude open/close noise)
+    """
+    name    = "pairs"
+    product = "MIS"
+    min_candles_1min = 20
+
+    PAIRS: list[tuple[str, str]] = [
+        ("HDFCBANK",   "ICICIBANK"),
+        ("TCS",        "INFY"),
+        ("SBIN",       "BANKBARODA"),
+        ("TATAMOTORS", "M&M"),
+    ]
+    PAIR_SYMBOLS: set[str] = {s for p in PAIRS for s in p}
+
+    ZSCORE_ENTRY  = 2.0
+    ZSCORE_EXIT   = 0.5
+    RATIO_WINDOW  = 50      # rolling bars for ratio mean/std
+    MIN_SCORE     = 4
+    COOL_S        = 120
+
+    def __init__(self):
+        super().__init__()
+        from collections import deque
+        self._prices:  dict = {}                           # sym → latest ltp
+        self._ratios:  dict = {p: deque(maxlen=self.RATIO_WINDOW) for p in self.PAIRS}
+        self._zscores: dict = {}                           # pair → latest zscore
+        self._cool_ts: dict = {}                           # (sym, side) → datetime
+
+    def evaluate_tick(self, snap: MarketSnapshot) -> tuple[str, Optional[dict]]:
+        sym = snap.symbol
+        if sym not in self.PAIR_SYMBOLS:
+            return "HOLD", None
+
+        now = now_ist()
+        t   = now.time().replace(tzinfo=None)
+        if not (time(9, 30) <= t <= time(14, 30)):
+            return "HOLD", None
+
+        ind = snap.indicators
+        self._prices[sym] = snap.tick.ltp
+
+        best_score, best_action, best_signal = -1, "HOLD", None
+
+        for pair in self.PAIRS:
+            a, b = pair
+            if sym not in pair:
+                continue
+            pa = self._prices.get(a)
+            pb = self._prices.get(b)
+            if not (pa and pb and pa > 0 and pb > 0):
+                continue
+
+            ratio = pa / pb
+            self._ratios[pair].append(ratio)
+            if len(self._ratios[pair]) < 20:
+                continue
+
+            ratios = list(self._ratios[pair])
+            mean   = sum(ratios) / len(ratios)
+            std    = (sum((r - mean) ** 2 for r in ratios) / len(ratios)) ** 0.5
+            if std <= 1e-8:
+                continue
+
+            zscore = (ratio - mean) / std
+            self._zscores[pair] = zscore
+
+            # Entry only on the EXPENSIVE leg (bet it reverts down = SHORT expensive)
+            # or the CHEAP leg (bet it reverts up = BUY cheap)
+            action, trade_sym = "", ""
+            score = 0
+
+            if zscore >= self.ZSCORE_ENTRY and sym == a:
+                # a is expensive relative to b → SHORT a
+                action, trade_sym = "SELL", a
+                score = 4 + min(int(abs(zscore) - self.ZSCORE_ENTRY), 3)
+            elif zscore <= -self.ZSCORE_ENTRY and sym == a:
+                # a is cheap relative to b → BUY a
+                action, trade_sym = "BUY", a
+                score = 4 + min(int(abs(zscore) - self.ZSCORE_ENTRY), 3)
+            elif zscore >= self.ZSCORE_ENTRY and sym == b:
+                # a expensive, b cheap → BUY b
+                action, trade_sym = "BUY", b
+                score = 4 + min(int(abs(zscore) - self.ZSCORE_ENTRY), 3)
+            elif zscore <= -self.ZSCORE_ENTRY and sym == b:
+                # a cheap, b expensive → SHORT b
+                action, trade_sym = "SELL", b
+                score = 4 + min(int(abs(zscore) - self.ZSCORE_ENTRY), 3)
+
+            if not action or score < self.MIN_SCORE:
+                continue
+
+            # Cooldown guard
+            cool_key = (trade_sym, action)
+            last_cool = self._cool_ts.get(cool_key)
+            if last_cool and (now - last_cool).total_seconds() < settings.cooldown_pairs:
+                continue
+            self._cool_ts[cool_key] = now
+
+            # Context bonus: volume + MACD direction + ind.trend
+            ctx = 0
+            is_long = (action == "BUY")
+            if ind.volume_ratio > 1.3:                           ctx += 1
+            if is_long  and ind.macd_hist > 0:                   ctx += 1
+            if not is_long and ind.macd_hist < 0:                ctx += 1
+            if is_long  and ind.trend == "UP":                   ctx += 1
+            if not is_long and ind.trend == "DOWN":              ctx += 1
+            if ind.rsi_14 < 35 and is_long:                      ctx += 1
+            if ind.rsi_14 > 65 and not is_long:                  ctx += 1
+            total = score + ctx
+
+            if total > best_score:
+                best_score  = total
+                best_action = action
+                best_signal = {
+                    "side":          "LONG" if action == "BUY" else "SHORT",
+                    "pair":          f"{a}/{b}",
+                    "zscore":        round(zscore, 2),
+                    "score":         total,
+                    "stop_loss_pct": settings.sl_pct_pairs,
+                    "target_pct":    settings.tgt_pct_pairs,
+                    "trigger": (
+                        f"PAIRS-{action} [{a}/{b}] z={zscore:.2f} score={total} "
+                        f"rsi={ind.rsi_14:.0f}"
+                    ),
+                }
+
+        if best_score < settings.min_score_pairs or best_action == "HOLD":
+            return "HOLD", None
+        return best_action, best_signal
+
+    def should_exit_position(self, pos: dict, ind: LiveIndicators) -> tuple[bool, str]:
+        entry = pos.get("average_price", 0.0)
+        ltp   = ind.ltp
+        if not entry or entry <= 0:
+            return False, ""
+        side = pos.get("side", "LONG")
+        chg  = ((ltp - entry) / entry * 100) if side == "LONG" else ((entry - ltp) / entry * 100)
+        if chg <= -settings.sl_pct_pairs:
+            return True, f"Pairs SL -{settings.sl_pct_pairs}%"
+        if chg >= settings.tgt_pct_pairs:
+            return True, f"Pairs TGT +{settings.tgt_pct_pairs}%"
+        if now_ist().time().replace(tzinfo=None) >= time(14, 30):
+            return True, "Pairs auto-square 2:30 PM"
+        return False, ""
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
 # Registry
 # ═══════════════════════════════════════════════════════════════════════════════
 
@@ -2506,4 +2669,5 @@ ALL_AGENTS: dict[str, BaseAgent] = {
     "scalping":      ScalpingAgent(),
     "mean_reversion": MeanReversionAgent(),
     "momentum":      MomentumAgent(),
+    "pairs":          PairsAgent(),
 }
