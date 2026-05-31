@@ -45,6 +45,7 @@ from kite_client import kite_client
 from trailing_sl_engine import trailing_sl_engine, TRAIL_CONFIGS
 from order_guard import order_guard
 from risk_manager import risk_manager, compute_round_trip_cost
+from twap_engine import twap_engine
 
 _SLIPPAGE_BPS: dict[str, int] = {"large": 3, "mid": 7, "small": 15}
 
@@ -186,10 +187,18 @@ class AtomicBracketEngine:
             sub_strategy=sub_strategy, trigger_reason=trigger)
         self._brackets[bracket_id] = bracket
         try:
-            entry_oid = kite_client.place_order(
-                tradingsymbol=symbol, exchange=exchange, transaction_type=side,
-                quantity=quantity, order_type="MARKET", product=product,
-                tag=f"BRK-{strategy}-ENTRY")
+            if twap_engine.should_twap(quantity):
+                child_ids = await twap_engine.execute(
+                    symbol=symbol, action=side, qty=quantity,
+                    product=product, tag=f"BRK-{strategy}-ENTRY", exchange=exchange)
+                if not child_ids:
+                    raise RuntimeError("TWAP execution produced no filled slices")
+                entry_oid = child_ids[0]
+            else:
+                entry_oid = kite_client.place_order(
+                    tradingsymbol=symbol, exchange=exchange, transaction_type=side,
+                    quantity=quantity, order_type="MARKET", product=product,
+                    tag=f"BRK-{strategy}-ENTRY")
             bracket.entry_order_id = entry_oid
         except Exception as exc:
             bracket.status = BracketStatus.FAILED

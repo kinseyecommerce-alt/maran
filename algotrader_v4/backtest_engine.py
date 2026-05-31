@@ -66,6 +66,7 @@ class BacktestResult:
     sharpe_percentile: float | None  = None   # % of permutations with Sharpe ≤ real
     min_sharpe_5pct: float | None    = None   # 5th pct of permuted Sharpes
     max_drawdown_95pct: float | None = None   # 95th pct of permuted max drawdowns
+    calmar_ratio: float = 0.0               # annualised_return / abs(max_drawdown_pct)
     # Raw trade log and equity curve (not serialised by default)
     trades: list[dict]      = field(default_factory=list)
     equity_curve: list[float] = field(default_factory=list)
@@ -93,6 +94,7 @@ class BacktestResult:
             "oos_total_pnl":     round(self.oos_total_pnl, 0),
             "oos_trades":        self.oos_trades,
             "oos_sharpe":        round(self.oos_sharpe, 2) if self.oos_sharpe is not None else None,
+            "calmar_ratio":      round(self.calmar_ratio, 2),
             "mc_pvalue":         round(self.mc_pvalue, 3),
             "mc_passed":         self.mc_passed,
             "monte_carlo": {
@@ -652,6 +654,10 @@ class BacktestEngine:
         gross_loss   = sum(abs(l) for l in losses) if losses else 1.0
         pf           = gross_profit / gross_loss if gross_loss > 0 else 0.0
 
+        trading_days = max(len(pnl_list := pnls), 1)
+        ann_return = (total_pnl / 100_000.0) * (252 / (trading_days / 375))
+        calmar = ann_return / max(max_dd_pct / 100, 0.001)
+
         return BacktestResult(
             symbol=symbol, strategy=strategy, passed=False,
             total_trades=len(trades), wins=len(wins), losses=len(losses),
@@ -659,6 +665,7 @@ class BacktestEngine:
             max_drawdown_pct=max_dd_pct, sharpe_ratio=sharpe, profit_factor=pf,
             best_trade=max(pnls) if pnls else 0.0,
             worst_trade=min(pnls) if pnls else 0.0,
+            calmar_ratio=round(calmar, 2),
             trades=trades,
             equity_curve=cumulative,
         )
@@ -675,6 +682,8 @@ class BacktestEngine:
             reasons.append(f"Sharpe too low ({r.sharpe_ratio:.2f} < {settings.bt_min_sharpe})")
         if r.max_drawdown_pct > settings.bt_max_drawdown_pct:
             reasons.append(f"Drawdown too high ({r.max_drawdown_pct:.1f}% > {settings.bt_max_drawdown_pct:.0f}%)")
+        if r.calmar_ratio < settings.bt_min_calmar and r.total_trades >= settings.bt_min_trades:
+            reasons.append(f"Calmar too low ({r.calmar_ratio:.2f} < {settings.bt_min_calmar:.1f})")
         if r.total_pnl <= 0:
             reasons.append(f"Negative total P&L (₹{r.total_pnl:.0f})")
         # Walk-forward OOS gate: OOS win rate must not be below 80% of IS win rate

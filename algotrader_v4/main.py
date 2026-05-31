@@ -1855,6 +1855,130 @@ async def on_startup():
         logger.warning("SECURITY: TRADING_MODE=LIVE but KITE_API_KEY is not set — order placement will fail.")
 
 
+# ── Observability & Ops ────────────────────────────────────────────────────────
+
+@app.get("/metrics", include_in_schema=False)
+async def prometheus_metrics():
+    """Prometheus-compatible metrics endpoint."""
+    from risk_manager import risk_manager as _rm
+    from trailing_sl_engine import trailing_sl_engine as _tsl
+    import time as _t
+    lines = [
+        "# HELP algotrader_up Server is up",
+        "# TYPE algotrader_up gauge",
+        "algotrader_up 1",
+        "# HELP algotrader_trades_today Total trades today",
+        "# TYPE algotrader_trades_today counter",
+        f"algotrader_trades_today {_rm.trades_today}",
+        "# HELP algotrader_pnl_today Net P&L today (INR)",
+        "# TYPE algotrader_pnl_today gauge",
+        f"algotrader_pnl_today {_rm.daily_pnl:.2f}",
+        "# HELP algotrader_open_positions Current open positions",
+        "# TYPE algotrader_open_positions gauge",
+        f"algotrader_open_positions {len(_tsl.positions)}",
+        "# HELP algotrader_timestamp_seconds Unix timestamp",
+        "# TYPE algotrader_timestamp_seconds gauge",
+        f"algotrader_timestamp_seconds {_t.time():.0f}",
+    ]
+    from fastapi.responses import PlainTextResponse
+    return PlainTextResponse("\n".join(lines) + "\n", media_type="text/plain; version=0.0.4")
+
+
+@app.get("/risk/stress-test", tags=["Risk"])
+async def stress_test(shock_pct: float = -5.0):
+    """Simulate a market shock (default -5% Nifty) and compute portfolio impact."""
+    from trailing_sl_engine import trailing_sl_engine as _tsl
+    from risk_manager import _BETA_MAP
+    positions = list(_tsl.positions.values())
+    if not positions:
+        return {"shock_pct": shock_pct, "positions_tested": 0, "estimated_pnl_impact": 0.0, "positions": []}
+    total_impact = 0.0
+    details = []
+    for pos in positions:
+        beta = _BETA_MAP.get(pos.symbol, 1.0)
+        expected_move_pct = shock_pct * beta
+        estimated_loss = pos.entry_price * pos.qty * (expected_move_pct / 100)
+        total_impact += estimated_loss
+        details.append({
+            "symbol": pos.symbol, "qty": pos.qty, "beta": beta,
+            "expected_move_pct": round(expected_move_pct, 2),
+            "estimated_pnl": round(estimated_loss, 0),
+        })
+    return {
+        "shock_pct": shock_pct,
+        "positions_tested": len(positions),
+        "estimated_pnl_impact": round(total_impact, 0),
+        "positions": details,
+    }
+
+
+@app.get("/compliance/sebi-report", tags=["SEBI Compliance"])
+async def sebi_daily_report(date: str | None = None):
+    """Generate SEBI-compliant daily activity report."""
+    return sebi_compliance.generate_daily_report(date)
+
+
+@app.get("/portfolio/implementation-shortfall", tags=["Portfolio"])
+async def implementation_shortfall(days: int = 30):
+    """Compare expected vs actual fill prices. Returns average shortfall in basis points."""
+    try:
+        import sqlite3
+        from pathlib import Path as _P
+        db_path = _P(__file__).parent / "logs" / "algotrader.db"
+        if not db_path.exists():
+            return {"trades_analysed": 0, "avg_shortfall_bps": 0.0, "total_shortfall_inr": 0.0}
+        con = sqlite3.connect(db_path)
+        con.row_factory = sqlite3.Row
+        rows = con.execute(
+            "SELECT symbol, side, expected_fill_price, actual_fill_price, qty "
+            "FROM trades WHERE expected_fill_price > 0 AND actual_fill_price > 0 "
+            "ORDER BY exit_time DESC LIMIT ?", (days * 10,)
+        ).fetchall()
+        con.close()
+        if not rows:
+            return {"trades_analysed": 0, "avg_shortfall_bps": 0.0, "total_shortfall_inr": 0.0}
+        bps_list, inr_list = [], []
+        for r in rows:
+            sign = -1 if r["side"] == "BUY" else 1
+            diff_bps = sign * (r["actual_fill_price"] - r["expected_fill_price"]) / r["expected_fill_price"] * 10000
+            diff_inr = sign * (r["actual_fill_price"] - r["expected_fill_price"]) * r["qty"]
+            bps_list.append(diff_bps)
+            inr_list.append(diff_inr)
+        return {
+            "trades_analysed": len(rows),
+            "avg_shortfall_bps": round(sum(bps_list) / len(bps_list), 2),
+            "total_shortfall_inr": round(sum(inr_list), 0),
+        }
+    except Exception as e:
+        return {"error": str(e)}
+
+
+@app.post("/notifications/test", tags=["Operations"])
+async def test_notification(body: dict = Body(default={"message": "AlgoTrader test alert"})):
+    """Send a test notification via configured channels (email/Telegram)."""
+    try:
+        from notifier import notifier as _notifier
+        msg = body.get("message", "AlgoTrader test alert")
+        _notifier.send(subject=msg, body="This is a test notification from AlgoTrader Pro.", level="INFO")
+        return {"status": "sent", "message": msg}
+    except Exception as e:
+        return {"status": "error", "detail": str(e)}
+
+
+# ── State_store fill-price migration ──────────────────────────────────────────
+
+# Add expected/actual fill price columns if not already present
+try:
+    from state_store import _conn as _ss_conn
+    for _col, _def in [("expected_fill_price", "REAL DEFAULT 0"), ("actual_fill_price", "REAL DEFAULT 0")]:
+        try:
+            _ss_conn().execute(f"ALTER TABLE trades ADD COLUMN {_col} {_def}")
+        except Exception:
+            pass
+except Exception:
+    pass
+
+
 # HIGH-7: reload=False in production — auto-reload bypasses security middleware
 if __name__ == "__main__":
     import uvicorn

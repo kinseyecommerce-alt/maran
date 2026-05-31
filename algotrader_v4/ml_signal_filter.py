@@ -36,6 +36,8 @@ class MLSignalFilter:
         self._lock    = threading.Lock()
         self._new_since_train = 0
         self._load()
+        if self._model is None:
+            self._warm_from_history()
 
     # ── Public API ────────────────────────────────────────────────────────────
 
@@ -88,6 +90,18 @@ class MLSignalFilter:
                 t.start()
 
     # ── Training ─────────────────────────────────────────────────────────────
+
+    def _warm_from_history(self) -> None:
+        """Called during __init__ if no saved model found — triggers background retrain from existing trades."""
+        try:
+            rows = self._load_trade_history()
+            n = len(rows)
+            if n >= 30:
+                logger.info("[MLFilter] Warming from {} historical trades...", n)
+                t = threading.Thread(target=self._retrain, daemon=True)
+                t.start()
+        except Exception as exc:
+            logger.debug("[MLFilter] warm-up probe failed: {}", exc)
 
     def _retrain(self) -> None:
         try:

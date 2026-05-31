@@ -29,6 +29,16 @@ class Settings(BaseSettings):
     telegram_bot_token: str = ""
     telegram_chat_id: str = ""
 
+    # Email / alert notifications
+    alert_email: str = ""                # recipient for alerts; empty = email disabled
+    smtp_host: str = "smtp.gmail.com"
+    smtp_port: int = 587
+    smtp_user: str = ""                  # sender email / SMTP login
+    smtp_pass: str = ""                  # app password or SMTP password
+    alert_on_loss_limit: bool = True     # send alert when daily loss limit is hit
+    alert_on_kill_switch: bool = True    # send alert on kill switch trigger
+    alert_on_startup: bool = True        # send startup notification at market open
+
     # n8n webhook integration
     n8n_webhook_url:    str = ""  # e.g. https://your-n8n.com/webhook/algotrader
     n8n_webhook_secret: str = ""  # optional HMAC-SHA256 signing secret
@@ -61,6 +71,7 @@ class Settings(BaseSettings):
     bt_max_drawdown_pct: float = 15.0
     bt_min_trades: int = 20
     bt_lookback_days: int = 730
+    bt_min_calmar: float = 0.5            # minimum Calmar ratio to pass backtest gate
 
     # Overtrade prevention (per strategy per day)
     max_trades_intraday:       int = 8
@@ -171,6 +182,12 @@ class Settings(BaseSettings):
     max_portfolio_beta: float = 1.3   # block BUY if portfolio beta would exceed this
     use_ml_filter: bool = False       # GBM win-probability gate (requires trained model)
     ml_filter_min_prob: float = 0.45  # minimum predicted win probability to enter
+
+    # TWAP order splitting (large-lot market impact reduction)
+    use_twap: bool = False            # split large orders into equal slices
+    twap_slices: int = 4              # number of child orders per TWAP execution
+    twap_interval_sec: int = 15       # seconds between each slice
+    twap_min_qty: int = 100           # only TWAP if qty >= this (don't slice small retail lots)
 
     # Real-time tick feed
     use_kite_websocket: bool = True   # use KiteConnect WebSocket for ticks in LIVE mode

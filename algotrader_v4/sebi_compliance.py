@@ -367,6 +367,28 @@ class SEBICompliance:
                 "rejected_today":        sum(1 for r in records if r.decision == "REJECTED"),
             }
 
+    def generate_daily_report(self, date_str: str | None = None) -> dict:
+        """Generate a SEBI-compliant daily activity report."""
+        import datetime
+        if date_str is None:
+            date_str = datetime.date.today().isoformat()
+        with self._lock:
+            today_records = self._audit_log.get(date_str, [])
+            today_entries = [r.__dict__ for r in today_records]
+        event_counts: dict[str, int] = {}
+        for e in today_entries:
+            etype = e.get("decision", "UNKNOWN")
+            event_counts[etype] = event_counts.get(etype, 0) + 1
+        return {
+            "report_date":       date_str,
+            "total_events":      len(today_entries),
+            "event_counts":      event_counts,
+            "kill_switch_active": self._state == KillSwitchState.KILLED,
+            "registered_algos":  list(APPROVED_ALGO_IDS.keys()),
+            "audit_entries":     today_entries[:200],
+            "generated_at":      datetime.datetime.utcnow().isoformat() + "Z",
+        }
+
     def reset_daily(self) -> None:
         with self._lock:
             self._orders_placed   = 0
