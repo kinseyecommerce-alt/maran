@@ -1,0 +1,253 @@
+"""
+alt_data.py
+Alternative data signals: NSE announcements, economic calendar, news sentiment.
+All sources are free/public — no additional API keys required.
+"""
+from __future__ import annotations
+
+import time
+import threading
+import re
+from datetime import date, datetime, timedelta
+from typing import Optional
+from loguru import logger
+
+# ── News / headline sentiment keywords ────────────────────────────────────────
+
+_POS_KEYWORDS = [
+    "beat", "record", "profit", "growth", "acquisition", "partnership",
+    "upgrade", "expansion", "dividend", "buyback", "order", "contract",
+    "outperform", "strong", "robust", "momentum", "win",
+]
+_NEG_KEYWORDS = [
+    "miss", "loss", "fraud", "penalty", "downgrade", "investigation",
+    "debt", "default", "decline", "layoff", "shutdown", "probe",
+    "fine", "lawsuit", "recall", "warning", "weak", "poor",
+]
+
+# ── F&O / RBI event calendar ─────────────────────────────────────────────────
+
+def _last_thursday(year: int, month: int) -> date:
+    """Return the last Thursday of the given month (NSE F&O expiry)."""
+    # Start from last day of month, walk back to Thursday (weekday 3)
+    if month == 12:
+        last = date(year + 1, 1, 1) - timedelta(days=1)
+    else:
+        last = date(year, month + 1, 1) - timedelta(days=1)
+    days_back = (last.weekday() - 3) % 7
+    return last - timedelta(days=days_back)
+
+
+def _rbi_mpc_dates(year: int) -> list[date]:
+    """
+    Approximate RBI MPC meeting dates: bimonthly (Feb,Apr,Jun,Aug,Oct,Dec).
+    Decision announced on the third day — use first Tuesday of those months as proxy.
+    Hard-coded for 2025-2026.
+    """
+    known: dict[int, list[tuple[int, int]]] = {
+        2025: [(2,7),(4,9),(6,6),(8,8),(10,8),(12,5)],
+        2026: [(2,6),(4,9),(6,5),(8,7),(10,9),(12,4)],
+    }
+    if year in known:
+        return [date(year, m, d) for m, d in known[year]]
+    # Fallback: first Friday of those months
+    result = []
+    for month in [2, 4, 6, 8, 10, 12]:
+        d = date(year, month, 1)
+        while d.weekday() != 4:  # Friday
+            d += timedelta(days=1)
+        result.append(d)
+    return result
+
+
+class AltDataEngine:
+    """
+    Provides alternative data signals to strategy agents.
+    Thread-safe; uses a simple in-memory cache with TTL.
+    """
+
+    def __init__(self) -> None:
+        self._lock               = threading.Lock()
+        self._announcement_cache: dict[str, dict] = {}  # symbol → {score, ts}
+        self._cache_ttl          = 300  # 5 minutes
+
+    # ── NSE Announcements ─────────────────────────────────────────────────────
+
+    def _fetch_announcements(self) -> list[dict]:
+        """
+        Fetch NSE corporate announcements from public API.
+        Returns [] on network failure (non-blocking).
+        """
+        try:
+            import urllib.request, json
+            url = "https://www.nseindia.com/api/corporate-announcements?index=equities"
+            req = urllib.request.Request(url, headers={
+                "User-Agent": "Mozilla/5.0",
+                "Accept": "application/json",
+                "Referer": "https://www.nseindia.com/",
+            })
+            with urllib.request.urlopen(req, timeout=5) as resp:
+                data = json.loads(resp.read())
+                return data if isinstance(data, list) else []
+        except Exception as exc:
+            logger.debug("NSE announcements fetch failed (non-critical): {}", exc)
+            return []
+
+    def _classify_announcement(self, ann: dict) -> float:
+        """
+        Score a single NSE announcement dict → catalyst_score in [-1, 1].
+        Positive: earnings beat, dividend, acquisition.
+        Negative: fraud, penalty, investigation, loss.
+        """
+        subject = (ann.get("subject") or ann.get("desc") or "").lower()
+        score = 0.0
+
+        if any(k in subject for k in ["financial result", "earnings", "quarterly result"]):
+            score += 0.4
+        if any(k in subject for k in ["dividend", "bonus", "split", "buyback"]):
+            score += 0.3
+        if any(k in subject for k in ["acquisition", "merger", "amalgamation", "partnership"]):
+            score += 0.5
+        if any(k in subject for k in ["order", "contract", "win", "bagged"]):
+            score += 0.3
+        if any(k in subject for k in ["loss", "fraud", "penalty", "fine", "investigation",
+                                       "probe", "default", "downgrade", "recall"]):
+            score -= 0.8
+        if any(k in subject for k in ["resignation", "shutdown", "closure", "insolvency"]):
+            score -= 0.6
+
+        return max(-1.0, min(1.0, score))
+
+    def refresh_announcements(self, symbols: list[str]) -> None:
+        """Refresh announcement cache for the given symbols (call from background thread)."""
+        announcements = self._fetch_announcements()
+        now = time.monotonic()
+        with self._lock:
+            for ann in announcements:
+                sym = ann.get("symbol", "").upper()
+                if sym in symbols:
+                    score = self._classify_announcement(ann)
+                    # Keep highest-magnitude score per symbol
+                    existing = self._announcement_cache.get(sym, {}).get("score", 0.0)
+                    if abs(score) > abs(existing):
+                        self._announcement_cache[sym] = {"score": score, "ts": now}
+
+    def get_catalyst(self, symbol: str) -> float:
+        """
+        Return current catalyst score for symbol in [-1.0, 1.0].
+        0.0 = no data or neutral.
+        """
+        with self._lock:
+            entry = self._announcement_cache.get(symbol)
+            if entry is None:
+                return 0.0
+            # Expire after TTL
+            if time.monotonic() - entry["ts"] > self._cache_ttl:
+                del self._announcement_cache[symbol]
+                return 0.0
+            return entry["score"]
+
+    def set_catalyst(self, symbol: str, score: float) -> None:
+        """Manually inject a catalyst score (for testing / manual overrides)."""
+        with self._lock:
+            self._announcement_cache[symbol] = {
+                "score": max(-1.0, min(1.0, score)),
+                "ts": time.monotonic(),
+            }
+
+    # ── Economic Event Calendar ───────────────────────────────────────────────
+
+    def is_event_day(self, dt: Optional[datetime] = None) -> tuple[bool, str]:
+        """
+        Check whether dt (default: today) is an economic event day.
+        Returns (True, event_name) or (False, "").
+        """
+        d = (dt or datetime.now()).date()
+        year = d.year
+
+        # F&O expiry
+        fno = _last_thursday(year, d.month)
+        if d == fno:
+            return True, "FNO_EXPIRY"
+
+        # Also flag the day BEFORE expiry (rollover effects)
+        if d == fno - timedelta(days=1):
+            return True, "FNO_EXPIRY_EVE"
+
+        # RBI MPC
+        for mpc_date in _rbi_mpc_dates(year):
+            if d == mpc_date:
+                return True, "RBI_MPC"
+            # Announcement window ±1 day
+            if abs((d - mpc_date).days) <= 1:
+                return True, "RBI_MPC_WINDOW"
+
+        return False, ""
+
+    def is_high_risk_day(self, dt: Optional[datetime] = None) -> bool:
+        """True on F&O expiry and RBI MPC days (position sizes should be reduced)."""
+        flag, _ = self.is_event_day(dt)
+        return flag
+
+    def days_to_next_event(self, dt: Optional[datetime] = None) -> int:
+        """Return calendar days until the next economic event."""
+        d = (dt or datetime.now()).date()
+        for ahead in range(1, 45):
+            check = d + timedelta(days=ahead)
+            flag, _ = self.is_event_day(datetime.combine(check, datetime.min.time()))
+            if flag:
+                return ahead
+        return 99
+
+    def next_fno_expiry(self, dt: Optional[datetime] = None) -> date:
+        """Return the next F&O expiry date on or after dt."""
+        d = (dt or datetime.now()).date()
+        exp = _last_thursday(d.year, d.month)
+        if exp < d:
+            # Already past — go to next month
+            if d.month == 12:
+                exp = _last_thursday(d.year + 1, 1)
+            else:
+                exp = _last_thursday(d.year, d.month + 1)
+        return exp
+
+    # ── News / Headline Sentiment ─────────────────────────────────────────────
+
+    def score_headlines(self, symbol: str, headlines: list[str]) -> float:
+        """
+        Score a list of news headlines for a symbol.
+        Returns aggregate sentiment in [-1.0, 1.0].
+        """
+        if not headlines:
+            return 0.0
+        total = 0.0
+        for headline in headlines:
+            hl = headline.lower()
+            pos = sum(0.2 for kw in _POS_KEYWORDS if kw in hl)
+            neg = sum(0.3 for kw in _NEG_KEYWORDS if kw in hl)
+            total += min(pos, 1.0) - min(neg, 1.0)
+        score = total / len(headlines)
+        result = max(-1.0, min(1.0, score))
+        # Update cache if magnitude is significant
+        if abs(result) >= 0.2:
+            self.set_catalyst(symbol, result)
+        return result
+
+    # ── Status / Debug ────────────────────────────────────────────────────────
+
+    def summary(self) -> dict:
+        """Return current alt data state for dashboard/API."""
+        with self._lock:
+            catalysts = {sym: e["score"] for sym, e in self._announcement_cache.items()}
+        event_flag, event_name = self.is_event_day()
+        return {
+            "catalysts":          catalysts,
+            "is_event_day":       event_flag,
+            "event_name":         event_name,
+            "days_to_next_event": self.days_to_next_event(),
+            "next_fno_expiry":    str(self.next_fno_expiry()),
+        }
+
+
+# Module-level singleton
+alt_data_engine = AltDataEngine()

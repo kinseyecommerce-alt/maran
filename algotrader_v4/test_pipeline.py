@@ -2901,6 +2901,111 @@ run("mean_reversion registered in order_guard._max_trades",      t_mean_reversio
 
 
 # ══════════════════════════════════════════════════════════════════════════
+# 19. ALT DATA + SURVIVORSHIP BIAS + TICK INFRASTRUCTURE
+# ══════════════════════════════════════════════════════════════════════════
+section("19. ALT DATA + SURVIVORSHIP BIAS + TICK INFRASTRUCTURE")
+
+from datetime import date as _date
+
+# ── Alt Data tests ────────────────────────────────────────────────────────────
+
+def t_alt_data_import():
+    from alt_data import alt_data_engine
+    assert alt_data_engine is not None
+
+def t_fno_expiry_last_thursday():
+    from alt_data import _last_thursday
+    for year in [2025, 2026]:
+        for month in range(1, 13):
+            exp = _last_thursday(year, month)
+            assert exp.weekday() == 3, f"{year}-{month:02d}: {exp} is not Thursday"
+
+def t_headline_positive():
+    from alt_data import alt_data_engine
+    score = alt_data_engine.score_headlines("RELIANCE", ["Reliance reports record profit and strong growth"])
+    assert score > 0, f"Expected positive score, got {score}"
+
+def t_headline_negative():
+    from alt_data import alt_data_engine
+    score = alt_data_engine.score_headlines("TCS", ["TCS faces investigation for fraud and heavy penalty"])
+    assert score < 0, f"Expected negative score, got {score}"
+
+def t_catalyst_bounded():
+    from alt_data import alt_data_engine
+    alt_data_engine.set_catalyst("TESTX", 0.7)
+    c = alt_data_engine.get_catalyst("TESTX")
+    assert -1.0 <= c <= 1.0, f"Catalyst out of bounds: {c}"
+
+def t_event_day_returns_tuple():
+    from alt_data import alt_data_engine
+    result = alt_data_engine.is_event_day()
+    assert isinstance(result, tuple) and len(result) == 2
+
+def t_days_to_next_event_positive():
+    from alt_data import alt_data_engine
+    d = alt_data_engine.days_to_next_event()
+    assert isinstance(d, int) and d >= 0
+
+# ── Index universe tests ───────────────────────────────────────────────────────
+
+def t_reliance_in_nifty100():
+    from index_universe import index_universe
+    assert index_universe.was_constituent("RELIANCE", "2025-06-01")
+
+def t_get_current_universe():
+    from index_universe import index_universe
+    u = index_universe.get_current_universe()
+    assert isinstance(u, list) and len(u) > 10
+
+def t_was_constituent_bool():
+    from index_universe import index_universe
+    result = index_universe.was_constituent("TCS", "2025-01-01")
+    assert isinstance(result, bool)
+
+def t_paytm_removed():
+    from index_universe import index_universe
+    assert not index_universe.was_constituent("PAYTM", "2025-01-01"), "PAYTM should be removed by 2025"
+
+# ── Tick recorder / replayer tests ────────────────────────────────────────────
+
+def t_tick_recorder_import():
+    from tick_recorder import tick_recorder
+    assert tick_recorder is not None
+
+def t_tick_recorder_stats():
+    from tick_recorder import tick_recorder
+    stats = tick_recorder.get_stats()
+    assert isinstance(stats, dict)
+
+def t_tick_replayer_empty():
+    from tick_replayer import tick_replayer
+    result = tick_replayer.replay_to_ohlcv("NONEXISTENT_SYM_XYZ")
+    assert result is None
+
+def t_tick_replayer_available_symbols():
+    from tick_replayer import tick_replayer
+    syms = tick_replayer.available_symbols()
+    assert isinstance(syms, list)
+
+print("── 19. ALT DATA + SURVIVORSHIP BIAS + TICK INFRASTRUCTURE ──────────────")
+run("alt_data_engine singleton importable",                         t_alt_data_import)
+run("alt_data: F&O expiry is last Thursday of every month",         t_fno_expiry_last_thursday)
+run("alt_data: positive headline → positive score",                 t_headline_positive)
+run("alt_data: negative headline → negative score",                 t_headline_negative)
+run("alt_data: catalyst_score clamped to [-1, 1]",                  t_catalyst_bounded)
+run("alt_data: is_event_day() returns (bool, str) tuple",           t_event_day_returns_tuple)
+run("alt_data: days_to_next_event() returns non-negative int",      t_days_to_next_event_positive)
+run("index_universe: RELIANCE in 2025 Nifty 100",                  t_reliance_in_nifty100)
+run("index_universe: get_current_universe returns list",            t_get_current_universe)
+run("index_universe: was_constituent() returns bool",               t_was_constituent_bool)
+run("index_universe: PAYTM removed from index by 2025",             t_paytm_removed)
+run("tick_recorder singleton importable",                           t_tick_recorder_import)
+run("tick_recorder.get_stats() returns dict",                       t_tick_recorder_stats)
+run("tick_replayer.replay_to_ohlcv returns None when no data",      t_tick_replayer_empty)
+run("tick_replayer.available_symbols() returns list",               t_tick_replayer_available_symbols)
+
+
+# ══════════════════════════════════════════════════════════════════════════
 # FINAL SUMMARY
 # ══════════════════════════════════════════════════════════════════════════
 failed = summary()

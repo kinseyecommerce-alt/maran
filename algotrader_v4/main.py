@@ -1672,6 +1672,104 @@ def sector_map_endpoint():
     return json.loads(p.read_text())
 
 
+# ── Alt Data ──────────────────────────────────────────────────────────────────
+
+@app.get("/alt-data/summary", tags=["Alt Data"])
+def alt_data_summary():
+    """Return current alt-data state: catalysts, event-day flag, next F&O expiry."""
+    from alt_data import alt_data_engine
+    return alt_data_engine.summary()
+
+@app.post("/alt-data/refresh", tags=["Alt Data"])
+def alt_data_refresh(symbols: list[str] = Body(default=[])):
+    """Trigger a fresh NSE announcement fetch for the given symbols."""
+    from alt_data import alt_data_engine
+    import threading
+    threading.Thread(target=alt_data_engine.refresh_announcements,
+                     args=(symbols,), daemon=True).start()
+    return {"status": "refresh triggered", "symbols": symbols}
+
+@app.post("/alt-data/headlines", tags=["Alt Data"])
+def alt_data_score_headlines(
+    symbol: str = Body(...),
+    headlines: list[str] = Body(...),
+):
+    """Score a list of news headlines for a symbol and update its catalyst score."""
+    from alt_data import alt_data_engine
+    score = alt_data_engine.score_headlines(symbol, headlines)
+    return {"symbol": symbol, "sentiment_score": score,
+            "catalyst_score": alt_data_engine.get_catalyst(symbol)}
+
+
+# ── Tick Recorder / Replayer ──────────────────────────────────────────────────
+
+@app.post("/tick-recorder/start", tags=["Simulate"])
+def start_tick_recorder(symbols: list[str] = Body(default=[])):
+    """Start recording live ticks to SQLite for later high-fidelity replay."""
+    from tick_recorder import tick_recorder
+    tick_recorder.start(symbols if symbols else None)
+    return {"status": "recording", "symbols": symbols or "ALL"}
+
+@app.post("/tick-recorder/stop", tags=["Simulate"])
+def stop_tick_recorder():
+    """Stop tick recording and return per-symbol tick counts."""
+    from tick_recorder import tick_recorder
+    stats = tick_recorder.stop()
+    return {"status": "stopped", "stats": stats}
+
+@app.get("/tick-recorder/status", tags=["Simulate"])
+def tick_recorder_status():
+    """Return current recording status and tick counts."""
+    from tick_recorder import tick_recorder
+    from tick_replayer import tick_replayer
+    return {
+        "recording": tick_recorder.is_enabled(),
+        "stats":     tick_recorder.get_stats(),
+        "symbols_with_data": tick_replayer.available_symbols(),
+    }
+
+@app.post("/backtest/tick-replay", tags=["Backtest"])
+async def backtest_tick_replay(
+    symbol:     str = Body(...),
+    strategy:   str = Body(...),
+    start_date: str = Body(default=""),
+    end_date:   str = Body(default=""),
+    bar_seconds: int = Body(default=60),
+):
+    """Run backtest using recorded tick data instead of OHLCV (higher fidelity)."""
+    from tick_replayer import tick_replayer
+    bars = tick_replayer.replay_to_ohlcv(symbol, start_date, end_date, bar_seconds)
+    if bars is None or len(bars) < 20:
+        return {"error": "Insufficient tick data. Use POST /tick-recorder/start to record live ticks first.",
+                "available_symbols": tick_replayer.available_symbols()}
+    from backtest_engine import BacktestEngine
+    engine = BacktestEngine()
+    result = engine.run(bars, strategy)
+    result["data_source"] = "tick_replay"
+    result["bars"] = len(bars)
+    return result
+
+
+# ── Index Universe ────────────────────────────────────────────────────────────
+
+@app.get("/universe", tags=["Symbol Scanner"])
+def get_index_universe(date: str = Query(default=""), index: str = Query(default="NIFTY100")):
+    """Return point-in-time Nifty index constituents for the given date (YYYY-MM-DD)."""
+    from index_universe import index_universe
+    symbols = index_universe.get_universe(date, index)
+    return {"date": date or "today", "index": index, "count": len(symbols), "symbols": symbols}
+
+@app.get("/universe/{symbol}", tags=["Symbol Scanner"])
+def symbol_constituent_history(symbol: str):
+    """Return all Nifty index membership periods for a symbol."""
+    from index_universe import index_universe
+    return {
+        "symbol": symbol.upper(),
+        "periods": index_universe.constituent_periods(symbol),
+        "is_current_member": index_universe.was_constituent(symbol, ""),
+    }
+
+
 # ── Startup ───────────────────────────────────────────────────────────────────
 @app.on_event("startup")
 async def on_startup():

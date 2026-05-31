@@ -601,6 +601,13 @@ class TickEngine:
             candles_5min=self._bufs_5min[symbol].candles()[-30:],
         )
 
+        # Record tick for later replay (no-op when recorder is disabled)
+        try:
+            from tick_recorder import tick_recorder
+            tick_recorder.record(symbol, tick)
+        except Exception:
+            pass
+
         for q in self._subscribers.values():
             try:    q.put_nowait(snap)
             except asyncio.QueueFull: pass

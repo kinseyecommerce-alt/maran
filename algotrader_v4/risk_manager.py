@@ -288,6 +288,14 @@ class RiskManager:
             sl_amount = price * (settings.stop_loss_pct / 100)
             cap = min(cap, (cap * risk_pct / 100) / sl_amount * price)
         qty = int(cap // price)
+        # Halve position size on F&O expiry / RBI MPC days (higher volatility)
+        try:
+            from alt_data import alt_data_engine
+            if alt_data_engine.is_high_risk_day():
+                qty = max(1, qty // 2)
+                logger.debug("Event-day sizing: qty halved to {}", qty)
+        except Exception:
+            pass
         return max(qty, 1)
 
     def sl_price(self, entry: float, side: str) -> float:

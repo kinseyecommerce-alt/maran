@@ -478,6 +478,19 @@ class BaseAgent(ABC):
             logger.warning("[{}] SEBI blocked {} {}: {}", self.name, action, sym, sebi_reason)
             return
 
+        # Alt-data catalyst filter: skip on major negative events, boost qty on positive
+        try:
+            from alt_data import alt_data_engine
+            catalyst = alt_data_engine.get_catalyst(sym)
+            if catalyst < -0.5:
+                logger.info("[{}] {} skipped — negative catalyst: {:.2f}", self.name, sym, catalyst)
+                return
+            if catalyst > 0.3:
+                qty = min(int(qty * 1.2), int(settings.max_position_size // ltp))
+                logger.debug("[{}] {} positive catalyst {:.2f} → qty bumped to {}", self.name, sym, catalyst, qty)
+        except Exception:
+            pass
+
         import time as _time
         sl       = signal.get("stop_loss", risk_manager.sl_price(ltp, action))
         product  = signal.get("product", self.product)
