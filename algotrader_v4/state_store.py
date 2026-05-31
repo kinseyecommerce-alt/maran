@@ -62,7 +62,8 @@ def init_db() -> None:
                 entry_time     TEXT,
                 exit_time      TEXT,
                 gate_confidence INTEGER DEFAULT 0,
-                trade_date     TEXT DEFAULT (date('now','localtime'))
+                trade_date     TEXT DEFAULT (date('now','localtime')),
+                pattern        TEXT DEFAULT ''
             );
 
             CREATE TABLE IF NOT EXISTS daily_pnl (
@@ -71,6 +72,10 @@ def init_db() -> None:
                 trades_count INTEGER DEFAULT 0
             );
         """)
+        # Migrate existing DB: add pattern column if it doesn't exist yet
+        existing = {row[1] for row in c.execute("PRAGMA table_info(trades)")}
+        if "pattern" not in existing:
+            c.execute("ALTER TABLE trades ADD COLUMN pattern TEXT DEFAULT ''")
 
 
 def upsert_position(
@@ -83,6 +88,7 @@ def upsert_position(
     sl_price: float,
     target: float,
     product: str,
+    pattern: str = "",
 ) -> None:
     """Insert or replace a position record (marks as open)."""
     with _conn() as c:
@@ -121,6 +127,7 @@ def record_trade(
     regime: str = "",
     entry_time: str = "",
     gate_confidence: int = 0,
+    pattern: str = "",
 ) -> None:
     """
     Insert a completed trade record and update the daily P&L summary.
@@ -133,12 +140,12 @@ def record_trade(
             INSERT INTO trades
               (symbol, strategy, side, entry_price, exit_price, quantity,
                gross_pnl, net_pnl, cost, exit_reason, regime,
-               entry_time, exit_time, gate_confidence, trade_date)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'), ?, ?)
+               entry_time, exit_time, gate_confidence, trade_date, pattern)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'), ?, ?, ?)
             """,
             (symbol, strategy, side, entry_price, exit_price, quantity,
              gross_pnl, net_pnl, cost, exit_reason, regime,
-             entry_time, gate_confidence, today),
+             entry_time, gate_confidence, today, pattern),
         )
         # Upsert daily summary
         c.execute(
@@ -344,3 +351,32 @@ def get_performance_report(
         "by_strategy":    by_strategy,
         "report_generated_at": datetime.now().isoformat(),
     }
+
+
+def get_pattern_breakdown(days: int = 30) -> list[dict]:
+    """P&L grouped by entry pattern — for last N days."""
+    from datetime import datetime, timedelta
+    cutoff = (datetime.utcnow() - timedelta(days=days)).isoformat()
+    with _conn() as conn:
+        rows = conn.execute("""
+            SELECT pattern,
+                   COUNT(*) as total_trades,
+                   SUM(CASE WHEN net_pnl > 0 THEN 1 ELSE 0 END) as wins,
+                   ROUND(SUM(net_pnl), 2) as total_pnl,
+                   ROUND(AVG(net_pnl), 2) as avg_pnl,
+                   ROUND(AVG(CASE WHEN net_pnl > 0 THEN net_pnl END), 2) as avg_win,
+                   ROUND(AVG(CASE WHEN net_pnl < 0 THEN net_pnl END), 2) as avg_loss
+            FROM trades
+            WHERE exit_time > ?
+            GROUP BY pattern
+            ORDER BY total_pnl DESC
+        """, (cutoff,)).fetchall()
+    return [dict(r) for r in rows]
+
+
+# Ensure tables and migrations are applied on first import
+init_db()
+
+# Module-level namespace alias — allows `from state_store import state_store`
+import sys as _sys
+state_store = _sys.modules[__name__]

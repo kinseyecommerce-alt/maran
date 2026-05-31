@@ -24,6 +24,38 @@ try:
 except Exception:
     pass
 
+# ── Stock beta map (loaded once at module level) ─────────────────────────────
+_BETA_MAP_PATH = Path(__file__).parent / "data" / "stock_betas.json"
+_BETA_MAP: dict[str, float] = {}
+try:
+    _BETA_MAP = _json.loads(_BETA_MAP_PATH.read_text())
+except Exception:
+    pass
+
+# ── Correlation matrix cache ──────────────────────────────────────────────────
+# Pre-loaded pairs with correlation > 0.75 (NSE major stocks, based on 1-year data)
+_HIGH_CORR_PAIRS: set[frozenset] = {
+    frozenset({"HDFCBANK", "ICICIBANK"}),
+    frozenset({"HDFCBANK", "AXISBANK"}),
+    frozenset({"ICICIBANK", "AXISBANK"}),
+    frozenset({"ICICIBANK", "KOTAKBANK"}),
+    frozenset({"TCS", "INFOSYS"}),
+    frozenset({"TCS", "WIPRO"}),
+    frozenset({"INFOSYS", "WIPRO"}),
+    frozenset({"INFOSYS", "HCLTECH"}),
+    frozenset({"TCS", "HCLTECH"}),
+    frozenset({"TATASTEEL", "JSWSTEEL"}),
+    frozenset({"TATASTEEL", "HINDALCO"}),
+    frozenset({"TATAMOTORS", "M&M"}),
+    frozenset({"SBIN", "BANKBARODA"}),
+    frozenset({"SBIN", "AXISBANK"}),
+    frozenset({"BAJFINANCE", "BAJAJFINSV"}),
+    frozenset({"RELIANCE", "ONGC"}),
+    frozenset({"SUNPHARMA", "DRREDDY"}),
+    frozenset({"SUNPHARMA", "CIPLA"}),
+    frozenset({"DRREDDY", "CIPLA"}),
+}
+
 
 # ── Transaction cost model (Zerodha structure) ──────────────────────────────
 
@@ -379,18 +411,54 @@ class RiskManager:
         """
         Returns (allowed, reason).
         Blocks if the symbol's sector already has max_positions_per_sector open positions.
+        Correlation-aware: a highly correlated open position (r>0.75) counts as 1.5×.
         INDEX and OTHERS sectors are exempt from the limit.
         """
         sector = _SECTOR_MAP.get(symbol.upper(), "OTHERS")
         if sector in ("INDEX", "OTHERS"):
             return True, "OK"
-        count = sum(
-            1 for s in open_symbols
-            if _SECTOR_MAP.get(s.upper(), "OTHERS") == sector
-        )
+        sym_up = symbol.upper()
+        count: float = 0.0
+        for s in open_symbols:
+            if _SECTOR_MAP.get(s.upper(), "OTHERS") != sector:
+                continue
+            # Correlated positions count as 1.5× against the limit
+            if frozenset({sym_up, s.upper()}) in _HIGH_CORR_PAIRS:
+                count += 1.5
+            else:
+                count += 1.0
         limit = getattr(settings, "max_positions_per_sector", 2)
         if count >= limit:
-            return False, f"Sector limit: {sector} already has {count}/{limit} positions"
+            return False, f"Sector limit: {sector} weighted {count:.1f}/{limit} positions"
+        return True, "OK"
+
+    def check_portfolio_beta(
+        self,
+        symbol: str,
+        open_symbols: list[str],
+        action: str = "BUY",
+    ) -> tuple[bool, str]:
+        """
+        Returns (allowed, reason).
+        Blocks BUY if adding this symbol would push portfolio beta above max_portfolio_beta.
+        Only applicable when open_symbols is non-empty and symbol has a known beta.
+        """
+        max_beta = getattr(settings, "max_portfolio_beta", 1.3)
+        if max_beta <= 0:
+            return True, "OK"
+        sym_beta = _BETA_MAP.get(symbol.upper(), 1.0)
+        if not open_symbols:
+            return True, "OK"
+        # Compute current portfolio beta (equal-weight approximation)
+        betas = [_BETA_MAP.get(s.upper(), 1.0) for s in open_symbols]
+        portfolio_beta = sum(betas) / len(betas)
+        # Simulate adding the new position
+        new_beta = (sum(betas) + sym_beta) / (len(betas) + 1)
+        if action == "BUY" and new_beta > max_beta:
+            return False, (
+                f"Portfolio beta {new_beta:.2f} > max {max_beta:.2f} "
+                f"(current {portfolio_beta:.2f}, {symbol}={sym_beta:.2f})"
+            )
         return True, "OK"
 
     def record_trade(self, pnl: float) -> None:

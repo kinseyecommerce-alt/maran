@@ -519,41 +519,51 @@ class OptionsAgent(BaseAgent):
         iv_rank = float(opts.get("iv_rank", 50.0)) if opts else 50.0
         atm_iv  = float(opts.get("atm_iv",  25.0)) if opts else 25.0
 
-        # Hard IV gate — never buy expensive premium
-        if iv_rank > self.MAX_IV_BUY:
-            self._update_state(sym, ind, ltp)
-            return "HOLD", None
-
         # Update ORB range (9:15-9:30 window)
         self._update_orb(sym, snap, t)
 
-        # Run all 12 patterns — collect the best signal
+        # Run all BUY patterns (blocked if IV too high for premium buying)
         best_score, best_opt, best_pattern = -1, "", ""
-        patterns = [
-            self._pat_ema_cross,
-            self._pat_trend_pull,
-            self._pat_orb,
-            self._pat_vwap_reclaim,
-            self._pat_bb_squeeze,
-            self._pat_rsi_extreme,
-            self._pat_surge,
-            self._pat_ichimoku_cloud,
-            self._pat_stochrsi_options,
-            self._pat_williams_options,
-            self._pat_oi_surge,
-            self._pat_expiry_scalp,
-        ]
-        for pat_fn in patterns:
+        is_sell_signal = False
+
+        if iv_rank <= self.MAX_IV_BUY:
+            buy_patterns = [
+                self._pat_ema_cross,
+                self._pat_trend_pull,
+                self._pat_orb,
+                self._pat_vwap_reclaim,
+                self._pat_bb_squeeze,
+                self._pat_rsi_extreme,
+                self._pat_surge,
+                self._pat_ichimoku_cloud,
+                self._pat_stochrsi_options,
+                self._pat_williams_options,
+                self._pat_oi_surge,
+                self._pat_expiry_scalp,
+            ]
+            for pat_fn in buy_patterns:
+                try:
+                    opt_type, base, pname = pat_fn(sym, snap, ind, ltp, t)
+                except Exception:
+                    continue
+                if not opt_type:
+                    continue
+                total = base + self._ctx_bonus(opt_type, snap, ind, ltp, iv_rank, surf, gex, flow, opts)
+                if total > best_score:
+                    best_score, best_opt, best_pattern = total, opt_type, pname
+
+        # Run SELL patterns (premium selling when IV is elevated)
+        # These can fire even when BUY patterns are blocked by IV gate
+        sell_patterns = [self._pat_strangle_sell, self._pat_iron_condor]
+        for pat_fn in sell_patterns:
             try:
                 opt_type, base, pname = pat_fn(sym, snap, ind, ltp, t)
             except Exception:
                 continue
             if not opt_type:
                 continue
-            # Add context bonuses
-            total = base + self._ctx_bonus(opt_type, snap, ind, ltp, iv_rank, surf, gex, flow, opts)
-            if total > best_score:
-                best_score, best_opt, best_pattern = total, opt_type, pname
+            if base > best_score:
+                best_score, best_opt, best_pattern, is_sell_signal = base, opt_type, pname, True
 
         # NOTE: _update_state() runs after patterns intentionally — patterns see
         # the PREVIOUS tick's _prev_rsi, _prev_ltp, _prev_above_vwap, _prev_bb_width.
@@ -561,14 +571,13 @@ class OptionsAgent(BaseAgent):
             self._update_state(sym, ind, ltp)
             return "HOLD", None
 
-        # After 13:00 only high-conviction signals (≥8/17) are taken —
-        # lower-scored setups need more time than remains to reach target
+        # After 13:00 only high-conviction signals (≥8/17) are taken
         if t >= time(13, 0) and best_score < 8:
             self._update_state(sym, ind, ltp)
             return "HOLD", None
 
-        # Macro trend filter — don't buy CE in a bearish EMA200 regime or PE in bullish
-        if ind.ema200 > 0:
+        # Macro trend filter — only applies to BUY direction
+        if not is_sell_signal and ind.ema200 > 0:
             macro_bull = ltp > ind.ema200
             if best_opt == "CE" and not macro_bull:
                 self._update_state(sym, ind, ltp)
@@ -593,29 +602,35 @@ class OptionsAgent(BaseAgent):
               0.75 if best_score >= 6 else
               0.5  if best_score >= 5 else 0.25)
 
-        # Strike and NFO symbol
-        strike  = self._pick_strike(ltp, best_opt, atm_iv)
-        opt_sym = self._nfo_symbol(sym, strike, best_opt)
-        lot_sz  = self.LOT_SIZES.get(sym, 1)
+        # For SELL patterns, map opt_type: CE_SELL → CE, PE_SELL → PE
+        actual_opt = best_opt.replace("_SELL", "") if is_sell_signal else best_opt
+        action_dir = "SELL" if is_sell_signal else "BUY"
+
+        # Strike: sell patterns target OTM (1.5× further from ATM than buy patterns)
+        otm_mult = 1.5 if is_sell_signal else 1.0
+        strike   = self._pick_strike(ltp, actual_opt, atm_iv, otm_mult)
+        opt_sym  = self._nfo_symbol(sym, strike, actual_opt)
+        lot_sz   = self.LOT_SIZES.get(sym, 1)
 
         self._update_state(sym, ind, ltp)
-        return "BUY", {
+        return action_dir, {
             "exchange":           "NFO",
             "option_symbol":      opt_sym,
-            "option_type":        best_opt,
+            "option_type":        actual_opt,
+            "is_sell":            is_sell_signal,
             "strike":             strike,
             "lot_size":           lot_sz,
-            "stop_loss_pct":      sl_pct,      # % of option premium (for live bracket)
-            "target_pct":         tgt_pct,     # % of option premium
-            "underlying_sl_pct":  2.0,          # 2% of underlying stock price
-            "underlying_tgt_pct": 4.0,          # 4% of underlying → 2:1 R:R
+            "stop_loss_pct":      sl_pct,
+            "target_pct":         tgt_pct,
+            "underlying_sl_pct":  2.0,
+            "underlying_tgt_pct": 4.0,
             "iv_rank":            round(iv_rank, 1),
             "atm_iv":             round(atm_iv, 2),
             "score":              best_score,
             "pattern":           best_pattern,
             "_gate_size_factor": sf,
             "trigger": (
-                f"OPT-{best_opt} [{best_pattern}] score={best_score}/14 "
+                f"OPT-{actual_opt} [{best_pattern}] {action_dir} score={best_score}/14 "
                 f"IVr={iv_rank:.0f}% sf={sf} rsi={ind.rsi_14:.0f} "
                 f"trend={ind.trend}"
             ),
@@ -831,6 +846,40 @@ class OptionsAgent(BaseAgent):
             return "PE", 5, "EXPIRY_SCALP"
         return "", 0, ""
 
+    def _pat_strangle_sell(self, sym, snap, ind, ltp, t):
+        """Sell OTM options when IV rank is elevated (>65%) and market is range-bound.
+        Returns the cheaper OTM leg to sell first (higher strike for CE, lower for PE)."""
+        from options_intelligence import get_cached as _get_opts
+        opts = _get_opts(sym)
+        iv_rank = float(opts.get("iv_rank", 0)) if opts else 0
+        if iv_rank < 65:
+            return "", 0, ""
+        # Range-bound condition: ADX < 22 (no strong trend to run against sold options)
+        if ind.adx_14 > 22:
+            return "", 0, ""
+        # Sell the leg with less directional momentum (the safer side)
+        if ind.macd_hist < 0 and ind.rsi_14 < 50:
+            # Bearish bias: sell the call (CE) further OTM
+            return "CE_SELL", 5, "STRANGLE_SELL"
+        if ind.macd_hist > 0 and ind.rsi_14 > 50:
+            # Bullish bias: sell the put (PE) further OTM
+            return "PE_SELL", 5, "STRANGLE_SELL"
+        return "", 0, ""
+
+    def _pat_iron_condor(self, sym, snap, ind, ltp, t):
+        """Iron condor setup: IV rank > 75%, strong range-bound, sell wings far OTM.
+        Returns the closest-to-delta-neutral leg to reduce margin requirement."""
+        from options_intelligence import get_cached as _get_opts
+        opts = _get_opts(sym)
+        iv_rank = float(opts.get("iv_rank", 0)) if opts else 0
+        if iv_rank < 75:
+            return "", 0, ""
+        if ind.adx_14 > 18:
+            return "", 0, ""
+        # Both legs OTM — fire as two separate signals; pick the higher-IV leg first
+        # High VIX = both legs elevated, but call skew usually higher: start with CE_SELL
+        return "CE_SELL", 6, "IRON_CONDOR"
+
     # ── Context bonus (+0 to +9 points added to every pattern) ───────────────
 
     def _ctx_bonus(self, opt_type, snap, ind, ltp, iv_rank, surf, gex, flow, opts=None) -> int:
@@ -927,12 +976,12 @@ class OptionsAgent(BaseAgent):
 
     # ── Strike selection (delta ~0.40 proxy) ─────────────────────────────────
 
-    def _pick_strike(self, spot: float, opt_type: str, atm_iv: float) -> int:
+    def _pick_strike(self, spot: float, opt_type: str, atm_iv: float, otm_mult: float = 1.0) -> int:
         import math
         step = 100 if spot > 30000 else 50
         iv   = max((atm_iv / 100.0) if atm_iv > 1.0 else atm_iv, 0.12)
         T    = 7.0 / 365.0
-        offset = 0.25 * spot * iv * math.sqrt(T)
+        offset = 0.25 * spot * iv * math.sqrt(T) * otm_mult
         raw    = (spot + offset) if opt_type == "CE" else (spot - offset)
         return max(int(round(raw / step) * step), step)
 
@@ -1795,7 +1844,21 @@ class FuturesAgent(BaseAgent):
             if total > best_score:
                 best_score, best_side, best_pattern = total, side, pname
 
-        if best_score < settings.min_score_futures:
+        # VIX volatility gate: raise min_score during extreme vol, lower during calm
+        _vix_min = settings.min_score_futures
+        try:
+            from market_regime import regime_detector as _rd
+            _sigs = _rd.current_signals
+            if _sigs and _sigs.india_vix > 0:
+                _vix_z = _sigs.vix_zscore
+                if _vix_z > 1.5:
+                    _vix_min += 2   # HIGH vol: require stronger signals
+                elif _vix_z < -1.0:
+                    _vix_min = max(1, _vix_min - 1)  # CALM vol: slightly more permissive
+        except Exception:
+            pass
+
+        if best_score < _vix_min:
             self._update_state(sym, ind, ltp)
             return "HOLD", None
 
@@ -2386,7 +2449,21 @@ class MomentumAgent(BaseAgent):
         self._prev_st_dir[sym]  = ind.supertrend_dir
         self._prev_squeeze[sym] = ind.squeeze_on
 
-        if best_score < settings.min_score_momentum or not best_action:
+        # VIX volatility gate: raise min_score during extreme vol, lower during calm
+        _mom_vix_min = settings.min_score_momentum
+        try:
+            from market_regime import regime_detector as _rd
+            _sigs = _rd.current_signals
+            if _sigs and _sigs.india_vix > 0:
+                _vix_z = _sigs.vix_zscore
+                if _vix_z > 1.5:
+                    _mom_vix_min += 2
+                elif _vix_z < -1.0:
+                    _mom_vix_min = max(1, _mom_vix_min - 1)
+        except Exception:
+            pass
+
+        if best_score < _mom_vix_min or not best_action:
             return "HOLD", None
 
         cools = self._cool_ts.setdefault(sym, {})

@@ -168,6 +168,9 @@ class Settings(BaseSettings):
     min_rolling_sharpe: float = 0.5
     use_limit_orders: bool = True
     limit_order_timeout_sec: int = 8
+    max_portfolio_beta: float = 1.3   # block BUY if portfolio beta would exceed this
+    use_ml_filter: bool = False       # GBM win-probability gate (requires trained model)
+    ml_filter_min_prob: float = 0.45  # minimum predicted win probability to enter
 
     # Real-time tick feed
     use_kite_websocket: bool = True   # use KiteConnect WebSocket for ticks in LIVE mode

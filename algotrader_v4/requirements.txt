@@ -48,3 +48,4 @@ swagger-ui-bundle==1.1.0
 
 # ── Testing (not needed in production) ───────────────────────────
 playwright==1.52.0
+scikit-learn>=1.3.0

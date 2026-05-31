@@ -238,7 +238,10 @@ async def stage_agents():
                 entry = None
                 for _ in range(60):                 # up to ~3s
                     await asyncio.sleep(0.05)
-                    hits = _orders_with_tag(symbol, f"Agent-{name}", "MARKET")
+                    # Accept either LIMIT (use_limit_orders=True) or MARKET entry
+                    hits = _orders_with_tag(symbol, f"Agent-{name}", "LIMIT")
+                    if not hits:
+                        hits = _orders_with_tag(symbol, f"Agent-{name}", "MARKET")
                     if hits:
                         entry = hits[0]
                         break

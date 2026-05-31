@@ -335,10 +335,35 @@ class AltDataEngine:
             self._fii_dii["sentiment_score"] = self._fii_sentiment
             self._fii_dii["source"] = "manual"
 
+    # ── Earnings Calendar ──────────────────────────────────────────────────────
+    def _load_earnings_calendar(self) -> list[dict]:
+        import csv, os
+        path = os.path.join(os.path.dirname(__file__), "data", "earnings_calendar.csv")
+        if not os.path.exists(path):
+            return []
+        with open(path) as f:
+            return list(csv.DictReader(f))
+
+    def is_earnings_period(self, symbol: str, days_ahead: int = 2) -> bool:
+        """True if symbol has earnings announced within ±days_ahead calendar days."""
+        from datetime import date, timedelta
+        today = date.today()
+        for row in self._load_earnings_calendar():
+            if row.get("symbol", "").upper() != symbol.upper():
+                continue
+            try:
+                event_date = date.fromisoformat(row["date"])
+                if abs((event_date - today).days) <= days_ahead:
+                    return True
+            except (ValueError, KeyError):
+                continue
+        return False
+
     # ── Status / Debug ────────────────────────────────────────────────────────
 
     def summary(self) -> dict:
         """Return current alt data state for dashboard/API."""
+        from datetime import date
         with self._lock:
             catalysts = {sym: e["score"] for sym, e in self._announcement_cache.items()}
             fii_data  = dict(self._fii_dii)
@@ -351,6 +376,8 @@ class AltDataEngine:
             "next_fno_expiry":    str(self.next_fno_expiry()),
             "fii_dii":            fii_data,
             "fii_sentiment":      self._fii_sentiment,
+            "earnings_blackout_symbols": [row["symbol"] for row in self._load_earnings_calendar()
+                                          if abs((date.fromisoformat(row["date"]) - date.today()).days) <= 2],
         }
 
 

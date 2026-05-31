@@ -135,6 +135,12 @@ def _setup_tsl_callbacks() -> None:
             )
         except Exception:
             pass
+        # Notify ML filter for online retraining
+        try:
+            from ml_signal_filter import ml_signal_filter as _mlf
+            _mlf.record_outcome({}, pnl > 0)
+        except Exception:
+            pass
 
     async def _on_target_hit(pos, ltp: float, level: int) -> None:
         pnl_est = (ltp - pos.entry_price) * pos.quantity * (1 if pos.side == "BUY" else -1)
@@ -193,6 +199,27 @@ async def send_telegram(text: str) -> None:
 
 
 _ADAPTIVE_REFRESH_INTERVAL = 300  # seconds between adaptive param refreshes
+
+# ── Session profiling ────────────────────────────────────────────────────────
+# NSE trading sessions with quality characteristics
+_SESSION_BUCKETS = [
+    (( 9, 15), ( 9, 45), "OPEN_DRIVE",     +2),   # high noise, require stronger signals
+    (( 9, 45), (12,  0), "MIDDAY_TREND",    0),   # clean trend window
+    ((12,  0), (13, 30), "LUNCH_LULL",     +2),   # low volume, filter weak signals
+    ((13, 30), (15, 10), "POWER_HOUR",      0),   # strong closing window
+    ((15, 10), (15, 30), "CLOSE",          99),   # no new entries — square off only
+]
+
+
+def session_bucket(now=None) -> tuple[str, int]:
+    """Return (bucket_name, extra_score_required) for the current IST time."""
+    from ist_clock import ist_time
+    t = now if now is not None else ist_time()
+    h, m = t.hour, t.minute
+    for (sh, sm), (eh, em), name, delta in _SESSION_BUCKETS:
+        if (h * 60 + m) >= (sh * 60 + sm) and (h * 60 + m) < (eh * 60 + em):
+            return name, delta
+    return "AFTER_MARKET", 99  # outside market hours — no new entries
 
 
 class BaseAgent(ABC):
@@ -326,6 +353,44 @@ class BaseAgent(ABC):
                 await self._check_exits_on_tick(snap)
                 action, signal = self.evaluate_tick(snap)
                 if action in ("BUY", "SELL") and signal:
+                    # ML signal filter — GBM win-probability gate
+                    if getattr(settings, "use_ml_filter", False):
+                        try:
+                            from ml_signal_filter import ml_signal_filter as _mlf
+                            _allowed, _prob = _mlf.filter_signal(
+                                rsi=getattr(snap.indicators, "rsi_14", 50),
+                                adx=getattr(snap.indicators, "adx_14", 20),
+                                volume_ratio=getattr(snap.indicators, "volume_ratio", 1.0),
+                                macd_hist=getattr(snap.indicators, "macd_hist", 0),
+                                bb_width=getattr(snap.indicators, "bb_width", 2.0),
+                                atr_pct=getattr(snap.indicators, "atr_14", 1.0),
+                                score=signal.get("score", 0),
+                                session=signal.get("session", "MIDDAY_TREND"),
+                                agent=self.name,
+                                direction=action,
+                                min_prob=settings.ml_filter_min_prob,
+                            )
+                            if not _allowed:
+                                logger.debug("[{}] {} ML filter veto prob={:.2f}", self.name, snap.symbol, _prob)
+                                continue
+                        except Exception:
+                            pass
+
+                    # Session filter: high-noise or close session requires stronger signals
+                    # Only applies in LIVE mode — PAPER/simulation runs at any time
+                    _bucket, _extra = session_bucket()
+                    signal["session"] = _bucket
+                    if settings.trading_mode == "LIVE":
+                        _sig_score = signal.get("score", 0)
+                        if _extra >= 99:
+                            continue   # CLOSE or AFTER_MARKET — no new entries in LIVE
+                        if _extra > 0:
+                            _cfg_min = getattr(settings, f"min_score_{self.name}", 3)
+                            if _sig_score < (_cfg_min + _extra):
+                                logger.debug("[{}] {} {} session filter ({} score={}<{}+{})",
+                                             self.name, snap.symbol, action,
+                                             _bucket, _sig_score, _cfg_min, _extra)
+                                continue
                     # ── Log signal generated ───────────────────────────
                     _activity(
                         agent=self.name, event="SIGNAL",
@@ -415,6 +480,26 @@ class BaseAgent(ABC):
 
     # ── Entry ───────────────────────────────────────────────────────────
 
+    async def _await_limit_fill(self, order_id: str, timeout: float) -> bool:
+        """Poll order status for up to `timeout` seconds. Returns True if COMPLETE."""
+        import asyncio as _aio
+        import time as _t
+        loop = asyncio.get_event_loop()
+        t0 = _t.monotonic()
+        while (_t.monotonic() - t0) < timeout:
+            await _aio.sleep(1)
+            try:
+                orders = await loop.run_in_executor(None, kite_client.orders)
+                for o in orders:
+                    if str(o.get("order_id")) == str(order_id):
+                        if o.get("status") == "COMPLETE":
+                            return True
+                        if o.get("status") in ("CANCELLED", "REJECTED"):
+                            return False
+            except Exception:
+                pass
+        return False
+
     async def _try_enter(self, snap: MarketSnapshot, action: str, signal: dict) -> None:
         import time as _time
         _t0  = _time.monotonic()
@@ -476,6 +561,21 @@ class BaseAgent(ABC):
             logger.debug("[{}] {} sector BLOCK: {}", self.name, sym, sector_reason)
             return
 
+        # Beta neutralization — block BUY if portfolio beta would exceed max_portfolio_beta
+        beta_ok, beta_reason = risk_manager.check_portfolio_beta(sym, _open_syms_for_sector, action)
+        if not beta_ok:
+            logger.debug("[{}] {} beta BLOCK: {}", self.name, sym, beta_reason)
+            return
+
+        # Earnings blackout — block entries within ±2 days of earnings event
+        try:
+            from alt_data import alt_data_engine as _alt
+            if _alt.is_earnings_period(sym):
+                logger.debug("[{}] {} EARNINGS BLACKOUT — skipping entry", self.name, sym)
+                return
+        except Exception:
+            pass
+
         allowed, reason = order_guard.can_place(sym, self.name, action)
         if not allowed:
             return
@@ -528,27 +628,50 @@ class BaseAgent(ABC):
         sl_side  = "SELL" if action == "BUY" else "BUY"
         _order_t0 = _time.monotonic()
 
-        # Place entry + SL-M concurrently in thread executor — releases event loop
-        # during both blocking HTTP calls and halves wall-clock placement time.
-        # SL-M is independent of fill; if entry fails the exception cancels both.
+        use_limit = getattr(settings, "use_limit_orders", False)
+        limit_px  = round(ltp * (1.0005 if action == "BUY" else 0.9995), 1)
+        lim_timeout = getattr(settings, "limit_order_timeout_sec", 8)
+
         try:
-            order_id, sl_order_id = await asyncio.gather(
-                loop.run_in_executor(None, lambda: kite_client.place_order(
-                    tradingsymbol=sym, exchange=exch,
-                    transaction_type=action, quantity=qty,
-                    order_type="MARKET", product=product,
-                    tag=f"Agent-{self.name}",
-                )),
-                loop.run_in_executor(None, lambda: kite_client.place_order(
-                    tradingsymbol=sym, exchange=exch,
-                    transaction_type=sl_side,
-                    quantity=qty, order_type="SL-M",
-                    product=product,
+            if use_limit and settings.trading_mode == "LIVE":
+                # LIVE: place LIMIT, wait for fill, cancel+fallback to MARKET if timeout
+                order_id = await loop.run_in_executor(None, lambda: kite_client.place_order(
+                    tradingsymbol=sym, exchange=exch, transaction_type=action, quantity=qty,
+                    order_type="LIMIT", product=product, price=limit_px, tag=f"Agent-{self.name}",
+                ))
+                filled = await self._await_limit_fill(order_id, lim_timeout)
+                if not filled:
+                    await loop.run_in_executor(None, lambda: kite_client.cancel_order(order_id))
+                    order_id = await loop.run_in_executor(None, lambda: kite_client.place_order(
+                        tradingsymbol=sym, exchange=exch, transaction_type=action, quantity=qty,
+                        order_type="MARKET", product=product, tag=f"Agent-{self.name}",
+                    ))
+                sl_order_id = await loop.run_in_executor(None, lambda: kite_client.place_order(
+                    tradingsymbol=sym, exchange=exch, transaction_type=sl_side,
+                    quantity=qty, order_type="SL-M", product=product,
                     trigger_price=sl, tag=f"Agent-{self.name}-SL",
-                )),
-            )
+                ))
+            else:
+                # PAPER or MARKET mode: place entry + SL-M concurrently in thread executor
+                entry_type = "LIMIT" if use_limit else "MARKET"
+                entry_px   = limit_px if use_limit else 0.0
+                order_id, sl_order_id = await asyncio.gather(
+                    loop.run_in_executor(None, lambda: kite_client.place_order(
+                        tradingsymbol=sym, exchange=exch,
+                        transaction_type=action, quantity=qty,
+                        order_type=entry_type, product=product,
+                        price=entry_px, tag=f"Agent-{self.name}",
+                    )),
+                    loop.run_in_executor(None, lambda: kite_client.place_order(
+                        tradingsymbol=sym, exchange=exch,
+                        transaction_type=sl_side,
+                        quantity=qty, order_type="SL-M",
+                        product=product,
+                        trigger_price=sl, tag=f"Agent-{self.name}-SL",
+                    )),
+                )
         except Exception as exc:
-            logger.warning("[{}] parallel order placement failed: {}", self.name, exc)
+            logger.warning("[{}] order placement failed: {}", self.name, exc)
             return
 
         _latency_ms = (_time.monotonic() - _order_t0) * 1000
@@ -577,6 +700,7 @@ class BaseAgent(ABC):
                 sl_price=sl_price_val,
                 target=tgt_val,
                 product=signal.get("product", self.product),
+                pattern=signal.get("pattern", ""),
             )
         except Exception:
             pass

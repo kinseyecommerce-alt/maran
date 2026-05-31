@@ -1572,6 +1572,13 @@ def portfolio_performance_report(
     )
 
 
+@app.get("/portfolio/pattern-breakdown", tags=["Portfolio"])
+async def pattern_breakdown(days: int = 30):
+    """P&L breakdown by entry pattern — which patterns are actually profitable."""
+    from state_store import get_pattern_breakdown
+    return get_pattern_breakdown(days=days)
+
+
 @app.get("/options/chain/{symbol}", tags=["Options"])
 async def options_chain(symbol: str, expiry_offset_days: int = Query(default=0)):
     """
