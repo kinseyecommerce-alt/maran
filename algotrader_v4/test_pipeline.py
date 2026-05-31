@@ -2987,6 +2987,22 @@ def t_tick_replayer_available_symbols():
     syms = tick_replayer.available_symbols()
     assert isinstance(syms, list)
 
+def t_fii_dii_data_returns_dict():
+    from alt_data import alt_data_engine
+    data = alt_data_engine.get_fii_dii_data()
+    assert isinstance(data, dict)
+
+def t_fii_sentiment_in_range():
+    from alt_data import alt_data_engine
+    score = alt_data_engine.get_fii_sentiment()
+    assert -1.0 <= score <= 1.0, f"FII sentiment out of range: {score}"
+
+def t_set_fii_sentiment():
+    from alt_data import alt_data_engine
+    alt_data_engine.set_fii_sentiment(0.35)
+    assert abs(alt_data_engine.get_fii_sentiment() - 0.35) < 0.001
+    alt_data_engine.set_fii_sentiment(0.0)  # restore
+
 print("── 19. ALT DATA + SURVIVORSHIP BIAS + TICK INFRASTRUCTURE ──────────────")
 run("alt_data_engine singleton importable",                         t_alt_data_import)
 run("alt_data: F&O expiry is last Thursday of every month",         t_fno_expiry_last_thursday)
@@ -3003,6 +3019,9 @@ run("tick_recorder singleton importable",                           t_tick_recor
 run("tick_recorder.get_stats() returns dict",                       t_tick_recorder_stats)
 run("tick_replayer.replay_to_ohlcv returns None when no data",      t_tick_replayer_empty)
 run("tick_replayer.available_symbols() returns list",               t_tick_replayer_available_symbols)
+run("alt_data: get_fii_dii_data() returns dict",                    t_fii_dii_data_returns_dict)
+run("alt_data: get_fii_sentiment() in [-1, 1]",                     t_fii_sentiment_in_range)
+run("alt_data: set_fii_sentiment() round-trips correctly",          t_set_fii_sentiment)
 
 
 # ══════════════════════════════════════════════════════════════════════════

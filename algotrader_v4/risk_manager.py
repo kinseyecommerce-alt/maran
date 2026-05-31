@@ -294,6 +294,18 @@ class RiskManager:
             if alt_data_engine.is_high_risk_day():
                 qty = max(1, qty // 2)
                 logger.debug("Event-day sizing: qty halved to {}", qty)
+            # FII/DII sentiment scaling: strong FII buying → +20% qty, strong selling → -30%
+            fii_score = alt_data_engine.get_fii_sentiment()
+            if fii_score >= 0.4:
+                qty = int(qty * 1.20)
+                logger.debug("FII strong buy: qty scaled +20% → {}", qty)
+            elif fii_score >= 0.2:
+                qty = int(qty * 1.10)
+            elif fii_score <= -0.4:
+                qty = max(1, int(qty * 0.70))
+                logger.debug("FII strong sell: qty scaled -30% → {}", qty)
+            elif fii_score <= -0.2:
+                qty = max(1, int(qty * 0.85))
         except Exception:
             pass
         return max(qty, 1)

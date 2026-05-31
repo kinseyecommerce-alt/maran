@@ -1700,6 +1700,20 @@ def alt_data_score_headlines(
     return {"symbol": symbol, "sentiment_score": score,
             "catalyst_score": alt_data_engine.get_catalyst(symbol)}
 
+@app.get("/alt-data/fii-dii", tags=["Alt Data"])
+def alt_data_fii_dii():
+    """Return latest FII/DII institutional flow data and derived sentiment score."""
+    from alt_data import alt_data_engine
+    data = alt_data_engine.get_fii_dii_data()
+    return {"fii_dii": data, "sentiment_score": alt_data_engine.get_fii_sentiment()}
+
+@app.post("/alt-data/fii-dii/refresh", tags=["Alt Data"])
+def alt_data_fii_dii_refresh():
+    """Fetch latest FII/DII data from NSE in background and update sentiment signal."""
+    from alt_data import alt_data_engine
+    threading.Thread(target=alt_data_engine.refresh_fii_dii, daemon=True).start()
+    return {"status": "refresh_started", "current_sentiment": alt_data_engine.get_fii_sentiment()}
+
 
 # ── Tick Recorder / Replayer ──────────────────────────────────────────────────
 
@@ -1796,6 +1810,21 @@ async def on_startup():
     asyncio.create_task(symbol_scanner.run())
     from platform_scheduler import platform_scheduler
     platform_scheduler.start()
+
+    # Schedule daily FII/DII refresh at 19:30 IST (market-close + 30 min)
+    try:
+        from apscheduler.triggers.cron import CronTrigger
+        from alt_data import alt_data_engine
+        platform_scheduler._scheduler.add_job(
+            alt_data_engine.refresh_fii_dii,
+            CronTrigger(hour=14, minute=0, timezone="UTC"),  # 19:30 IST = 14:00 UTC
+            id="fii_dii_daily_refresh",
+            replace_existing=True,
+        )
+        logger.info("FII/DII daily refresh scheduled at 19:30 IST")
+    except Exception as _e:
+        logger.debug("FII/DII scheduler setup skipped: {}", _e)
+
     # Warn when security-critical settings are absent (auth middleware is a no-op without these)
     if not settings.api_key:
         logger.warning("SECURITY: API_KEY is not set — all mutating endpoints are unprotected. Set API_KEY in .env before deploying.")

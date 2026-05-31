@@ -70,6 +70,9 @@ class AltDataEngine:
         self._lock               = threading.Lock()
         self._announcement_cache: dict[str, dict] = {}  # symbol → {score, ts}
         self._cache_ttl          = 300  # 5 minutes
+        # FII/DII market-wide sentiment (refreshed daily after market close)
+        self._fii_dii: dict = {}          # raw fetched data
+        self._fii_sentiment: float = 0.0  # -1.0 to +1.0 market signal
 
     # ── NSE Announcements ─────────────────────────────────────────────────────
 
@@ -233,12 +236,112 @@ class AltDataEngine:
             self.set_catalyst(symbol, result)
         return result
 
+    # ── FII / DII Flows ───────────────────────────────────────────────────────
+
+    def refresh_fii_dii(self) -> dict:
+        """
+        Fetch latest FII/DII equity cash flows from NSE.
+        Published daily after ~19:00 IST. Returns parsed dict.
+        Signal interpretation:
+          FII net buy  > +1000 Cr → market bullish  (+0.4)
+          FII net buy  > +500 Cr  → mild bullish    (+0.2)
+          FII net sell > -500 Cr  → mild bearish    (-0.2)
+          FII net sell > -1000 Cr → strong bearish  (-0.4)
+        Combined FII+DII flows give overall institutional sentiment.
+        """
+        try:
+            import urllib.request, json as _json
+            url = "https://www.nseindia.com/api/fiidiiTradeReact"
+            req = urllib.request.Request(url, headers={
+                "User-Agent": "Mozilla/5.0",
+                "Accept": "application/json",
+                "Referer": "https://www.nseindia.com/",
+                "X-Requested-With": "XMLHttpRequest",
+            })
+            with urllib.request.urlopen(req, timeout=8) as resp:
+                raw = _json.loads(resp.read())
+
+            parsed = {"fii_net": 0.0, "dii_net": 0.0, "date": "", "source": "NSE"}
+            for row in (raw if isinstance(raw, list) else []):
+                cat = str(row.get("category", "")).upper()
+                try:
+                    net = float(str(row.get("netValue", "0")).replace(",", "").replace("-", "-"))
+                except (ValueError, TypeError):
+                    net = 0.0
+                if "FII" in cat or "FPI" in cat:
+                    parsed["fii_net"] = net
+                    parsed["date"] = row.get("date", "")
+                elif "DII" in cat:
+                    parsed["dii_net"] = net
+
+            # Compute market sentiment score
+            fii = parsed["fii_net"]
+            dii = parsed["dii_net"]
+            score = 0.0
+            if fii > 1000:
+                score += 0.4
+            elif fii > 500:
+                score += 0.2
+            elif fii < -1000:
+                score -= 0.4
+            elif fii < -500:
+                score -= 0.2
+            # DII often counters FII — moderate adjustment
+            if dii > 500 and fii < 0:
+                score += 0.1   # DII buying softens bearish signal
+            elif dii < -500 and fii > 0:
+                score -= 0.1   # DII selling softens bullish signal
+
+            parsed["sentiment_score"] = round(max(-1.0, min(1.0, score)), 2)
+            parsed["signal"] = (
+                "STRONG_BULLISH" if score >= 0.4 else
+                "BULLISH"        if score >= 0.2 else
+                "BEARISH"        if score <= -0.2 else
+                "STRONG_BEARISH" if score <= -0.4 else
+                "NEUTRAL"
+            )
+
+            with self._lock:
+                self._fii_dii      = parsed
+                self._fii_sentiment = parsed["sentiment_score"]
+            logger.info(
+                "FII/DII: FII={:+,.0f} Cr  DII={:+,.0f} Cr  signal={} score={:+.2f}",
+                fii, dii, parsed["signal"], score
+            )
+            return parsed
+
+        except Exception as exc:
+            logger.debug("FII/DII fetch failed (non-critical): {}", exc)
+            return self._fii_dii   # return last cached value
+
+    def get_fii_sentiment(self) -> float:
+        """
+        Return FII/DII market-wide sentiment in [-1.0, 1.0].
+        Used by risk_manager to scale all position sizes.
+        0.0 = neutral / not yet fetched.
+        """
+        with self._lock:
+            return self._fii_sentiment
+
+    def get_fii_dii_data(self) -> dict:
+        """Return the raw FII/DII data dict for API / dashboard."""
+        with self._lock:
+            return dict(self._fii_dii)
+
+    def set_fii_sentiment(self, score: float) -> None:
+        """Manually override FII/DII sentiment (testing / manual input)."""
+        with self._lock:
+            self._fii_sentiment = max(-1.0, min(1.0, score))
+            self._fii_dii["sentiment_score"] = self._fii_sentiment
+            self._fii_dii["source"] = "manual"
+
     # ── Status / Debug ────────────────────────────────────────────────────────
 
     def summary(self) -> dict:
         """Return current alt data state for dashboard/API."""
         with self._lock:
             catalysts = {sym: e["score"] for sym, e in self._announcement_cache.items()}
+            fii_data  = dict(self._fii_dii)
         event_flag, event_name = self.is_event_day()
         return {
             "catalysts":          catalysts,
@@ -246,6 +349,8 @@ class AltDataEngine:
             "event_name":         event_name,
             "days_to_next_event": self.days_to_next_event(),
             "next_fno_expiry":    str(self.next_fno_expiry()),
+            "fii_dii":            fii_data,
+            "fii_sentiment":      self._fii_sentiment,
         }
 
 
