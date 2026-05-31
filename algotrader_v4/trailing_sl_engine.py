@@ -188,11 +188,6 @@ class PositionSL:
     _on_sl_moved:     Optional[Callable] = field(default=None, repr=False)
     _on_partial_exit: Optional[Callable] = field(default=None, repr=False)
 
-    # Per-position callbacks (set via register(), used before module-level fallbacks)
-    _on_sl_hit:     Optional[Callable] = field(default=None, repr=False)
-    _on_target_hit: Optional[Callable] = field(default=None, repr=False)
-    _on_sl_moved:   Optional[Callable] = field(default=None, repr=False)
-
     @property
     def cfg(self) -> TrailConfig:
         return TRAIL_CONFIGS.get(self.strategy, TRAIL_CONFIGS["intraday"])
@@ -345,6 +340,11 @@ class TrailingSLEngine:
     async def _evaluate(
         self, pos: PositionSL, ltp: float, atr_14: float
     ) -> None:
+        # Guard: position may have been exited by a concurrent on_tick call that
+        # was interleaved at an await point inside this function for the same symbol.
+        if pos.status != SLStatus.ACTIVE:
+            return
+
         cfg = pos.cfg
         old_sl = pos.current_sl
 

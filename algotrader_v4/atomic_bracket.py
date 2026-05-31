@@ -251,9 +251,9 @@ class AtomicBracketEngine:
         while time.monotonic() < deadline:
             await asyncio.sleep(self.FILL_POLL_INTERVAL_MS / 1000)
             if hasattr(kite_client, "_paper_orders"):
-                for o in kite_client._paper_orders:
-                    if o["order_id"] == oid and o["status"] == "COMPLETE":
-                        return float(o.get("price") or bracket.signal_price)
+                o = kite_client._paper_orders.get(oid)
+                if o and o["status"] == "COMPLETE":
+                    return float(o.get("price") or bracket.signal_price)
             try:
                 history = kite_client.order_history(oid)
                 for h in reversed(history):
@@ -327,10 +327,9 @@ class AtomicBracketEngine:
         if bracket.sl_order_id:
             try:
                 if hasattr(kite_client, "_paper_orders"):
-                    for o in kite_client._paper_orders:
-                        if o["order_id"] == bracket.sl_order_id and o["status"] == "COMPLETE":
-                            sl_already_filled = True
-                            break
+                    o = kite_client._paper_orders.get(bracket.sl_order_id)
+                    if o and o["status"] == "COMPLETE":
+                        sl_already_filled = True
                 if not sl_already_filled:
                     history = kite_client.order_history(bracket.sl_order_id)
                     for h in reversed(history):

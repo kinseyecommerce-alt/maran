@@ -76,17 +76,18 @@ class _TokenBucket:
         self._lock     = Lock()
 
     def acquire(self) -> None:
-        with self._lock:
-            now   = time.monotonic()
-            delta = now - self._last
-            self._tokens = min(self._rate, self._tokens + delta * self._rate)
-            self._last   = now
-            if self._tokens < 1:
+        while True:
+            with self._lock:
+                now   = time.monotonic()
+                delta = now - self._last
+                self._tokens = min(self._rate, self._tokens + delta * self._rate)
+                self._last   = now
+                if self._tokens >= 1:
+                    self._tokens -= 1
+                    return
                 wait = (1 - self._tokens) / self._rate
-                time.sleep(wait)
-                self._tokens = 0
-            else:
-                self._tokens -= 1
+            # Sleep outside the lock so other callers are not blocked during the wait.
+            time.sleep(wait)
 
 
 _rest_bucket = _TokenBucket(_KITE_REST_RPS)
@@ -129,7 +130,8 @@ class KiteClient:
 
     def __init__(self) -> None:
         self._kite: Optional[KiteConnect] = None
-        self._paper_orders:    list[dict] = []
+        self._paper_orders:    dict[str, dict] = {}   # order_id → order dict (O(1) lookup)
+        self._paper_orders_lock: Lock = Lock()
         self._paper_positions: list[dict] = []
         self._instruments_cache: dict[str, list[dict]] = {}
         self._pos_cache: dict = {}
@@ -276,12 +278,15 @@ class KiteClient:
 
     def orders(self) -> list[dict]:
         if settings.trading_mode == "PAPER":
-            return self._paper_orders
+            with self._paper_orders_lock:
+                return list(self._paper_orders.values())
         return _with_retry(self.kite.orders, label="orders")
 
     def order_history(self, order_id: str) -> list[dict]:
         if settings.trading_mode == "PAPER":
-            return [o for o in self._paper_orders if o["order_id"] == order_id]
+            with self._paper_orders_lock:
+                o = self._paper_orders.get(order_id)
+                return [o] if o else []
         return _with_retry(
             lambda: self.kite.order_history(order_id), label="order_history"
         )
@@ -351,8 +356,9 @@ class KiteClient:
         quantity: int = 0, trigger_price: float = 0.0,
     ) -> str:
         if settings.trading_mode == "PAPER":
-            for o in self._paper_orders:
-                if o["order_id"] == order_id:
+            with self._paper_orders_lock:
+                o = self._paper_orders.get(order_id)
+                if o:
                     if price:         o["price"]         = price
                     if quantity:      o["quantity"]       = quantity
                     if trigger_price: o["trigger_price"]  = trigger_price
@@ -368,8 +374,9 @@ class KiteClient:
 
     def cancel_order(self, order_id: str) -> str:
         if settings.trading_mode == "PAPER":
-            for o in self._paper_orders:
-                if o["order_id"] == order_id:
+            with self._paper_orders_lock:
+                o = self._paper_orders.get(order_id)
+                if o:
                     o["status"] = "CANCELLED"
             return order_id
         return _with_retry(
@@ -517,7 +524,8 @@ class KiteClient:
             "tag":              tag,
             "placed_at":        datetime.now().isoformat(),
         }
-        self._paper_orders.append(record)
+        with self._paper_orders_lock:
+            self._paper_orders[order_id] = record
         # Only update position for immediately filled orders
         if status == "COMPLETE":
             self._update_paper_position(record)
@@ -561,7 +569,9 @@ class KiteClient:
         If ltp crosses the trigger_price, mark the order COMPLETE
         and update the paper position.
         """
-        for order in self._paper_orders:
+        with self._paper_orders_lock:
+            orders_snapshot = list(self._paper_orders.values())
+        for order in orders_snapshot:
             if order["tradingsymbol"] != symbol:
                 continue
             if order["status"] != "TRIGGER PENDING":

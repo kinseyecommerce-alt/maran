@@ -83,10 +83,9 @@ def _setup_tsl_callbacks() -> None:
             # Check if the SL-M order already executed on the exchange
             try:
                 if hasattr(kite_client, "_paper_orders"):
-                    for o in kite_client._paper_orders:
-                        if o["order_id"] == sl_oid and o["status"] == "COMPLETE":
-                            sl_already_filled = True
-                            break
+                    o = kite_client._paper_orders.get(sl_oid)
+                    if o and o["status"] == "COMPLETE":
+                        sl_already_filled = True
                 if not sl_already_filled:
                     history = kite_client.order_history(sl_oid)
                     for h in reversed(history):

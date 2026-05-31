@@ -129,7 +129,7 @@ def t_paper_place_order():
 def t_tag_truncated():
     kc = KiteClient()
     kc.place_order("RELIANCE", "NSE", "BUY", 1, tag="A" * 30)
-    assert all(len(o["tag"]) <= _KITE_ORDER_TAG_MAX for o in kc._paper_orders)
+    assert all(len(o["tag"]) <= _KITE_ORDER_TAG_MAX for o in kc._paper_orders.values())
 
 def t_paper_orders_list():
     kc = KiteClient()
@@ -199,15 +199,15 @@ def t_cancel_order():
     kc = KiteClient()
     oid = kc.place_order("SBIN", "NSE", "BUY", 1)
     kc.cancel_order(oid)
-    o = next(x for x in kc._paper_orders if x["order_id"] == oid)
-    assert o["status"] == "CANCELLED"
+    o = kc._paper_orders.get(oid)
+    assert o and o["status"] == "CANCELLED"
 
 def t_modify_order():
     kc = KiteClient()
     oid = kc.place_order("AXISBANK", "NSE", "BUY", 1, price=900.0)
     kc.modify_order(oid, price=910.0)
-    o = next(x for x in kc._paper_orders if x["order_id"] == oid)
-    assert o["price"] == 910.0
+    o = kc._paper_orders.get(oid)
+    assert o and o["price"] == 910.0
 
 run("_TokenBucket.acquire() no raise",          t_bucket_acquire)
 run("_TokenBucket throttle within 2s for 5",    t_bucket_throttle)

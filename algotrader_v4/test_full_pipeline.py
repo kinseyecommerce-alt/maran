@@ -166,7 +166,7 @@ def _orders_with_tag(symbol: str, tag: str, order_type: str | None = None):
     # OptionsAgent places orders for contract symbols (e.g. INFY2606041650CE),
     # so match by prefix so that _orders_with_tag("INFY", ...) also finds those.
     out = []
-    for o in kite_client._paper_orders:
+    for o in kite_client._paper_orders.values():
         ts = o.get("tradingsymbol", "")
         if ts != symbol and not ts.startswith(symbol):
             continue
