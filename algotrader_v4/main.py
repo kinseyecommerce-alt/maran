@@ -1763,10 +1763,11 @@ def get_index_universe(date: str = Query(default=""), index: str = Query(default
 def symbol_constituent_history(symbol: str):
     """Return all Nifty index membership periods for a symbol."""
     from index_universe import index_universe
+    from datetime import date
     return {
         "symbol": symbol.upper(),
         "periods": index_universe.constituent_periods(symbol),
-        "is_current_member": index_universe.was_constituent(symbol, ""),
+        "is_current_member": index_universe.was_constituent(symbol, date.today().isoformat()),
     }
 
 
