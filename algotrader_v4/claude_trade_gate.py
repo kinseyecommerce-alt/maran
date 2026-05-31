@@ -148,6 +148,13 @@ def _build_context(snap, action: str, signal: dict, strategy: str) -> dict:
     except Exception:
         institutional = {}
 
+    # ── News context (sync cache read — never blocks trade execution) ────────
+    try:
+        from news_sentinel import news_sentinel
+        news_context = news_sentinel.format_for_prompt(snap.symbol)
+    except Exception:
+        news_context = ""
+
     # ── Options-specific intelligence (only populated for fno strategy) ───────
     options_advanced: dict = {}
     if strategy == "options":
@@ -250,6 +257,7 @@ def _build_context(snap, action: str, signal: dict, strategy: str) -> dict:
             "minutes_to_squareoff": max(0, _minutes_to_squareoff()),
         },
         "key_levels":        level_ctx,
+        "news_context":      news_context,
         "event_risk":        event_risk,
         "options_iv":        options_iv,
         "institutional":     institutional,
