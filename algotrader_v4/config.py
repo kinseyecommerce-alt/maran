@@ -174,6 +174,12 @@ class Settings(BaseSettings):
     # In production set to your static outbound IP e.g. "1.2.3.4"
     sebi_whitelisted_ips: str = ""
 
+    # TWAP order splitting — reduces market impact on large lot entries
+    use_twap: bool = False          # split large orders into slices to reduce impact
+    twap_slices: int = 4            # number of child orders per TWAP execution
+    twap_interval_sec: int = 15     # seconds between each slice
+    twap_min_qty: int = 100         # minimum qty to trigger TWAP (don't TWAP small retail lots)
+
     @field_validator("squareoff_time")
     @classmethod
     def validate_squareoff_time(cls, v: str) -> str:

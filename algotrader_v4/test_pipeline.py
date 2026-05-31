@@ -2324,6 +2324,69 @@ run("FuturesAgent has ≥10 pattern methods",               t_futures_10_pattern
 
 
 # ══════════════════════════════════════════════════════════════════════════
+# 20. TWAP ENGINE
+# ══════════════════════════════════════════════════════════════════════════
+section("20. TWAP ENGINE")
+from twap_engine import TWAPEngine, twap_engine as _twap_singleton
+
+def t_twap_singleton_importable():
+    from twap_engine import twap_engine as te
+    assert te is not None
+    assert isinstance(te, TWAPEngine)
+
+def t_twap_should_twap_below_min():
+    from config import settings as _s
+    engine = TWAPEngine()
+    _s.use_twap = True
+    _s.twap_min_qty = 100
+    assert engine.should_twap(50) is False
+
+def t_twap_should_twap_above_min():
+    from config import settings as _s
+    engine = TWAPEngine()
+    _s.use_twap = True
+    _s.twap_min_qty = 100
+    assert engine.should_twap(150) is True
+
+def t_twap_should_twap_disabled():
+    from config import settings as _s
+    engine = TWAPEngine()
+    _s.use_twap = False
+    _s.twap_min_qty = 100
+    assert engine.should_twap(150) is False
+
+async def t_twap_execute_returns_list():
+    """execute() must return a list of order IDs (mocked kite_client)."""
+    import asyncio
+    from unittest.mock import patch
+    engine = TWAPEngine()
+    from config import settings as _s
+    _s.twap_slices = 2
+    _s.twap_interval_sec = 0  # no sleep in tests
+    call_count = 0
+    def _mock_place_order(**kwargs):
+        nonlocal call_count
+        call_count += 1
+        return f"mock-oid-{call_count}"
+    with patch("twap_engine.kite_client") as mock_kite:
+        mock_kite.place_order.side_effect = _mock_place_order
+        result = await engine.execute(
+            symbol="RELIANCE", action="BUY", qty=200,
+            product="MIS", tag="TEST-TWAP", exchange="NSE")
+    assert isinstance(result, list)
+    assert len(result) == 2
+
+async def _run_twap_async():
+    await arun("execute() returns list of order IDs (mocked)", t_twap_execute_returns_list())
+
+run("TWAPEngine singleton importable",                        t_twap_singleton_importable)
+run("should_twap(50) == False when twap_min_qty=100",         t_twap_should_twap_below_min)
+run("should_twap(150) == True when use_twap=True, min=100",   t_twap_should_twap_above_min)
+run("should_twap(150) == False when use_twap=False",          t_twap_should_twap_disabled)
+asyncio.run(_run_twap_async())
+
+
+# ══════════════════════════════════════════════════════════════════════════
 # FINAL SUMMARY
 # ══════════════════════════════════════════════════════════════════════════
 failed = summary()
