@@ -119,13 +119,13 @@ def _setup_tsl_callbacks() -> None:
         risk_manager.position_closed()
         trailing_sl_engine.deregister(pos.order_id)
 
-        # Persist to SQLite (Phase 3)
+        # Persist to SQLite (Phase 3) — non-blocking async variants
         try:
-            from state_store import close_position, record_trade
+            from state_store import close_position_async, record_trade_async
             from risk_manager import compute_tx_costs
-            close_position(pos.order_id)
+            close_position_async(pos.order_id)
             cost = compute_tx_costs(pos.quantity, pos.entry_price, ltp, "MIS")
-            record_trade(
+            record_trade_async(
                 symbol=pos.symbol, strategy=pos.strategy,
                 side=pos.side, entry_price=pos.entry_price,
                 exit_price=ltp, quantity=pos.quantity,
@@ -567,6 +567,22 @@ class BaseAgent(ABC):
             logger.debug("[{}] {} beta BLOCK: {}", self.name, sym, beta_reason)
             return
 
+        # Portfolio optimizer soft gate — skip if a same-sector rival has >20% better Sharpe
+        try:
+            from portfolio_optimizer import portfolio_optimizer as _popt
+            _sig_for_gate = {
+                "symbol":  sym,
+                "score":   signal.get("score", 0),
+                "atr_pct": getattr(snap.indicators, "atr_14", 0) / max(snap.tick.ltp, 1) * 100,
+                "agent":   self.name,
+            }
+            _allowed, _suggested_capital = _popt.should_trade(sym, _sig_for_gate, {})
+            if not _allowed:
+                logger.debug("[{}] {} portfolio optimizer SKIP", self.name, sym)
+                return
+        except Exception:
+            pass
+
         # Earnings blackout — block entries within ±2 days of earnings event
         try:
             from alt_data import alt_data_engine as _alt
@@ -685,12 +701,12 @@ class BaseAgent(ABC):
         self.state.signals_fired += 1
         self.state.last_signal    = signal
 
-        # Persist position to SQLite (Phase 3)
+        # Persist position to SQLite (Phase 3) — non-blocking async variant
         try:
-            from state_store import upsert_position
+            from state_store import upsert_position_async
             sl_price_val = signal.get("stop_loss", risk_manager.sl_price(ltp, action))
             tgt_val      = signal.get("target", risk_manager.target_price(ltp, action))
-            upsert_position(
+            upsert_position_async(
                 order_id=order_id,
                 symbol=sym,
                 strategy=self.name,
@@ -786,9 +802,9 @@ class BaseAgent(ABC):
             self.state.pnl_today += pnl
             trailing_sl_engine.deregister(oid)
 
-            # Persist to SQLite (Phase 3)
+            # Persist to SQLite (Phase 3) — non-blocking async variant
             try:
-                from state_store import record_trade as _st_record
+                from state_store import record_trade_async as _st_record
                 from risk_manager import compute_tx_costs
                 entry_price = pos.get("average_price", snap.tick.ltp)
                 product_val = pos.get("product", self.product)

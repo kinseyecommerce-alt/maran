@@ -30,6 +30,7 @@ from adaptive_engine import adaptive_engine
 from agents.base_agent import send_telegram
 from agents.strategy_agents import ALL_AGENTS
 from bot_state import is_agent_enabled
+from portfolio_optimizer import portfolio_optimizer
 
 
 MASTER_PROMPT = """You are the MASTER TRADING INTELLIGENCE for an NSE/BSE algorithmic trading system.
@@ -144,6 +145,8 @@ class MasterAgent:
         self._confirmed_regime: Optional[str] = None
         # Phase 3D: rolling Sharpe tracking — {strategy: [recent sharpes]}
         self._rolling_sharpe_below_count: dict[str, int] = {}
+        # Portfolio optimizer: latest allocations updated every 15 min
+        self._latest_allocations: dict[str, float] = {}
 
     # ── Lifecycle ──────────────────────────────────────────────────────────────
 
@@ -202,6 +205,8 @@ class MasterAgent:
                                  day_of_week="sun", id="weekly_backtest")
         self._scheduler.add_job(self._weekly_memory_synthesis, "cron", hour=21, minute=0,
                                  day_of_week="sun", id="weekly_memory")
+        self._scheduler.add_job(self._portfolio_optimize_job, "interval", minutes=15,
+                                 id="portfolio_optimize")
         self._scheduler.start()
         logger.info("[master_v5] started — tick-driven 1s")
         asyncio.create_task(send_telegram(
@@ -424,6 +429,52 @@ class MasterAgent:
             await send_telegram("\n".join(lines))
         except Exception as exc:
             logger.error("[master] Weekly backtest failed: {}", exc)
+
+    async def _portfolio_optimize_job(self) -> None:
+        """
+        Every 15 minutes: collect pending signals from all running agents and run
+        mean-variance optimization.  Result stored on portfolio_optimizer singleton
+        for agents to query via should_trade().
+        """
+        if not self.running:
+            return
+        try:
+            signals: list[dict] = []
+            live = tick_engine.all_latest()
+            for agent_name, agent in ALL_AGENTS.items():
+                if not agent.state.running:
+                    continue
+                # Pull latest signals queued for the agent's watchlist symbols.
+                for sym_data in self._agent_watchlists.get(agent_name, []):
+                    sym = sym_data.get("symbol", sym_data) if isinstance(sym_data, dict) else sym_data
+                    snap = live.get(sym)
+                    if snap is None:
+                        continue
+                    score   = snap.get("score", 0) or snap.get("signal_score", 0)
+                    atr_pct = snap.get("atr_pct", snap.get("atr_14_pct", 1.0)) or 1.0
+                    if score <= 0:
+                        continue
+                    signals.append({
+                        "symbol":  sym,
+                        "score":   float(score),
+                        "atr_pct": float(atr_pct),
+                        "agent":   agent_name,
+                    })
+
+            intraday_capital = (
+                settings.total_capital
+                * settings.intraday_capital_pct / 100.0
+            )
+            allocs = await asyncio.to_thread(
+                portfolio_optimizer.optimize, signals, intraday_capital
+            )
+            self._latest_allocations = allocs
+            logger.debug(
+                "[master] Portfolio optimizer: {} signals → {} allocations",
+                len(signals), len(allocs),
+            )
+        except Exception as exc:
+            logger.error("[master] Portfolio optimize job failed: {}", exc)
 
     # ── Helpers ────────────────────────────────────────────────────────────────
 

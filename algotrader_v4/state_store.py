@@ -13,11 +13,68 @@ from __future__ import annotations
 import math
 import sqlite3
 import json
+import threading
+import queue as _queue
 from pathlib import Path
 from datetime import date, datetime
 from typing import Optional
 
 DB_PATH = Path("logs/algotrader.db")
+
+# ── Async write queue ────────────────────────────────────────────────────────
+# All mutating DB calls (record_trade, upsert_position, close_position) put
+# (fn, args, kwargs) tuples onto this queue. A background thread drains it
+# sequentially — no event-loop blocking, no write contention.
+_write_q: "_queue.Queue[tuple | None]" = _queue.Queue(maxsize=2000)
+_writer_started = threading.Event()
+
+
+def _writer_thread() -> None:
+    """Background thread — drains _write_q and executes writes sequentially."""
+    while True:
+        item = _write_q.get()
+        if item is None:          # sentinel → shutdown
+            break
+        fn, args, kwargs = item
+        try:
+            fn(*args, **kwargs)
+        except Exception as exc:
+            from loguru import logger
+            logger.warning("[state_store] async write failed: {}", exc)
+        finally:
+            _write_q.task_done()
+
+
+def _start_writer() -> None:
+    if not _writer_started.is_set():
+        t = threading.Thread(target=_writer_thread, daemon=True, name="db-writer")
+        t.start()
+        _writer_started.set()
+
+
+def _enqueue(fn, *args, **kwargs) -> None:
+    """Put a write onto the queue; starts writer thread on first call."""
+    _start_writer()
+    try:
+        _write_q.put_nowait((fn, args, kwargs))
+    except _queue.Full:
+        # Queue full (backlog > 2000 writes) — fall back to synchronous
+        fn(*args, **kwargs)
+
+
+def record_trade_async(*args, **kwargs) -> None:
+    """Non-blocking version of record_trade — safe to call from async callbacks."""
+    _enqueue(record_trade, *args, **kwargs)
+
+
+def close_position_async(order_id: str) -> None:
+    """Non-blocking version of close_position — safe to call from async callbacks."""
+    _enqueue(close_position, order_id)
+
+
+def upsert_position_async(*args, **kwargs) -> None:
+    """Non-blocking version of upsert_position — safe to call from async callbacks."""
+    _enqueue(upsert_position, *args, **kwargs)
 
 
 def _conn() -> sqlite3.Connection:
@@ -376,6 +433,9 @@ def get_pattern_breakdown(days: int = 30) -> list[dict]:
 
 # Ensure tables and migrations are applied on first import
 init_db()
+
+# Start background writer thread immediately on import
+_start_writer()
 
 # Module-level namespace alias — allows `from state_store import state_store`
 import sys as _sys

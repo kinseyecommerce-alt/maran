@@ -138,17 +138,24 @@ class AltDataEngine:
     def get_catalyst(self, symbol: str) -> float:
         """
         Return current catalyst score for symbol in [-1.0, 1.0].
+        Blends announcement score (70%) with bulk-deal signal (30%).
         0.0 = no data or neutral.
         """
         with self._lock:
             entry = self._announcement_cache.get(symbol)
             if entry is None:
-                return 0.0
-            # Expire after TTL
-            if time.monotonic() - entry["ts"] > self._cache_ttl:
+                base_score = 0.0
+            elif time.monotonic() - entry["ts"] > self._cache_ttl:
                 del self._announcement_cache[symbol]
-                return 0.0
-            return entry["score"]
+                base_score = 0.0
+            else:
+                base_score = entry["score"]
+
+        bulk_signal = self.get_bulk_deal_signal(symbol)
+        if base_score == 0.0 and bulk_signal == 0.0:
+            return 0.0
+        combined = (0.7 * base_score) + (0.3 * bulk_signal)
+        return round(max(-1.0, min(1.0, combined)), 4)
 
     def set_catalyst(self, symbol: str, score: float) -> None:
         """Manually inject a catalyst score (for testing / manual overrides)."""
@@ -358,6 +365,85 @@ class AltDataEngine:
             except (ValueError, KeyError):
                 continue
         return False
+
+    # ── Bulk / Block Deal Data ────────────────────────────────────────────────
+
+    def _nse_opener(self):
+        """
+        Build a urllib opener with cookie support and NSE headers.
+        Establishes a session by visiting the NSE homepage first so that
+        the server sets its mandatory session cookie.
+        """
+        import urllib.request, http.cookiejar
+        jar = http.cookiejar.CookieJar()
+        opener = urllib.request.build_opener(urllib.request.HTTPCookieProcessor(jar))
+        _NSE_HEADERS = [
+            ("User-Agent", "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 Chrome/120"),
+            ("Accept", "application/json, text/plain, */*"),
+            ("Accept-Language", "en-US,en;q=0.9"),
+            ("Referer", "https://www.nseindia.com/"),
+            ("Accept-Encoding", "gzip, deflate, br"),
+            ("Connection", "keep-alive"),
+        ]
+        opener.addheaders = _NSE_HEADERS
+        try:
+            # Seed the cookie jar with a homepage visit
+            opener.open("https://www.nseindia.com/", timeout=6)
+        except Exception:
+            pass  # best-effort; continue even if blocked
+        return opener
+
+    def get_bulk_deals(self, symbol: str, days: int = 5) -> list[dict]:
+        """
+        Fetch recent bulk deals for a symbol from NSE.
+        Returns list of {date, client, buy_sell, qty, price, remarks}.
+        NSE endpoint: https://www.nseindia.com/api/bulk-deals?symbol={symbol}
+        Falls back to [] on network failure.
+        """
+        import json as _json, gzip as _gzip
+        url = f"https://www.nseindia.com/api/bulk-deals?symbol={symbol.upper()}"
+        try:
+            opener = self._nse_opener()
+            resp = opener.open(url, timeout=8)
+            raw = resp.read()
+            # NSE may return gzip even without explicit decompression
+            try:
+                raw = _gzip.decompress(raw)
+            except Exception:
+                pass
+            data = _json.loads(raw)
+            rows = data if isinstance(data, list) else data.get("data", [])
+            result = []
+            for r in rows:
+                result.append({
+                    "date":     r.get("DATE2") or r.get("date", ""),
+                    "client":   r.get("CLIENT_NAME") or r.get("clientName", ""),
+                    "buy_sell": r.get("BUY_SELL") or r.get("buySell", ""),
+                    "qty":      int(float(str(r.get("QUANTITY_TRADED") or r.get("quantity", 0) or 0))),
+                    "price":    float(str(r.get("TRADE_PRICE") or r.get("price", 0) or 0)),
+                    "remarks":  r.get("REMARKS") or r.get("remarks", ""),
+                })
+            return result
+        except Exception as exc:
+            logger.debug("NSE bulk deals fetch failed for {} (non-critical): {}", symbol, exc)
+            return []
+
+    def get_bulk_deal_signal(self, symbol: str) -> float:
+        """
+        Returns sentiment score [-1, 1] based on recent bulk deals.
+        Large BUY deals from mutual funds / FIIs → positive score.
+        Large SELL deals → negative score.
+        Returns 0.0 if no recent deals or on network failure.
+        """
+        deals = self.get_bulk_deals(symbol)
+        if not deals:
+            return 0.0
+        buy_qty  = sum(d.get("qty", 0) for d in deals if d.get("buy_sell", "").upper() == "BUY")
+        sell_qty = sum(d.get("qty", 0) for d in deals if d.get("buy_sell", "").upper() == "SELL")
+        total = buy_qty + sell_qty
+        if total == 0:
+            return 0.0
+        return round((buy_qty - sell_qty) / total, 2)  # [-1, 1]
 
     # ── Status / Debug ────────────────────────────────────────────────────────
 
