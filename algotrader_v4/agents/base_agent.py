@@ -591,13 +591,14 @@ class BaseAgent(ABC):
         except Exception:
             pass
 
-        allowed, reason = order_guard.can_place(sym, self.name, action)
-        if not allowed:
-            return
-        if order_guard.is_symbol_active_anywhere(sym):
+        # Atomic claim: reserves the slot so no concurrent agent can place the same order
+        # while we await the Claude gate, SEBI checks, or order placement below.
+        claimed, reason = order_guard.try_claim(sym, self.name, action)
+        if not claimed:
             return
         allowed, _ = risk_manager.check_before_order(sym, qty, ltp, action)
         if not allowed:
+            order_guard.release_claim(sym, self.name, action)
             return
 
         # LOW-2: SEBI pre-order compliance check
@@ -612,6 +613,7 @@ class BaseAgent(ABC):
         )
         if not sebi_ok:
             logger.warning("[{}] SEBI blocked {} {}: {}", self.name, action, sym, sebi_reason)
+            order_guard.release_claim(sym, self.name, action)
             return
 
         # Macro filter: skip BUY entries during strong global macro headwinds
@@ -621,6 +623,7 @@ class BaseAgent(ABC):
                 macro_score = macro_signals.get_macro_score()
                 if macro_score < -0.5:
                     logger.info("[{}] {} BUY skipped — macro headwind: {:.2f}", self.name, sym, macro_score)
+                    order_guard.release_claim(sym, self.name, action)
                     return
             except Exception:
                 pass
@@ -631,6 +634,7 @@ class BaseAgent(ABC):
             catalyst = alt_data_engine.get_catalyst(sym)
             if catalyst < -0.5:
                 logger.info("[{}] {} skipped — negative catalyst: {:.2f}", self.name, sym, catalyst)
+                order_guard.release_claim(sym, self.name, action)
                 return
             if catalyst > 0.3:
                 qty = min(int(qty * 1.2), int(settings.max_position_size // ltp))
@@ -687,6 +691,7 @@ class BaseAgent(ABC):
                 )
         except Exception as exc:
             logger.warning("[{}] order placement failed: {}", self.name, exc)
+            order_guard.release_claim(sym, self.name, action)
             return
 
         _latency_ms = (_time.monotonic() - _order_t0) * 1000
@@ -694,7 +699,7 @@ class BaseAgent(ABC):
         logger.debug("[{}] _try_enter total: {:.0f}ms", self.name, (_time.monotonic() - _t0) * 1000)
 
         sebi_compliance.record_order_id(self.name, sym, order_id)
-        order_guard.register_order(sym, self.name, action, order_id)
+        order_guard.confirm_claim(sym, self.name, action, order_id)
         risk_manager.position_opened()
         self.state.trades_today  += 1
         self.state.signals_fired += 1
