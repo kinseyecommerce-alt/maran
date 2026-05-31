@@ -1638,6 +1638,124 @@ async def on_startup():
         logger.warning("SECURITY: TRADING_MODE=LIVE but KITE_API_KEY is not set — order placement will fail.")
 
 
+@app.get("/metrics", include_in_schema=False)
+async def prometheus_metrics():
+    """Prometheus-compatible metrics endpoint."""
+    import time as _time
+    lines = [
+        f"# HELP algotrader_up Server is up",
+        f"# TYPE algotrader_up gauge",
+        f"algotrader_up 1",
+        f"# HELP algotrader_trades_today Total trades today",
+        f"# TYPE algotrader_trades_today counter",
+        f"algotrader_trades_today {risk_manager.trades_today}",
+        f"# HELP algotrader_pnl_today Net P&L today (INR)",
+        f"# TYPE algotrader_pnl_today gauge",
+        f"algotrader_pnl_today {risk_manager.daily_realised_pnl:.2f}",
+        f"# HELP algotrader_open_positions Current open positions",
+        f"# TYPE algotrader_open_positions gauge",
+        f"algotrader_open_positions {len(trailing_sl_engine._positions)}",
+        f"# HELP algotrader_timestamp_seconds Unix timestamp of last metric scrape",
+        f"# TYPE algotrader_timestamp_seconds gauge",
+        f"algotrader_timestamp_seconds {_time.time():.0f}",
+    ]
+    from fastapi.responses import PlainTextResponse
+    return PlainTextResponse("\n".join(lines) + "\n", media_type="text/plain; version=0.0.4")
+
+
+@app.get("/risk/stress-test", tags=["Risk"])
+async def stress_test(shock_pct: float = -5.0):
+    """Simulate a market shock (default -5% Nifty) and compute portfolio impact."""
+    # Beta map for common NSE symbols (default 1.0 for unknown)
+    _BETA_MAP: dict[str, float] = {
+        "RELIANCE": 1.1, "TCS": 0.9, "HDFCBANK": 1.2, "INFY": 0.95,
+        "ICICIBANK": 1.3, "SBIN": 1.4, "AXISBANK": 1.3, "KOTAKBANK": 1.1,
+        "LT": 1.15, "WIPRO": 0.9, "TATAMOTORS": 1.5, "TATASTEEL": 1.4,
+        "NIFTY": 1.0, "BANKNIFTY": 1.2,
+    }
+    positions = list(trailing_sl_engine._positions.values())
+    if not positions:
+        return {"shock_pct": shock_pct, "positions_tested": 0, "estimated_pnl_impact": 0.0, "positions": []}
+    total_impact = 0.0
+    details = []
+    for pos in positions:
+        beta = _BETA_MAP.get(pos.symbol, 1.0)
+        expected_move_pct = shock_pct * beta
+        estimated_loss = pos.entry_price * pos.quantity * (expected_move_pct / 100)
+        total_impact += estimated_loss
+        details.append({
+            "symbol": pos.symbol, "qty": pos.quantity, "beta": beta,
+            "expected_move_pct": round(expected_move_pct, 2),
+            "estimated_pnl": round(estimated_loss, 0),
+        })
+    return {
+        "shock_pct": shock_pct,
+        "positions_tested": len(positions),
+        "estimated_pnl_impact": round(total_impact, 0),
+        "positions": details,
+    }
+
+
+@app.get("/compliance/sebi-report", tags=["SEBI Compliance"])
+async def sebi_daily_report(date: str | None = None):
+    """Generate SEBI-compliant daily activity report."""
+    return sebi_compliance.generate_daily_report(date)
+
+
+@app.get("/portfolio/implementation-shortfall", tags=["Portfolio"])
+async def implementation_shortfall(days: int = 30):
+    """
+    Compare expected vs actual fill prices across recent trades.
+    Returns average shortfall in bps (basis points).
+    """
+    try:
+        import sqlite3
+        from pathlib import Path
+        db_path = Path(__file__).parent / "logs" / "algotrader.db"
+        if not db_path.exists():
+            return {"trades_analysed": 0, "avg_shortfall_bps": 0.0, "total_shortfall_inr": 0.0}
+        con = sqlite3.connect(db_path)
+        con.row_factory = sqlite3.Row
+        rows = con.execute(
+            "SELECT symbol, side, expected_fill_price, actual_fill_price, quantity "
+            "FROM trades WHERE expected_fill_price > 0 AND actual_fill_price > 0 "
+            "ORDER BY exit_time DESC LIMIT ?", (days * 10,)
+        ).fetchall()
+        con.close()
+        if not rows:
+            return {"trades_analysed": 0, "avg_shortfall_bps": 0.0, "total_shortfall_inr": 0.0}
+        shortfalls_bps, shortfalls_inr = [], []
+        for r in rows:
+            if r["expected_fill_price"] <= 0:
+                continue
+            # BUY: actual > expected = negative shortfall (paid more)
+            sign = -1 if r["side"] == "BUY" else 1
+            diff_bps = sign * (r["actual_fill_price"] - r["expected_fill_price"]) / r["expected_fill_price"] * 10000
+            diff_inr = sign * (r["actual_fill_price"] - r["expected_fill_price"]) * r["quantity"]
+            shortfalls_bps.append(diff_bps)
+            shortfalls_inr.append(diff_inr)
+        avg_bps = sum(shortfalls_bps) / len(shortfalls_bps)
+        return {
+            "trades_analysed": len(rows),
+            "avg_shortfall_bps": round(avg_bps, 2),
+            "total_shortfall_inr": round(sum(shortfalls_inr), 0),
+        }
+    except Exception as e:
+        return {"error": str(e)}
+
+
+@app.post("/notifications/test", tags=["Operations"])
+async def test_notification(body: dict = Body(default={"message": "AlgoTrader test alert"})):
+    """Send a test notification via configured channels (email/Telegram)."""
+    try:
+        from notifier import notifier
+        msg = body.get("message", "AlgoTrader test alert")
+        notifier.send(subject=msg, body="This is a test notification from AlgoTrader Pro.", level="INFO")
+        return {"status": "sent", "message": msg}
+    except Exception as e:
+        return {"status": "error", "detail": str(e)}
+
+
 # HIGH-7: reload=False in production — auto-reload bypasses security middleware
 if __name__ == "__main__":
     import uvicorn

@@ -29,6 +29,16 @@ class Settings(BaseSettings):
     telegram_bot_token: str = ""
     telegram_chat_id: str = ""
 
+    # Alerts (email + Telegram)
+    alert_email: str = ""             # recipient email for alerts; empty = disabled
+    smtp_host: str = "smtp.gmail.com"
+    smtp_port: int = 587
+    smtp_user: str = ""               # SMTP sender address
+    smtp_pass: str = ""               # SMTP password / app password
+    alert_on_loss_limit: bool = True  # send alert when daily loss limit is hit
+    alert_on_kill_switch: bool = True # send alert on kill switch trigger
+    alert_on_startup: bool = True     # send startup notification at market open
+
     # n8n webhook integration
     n8n_webhook_url:    str = ""  # e.g. https://your-n8n.com/webhook/algotrader
     n8n_webhook_secret: str = ""  # optional HMAC-SHA256 signing secret
@@ -61,6 +71,7 @@ class Settings(BaseSettings):
     bt_max_drawdown_pct: float = 15.0
     bt_min_trades: int = 20
     bt_lookback_days: int = 180
+    bt_min_calmar: float = 0.5        # minimum Calmar ratio to pass backtest gate
 
     # Overtrade prevention (per strategy per day)
     max_trades_intraday: int = 8

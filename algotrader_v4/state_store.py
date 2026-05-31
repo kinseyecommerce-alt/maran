@@ -61,7 +61,9 @@ def init_db() -> None:
                 entry_time     TEXT,
                 exit_time      TEXT,
                 gate_confidence INTEGER DEFAULT 0,
-                trade_date     TEXT DEFAULT (date('now','localtime'))
+                trade_date     TEXT DEFAULT (date('now','localtime')),
+                expected_fill_price REAL DEFAULT 0,
+                actual_fill_price   REAL DEFAULT 0
             );
 
             CREATE TABLE IF NOT EXISTS daily_pnl (
@@ -70,6 +72,15 @@ def init_db() -> None:
                 trades_count INTEGER DEFAULT 0
             );
         """)
+        # Migrate existing DB: add new columns if they don't exist yet
+        for col, typedef in [
+            ("expected_fill_price", "REAL DEFAULT 0"),
+            ("actual_fill_price",   "REAL DEFAULT 0"),
+        ]:
+            try:
+                c.execute(f"ALTER TABLE trades ADD COLUMN {col} {typedef}")
+            except Exception:
+                pass
 
 
 def upsert_position(

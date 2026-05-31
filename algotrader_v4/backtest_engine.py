@@ -58,10 +58,16 @@ class BacktestResult:
     oos_win_rate: float     = 0.0
     oos_total_pnl: float    = 0.0
     oos_trades: int         = 0
+    oos_sharpe: float | None = None
     walk_forward_used: bool = False
     # Monte Carlo
     mc_pvalue: float        = 1.0
     mc_passed: bool         = False
+    sharpe_percentile: float | None  = None   # % of permutations with Sharpe ≤ real
+    min_sharpe_5pct: float | None    = None   # 5th pct of permuted Sharpes
+    max_drawdown_95pct: float | None = None   # 95th pct of permuted max drawdowns
+    # Calmar ratio
+    calmar_ratio: float = 0.0          # annualised_return / abs(max_drawdown_pct)
     # Raw trade log and equity curve (not serialised by default)
     trades: list[dict]      = field(default_factory=list)
     equity_curve: list[float] = field(default_factory=list)
@@ -88,8 +94,10 @@ class BacktestResult:
             "oos_win_rate":      round(self.oos_win_rate, 1),
             "oos_total_pnl":     round(self.oos_total_pnl, 0),
             "oos_trades":        self.oos_trades,
+            "oos_sharpe":        round(self.oos_sharpe, 2) if self.oos_sharpe is not None else None,
             "mc_pvalue":         round(self.mc_pvalue, 3),
             "mc_passed":         self.mc_passed,
+            "calmar_ratio":      round(self.calmar_ratio, 2),
         }
         if include_trades:
             d["trades"] = self.trades
@@ -623,7 +631,13 @@ class BacktestEngine:
         gross_loss   = sum(abs(l) for l in losses) if losses else 1.0
         pf           = gross_profit / gross_loss if gross_loss > 0 else 0.0
 
-        return BacktestResult(
+        # Calmar = annualised_return / max_drawdown
+        initial_capital = 100_000.0
+        trading_days = max(len(pnls), 1)
+        ann_return = (sum(pnls) / max(initial_capital, 1)) * (252 / (trading_days / 375))
+        calmar = ann_return / max(max_dd_pct / 100, 0.001)
+
+        result = BacktestResult(
             symbol=symbol, strategy=strategy, passed=False,
             total_trades=len(trades), wins=len(wins), losses=len(losses),
             win_rate=win_rate, total_pnl=total_pnl, avg_win=avg_win, avg_loss=avg_loss,
@@ -633,6 +647,8 @@ class BacktestEngine:
             trades=trades,
             equity_curve=cumulative,
         )
+        result.calmar_ratio = round(calmar, 2)
+        return result
 
     # ── Pass/fail gate ─────────────────────────────────────────────────────────
 
@@ -648,6 +664,8 @@ class BacktestEngine:
             reasons.append(f"Drawdown too high ({r.max_drawdown_pct:.1f}% > {settings.bt_max_drawdown_pct:.0f}%)")
         if r.total_pnl <= 0:
             reasons.append(f"Negative total P&L (₹{r.total_pnl:.0f})")
+        if r.calmar_ratio < settings.bt_min_calmar and r.total_trades >= settings.bt_min_trades:
+            reasons.append(f"Calmar too low ({r.calmar_ratio:.2f} < {settings.bt_min_calmar:.1f})")
         # Walk-forward OOS gate: OOS win rate must not be below 80% of IS win rate
         if r.walk_forward_used and r.oos_trades >= 5:
             oos_floor = r.win_rate * 0.80
