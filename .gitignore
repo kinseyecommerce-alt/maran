@@ -27,6 +27,9 @@ logs/
 .DS_Store
 Thumbs.db
 
+# Agent worktrees (temporary git worktrees created by parallel agents)
+.claude/worktrees/
+
 # Ruflo / Claude-Flow runtime (any directory depth)
 .claude/memory.db
 **/.claude-flow/data/
