@@ -1815,7 +1815,7 @@ async def on_startup():
     try:
         from apscheduler.triggers.cron import CronTrigger
         from alt_data import alt_data_engine
-        platform_scheduler._scheduler.add_job(
+        platform_scheduler._sched.add_job(
             alt_data_engine.refresh_fii_dii,
             CronTrigger(hour=14, minute=0, timezone="UTC"),  # 19:30 IST = 14:00 UTC
             id="fii_dii_daily_refresh",
