@@ -180,7 +180,7 @@ npx @claude-flow/cli@latest doctor --fix
 ## AlgoTrader Pro v4 — Project Context
 
 ### Overview
-NSE/BSE algorithmic trading system — 5 strategy agents, Zerodha Kite broker, TrueData
+NSE/BSE algorithmic trading system — 8 strategy agents, Zerodha Kite broker, TrueData
 market feed, Claude AI trade gate, FastAPI backend, asyncio runtime.
 Working directory: `algotrader_v4/`
 Active branch: `claude/loving-bell-0eMf7`
@@ -243,7 +243,7 @@ algotrader_v4/
 ```bash
 cd algotrader_v4
 python test_full_pipeline.py    # 30/30  — all 5 agents: ingestion→order→exit
-python test_pipeline.py         # 306/306 — cross-module risk/guard/SEBI/kite/TSL + Phases 1-6
+python test_pipeline.py         # 345/345 — cross-module risk/guard/SEBI/kite/TSL + all phases
 python test_sim_orders_flow.py  # 13/13  — PAPER order/guard/risk flow
 ```
 
@@ -265,6 +265,15 @@ Phase 3  — Regime hysteresis, VIX z-score, sector limits       ✅ master_agen
 Phase 4  — SQLite persistence with PostgreSQL/Redis fallback   ✅ state_store.py
 Phase 5  — Options chain UI, drawdown chart, trade journal,    ✅ static/dashboard.html
            multi-leg builder, keyboard shortcuts B/K/R/1-5
+FuturesAgent Intelligence — 12 patterns, 9-factor ctx_bonus,   ✅ agents/strategy_agents.py
+  macro gate, L2 wall gate, rollover awareness
+1000-Trader Upgrade — signal_aggregator (consensus +50% qty),  ✅ signal_aggregator.py
+  PairsAgent (statarb), conviction sizing, 100+ symbol pairs      agents/strategy_agents.py
+  scanner criteria for all 8 agents (15→100 symbols/agent)        symbol_scanner.py
+Macro signals (USD/INR, crude, S&P, VIX) → risk gate           ✅ macro_signals.py
+FII/DII institutional flow → ±20% qty sizing                   ✅ alt_data.py / risk_manager.py
+L2 order book depth → wall detection per symbol                ✅ tick_engine.py
+Latency: async order placement, positions cache 2s TTL         ✅ base_agent.py / kite_client.py
 ```
 
 ### PAPER Mode Behaviour
