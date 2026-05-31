@@ -1698,16 +1698,28 @@ class FuturesAgent(BaseAgent):
     """
     NSE/BSE index & stock futures agent (product=NRML, exchange=NFO).
 
-    Patterns:
-      1. EMA_TREND   — EMA9 > EMA21 > EMA50 full alignment with RSI 50-70
-      2. ORB_FUTURES — Opening range breakout 9:30-10:00, futures margin leverage
-      3. VWAP_PULL   — Price pulls to VWAP from above/below with volume surge
-      4. MACD_CROSS  — MACD histogram crosses zero with Supertrend confirmation
-      5. ATR_BREAK   — Price breaks yesterday high/low by >1.5×ATR
+    Patterns (12):
+      1.  EMA_TREND        — EMA9 > EMA21 > EMA50 full alignment with RSI 50-70
+      2.  ORB_FUTURES      — Opening range breakout 9:30-10:00
+      3.  VWAP_PULL        — Price pulls to VWAP from above/below with volume surge
+      4.  MACD_CROSS       — MACD histogram crosses zero with Supertrend confirmation
+      5.  ATR_BREAK        — Price breaks yesterday high/low by >1.5×ATR
+      6.  HMA_TREND        — HMA direction flip + EMA confirms
+      7.  STOCHRSI_FUTURES — StochRSI cross from extreme + Supertrend
+      8.  ICHIMOKU_FUTURES — Ichimoku cloud breakout (bullish/bearish)
+      9.  VOL_SURGE        — Volume explosion ≥1.8× + full EMA stack
+      10. MULTI_TF_ALIGN   — 3-bar EMA persistence entry
+      11. VWAP_BAND_BREAK  — Price exits VWAP ±2σ band with volume (momentum continuation)
+      12. MOMENTUM_CATCH   — 3-bar STRONG momentum + ADX≥25 (catch running moves)
 
-    Sizing: full capital bucket, 1 lot minimum; lot sizes match index lot sizes.
+    Context bonus (9 factors, max +9):
+      volume, MACD, trend label, FII/DII sentiment, macro score,
+      ADX≥25, Supertrend, depth imbalance, wall clear.
+
+    Gates: VWAP filter, macro gate (blocks LONG on risk-off), L2 wall gate.
+    Rollover: last 3 trading days of expiry month → time gate tightens to 14:00.
+    Sizing: full capital bucket, 1 lot minimum.
     Cooldown: 180s per symbol per direction.
-    Time gate: entries only 9:20–14:45 IST.
     """
     name    = "futures"
     product = "NRML"
@@ -1719,30 +1731,38 @@ class FuturesAgent(BaseAgent):
     MIN_SCORE = 4
     COOL_S    = 180
 
-    _orb_high:           dict = {}
-    _orb_low:            dict = {}
-    _orb_fired:          dict = {}
-    _prev_above_vwap:    dict = {}
-    _prev_macd_hist:     dict = {}
-    _prev_ltp:           dict = {}
-    _cool_ts:            dict = {}
-    _day_high:           dict = {}   # sym → float (rolling daily high for ATR_BREAK)
-    _day_low:            dict = {}   # sym → float
-    _prev_stochrsi_k_fut: dict = {}  # sym → float (StochRSI cross detection)
-    _prev_hma_dir_fut:   dict = {}   # sym → str (HMA direction)
-    _prev_ema_bull:      dict = {}   # sym → bool (EMA_TREND first-bar detection)
-    _prev_ema_bear:      dict = {}   # sym → bool (EMA_TREND first-bar detection)
-    _ema_bull_streak:    dict = {}   # sym → int (consecutive bull-aligned bars)
-    _ema_bear_streak:    dict = {}   # sym → int (consecutive bear-aligned bars)
+    _orb_high:              dict = {}
+    _orb_low:               dict = {}
+    _orb_fired:             dict = {}
+    _prev_above_vwap:       dict = {}
+    _prev_macd_hist:        dict = {}
+    _prev_ltp:              dict = {}
+    _cool_ts:               dict = {}
+    _day_high:              dict = {}   # sym → float (rolling daily high for ATR_BREAK)
+    _day_low:               dict = {}   # sym → float
+    _prev_stochrsi_k_fut:   dict = {}   # sym → float (StochRSI cross detection)
+    _prev_hma_dir_fut:      dict = {}   # sym → str (HMA direction)
+    _prev_ema_bull:         dict = {}   # sym → bool (EMA_TREND first-bar detection)
+    _prev_ema_bear:         dict = {}   # sym → bool (EMA_TREND first-bar detection)
+    _ema_bull_streak:       dict = {}   # sym → int (consecutive bull-aligned bars)
+    _ema_bear_streak:       dict = {}   # sym → int (consecutive bear-aligned bars)
+    _prev_above_vwap_u2:    dict = {}   # sym → bool (VWAP_BAND_BREAK upper cross)
+    _prev_below_vwap_l2:    dict = {}   # sym → bool (VWAP_BAND_BREAK lower cross)
+    _momentum_streak_up:    dict = {}   # sym → int (MOMENTUM_CATCH consecutive STRONG_UP)
+    _momentum_streak_dn:    dict = {}   # sym → int (MOMENTUM_CATCH consecutive STRONG_DOWN)
 
     def evaluate_tick(self, snap: MarketSnapshot) -> tuple[str, Optional[dict]]:
+        from macro_signals import macro_signals
         ind = snap.indicators
         sym = snap.symbol
         ltp = snap.tick.ltp
         now = now_ist()
         t   = now.time().replace(tzinfo=None)
 
-        if not (time(9, 20) <= t <= time(14, 45)):
+        # Rollover awareness: last 3 calendar days of expiry month → close early
+        _rollover = self._is_rollover_period()
+        cutoff = time(14, 0) if _rollover else time(14, 45)
+        if not (time(9, 20) <= t <= cutoff):
             return "HOLD", None
 
         self._update_orb(sym, snap, t)
@@ -1760,6 +1780,8 @@ class FuturesAgent(BaseAgent):
             self._pat_ichimoku_futures,
             self._pat_vol_surge,
             self._pat_multi_tf_align,
+            self._pat_vwap_band_break,
+            self._pat_momentum_catch,
         ]
         for pat_fn in patterns:
             try:
@@ -1768,7 +1790,7 @@ class FuturesAgent(BaseAgent):
                 continue
             if not side:
                 continue
-            total = base + self._ctx_bonus(side, ind)
+            total = base + self._ctx_bonus(side, ind, snap)
             if total > best_score:
                 best_score, best_side, best_pattern = total, side, pname
 
@@ -1787,6 +1809,23 @@ class FuturesAgent(BaseAgent):
                 self._update_state(sym, ind, ltp)
                 return "HOLD", None
 
+        # Macro gate: block LONG in risk-off environment, SHORT in strong risk-on
+        macro_score = macro_signals.get_macro_score()
+        if best_side == "LONG"  and macro_score < -0.5:
+            self._update_state(sym, ind, ltp)
+            return "HOLD", None
+        if best_side == "SHORT" and macro_score >  0.5:
+            self._update_state(sym, ind, ltp)
+            return "HOLD", None
+
+        # L2 order book wall gate: large sell wall above → no LONG; large buy wall below → no SHORT
+        if best_side == "LONG"  and ind.wall_above:
+            self._update_state(sym, ind, ltp)
+            return "HOLD", None
+        if best_side == "SHORT" and ind.wall_below:
+            self._update_state(sym, ind, ltp)
+            return "HOLD", None
+
         cools = self._cool_ts.setdefault(sym, {})
         last  = cools.get(best_side)
         if last and (now - last).total_seconds() < settings.cooldown_futures:
@@ -1795,7 +1834,8 @@ class FuturesAgent(BaseAgent):
         cools[best_side] = now
 
         lot_sz  = self.LOT_SIZES.get(sym, 1)
-        sl_pct  = settings.sl_pct_futures
+        # Tighten SL during rollover period (increased gamma / pinning risk)
+        sl_pct  = settings.sl_pct_futures * 0.7 if _rollover else settings.sl_pct_futures
         tgt_pct = settings.tgt_pct_futures
 
         fut_sym = self._futures_symbol(sym)
@@ -1929,14 +1969,40 @@ class FuturesAgent(BaseAgent):
             return "SHORT", 5, "ICHIMOKU_FUTURES"
         return "", 0, ""
 
-    def _ctx_bonus(self, side: str, ind: LiveIndicators) -> int:
+    def _ctx_bonus(self, side: str, ind: LiveIndicators, snap: MarketSnapshot) -> int:
+        from macro_signals import macro_signals
+        from alt_data import alt_data_engine
         b = 0
         is_long = (side == "LONG")
-        if ind.volume_ratio > 1.4:              b += 1
-        if is_long  and ind.macd_hist > 0:      b += 1
-        if not is_long and ind.macd_hist < 0:   b += 1
-        if is_long  and ind.trend == "UP":      b += 1
-        if not is_long and ind.trend == "DOWN": b += 1
+
+        # Core confirmations
+        if ind.volume_ratio > 1.4:                              b += 1
+        if is_long  and ind.macd_hist > 0:                      b += 1
+        if not is_long and ind.macd_hist < 0:                   b += 1
+        if is_long  and ind.trend == "UP":                      b += 1
+        if not is_long and ind.trend == "DOWN":                 b += 1
+
+        # ADX ≥ 25 = trending market (not sideways noise)
+        if ind.adx_14 >= 25:                                    b += 1
+
+        # Supertrend confirms direction
+        if is_long  and ind.supertrend_dir == "UP":             b += 1
+        if not is_long and ind.supertrend_dir == "DOWN":        b += 1
+
+        # L2 depth imbalance: heavy bid pressure (>0.62) for LONG, ask pressure (<0.38) for SHORT
+        if is_long  and ind.depth_imbalance > 0.62:             b += 1
+        if not is_long and ind.depth_imbalance < 0.38:          b += 1
+
+        # FII/DII institutional sentiment
+        fii = alt_data_engine.get_fii_sentiment()
+        if is_long  and fii >= 0.3:                             b += 1
+        if not is_long and fii <= -0.3:                         b += 1
+
+        # Macro cross-asset alignment (USD, crude, S&P, VIX)
+        macro = macro_signals.get_macro_score()
+        if is_long  and macro >= 0.2:                           b += 1
+        if not is_long and macro <= -0.2:                       b += 1
+
         return b
 
     def _update_orb(self, sym: str, snap: MarketSnapshot, t: time) -> None:
@@ -1982,6 +2048,59 @@ class FuturesAgent(BaseAgent):
             return "SHORT", 5, "MULTI_TF_ALIGN"
         return "", 0, ""
 
+    def _pat_vwap_band_break(self, sym, snap, ind, ltp, t):
+        """Price exits VWAP ±2σ band with volume: momentum breakout / breakdown."""
+        import bot_state
+        if not bot_state.is_pattern_enabled("futures", "VWAP_BAND_BREAK"):
+            return "", 0, ""
+        u2 = ind.vwap_upper2
+        l2 = ind.vwap_lower2
+        if not (u2 > 0 and l2 > 0):
+            return "", 0, ""
+        if ind.volume_ratio < 1.4:
+            return "", 0, ""
+        was_below_u2 = not self._prev_above_vwap_u2.get(sym, ltp > u2)
+        was_above_l2 = not self._prev_below_vwap_l2.get(sym, ltp < l2)
+        now_above_u2 = ltp > u2
+        now_below_l2 = ltp < l2
+        if was_below_u2 and now_above_u2 and ind.macd_hist > 0 and ind.ema9 > ind.ema21:
+            return "LONG",  4, "VWAP_BAND_BREAK"
+        if was_above_l2 and now_below_l2 and ind.macd_hist < 0 and ind.ema9 < ind.ema21:
+            return "SHORT", 4, "VWAP_BAND_BREAK"
+        return "", 0, ""
+
+    def _pat_momentum_catch(self, sym, snap, ind, ltp, t):
+        """Catch a strong running move: 3 consecutive STRONG momentum bars + ADX≥25."""
+        import bot_state
+        if not bot_state.is_pattern_enabled("futures", "MOMENTUM_CATCH"):
+            return "", 0, ""
+        streak_up = self._momentum_streak_up.get(sym, 0)
+        streak_dn = self._momentum_streak_dn.get(sym, 0)
+        if ind.adx_14 < 25:
+            return "", 0, ""
+        # Fire on exactly the 3rd bar of sustained strong momentum (not persistent)
+        if streak_up == 3 and ind.supertrend_dir == "UP" and ltp > ind.vwap > 0:
+            return "LONG",  4, "MOMENTUM_CATCH"
+        if streak_dn == 3 and ind.supertrend_dir == "DOWN" and ind.vwap > 0 and ltp < ind.vwap:
+            return "SHORT", 4, "MOMENTUM_CATCH"
+        return "", 0, ""
+
+    def _is_rollover_period(self) -> bool:
+        """True if today is within 3 calendar days BEFORE NSE monthly futures expiry (last Thursday)."""
+        from datetime import date, timedelta
+        today = date.today()
+        for month_offset in (0, 1):
+            y, m = today.year, today.month + month_offset
+            if m > 12:
+                y, m = y + 1, m - 12
+            last_day = date(y, m + 1, 1) - timedelta(days=1) if m < 12 else date(y + 1, 1, 1) - timedelta(days=1)
+            while last_day.weekday() != 3:
+                last_day -= timedelta(days=1)
+            days_to = (last_day - today).days
+            if 0 <= days_to <= 3:
+                return True
+        return False
+
     def _update_state(self, sym: str, ind: LiveIndicators, ltp: float) -> None:
         if ind.vwap and ind.vwap > 0:
             self._prev_above_vwap[sym] = ltp > ind.vwap
@@ -2003,6 +2122,20 @@ class FuturesAgent(BaseAgent):
             self._ema_bear_streak[sym] = self._ema_bear_streak.get(sym, 0) + 1
         else:
             self._ema_bear_streak[sym] = 0
+        # VWAP_BAND_BREAK cross-state
+        if ind.vwap_upper2 > 0:
+            self._prev_above_vwap_u2[sym] = ltp > ind.vwap_upper2
+        if ind.vwap_lower2 > 0:
+            self._prev_below_vwap_l2[sym] = ltp < ind.vwap_lower2
+        # MOMENTUM_CATCH streak counters
+        if ind.momentum == "STRONG_UP":
+            self._momentum_streak_up[sym] = self._momentum_streak_up.get(sym, 0) + 1
+        else:
+            self._momentum_streak_up[sym] = 0
+        if ind.momentum == "STRONG_DOWN":
+            self._momentum_streak_dn[sym] = self._momentum_streak_dn.get(sym, 0) + 1
+        else:
+            self._momentum_streak_dn[sym] = 0
 
     def _futures_symbol(self, underlying: str) -> str:
         from datetime import date, timedelta
