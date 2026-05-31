@@ -303,13 +303,23 @@ async def assess(snap, action: str, signal: dict, strategy: str) -> GateDecision
         d   = json.loads(raw)
         latency = int((asyncio.get_event_loop().time() - t0) * 1000)
 
+        conf   = int(d.get("confidence", 60))
+        enter  = bool(d.get("enter", True))
+        reason = d.get("reason", "")
+
+        # Hard threshold: if Opus approved but confidence is below the bar, downgrade to skip.
+        # This lets master_agent_v5 tighten/loosen the bar per regime without code changes.
+        if enter and conf < settings.claude_gate_threshold:
+            enter  = False
+            reason = f"conf {conf} < threshold {settings.claude_gate_threshold} — {reason}"
+
         decision = GateDecision(
-            confidence=int(d.get("confidence", 60)),
-            enter=bool(d.get("enter", True)),
+            confidence=conf,
+            enter=enter,
             adjusted_sl_pct=d.get("adjusted_sl_pct"),
             adjusted_target_pct=d.get("adjusted_target_pct"),
             size_factor=float(d.get("size_factor", 1.0)),
-            reason=d.get("reason", ""),
+            reason=reason,
             warnings=d.get("warnings", []),
             latency_ms=latency,
         )
