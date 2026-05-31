@@ -10,10 +10,11 @@ Tables:
 """
 from __future__ import annotations
 
+import math
 import sqlite3
 import json
 from pathlib import Path
-from datetime import date
+from datetime import date, datetime
 from typing import Optional
 
 DB_PATH = Path("logs/algotrader.db")
@@ -216,4 +217,130 @@ def get_trade_stats(
         "gross_pnl":  round(sum(r.get("gross_pnl", 0) for r in rows), 2),
         "total_cost": round(sum(r.get("cost",       0) for r in rows), 2),
         "win_rate":   round(len(wins) / len(rows) * 100, 1),
+    }
+
+
+def get_performance_report(
+    start_date: Optional[str] = None,
+    end_date:   Optional[str] = None,
+    strategy:   Optional[str] = None,
+) -> dict:
+    """
+    Full performance report: cumulative P&L, max drawdown, Sharpe, Calmar,
+    monthly breakdown, per-strategy split.
+
+    start_date / end_date: "YYYY-MM-DD" strings (inclusive). Defaults to all trades.
+    """
+    with _conn() as c:
+        q      = "SELECT * FROM trades WHERE 1=1"
+        params: list = []
+        if start_date:
+            q += " AND trade_date >= ?"
+            params.append(start_date)
+        if end_date:
+            q += " AND trade_date <= ?"
+            params.append(end_date)
+        if strategy:
+            q += " AND strategy = ?"
+            params.append(strategy)
+        q += " ORDER BY trade_date ASC, id ASC"
+        rows = [dict(r) for r in c.execute(q, params)]
+
+    if not rows:
+        return {
+            "total_trades": 0, "win_rate": 0.0,
+            "total_net_pnl": 0.0, "total_gross_pnl": 0.0, "total_costs": 0.0,
+            "max_drawdown_pct": 0.0, "sharpe_ratio": None,
+            "calmar_ratio": None, "monthly_breakdown": [], "by_strategy": {},
+            "report_generated_at": datetime.now().isoformat(),
+        }
+
+    wins      = [r for r in rows if r.get("net_pnl", 0) > 0]
+    net_pnls  = [r.get("net_pnl", 0.0) for r in rows]
+    total_net = sum(net_pnls)
+
+    # Daily P&L series for Sharpe / drawdown
+    daily: dict[str, float] = {}
+    for r in rows:
+        d = r.get("trade_date", "")
+        daily[d] = daily.get(d, 0.0) + r.get("net_pnl", 0.0)
+    daily_vals = list(daily.values())
+
+    # Max drawdown from cumulative equity curve
+    equity, peak, max_dd = 0.0, 0.0, 0.0
+    for pnl in daily_vals:
+        equity += pnl
+        if equity > peak:
+            peak = equity
+        dd = (peak - equity) / peak * 100 if peak > 0 else 0.0
+        if dd > max_dd:
+            max_dd = dd
+    max_dd = round(max_dd, 2)
+
+    # Annualised Sharpe ratio (252 trading days)
+    sharpe = None
+    if len(daily_vals) >= 5:
+        n    = len(daily_vals)
+        mean = sum(daily_vals) / n
+        var  = sum((x - mean) ** 2 for x in daily_vals) / n
+        std  = math.sqrt(var)
+        if std > 0:
+            sharpe = round((mean / std) * math.sqrt(252), 2)
+
+    # Calmar ratio = annualised return / max drawdown
+    calmar = None
+    if max_dd > 0 and len(daily_vals) >= 1:
+        trading_days = len(daily_vals)
+        ann_return   = total_net * (252 / trading_days)
+        calmar       = round(ann_return / max_dd, 2)
+
+    # Monthly breakdown
+    monthly: dict[str, dict] = {}
+    for r in rows:
+        td  = r.get("trade_date", "")[:7]  # "YYYY-MM"
+        m   = monthly.setdefault(td, {"month": td, "trades": 0, "net_pnl": 0.0, "wins": 0})
+        m["trades"]  += 1
+        m["net_pnl"] += r.get("net_pnl", 0.0)
+        if r.get("net_pnl", 0) > 0:
+            m["wins"] += 1
+    monthly_breakdown = []
+    for m in sorted(monthly.values(), key=lambda x: x["month"]):
+        t = m["trades"]
+        monthly_breakdown.append({
+            "month":    m["month"],
+            "trades":   t,
+            "net_pnl":  round(m["net_pnl"], 2),
+            "win_rate": round(m["wins"] / t * 100, 1) if t else 0.0,
+        })
+
+    # Per-strategy summary
+    by_strat: dict[str, dict] = {}
+    for r in rows:
+        s  = r.get("strategy", "unknown")
+        st = by_strat.setdefault(s, {"trades": 0, "net_pnl": 0.0, "wins": 0})
+        st["trades"]  += 1
+        st["net_pnl"] += r.get("net_pnl", 0.0)
+        if r.get("net_pnl", 0) > 0:
+            st["wins"] += 1
+    by_strategy = {
+        s: {
+            "trades":   v["trades"],
+            "net_pnl":  round(v["net_pnl"], 2),
+            "win_rate": round(v["wins"] / v["trades"] * 100, 1) if v["trades"] else 0.0,
+        }
+        for s, v in by_strat.items()
+    }
+
+    return {
+        "total_trades":    len(rows),
+        "win_rate":        round(len(wins) / len(rows) * 100, 1),
+        "total_net_pnl":   round(total_net, 2),
+        "total_gross_pnl": round(sum(r.get("gross_pnl", 0) for r in rows), 2),
+        "total_costs":     round(sum(r.get("cost", 0) for r in rows), 2),
+        "max_drawdown_pct": max_dd,
+        "sharpe_ratio":    sharpe,
+        "calmar_ratio":    calmar,
+        "monthly_breakdown": monthly_breakdown,
+        "by_strategy":    by_strategy,
+        "report_generated_at": datetime.now().isoformat(),
     }

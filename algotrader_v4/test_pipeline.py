@@ -890,8 +890,8 @@ def _make_snap(symbol="RELIANCE", ltp=2800.0, rsi=52.0, trend="UP",
                           candles_1min=candles, candles_5min=candles[:6])
 
 def t_agents_4():
-    assert len(ALL_AGENTS) == 5
-    assert set(ALL_AGENTS.keys()) == {"intraday","options","futures","swing","scalping"}
+    assert len(ALL_AGENTS) == 7
+    assert set(ALL_AGENTS.keys()) == {"intraday","options","futures","swing","scalping","mean_reversion","momentum"}
 
 def t_intraday_returns_action():
     agent = IntradayAgent()
@@ -1088,7 +1088,7 @@ def t_intraday_buy_has_target():
     if action == "BUY" and sig:
         assert "target" in sig or "stop_loss" in sig
 
-run("ALL_AGENTS has 5 strategy agents",          t_agents_4)
+run("ALL_AGENTS has 7 strategy agents",          t_agents_4)
 run("IntradayAgent.evaluate_tick returns valid", t_intraday_returns_action)
 run("IntradayAgent → BUY on bullish setup",      t_intraday_buy_signal)
 run("IntradayAgent → HOLD on RSI overbought",    t_intraday_hold_overbought)

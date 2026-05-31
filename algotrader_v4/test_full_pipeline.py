@@ -242,6 +242,12 @@ async def stage_agents():
                     if hits:
                         entry = hits[0]
                         break
+                # Give _try_enter() time to complete post-gather work (TSL register)
+                # before stopping the agent. With parallel asyncio.gather(), both
+                # orders appear in _paper_orders before the coroutine resumes to run
+                # the post-gather synchronous code (sebi, order_guard, TSL register).
+                # A short yield lets the event loop schedule that completion.
+                await asyncio.sleep(0.15)
         finally:
             agent.stop()
 

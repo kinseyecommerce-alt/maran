@@ -1719,6 +1719,33 @@
           </div>
         </div>
 
+        <!-- ── Performance Report ─────────────────────────────── -->
+        <div class="card" style="margin-top:16px">
+          <div class="card-title"><i data-lucide="bar-chart-2"></i> Track Record &amp; Performance Report</div>
+          <div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:12px;align-items:center">
+            <input id="pr-start" type="date" placeholder="Start date" style="border:1px solid var(--border);background:var(--bg2);color:var(--fg1);border-radius:6px;padding:4px 8px;font-size:13px">
+            <input id="pr-end" type="date" placeholder="End date" style="border:1px solid var(--border);background:var(--bg2);color:var(--fg1);border-radius:6px;padding:4px 8px;font-size:13px">
+            <select id="pr-strategy" style="border:1px solid var(--border);background:var(--bg2);color:var(--fg1);border-radius:6px;padding:4px 8px;font-size:13px">
+              <option value="">All strategies</option>
+              <option value="intraday">Intraday</option>
+              <option value="scalping">Scalping</option>
+              <option value="swing">Swing</option>
+              <option value="options">Options</option>
+              <option value="futures">Futures</option>
+              <option value="mean_reversion">Mean Reversion</option>
+              <option value="momentum">Momentum</option>
+            </select>
+            <button class="btn" onclick="loadPerformanceReport()">Generate Report</button>
+            <button class="btn btn-secondary" onclick="downloadPerformanceReport()">Download JSON</button>
+          </div>
+          <!-- Summary chips -->
+          <div id="pr-chips" style="display:flex;gap:12px;flex-wrap:wrap;margin-bottom:16px"></div>
+          <!-- Monthly breakdown table -->
+          <div id="pr-monthly" style="overflow-x:auto"></div>
+          <!-- Per-strategy table -->
+          <div id="pr-strat" style="overflow-x:auto;margin-top:12px"></div>
+        </div>
+
       </div><!-- /tab-analytics -->
 
 
@@ -4584,6 +4611,105 @@ async function exportTrades() {
   document.body.appendChild(a);
   a.click();
   document.body.removeChild(a);
+}
+
+// ── Performance Report ────────────────────────────────────────────────────────
+let _prData = null;
+
+async function loadPerformanceReport() {
+  const start  = document.getElementById('pr-start').value;
+  const end    = document.getElementById('pr-end').value;
+  const strat  = document.getElementById('pr-strategy').value;
+  let url = '/portfolio/performance-report?';
+  if (start) url += `start_date=${start}&`;
+  if (end)   url += `end_date=${end}&`;
+  if (strat) url += `strategy=${strat}`;
+  try {
+    const r = await fetch(url, { headers: { 'X-API-Key': _apiKey } });
+    _prData = await r.json();
+    _renderPerformanceReport(_prData);
+  } catch(e) {
+    document.getElementById('pr-chips').innerHTML = `<span style="color:var(--red)">Failed to load report: ${e}</span>`;
+  }
+}
+
+function _renderPerformanceReport(d) {
+  const fmt = v => v == null ? '—' : v;
+  const pnlColor = v => v > 0 ? 'var(--green)' : v < 0 ? 'var(--red)' : 'var(--fg2)';
+  const chips = [
+    { label: 'Total Trades', val: d.total_trades },
+    { label: 'Win Rate', val: d.win_rate != null ? d.win_rate + '%' : '—' },
+    { label: 'Net P&L', val: d.total_net_pnl != null ? '₹' + d.total_net_pnl.toLocaleString('en-IN') : '—', color: pnlColor(d.total_net_pnl) },
+    { label: 'Gross P&L', val: d.total_gross_pnl != null ? '₹' + d.total_gross_pnl.toLocaleString('en-IN') : '—' },
+    { label: 'Total Costs', val: d.total_costs != null ? '₹' + d.total_costs.toLocaleString('en-IN') : '—', color: 'var(--red)' },
+    { label: 'Max Drawdown', val: d.max_drawdown_pct != null ? d.max_drawdown_pct + '%' : '—', color: d.max_drawdown_pct > 0 ? 'var(--red)' : 'var(--fg2)' },
+    { label: 'Sharpe Ratio', val: fmt(d.sharpe_ratio), color: d.sharpe_ratio > 1 ? 'var(--green)' : 'var(--amber)' },
+    { label: 'Calmar Ratio', val: fmt(d.calmar_ratio) },
+  ];
+  document.getElementById('pr-chips').innerHTML = chips.map(c =>
+    `<div style="background:var(--bg2);border:1px solid var(--border);border-radius:8px;padding:10px 16px;min-width:120px;text-align:center">
+      <div style="font-size:11px;color:var(--fg3);margin-bottom:4px">${c.label}</div>
+      <div style="font-size:18px;font-weight:600;color:${c.color || 'var(--fg1)'};">${c.val}</div>
+    </div>`
+  ).join('');
+
+  // Monthly breakdown
+  const mb = d.monthly_breakdown || [];
+  if (mb.length) {
+    document.getElementById('pr-monthly').innerHTML =
+      `<div style="font-size:12px;font-weight:600;color:var(--fg2);margin-bottom:6px">Monthly Breakdown</div>
+      <table style="width:100%;border-collapse:collapse;font-size:13px">
+        <thead><tr style="color:var(--fg3);border-bottom:1px solid var(--border)">
+          <th style="text-align:left;padding:4px 8px">Month</th>
+          <th style="text-align:right;padding:4px 8px">Trades</th>
+          <th style="text-align:right;padding:4px 8px">Net P&L</th>
+          <th style="text-align:right;padding:4px 8px">Win Rate</th>
+        </tr></thead>
+        <tbody>${mb.map(m =>
+          `<tr style="border-bottom:1px solid var(--border2)">
+            <td style="padding:4px 8px">${m.month}</td>
+            <td style="padding:4px 8px;text-align:right">${m.trades}</td>
+            <td style="padding:4px 8px;text-align:right;color:${pnlColor(m.net_pnl)}">₹${m.net_pnl.toLocaleString('en-IN')}</td>
+            <td style="padding:4px 8px;text-align:right">${m.win_rate}%</td>
+          </tr>`).join('')}
+        </tbody>
+      </table>`;
+  } else {
+    document.getElementById('pr-monthly').innerHTML = '<div style="color:var(--fg3);font-size:13px">No monthly data</div>';
+  }
+
+  // Per-strategy
+  const bs = d.by_strategy || {};
+  const strats = Object.keys(bs);
+  if (strats.length) {
+    document.getElementById('pr-strat').innerHTML =
+      `<div style="font-size:12px;font-weight:600;color:var(--fg2);margin-bottom:6px">By Strategy</div>
+      <table style="width:100%;border-collapse:collapse;font-size:13px">
+        <thead><tr style="color:var(--fg3);border-bottom:1px solid var(--border)">
+          <th style="text-align:left;padding:4px 8px">Strategy</th>
+          <th style="text-align:right;padding:4px 8px">Trades</th>
+          <th style="text-align:right;padding:4px 8px">Net P&L</th>
+          <th style="text-align:right;padding:4px 8px">Win Rate</th>
+        </tr></thead>
+        <tbody>${strats.map(s =>
+          `<tr style="border-bottom:1px solid var(--border2)">
+            <td style="padding:4px 8px;text-transform:capitalize">${s}</td>
+            <td style="padding:4px 8px;text-align:right">${bs[s].trades}</td>
+            <td style="padding:4px 8px;text-align:right;color:${pnlColor(bs[s].net_pnl)}">₹${bs[s].net_pnl.toLocaleString('en-IN')}</td>
+            <td style="padding:4px 8px;text-align:right">${bs[s].win_rate}%</td>
+          </tr>`).join('')}
+        </tbody>
+      </table>`;
+  }
+}
+
+function downloadPerformanceReport() {
+  if (!_prData) { loadPerformanceReport().then(downloadPerformanceReport); return; }
+  const blob = new Blob([JSON.stringify(_prData, null, 2)], { type: 'application/json' });
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(blob);
+  a.download = `performance_report_${new Date().toISOString().slice(0,10)}.json`;
+  a.click();
 }
 
 // ── Rolling Sharpe Cards ──────────────────────────────────────────────────────

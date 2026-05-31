@@ -443,9 +443,11 @@ class BaseAgent(ABC):
         if size_factor < 1.0:
             qty = max(1, int(qty * size_factor))
 
-        # Sector limit check (Phase 3)
+        # Sector limit check — run in executor so it doesn't block the event loop
+        loop = asyncio.get_event_loop()
+        _pos_data = await loop.run_in_executor(None, kite_client.positions)
         _open_syms_for_sector = [
-            p["tradingsymbol"] for p in kite_client.positions().get("net", [])
+            p["tradingsymbol"] for p in _pos_data.get("net", [])
             if p.get("quantity", 0) != 0
         ]
         sector_ok, sector_reason = risk_manager.check_sector_limit(sym, _open_syms_for_sector)
@@ -476,12 +478,38 @@ class BaseAgent(ABC):
             logger.warning("[{}] SEBI blocked {} {}: {}", self.name, action, sym, sebi_reason)
             return
 
-        order_id = kite_client.place_order(
-            tradingsymbol=sym, exchange=exch,
-            transaction_type=action, quantity=qty,
-            order_type="MARKET", product=signal.get("product", self.product),
-            tag=f"Agent-{self.name}",
-        )
+        import time as _time
+        sl       = signal.get("stop_loss", risk_manager.sl_price(ltp, action))
+        product  = signal.get("product", self.product)
+        sl_side  = "SELL" if action == "BUY" else "BUY"
+        _t0 = _time.monotonic()
+
+        # Place entry + SL-M concurrently in thread executor — releases event loop
+        # during both blocking HTTP calls and halves wall-clock placement time.
+        # SL-M is independent of fill; if entry fails the exception cancels both.
+        try:
+            order_id, sl_order_id = await asyncio.gather(
+                loop.run_in_executor(None, lambda: kite_client.place_order(
+                    tradingsymbol=sym, exchange=exch,
+                    transaction_type=action, quantity=qty,
+                    order_type="MARKET", product=product,
+                    tag=f"Agent-{self.name}",
+                )),
+                loop.run_in_executor(None, lambda: kite_client.place_order(
+                    tradingsymbol=sym, exchange=exch,
+                    transaction_type=sl_side,
+                    quantity=qty, order_type="SL-M",
+                    product=product,
+                    trigger_price=sl, tag=f"Agent-{self.name}-SL",
+                )),
+            )
+        except Exception as exc:
+            logger.warning("[{}] parallel order placement failed: {}", self.name, exc)
+            return
+
+        _latency_ms = (_time.monotonic() - _t0) * 1000
+        logger.info("[{}] order latency: {:.0f}ms | entry={} sl={}", self.name, _latency_ms, order_id, sl_order_id)
+
         sebi_compliance.record_order_id(self.name, sym, order_id)
         order_guard.register_order(sym, self.name, action, order_id)
         risk_manager.position_opened()
@@ -516,15 +544,13 @@ class BaseAgent(ABC):
             sl=signal.get("stop_loss", 0.0),
             target=signal.get("target", 0.0),
             order_id=str(order_id),
-            detail=f"product={signal.get('product', self.product)} size_factor={size_factor}",
+            detail=f"product={product} size_factor={size_factor} latency={_latency_ms:.0f}ms",
         )
-
 
         # Wire TSL callbacks (idempotent — only installs module-level fallbacks once)
         _setup_tsl_callbacks()
 
         # Register with trailing SL engine (monitors every tick)
-        # Pass per-position callbacks so they don't conflict with atomic_bracket's
         trailing_sl_engine.register(
             symbol=sym, strategy=self.name, side=action,
             entry_price=ltp, quantity=qty, order_id=order_id,
@@ -532,16 +558,6 @@ class BaseAgent(ABC):
             on_sl_hit=trailing_sl_engine.on_sl_hit,
             on_target_hit=trailing_sl_engine.on_target_hit,
             on_sl_moved=trailing_sl_engine.on_sl_moved,
-        )
-
-        sl = signal.get("stop_loss", risk_manager.sl_price(ltp, action))
-        product = signal.get("product", self.product)
-        sl_order_id = kite_client.place_order(
-            tradingsymbol=sym, exchange=exch,
-            transaction_type="SELL" if action == "BUY" else "BUY",
-            quantity=qty, order_type="SL-M",
-            product=product,
-            trigger_price=sl, tag=f"Agent-{self.name}-SL",
         )
 
         # Register SL-M order so TSL callbacks can modify/cancel it

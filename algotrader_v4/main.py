@@ -1553,6 +1553,25 @@ def portfolio_stats(days: int = Query(default=7, ge=1, le=90),
     return stats
 
 
+@app.get("/portfolio/performance-report", tags=["Portfolio"])
+def portfolio_performance_report(
+    start_date: str = Query(default="", description="YYYY-MM-DD (inclusive)"),
+    end_date:   str = Query(default="", description="YYYY-MM-DD (inclusive)"),
+    strategy:   str = Query(default="", description="Filter by strategy name"),
+):
+    """
+    Full performance report: cumulative P&L, max drawdown, Sharpe ratio,
+    Calmar ratio, monthly breakdown, per-strategy split.
+    All trades in the DB are included by default; filter with start_date/end_date/strategy.
+    """
+    from state_store import get_performance_report
+    return get_performance_report(
+        start_date=start_date or None,
+        end_date=end_date   or None,
+        strategy=strategy   or None,
+    )
+
+
 @app.get("/options/chain/{symbol}", tags=["Options"])
 async def options_chain(symbol: str, expiry_offset_days: int = Query(default=0)):
     """
