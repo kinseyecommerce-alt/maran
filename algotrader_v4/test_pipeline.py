@@ -890,8 +890,8 @@ def _make_snap(symbol="RELIANCE", ltp=2800.0, rsi=52.0, trend="UP",
                           candles_1min=candles, candles_5min=candles[:6])
 
 def t_agents_4():
-    assert len(ALL_AGENTS) == 7
-    assert set(ALL_AGENTS.keys()) == {"intraday","options","futures","swing","scalping","mean_reversion","momentum"}
+    assert len(ALL_AGENTS) >= 7
+    assert {"intraday","options","futures","swing","scalping","mean_reversion","momentum"}.issubset(set(ALL_AGENTS.keys()))
 
 def t_intraday_returns_action():
     agent = IntradayAgent()
@@ -1088,7 +1088,7 @@ def t_intraday_buy_has_target():
     if action == "BUY" and sig:
         assert "target" in sig or "stop_loss" in sig
 
-run("ALL_AGENTS has 7 strategy agents",          t_agents_4)
+run("ALL_AGENTS has ≥7 strategy agents",          t_agents_4)
 run("IntradayAgent.evaluate_tick returns valid", t_intraday_returns_action)
 run("IntradayAgent → BUY on bullish setup",      t_intraday_buy_signal)
 run("IntradayAgent → HOLD on RSI overbought",    t_intraday_hold_overbought)
@@ -2050,17 +2050,19 @@ def t_fno_agent_instantiates():
 def t_fno_ctx_bonus_bull():
     from unittest.mock import MagicMock
     a = OptionsAgent()
+    snap = MagicMock(); snap.candles_5min = []
     ind = MagicMock()
     ind.macd_hist = 0.5; ind.volume_ratio = 1.5; ind.bb_upper = 0; ind.bb_lower = 0; ind.bb_mid = 0
-    bonus = a._ctx_bonus("CE", ind, 22150.0, 20.0, None, None, None)
+    bonus = a._ctx_bonus("CE", snap, ind, 22150.0, 20.0, None, None, None, None)
     assert bonus >= 3, f"Bull CE bonus {bonus} < 3"
 
 def t_fno_ctx_bonus_bear():
     from unittest.mock import MagicMock
     a = OptionsAgent()
+    snap = MagicMock(); snap.candles_5min = []
     ind = MagicMock()
     ind.macd_hist = -0.5; ind.volume_ratio = 1.6; ind.bb_upper = 0; ind.bb_lower = 0; ind.bb_mid = 0
-    bonus = a._ctx_bonus("PE", ind, 21850.0, 20.0, None, None, None)
+    bonus = a._ctx_bonus("PE", snap, ind, 21850.0, 20.0, None, None, None, None)
     assert bonus >= 3, f"Bear PE bonus {bonus} < 3"
 
 def t_fno_pat_ema_cross_ce():

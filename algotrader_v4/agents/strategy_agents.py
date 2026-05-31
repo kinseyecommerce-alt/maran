@@ -838,9 +838,10 @@ class OptionsAgent(BaseAgent):
         is_call = (opt_type == "CE")
 
         # IV rank (0-2)
-        if   iv_rank <= 28: b += 2
-        elif iv_rank <= 55: b += 1
-        elif iv_rank >  65: b -= 1
+        if iv_rank is not None:
+            if   iv_rank <= 28: b += 2
+            elif iv_rank <= 55: b += 1
+            elif iv_rank >  65: b -= 1
 
         # Flow (0-1)
         if flow:
