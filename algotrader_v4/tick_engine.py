@@ -54,6 +54,8 @@ class Tick:
     low:       float
     open:      float
     timestamp: datetime
+    bid_depth: list = field(default_factory=list)  # [(price, qty), ...] top 5 bids
+    ask_depth: list = field(default_factory=list)  # [(price, qty), ...] top 5 asks
 
     @classmethod
     def from_quote(cls, q: Quote) -> "Tick":
@@ -61,6 +63,8 @@ class Tick:
             symbol=q.symbol, ltp=q.ltp, bid=q.bid, ask=q.ask,
             volume=q.volume, change=q.change, change_pct=q.change_pct,
             high=q.high, low=q.low, open=q.open, timestamp=q.ts,
+            bid_depth=getattr(q, "bid_depth", []),
+            ask_depth=getattr(q, "ask_depth", []),
         )
 
 
@@ -77,6 +81,9 @@ class LiveIndicators:
     bid:         float = 0.0
     ask:         float = 0.0
     spread:      float = 0.0
+    wall_above:       bool  = False   # large sell wall within 0.5% above LTP
+    wall_below:       bool  = False   # large buy wall within 0.5% below LTP
+    depth_imbalance:  float = 0.5     # bid_qty/(bid_qty+ask_qty), >0.6=buy pressure
     # EMA
     ema9:        float = 0.0
     ema21:       float = 0.0
@@ -316,9 +323,15 @@ class IndicatorCalc:
 
     @staticmethod
     def compute(sym: str, tick: Tick, df: pd.DataFrame) -> LiveIndicators:
+        wall_above, wall_below, depth_imbalance = _detect_walls(
+            tick.ltp, tick.bid_depth, tick.ask_depth,
+        )
         ind = LiveIndicators(
             symbol=sym, ltp=tick.ltp, bid=tick.bid, ask=tick.ask,
             spread=round(tick.ask - tick.bid, 2),
+            wall_above=wall_above,
+            wall_below=wall_below,
+            depth_imbalance=depth_imbalance,
             day_high=tick.high, day_low=tick.low,
             day_open=tick.open, change_pct=tick.change_pct,
             computed_at=time.time(),
@@ -432,9 +445,11 @@ class IndicatorCalc:
 def _kite_quote_to_quote(symbol: str, data: dict) -> Quote:
     ohlc  = data.get("ohlc", {})
     depth = data.get("depth", {})
-    buys  = depth.get("buy",  [{}])
-    sells = depth.get("sell", [{}])
+    buys  = depth.get("buy",  [])
+    sells = depth.get("sell", [])
     ltp   = data.get("last_price", 0.0)
+    bid_depth = [(b.get("price", 0.0), b.get("quantity", 0)) for b in buys[:5]]
+    ask_depth = [(s.get("price", 0.0), s.get("quantity", 0)) for s in sells[:5]]
     return Quote(
         symbol    = symbol,
         ltp       = ltp,
@@ -447,7 +462,34 @@ def _kite_quote_to_quote(symbol: str, data: dict) -> Quote:
         volume    = data.get("volume_traded", 0),
         bid       = buys[0].get("price",  ltp) if buys  else ltp,
         ask       = sells[0].get("price", ltp) if sells else ltp,
+        bid_depth = bid_depth,
+        ask_depth = ask_depth,
     )
+
+
+def _detect_walls(ltp: float, bid_depth: list, ask_depth: list) -> tuple[bool, bool, float]:
+    """Return (wall_above, wall_below, depth_imbalance)."""
+    if not bid_depth and not ask_depth:
+        return False, False, 0.5
+
+    bid_total = sum(q for _, q in bid_depth)
+    ask_total = sum(q for _, q in ask_depth)
+    total = bid_total + ask_total
+    imbalance = bid_total / total if total > 0 else 0.5
+
+    threshold = ltp * 0.005  # 0.5% of price
+    avg_ask_qty = ask_total / len(ask_depth) if ask_depth else 0
+    avg_bid_qty = bid_total / len(bid_depth) if bid_depth else 0
+
+    wall_above = any(
+        0 < price - ltp < threshold and qty > avg_ask_qty * 3
+        for price, qty in ask_depth
+    )
+    wall_below = any(
+        0 < ltp - price < threshold and qty > avg_bid_qty * 3
+        for price, qty in bid_depth
+    )
+    return wall_above, wall_below, round(imbalance, 3)
 
 
 # ── Tick Engine ───────────────────────────────────────────────────────────────

@@ -1265,7 +1265,7 @@ class ScalpingAgent(BaseAgent):
             return "HOLD", None
 
         # ── Level proximity guard ─────────────────────────────────────────────
-        if not self._level_ok(sym, ltp, action):
+        if not self._level_ok(sym, ltp, action, ind):
             return "HOLD", None
 
         # ── Adaptive size from score ──────────────────────────────────────────
@@ -1516,27 +1516,36 @@ class ScalpingAgent(BaseAgent):
 
     # ── Level proximity guard ─────────────────────────────────────────────────
 
-    def _level_ok(self, sym: str, ltp: float, side: str) -> bool:
+    def _level_ok(self, sym: str, ltp: float, side: str, ind: "LiveIndicators | None" = None) -> bool:
         try:
             from levels_engine import get_levels
             lvls = get_levels(sym)
             if not lvls:
-                return True
-            threshold = ltp * 0.0015
-            keys_r = ("r1", "r2", "pdh", "weekly_high", "vwap_upper_1")
-            keys_s = ("s1", "s2", "pdl", "weekly_low",  "vwap_lower_1")
-            if side == "BUY":
-                for k in keys_r:
-                    v = lvls.get(k)
-                    if v and 0 < v - ltp < threshold:
-                        return False
+                pass
             else:
-                for k in keys_s:
-                    v = lvls.get(k)
-                    if v and 0 < ltp - v < threshold:
-                        return False
+                threshold = ltp * 0.0015
+                keys_r = ("r1", "r2", "pdh", "weekly_high", "vwap_upper_1")
+                keys_s = ("s1", "s2", "pdl", "weekly_low",  "vwap_lower_1")
+                if side == "BUY":
+                    for k in keys_r:
+                        v = lvls.get(k)
+                        if v and 0 < v - ltp < threshold:
+                            return False
+                else:
+                    for k in keys_s:
+                        v = lvls.get(k)
+                        if v and 0 < ltp - v < threshold:
+                            return False
         except Exception:
             pass
+
+        # Level 2 wall guard — block entry if institutional wall in the way
+        if ind is not None:
+            if side == "BUY" and ind.wall_above:
+                return False
+            if side == "SELL" and ind.wall_below:
+                return False
+
         return True
 
     # ── Loss-streak tracking ──────────────────────────────────────────────────

@@ -416,6 +416,8 @@ class BaseAgent(ABC):
     # ── Entry ───────────────────────────────────────────────────────────
 
     async def _try_enter(self, snap: MarketSnapshot, action: str, signal: dict) -> None:
+        import time as _time
+        _t0  = _time.monotonic()
         sym  = snap.symbol
         ltp  = snap.tick.ltp
         exch = signal.get("exchange", "NSE")
@@ -445,7 +447,7 @@ class BaseAgent(ABC):
 
         # Sector limit check — run in executor so it doesn't block the event loop
         loop = asyncio.get_event_loop()
-        _pos_data = await loop.run_in_executor(None, kite_client.positions)
+        _pos_data = await loop.run_in_executor(None, kite_client.positions_cached)
         _open_syms_for_sector = [
             p["tradingsymbol"] for p in _pos_data.get("net", [])
             if p.get("quantity", 0) != 0
@@ -478,6 +480,17 @@ class BaseAgent(ABC):
             logger.warning("[{}] SEBI blocked {} {}: {}", self.name, action, sym, sebi_reason)
             return
 
+        # Macro filter: skip BUY entries during strong global macro headwinds
+        if action == "BUY":
+            try:
+                from macro_signals import macro_signals
+                macro_score = macro_signals.get_macro_score()
+                if macro_score < -0.5:
+                    logger.info("[{}] {} BUY skipped — macro headwind: {:.2f}", self.name, sym, macro_score)
+                    return
+            except Exception:
+                pass
+
         # Alt-data catalyst filter: skip on major negative events, boost qty on positive
         try:
             from alt_data import alt_data_engine
@@ -491,11 +504,10 @@ class BaseAgent(ABC):
         except Exception:
             pass
 
-        import time as _time
         sl       = signal.get("stop_loss", risk_manager.sl_price(ltp, action))
         product  = signal.get("product", self.product)
         sl_side  = "SELL" if action == "BUY" else "BUY"
-        _t0 = _time.monotonic()
+        _order_t0 = _time.monotonic()
 
         # Place entry + SL-M concurrently in thread executor — releases event loop
         # during both blocking HTTP calls and halves wall-clock placement time.
@@ -520,8 +532,9 @@ class BaseAgent(ABC):
             logger.warning("[{}] parallel order placement failed: {}", self.name, exc)
             return
 
-        _latency_ms = (_time.monotonic() - _t0) * 1000
+        _latency_ms = (_time.monotonic() - _order_t0) * 1000
         logger.info("[{}] order latency: {:.0f}ms | entry={} sl={}", self.name, _latency_ms, order_id, sl_order_id)
+        logger.debug("[{}] _try_enter total: {:.0f}ms", self.name, (_time.monotonic() - _t0) * 1000)
 
         sebi_compliance.record_order_id(self.name, sym, order_id)
         order_guard.register_order(sym, self.name, action, order_id)

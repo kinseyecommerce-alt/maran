@@ -132,6 +132,9 @@ class KiteClient:
         self._paper_orders:    list[dict] = []
         self._paper_positions: list[dict] = []
         self._instruments_cache: dict[str, list[dict]] = {}
+        self._pos_cache: dict = {}
+        self._pos_cache_ts: float = 0.0
+        self._pos_cache_ttl: float = 2.0   # 2-second TTL — fast enough for sector check
 
     # ── Auth ───────────────────────────────────────────────────────────────
 
@@ -254,6 +257,17 @@ class KiteClient:
         if settings.trading_mode == "PAPER":
             return {"net": self._paper_positions, "day": self._paper_positions}
         return _with_retry(self.kite.positions, label="positions")
+
+    def positions_cached(self) -> dict:
+        """Return cached positions (TTL=2s) to avoid per-trade REST round-trips."""
+        import time as _time
+        now = _time.monotonic()
+        if now - self._pos_cache_ts < self._pos_cache_ttl and self._pos_cache:
+            return self._pos_cache
+        result = self.positions()
+        self._pos_cache = result
+        self._pos_cache_ts = now
+        return result
 
     def holdings(self) -> list[dict]:
         if settings.trading_mode == "PAPER":

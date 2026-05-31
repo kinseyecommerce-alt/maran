@@ -3023,6 +3023,58 @@ run("alt_data: get_fii_dii_data() returns dict",                    t_fii_dii_da
 run("alt_data: get_fii_sentiment() in [-1, 1]",                     t_fii_sentiment_in_range)
 run("alt_data: set_fii_sentiment() round-trips correctly",          t_set_fii_sentiment)
 
+print("── 20. MACRO SIGNALS + DEPTH + LATENCY ─────────────────────────────────")
+
+def t_macro_import():
+    from macro_signals import macro_signals
+    assert macro_signals is not None
+
+def t_macro_score_in_range():
+    from macro_signals import macro_signals
+    s = macro_signals.get_macro_score()
+    assert -1.0 <= s <= 1.0, f"macro score out of range: {s}"
+
+def t_macro_data_returns_dict():
+    from macro_signals import macro_signals
+    d = macro_signals.get_macro_data()
+    assert isinstance(d, dict)
+
+def t_depth_fields_on_indicators():
+    from tick_engine import LiveIndicators
+    ind = LiveIndicators(symbol="TEST")
+    assert hasattr(ind, "wall_above")
+    assert hasattr(ind, "wall_below")
+    assert hasattr(ind, "depth_imbalance")
+    assert isinstance(ind.wall_above, bool)
+    assert isinstance(ind.wall_below, bool)
+    assert 0.0 <= ind.depth_imbalance <= 1.0
+
+def t_depth_fields_on_tick():
+    from tick_engine import Tick
+    import dataclasses
+    fields = {f.name for f in dataclasses.fields(Tick)}
+    assert "bid_depth" in fields
+    assert "ask_depth" in fields
+
+def t_positions_cached_exists():
+    from kite_client import kite_client
+    assert callable(getattr(kite_client, "positions_cached", None))
+
+def t_wall_detection_no_depth():
+    from tick_engine import _detect_walls
+    wa, wb, imb = _detect_walls(100.0, [], [])
+    assert wa is False
+    assert wb is False
+    assert imb == 0.5
+
+run("macro_signals singleton importable",                           t_macro_import)
+run("macro_signals: get_macro_score() in [-1, 1]",                 t_macro_score_in_range)
+run("macro_signals: get_macro_data() returns dict",                t_macro_data_returns_dict)
+run("depth: LiveIndicators has wall_above/wall_below/depth_imbalance", t_depth_fields_on_indicators)
+run("depth: Tick has bid_depth and ask_depth fields",              t_depth_fields_on_tick)
+run("latency: kite_client.positions_cached() callable",            t_positions_cached_exists)
+run("depth: _detect_walls() returns (False,False,0.5) with no depth", t_wall_detection_no_depth)
+
 
 # ══════════════════════════════════════════════════════════════════════════
 # FINAL SUMMARY

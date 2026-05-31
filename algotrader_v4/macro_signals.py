@@ -1,8 +1,7 @@
 """
-macro_signals.py
-Cross-asset macro indicators: USD/INR, Crude WTI, S&P 500 futures, US VIX.
-Fetches every 300 s in a background thread and exposes a [-1, 1] sentiment score
-used to filter BUY entries during unfavourable macro conditions.
+macro_signals.py — cross-asset macro indicators for AlgoTrader Pro v4.
+Fetches USD/INR, Crude WTI, S&P 500 futures, US VIX every 300 s in a
+background thread; exposes a [-1, 1] score to filter BUY entries.
 """
 from __future__ import annotations
 
@@ -13,66 +12,41 @@ from loguru import logger
 
 
 def _signal_label(score: float) -> str:
-    if score >= 0.5:
-        return "STRONG_BULL"
-    if score >= 0.15:
-        return "BULL"
-    if score <= -0.5:
-        return "STRONG_BEAR"
-    if score <= -0.15:
-        return "BEAR"
+    if score >= 0.5:   return "STRONG_BULL"
+    if score >= 0.15:  return "BULL"
+    if score <= -0.5:  return "STRONG_BEAR"
+    if score <= -0.15: return "BEAR"
     return "NEUTRAL"
 
 
 def _compute_score(usdinr: float, crude: float, sp_chg: float, us_vix: float) -> float:
     score = 0.0
-
-    # USD/INR — rupee weakness = FII outflows = bearish
-    if usdinr > 86:
-        score -= 0.4
-    elif usdinr > 84:
-        score -= 0.2
-    elif usdinr < 82:
-        score += 0.2  # rupee strength = FII inflows
-
-    # Crude WTI — high crude = input cost headwind for India
-    if crude > 90:
-        score -= 0.3
-    elif crude > 80:
-        score -= 0.1
-    elif crude < 65:
-        score += 0.2  # low crude = positive for India
-
+    # USD/INR — rupee weakness = FII outflows
+    if usdinr > 86:   score -= 0.4
+    elif usdinr > 84: score -= 0.2
+    elif usdinr < 82: score += 0.2
+    # Crude WTI — import cost headwind
+    if crude > 90:    score -= 0.3
+    elif crude > 80:  score -= 0.1
+    elif crude < 65:  score += 0.2
     # S&P futures — global risk sentiment
-    if sp_chg < -1.5:
-        score -= 0.4
-    elif sp_chg < -0.5:
-        score -= 0.2
-    elif sp_chg > 1.0:
-        score += 0.2
-    elif sp_chg > 0.3:
-        score += 0.1
-
+    if sp_chg < -1.5:   score -= 0.4
+    elif sp_chg < -0.5: score -= 0.2
+    elif sp_chg > 1.0:  score += 0.2
+    elif sp_chg > 0.3:  score += 0.1
     # VIX — global fear gauge
-    if us_vix > 25:
-        score -= 0.3
-    elif us_vix > 20:
-        score -= 0.1
-    elif us_vix < 14:
-        score += 0.1
-
+    if us_vix > 25:   score -= 0.3
+    elif us_vix > 20: score -= 0.1
+    elif us_vix < 14: score += 0.1
     return max(-1.0, min(1.0, score))
 
 
 def _fetch_ticker_last_two(symbol: str) -> tuple[float, float]:
-    """
-    Download last 2 daily bars for *symbol* via yfinance.
-    Returns (prev_close, last_close). Raises on any failure.
-    """
-    import yfinance as yf  # noqa: PLC0415 — lazy import, yf may not be installed in tests
+    """Return (prev_close, last_close) for *symbol* via yfinance. Raises on failure."""
+    import yfinance as yf  # lazy import
     df = yf.download(symbol, period="2d", interval="1d", progress=False, auto_adjust=True)
     if df is None or len(df) < 1:
-        raise ValueError(f"No data returned for {symbol}")
+        raise ValueError(f"No data for {symbol}")
     closes = df["Close"].dropna()
     last = float(closes.iloc[-1])
     prev = float(closes.iloc[-2]) if len(closes) >= 2 else last
@@ -80,19 +54,14 @@ def _fetch_ticker_last_two(symbol: str) -> tuple[float, float]:
 
 
 class MacroSignals:
-    """
-    Thread-safe singleton — fetches cross-asset macro indicators every 300 s
-    and exposes a [-1, 1] sentiment score.
-    """
+    """Thread-safe singleton; fetches cross-asset macro indicators every 300 s."""
 
     def __init__(self) -> None:
-        self._lock             = threading.Lock()
-        self._data: dict       = {}
-        self._score: float     = 0.0
-        self._last_refresh: float = 0.0
+        self._lock                    = threading.Lock()
+        self._data: dict              = {}
+        self._score: float            = 0.0
+        self._last_refresh: float     = 0.0
         self._refresh_interval: float = 300.0  # 5 minutes
-
-    # ── Public API ────────────────────────────────────────────────────────────
 
     def get_macro_score(self) -> float:
         """Return [-1, 1] macro sentiment. 0.0 if no data yet."""
@@ -106,48 +75,41 @@ class MacroSignals:
         with self._lock:
             return dict(self._data)
 
-    # ── Fetch & Compute ───────────────────────────────────────────────────────
-
     def refresh(self) -> dict:
         """
         Fetch all signals, compute score, store result.
         Safe to call from any thread; does NOT use asyncio.
-        Returns the populated data dict.
+        Returns the public data dict (no internal keys).
         """
         usdinr = crude = sp_last = sp_prev = us_vix = None
 
-        # USD/INR
         try:
             _, usdinr = _fetch_ticker_last_two("USDINR=X")
         except Exception as exc:
             logger.debug("Macro: USDINR fetch failed — {}", exc)
 
-        # Crude WTI
         try:
             _, crude = _fetch_ticker_last_two("CL=F")
         except Exception as exc:
             logger.debug("Macro: Crude (CL=F) fetch failed — {}", exc)
 
-        # S&P 500 futures
         try:
             sp_prev, sp_last = _fetch_ticker_last_two("ES=F")
         except Exception as exc:
             logger.debug("Macro: S&P futures (ES=F) fetch failed — {}", exc)
 
-        # US VIX
         try:
             _, us_vix = _fetch_ticker_last_two("^VIX")
         except Exception as exc:
             logger.debug("Macro: VIX (^VIX) fetch failed — {}", exc)
 
         with self._lock:
-            # Fall back to last cached values for any missing signals
-            prev_data = self._data
-            usdinr  = usdinr  if usdinr  is not None else prev_data.get("usdinr",  84.0)
-            crude   = crude   if crude   is not None else prev_data.get("crude_wti", 80.0)
-            sp_last = sp_last if sp_last is not None else prev_data.get("_sp_last", 5000.0)
-            sp_prev = sp_prev if sp_prev is not None else prev_data.get("_sp_prev", sp_last)
-            us_vix  = us_vix  if us_vix  is not None else prev_data.get("us_vix",  18.0)
+            prev = self._data
+            usdinr  = usdinr  if usdinr  is not None else prev.get("usdinr",   84.0)
+            crude   = crude   if crude   is not None else prev.get("crude_wti", 80.0)
+            sp_last = sp_last if sp_last is not None else prev.get("_sp_last",  5000.0)
+            sp_prev = sp_prev if sp_prev is not None else prev.get("_sp_prev",  sp_last)
+            us_vix  = us_vix  if us_vix  is not None else prev.get("us_vix",   18.0)
 
             sp_chg = (sp_last / sp_prev - 1) * 100 if sp_prev else 0.0
             score  = _compute_score(usdinr, crude, sp_chg, us_vix)
@@ -165,7 +127,6 @@ class MacroSignals:
                 "score":         round(score, 4),
                 "signal":        _signal_label(score),
                 "refreshed_at":  datetime.now(timezone.utc).isoformat(),
-                # internal cache helpers
                 "_sp_last":      sp_last,
                 "_sp_prev":      sp_prev,
             }
@@ -175,20 +136,14 @@ class MacroSignals:
 
         return {k: v for k, v in data.items() if not k.startswith("_")}
 
-    # ── Background Refresh ────────────────────────────────────────────────────
-
     def _auto_refresh_if_stale(self) -> None:
-        """Trigger refresh in a background thread if data is stale (non-blocking)."""
+        """Trigger a background refresh if data is stale (non-blocking)."""
         with self._lock:
-            age = time.monotonic() - self._last_refresh
-            stale = age >= self._refresh_interval
-
+            stale = (time.monotonic() - self._last_refresh) >= self._refresh_interval
         if stale:
-            t = threading.Thread(target=self._refresh_safe, daemon=True, name="macro-refresh")
-            t.start()
+            threading.Thread(target=self._refresh_safe, daemon=True, name="macro-refresh").start()
 
     def _refresh_safe(self) -> None:
-        """Wrapper that catches all exceptions so the background thread never crashes."""
         try:
             self.refresh()
         except Exception as exc:

@@ -1714,6 +1714,20 @@ def alt_data_fii_dii_refresh():
     threading.Thread(target=alt_data_engine.refresh_fii_dii, daemon=True).start()
     return {"status": "refresh_started", "current_sentiment": alt_data_engine.get_fii_sentiment()}
 
+@app.get("/macro/signals", tags=["Alt Data"])
+def macro_signals_summary():
+    """Return cross-asset macro sentiment: USD/INR, crude oil, S&P500 futures, VIX."""
+    from macro_signals import macro_signals
+    macro_signals._auto_refresh_if_stale()
+    return {"score": macro_signals.get_macro_score(), **macro_signals.get_macro_data()}
+
+@app.post("/macro/refresh", tags=["Alt Data"])
+def macro_signals_refresh():
+    """Trigger immediate macro data refresh from yfinance in background."""
+    from macro_signals import macro_signals
+    threading.Thread(target=macro_signals.refresh, daemon=True).start()
+    return {"status": "refresh_started", "current_score": macro_signals.get_macro_score()}
+
 
 # ── Tick Recorder / Replayer ──────────────────────────────────────────────────
 
