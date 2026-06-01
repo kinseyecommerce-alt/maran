@@ -14,6 +14,7 @@ SEBI Algo Trading Compliance Module — 10 regulations implemented:
 """
 from __future__ import annotations
 
+import hmac
 import json
 import uuid
 from collections import defaultdict
@@ -175,7 +176,9 @@ class SEBICompliance:
 
     def reset_kill_switch(self, secret: str = "") -> tuple[bool, str]:
         """Requires KILL_SWITCH_RESET_SECRET env var when configured."""
-        if settings.kill_switch_reset_secret and secret != settings.kill_switch_reset_secret:
+        if settings.kill_switch_reset_secret and not hmac.compare_digest(
+            secret.encode(), settings.kill_switch_reset_secret.encode()
+        ):
             logger.error("SEBI: Unauthorized kill-switch reset attempt (bad secret)")
             return False, "Invalid reset secret"
         with self._lock:

@@ -305,7 +305,11 @@ except Exception as e:
 print("\n--- Test 7: API Authentication ---")
 import subprocess, json
 
-api_key = "c3E77J3oolITRsyiSPuFEpGEae-Tr_rFgjRBea45pYg"
+import os as _os
+api_key = _os.environ.get("API_KEY", "")
+if not api_key:
+    print("SKIP Test 7: API_KEY not set in environment — skipping live auth tests")
+    api_key = None
 base_url = "http://localhost:8000"
 
 # 7a: Correct key allows PATCH

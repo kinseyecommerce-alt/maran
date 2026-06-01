@@ -85,6 +85,7 @@ _EXEMPT_PREFIXES = ("/swagger-static",)
 _SENSITIVE_GETS = frozenset({
     "/portfolio/positions", "/portfolio/orders", "/sebi/audit-log",
     "/docs", "/redoc",
+    "/gate/log", "/agents/activity", "/brackets", "/trailing-sl/status", "/metrics",
 })
 
 @app.middleware("http")
@@ -101,7 +102,9 @@ async def _api_key_gate(request: Request, call_next):
         # Accept X-API-Key (programmatic) OR JWT Bearer (browser/UI)
         api_key = request.headers.get("X-API-Key", "")
         auth_hdr = request.headers.get("Authorization", "")
-        has_key = api_key == settings.api_key
+        has_key = bool(settings.api_key) and hmac.compare_digest(
+            api_key.encode(), settings.api_key.encode()
+        )
         has_jwt = False
         if auth_hdr.startswith("Bearer ") and settings.jwt_secret_key:
             has_jwt = decode_token(auth_hdr[7:]) is not None
@@ -126,7 +129,13 @@ async def _ip_whitelist_gate(request: Request, call_next):
 # ── MED-2: In-memory rate limiter for orders and AI signals ──────────────────
 _rate_store: dict[str, list[float]] = defaultdict(list)
 _RATE_WINDOW = 60.0
-_RATE_LIMITS = {"/orders/place": 30, "/signals/generate": 10}
+_RATE_LIMITS = {
+    "/orders/place": 30,
+    "/signals/generate": 10,
+    "/backtest/run": 5,
+    "/backtest/compare": 3,
+    "/optimizer/run": 2,
+}
 
 @app.middleware("http")
 async def _rate_limiter(request: Request, call_next):
@@ -195,8 +204,10 @@ class TokenRequest(BaseModel):
 
 class BacktestRequest(BaseModel):
     symbol: str; exchange: str = "NSE"; strategy: str = "intraday"
-    lookback_days: int | None = None; walk_forward: bool = True
-    n_folds: int | None = None; out_of_sample_pct: float | None = None
+    lookback_days: int | None = Field(None, ge=1, le=730)
+    walk_forward: bool = True
+    n_folds: int | None = Field(None, ge=2, le=24)
+    out_of_sample_pct: float | None = Field(None, ge=0.10, le=0.50)
 
 class BatchBacktestRequest(BaseModel):
     symbols: list[dict]; strategy: str = "intraday"; walk_forward: bool = True
@@ -381,7 +392,9 @@ def me(request: Request):
         user = decode_token(auth[7:])
         if user:
             return {"user": user, "auth_method": "jwt"}
-    if request.headers.get("X-API-Key") == settings.api_key and settings.api_key:
+    if bool(settings.api_key) and hmac.compare_digest(
+        request.headers.get("X-API-Key", "").encode(), settings.api_key.encode()
+    ):
         return {"user": "api-key-user", "auth_method": "api_key"}
     raise HTTPException(401, "Not authenticated")
 
@@ -1397,7 +1410,6 @@ def config_validate():
     creds["ticker_source"] = ticker_source
     creds["truedata_username"] = bool(settings.truedata_username)
     creds["truedata_password"] = bool(settings.truedata_password)
-    creds["admin_username"] = settings.admin_username
     creds["ready_to_trade"] = bool(
         creds.get("kite_api_key")
         and creds.get("kite_access_token")
@@ -1851,6 +1863,10 @@ async def on_startup():
         logger.warning("SECURITY: API_KEY is not set — all mutating endpoints are unprotected. Set API_KEY in .env before deploying.")
     if not settings.jwt_secret_key:
         logger.warning("SECURITY: JWT_SECRET_KEY is not set — browser login tokens cannot be issued. Set JWT_SECRET_KEY in .env before deploying.")
+    elif len(settings.jwt_secret_key) < 32:
+        logger.error("SECURITY: JWT_SECRET_KEY is too short ({} chars) — minimum 32 chars required. Refusing to start in LIVE mode.", len(settings.jwt_secret_key))
+        if settings.trading_mode == "LIVE":
+            raise RuntimeError("JWT_SECRET_KEY must be at least 32 characters in LIVE mode")
     if settings.trading_mode == "LIVE" and not settings.kite_api_key:
         logger.warning("SECURITY: TRADING_MODE=LIVE but KITE_API_KEY is not set — order placement will fail.")
 
