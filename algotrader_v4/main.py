@@ -1979,6 +1979,63 @@ except Exception:
     pass
 
 
+@app.post("/optimizer/run", tags=["Optimizer"])
+async def run_optimizer(
+    phase: int | None = None,
+    background_tasks: BackgroundTasks = None,
+):
+    """
+    Run the profit optimiser pipeline (or a single phase).
+    Runs in background — returns immediately, check logs for progress.
+    phase=1: param optimisation  phase=2: threshold sweep  phase=3: regime config  None=all
+    """
+    def _run():
+        from profit_optimizer import phase1_optimise, phase2_threshold_sweep, phase3_regime_config
+        if phase == 1:
+            phase1_optimise()
+        elif phase == 2:
+            phase2_threshold_sweep()
+        elif phase == 3:
+            import json
+            from pathlib import Path
+            f = Path("logs/optimizer/optimised_params.json")
+            saved = json.loads(f.read_text()) if f.exists() else {}
+            phase3_regime_config(saved.get("phase1", {}), saved.get("phase2", {}))
+        else:
+            p1 = phase1_optimise()
+            p2 = phase2_threshold_sweep()
+            phase3_regime_config(p1, p2)
+
+    if background_tasks:
+        background_tasks.add_task(_run)
+        return {"status": "started", "phase": phase or "all", "note": "check logs for progress"}
+    return {"status": "error", "detail": "no BackgroundTasks injected"}
+
+
+@app.post("/optimizer/apply", tags=["Optimizer"])
+async def apply_optimizer():
+    """Apply the best optimised config to live settings immediately."""
+    from profit_optimizer import apply_optimised_config
+    from market_regime import regime_detector
+    regime = regime_detector.current_regime.value if regime_detector.current_regime else None
+    return apply_optimised_config(regime=regime)
+
+
+@app.get("/optimizer/results", tags=["Optimizer"])
+async def optimizer_results():
+    """Return the latest optimisation results."""
+    import json
+    from pathlib import Path
+    out = {}
+    params_f = Path("logs/optimizer/optimised_params.json")
+    regime_f = Path("logs/optimizer/regime_config.json")
+    if params_f.exists():
+        out["optimised_params"] = json.loads(params_f.read_text())
+    if regime_f.exists():
+        out["regime_config"] = json.loads(regime_f.read_text())
+    return out or {"status": "not_run_yet", "hint": "POST /optimizer/run first"}
+
+
 # HIGH-7: reload=False in production — auto-reload bypasses security middleware
 if __name__ == "__main__":
     import uvicorn

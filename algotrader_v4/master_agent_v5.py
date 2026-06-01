@@ -521,6 +521,16 @@ class MasterAgent:
             settings.claude_gate_threshold = int(threshold)
             logger.info("[master] Gate threshold → {}", threshold)
 
+        # Apply regime-aware optimised config (from profit_optimizer.py)
+        try:
+            from profit_optimizer import apply_optimised_config
+            from market_regime import regime_detector
+            regime_name = regime_detector.current_regime.value if regime_detector.current_regime else None
+            if regime_name:
+                apply_optimised_config(regime=regime_name)
+        except Exception:
+            pass
+
         # Log opportunity alert if present
         alert = d.get("opportunity_alert")
         if alert and alert not in (None, "null", ""):
