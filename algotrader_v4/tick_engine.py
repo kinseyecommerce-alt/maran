@@ -518,6 +518,7 @@ class TickEngine:
         self._latest_ind:  dict[str, LiveIndicators]  = {}
 
         self._subscribers:  dict[str, asyncio.Queue]  = {}
+        self._queue_drop_count: dict[str, int]        = {}  # dropped-tick counter per subscriber
         self.ws_broadcast:  Optional[Callable]        = None
 
         self._loop: Optional[asyncio.AbstractEventLoop] = None
@@ -662,9 +663,14 @@ class TickEngine:
         except Exception:
             pass
 
-        for q in self._subscribers.values():
-            try:    q.put_nowait(snap)
-            except asyncio.QueueFull: pass
+        for name, q in self._subscribers.items():
+            try:
+                q.put_nowait(snap)
+            except asyncio.QueueFull:
+                cnt = self._queue_drop_count.get(name, 0) + 1
+                self._queue_drop_count[name] = cnt
+                if cnt % 100 == 1:
+                    logger.warning("[TickEngine] Queue full for '{}': {} ticks dropped (size={})", name, cnt, q.maxsize)
 
         if self.ws_broadcast:
             try:

@@ -258,7 +258,7 @@ class RiskManager:
             return True, "OK"
         now_t = ist_time()
         open_t  = time(9, 15)
-        sq_h, sq_m = [int(x) for x in settings.squareoff_time.split(":")]
+        sq_h, sq_m = [int(x) for x in (settings.squareoff_time or "15:10").split(":")]
         close_t = time(sq_h, sq_m)
         if not (open_t <= now_t <= close_t):
             return False, f"Outside trading hours (market {open_t}–{close_t})"

@@ -28,6 +28,7 @@ from agents.activity_log import push as _activity
 # ── TSL callback registry ────────────────────────────────────────────────────
 # Maps main order_id → {sl_order_id, product, exchange}
 _tsl_sl_orders: dict[str, dict] = {}
+_tsl_sl_orders_lock = __import__("threading").Lock()
 _tsl_callbacks_installed: bool = False
 
 
@@ -46,10 +47,11 @@ def _setup_tsl_callbacks() -> None:
             order_id=str(pos.order_id),
             detail=f"{move_type}: {old_sl:.2f} → {pos.current_sl:.2f}",
         )
-        entry = _tsl_sl_orders.get(pos.order_id)
+        with _tsl_sl_orders_lock:
+            entry = _tsl_sl_orders.get(pos.order_id)
+            sl_oid = entry["sl_order_id"] if entry else None
         if not entry:
             return
-        sl_oid = entry["sl_order_id"]
         _loop = asyncio.get_event_loop()
         try:
             await _loop.run_in_executor(
@@ -70,7 +72,9 @@ def _setup_tsl_callbacks() -> None:
                 trigger_price=pos.current_sl,
                 tag=f"TSL-{pos.strategy}",
             ))
-            entry["sl_order_id"] = new_sl_oid
+            with _tsl_sl_orders_lock:
+                if pos.order_id in _tsl_sl_orders:
+                    _tsl_sl_orders[pos.order_id]["sl_order_id"] = new_sl_oid
 
     async def _on_sl_hit(pos, ltp: float, pnl: float) -> None:
         _activity(
@@ -80,7 +84,8 @@ def _setup_tsl_callbacks() -> None:
             sl=pos.current_sl, order_id=str(pos.order_id),
             detail=f"entry={pos.entry_price:.2f} sl={pos.current_sl:.2f}",
         )
-        entry = _tsl_sl_orders.pop(pos.order_id, None)
+        with _tsl_sl_orders_lock:
+            entry = _tsl_sl_orders.pop(pos.order_id, None)
         sl_already_filled = False
         _loop = asyncio.get_event_loop()
         if entry and entry.get("sl_order_id"):
@@ -156,7 +161,8 @@ def _setup_tsl_callbacks() -> None:
             detail=f"T{level} hit entry={pos.entry_price:.2f}",
         )
         if level == 2:
-            entry = _tsl_sl_orders.pop(pos.order_id, None)
+            with _tsl_sl_orders_lock:
+                entry = _tsl_sl_orders.pop(pos.order_id, None)
             _loop = asyncio.get_event_loop()
             await _loop.run_in_executor(None, lambda: kite_client.place_order(
                 tradingsymbol=pos.symbol,
@@ -784,11 +790,12 @@ class BaseAgent(ABC):
         )
 
         # Register SL-M order so TSL callbacks can modify/cancel it
-        _tsl_sl_orders[order_id] = {
-            "sl_order_id": sl_order_id,
-            "product":     product,
-            "exchange":    exch,
-        }
+        with _tsl_sl_orders_lock:
+            _tsl_sl_orders[order_id] = {
+                "sl_order_id": sl_order_id,
+                "product":     product,
+                "exchange":    exch,
+            }
 
         ind = snap.indicators
         await send_telegram(
@@ -849,14 +856,14 @@ class BaseAgent(ABC):
             risk_manager.record_trade(pnl)
             risk_manager.position_closed()
             self.state.pnl_today += pnl
-            # FIX 5: TSL positions are keyed by ENTRY order_id, not exit order_id.
-            # Find the entry order_id for this symbol from _tsl_sl_orders.
-            _entry_oid = next(
-                (k for k, v in list(_tsl_sl_orders.items())
-                 if trailing_sl_engine._positions.get(k) is not None
-                 and trailing_sl_engine._positions[k].symbol == sym),
-                None,
-            )
+            # TSL positions are keyed by ENTRY order_id, not exit order_id.
+            with _tsl_sl_orders_lock:
+                _entry_oid = next(
+                    (k for k, v in list(_tsl_sl_orders.items())
+                     if trailing_sl_engine._positions.get(k) is not None
+                     and trailing_sl_engine._positions[k].symbol == sym),
+                    None,
+                )
             trailing_sl_engine.deregister(_entry_oid if _entry_oid is not None else oid)
 
             # Persist to SQLite (Phase 3) — non-blocking async variant

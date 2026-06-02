@@ -389,8 +389,8 @@ class AltDataEngine:
         try:
             # Seed the cookie jar with a homepage visit
             opener.open("https://www.nseindia.com/", timeout=6)
-        except Exception:
-            pass  # best-effort; continue even if blocked
+        except Exception as exc:
+            logger.debug("NSE cookie seed failed (non-critical): {}", exc)
         return opener
 
     def get_bulk_deals(self, symbol: str, days: int = 5) -> list[dict]:
