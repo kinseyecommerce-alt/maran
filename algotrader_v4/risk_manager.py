@@ -305,6 +305,12 @@ class RiskManager:
         capital: float | None = None,
         risk_pct: float | None = None,
     ) -> int:
+        # FIX 2: guard against zero / None ltp to prevent ZeroDivisionError
+        if not price or price <= 0:
+            logger.warning(
+                "[RiskManager] calculate_quantity: ltp={} invalid for {}", price, agent or "unknown"
+            )
+            return 0
         if capital is not None:
             cap = capital
         elif agent:
@@ -313,9 +319,12 @@ class RiskManager:
             cap = settings.max_position_size
         if settings.use_kelly_capital_sizing and agent:
             kf = get_kelly_fraction(agent)
-            if kf > 0:
-                cap = settings.total_capital * kf
-                logger.debug("Kelly sizing: agent={} kf={:.3f} cap=₹{:.0f}", agent, kf, cap)
+            if kf <= 0:
+                # FIX 3: No edge established yet — use minimum 2% of capital as safe fallback
+                kf = 0.02
+                logger.debug("Kelly sizing: agent={} no history yet — using fallback kf=0.02", agent)
+            cap = settings.total_capital * kf
+            logger.debug("Kelly sizing: agent={} kf={:.3f} cap=₹{:.0f}", agent, kf, cap)
         if risk_pct and price > 0:
             sl_amount = price * (settings.stop_loss_pct / 100)
             cap = min(cap, (cap * risk_pct / 100) / sl_amount * price)

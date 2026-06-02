@@ -569,6 +569,8 @@ class KiteClient:
         If ltp crosses the trigger_price, mark the order COMPLETE
         and update the paper position.
         """
+        if ltp <= 0:
+            return
         with self._paper_orders_lock:
             orders_snapshot = list(self._paper_orders.values())
         for order in orders_snapshot:
