@@ -2052,6 +2052,33 @@ async def optimizer_results():
     return out or {"status": "not_run_yet", "hint": "POST /optimizer/run first"}
 
 
+# ── God Mode ─────────────────────────────────────────────────────────────────
+
+@app.post("/config/god-mode/enable", tags=["God Mode"])
+async def god_mode_enable():
+    """
+    Activate God Mode: maximum-aggression trading profile.
+    All limits raised, all agents enabled, capital maximised, cooldowns slashed.
+    Baseline is snapshot-saved and fully restored on /disable.
+    """
+    from god_mode import god_mode_manager
+    return god_mode_manager.enable()
+
+
+@app.post("/config/god-mode/disable", tags=["God Mode"])
+async def god_mode_disable():
+    """Deactivate God Mode and restore all settings to their pre-activation baseline."""
+    from god_mode import god_mode_manager
+    return god_mode_manager.disable()
+
+
+@app.get("/config/god-mode/status", tags=["God Mode"])
+async def god_mode_status():
+    """Return current God Mode state: active flag, all live overrides vs baseline."""
+    from god_mode import god_mode_manager
+    return god_mode_manager.status()
+
+
 # HIGH-7: reload=False in production — auto-reload bypasses security middleware
 if __name__ == "__main__":
     import uvicorn
