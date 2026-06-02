@@ -379,7 +379,20 @@ class TrailingSLEngine:
                 pos.symbol, pos.side, ltp, pos.current_sl, pnl
             )
             if cb_sl_hit:
-                await cb_sl_hit(pos, ltp, pnl)
+                try:
+                    await cb_sl_hit(pos, ltp, pnl)
+                except Exception as exc:
+                    logger.error(
+                        "[TSL] callback error for {}: {} — position cleaned up anyway",
+                        pos.symbol, exc
+                    )
+                finally:
+                    pos.status = SLStatus.HIT  # ensure EXITED-equivalent is marked
+                    with self._lock:
+                        self._positions.pop(pos.order_id, None)
+            else:
+                with self._lock:
+                    self._positions.pop(pos.order_id, None)
             return
 
         # ── 3. Target 2 hit ────────────────────────────────────────────
@@ -391,7 +404,13 @@ class TrailingSLEngine:
                 pos.target2_hit = True
                 logger.info("🎯 TARGET 2 hit: {} @ ₹{:.2f}", pos.symbol, ltp)
                 if cb_target:
-                    await cb_target(pos, ltp, 2)
+                    try:
+                        await cb_target(pos, ltp, 2)
+                    except Exception as exc:
+                        logger.error(
+                            "[TSL] target2 callback error for {}: {} — continuing",
+                            pos.symbol, exc
+                        )
 
         # ── 4. Target 1 hit → partial scale-out + tighten trail ──────
         if not pos.target1_hit:
@@ -428,7 +447,13 @@ class TrailingSLEngine:
                     pos.symbol, ltp, pos.current_sl
                 )
                 if cb_target:
-                    await cb_target(pos, ltp, 1)
+                    try:
+                        await cb_target(pos, ltp, 1)
+                    except Exception as exc:
+                        logger.error(
+                            "[TSL] target1 callback error for {}: {} — continuing",
+                            pos.symbol, exc
+                        )
 
         # ── 5. Breakeven ───────────────────────────────────────────────
         if not pos.breakeven_hit and profit_pct >= cfg.breakeven_pct:

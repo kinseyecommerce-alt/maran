@@ -615,6 +615,11 @@ class TickEngine:
         if symbol not in self._bufs_1min:
             return
 
+        # Guard against zero/None ltp — avoids division by zero in VWAP/ATR calculations
+        ltp = tick.ltp
+        if not ltp or ltp <= 0:
+            return
+
         # Skip indicator recompute for duplicate LTP within 100ms (WS fires rapidly)
         now_mono = time.monotonic()
         if (self._last_tick_ltp.get(symbol) == tick.ltp

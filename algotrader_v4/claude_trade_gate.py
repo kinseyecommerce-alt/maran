@@ -73,7 +73,12 @@ class GateDecision:
     latency_ms: int = 0
 
 
-_ALLOW_ON_ERROR = GateDecision(confidence=60, enter=True, reason="API fallback — rule-based approval")
+_ALLOW_ON_ERROR = GateDecision(
+    confidence=60,
+    enter=True,
+    reason="gate_unavailable — defaulting to allow",
+    size_factor=0.75,
+)
 
 _client: Optional[anthropic.AsyncAnthropic] = None
 
@@ -299,39 +304,48 @@ async def assess(snap, action: str, signal: dict, strategy: str) -> GateDecision
             ),
             timeout=8.0,
         )
-        raw = resp.content[0].text.strip().lstrip("```json").rstrip("```").strip()
-        d   = json.loads(raw)
         latency = int((asyncio.get_event_loop().time() - t0) * 1000)
 
-        conf   = int(d.get("confidence", 60))
-        enter  = bool(d.get("enter", True))
-        reason = d.get("reason", "")
+        # FIX 4: wrap response parsing so any unexpected format falls back safely
+        try:
+            raw = resp.content[0].text.strip().lstrip("```json").rstrip("```").strip()
+            d   = json.loads(raw)
 
-        # Hard threshold: if Opus approved but confidence is below the bar, downgrade to skip.
-        # This lets master_agent_v5 tighten/loosen the bar per regime without code changes.
-        if enter and conf < settings.claude_gate_threshold:
-            enter  = False
-            reason = f"conf {conf} < threshold {settings.claude_gate_threshold} — {reason}"
+            conf   = int(d.get("confidence", 60))
+            enter  = bool(d.get("enter", True))
+            reason = d.get("reason", "")
 
-        decision = GateDecision(
-            confidence=conf,
-            enter=enter,
-            adjusted_sl_pct=d.get("adjusted_sl_pct"),
-            adjusted_target_pct=d.get("adjusted_target_pct"),
-            size_factor=float(d.get("size_factor", 1.0)),
-            reason=reason,
-            warnings=d.get("warnings", []),
-            latency_ms=latency,
-        )
+            # Hard threshold: if Opus approved but confidence is below the bar, downgrade to skip.
+            # This lets master_agent_v5 tighten/loosen the bar per regime without code changes.
+            if enter and conf < settings.claude_gate_threshold:
+                enter  = False
+                reason = f"conf {conf} < threshold {settings.claude_gate_threshold} — {reason}"
+
+            decision = GateDecision(
+                confidence=conf,
+                enter=enter,
+                adjusted_sl_pct=d.get("adjusted_sl_pct"),
+                adjusted_target_pct=d.get("adjusted_target_pct"),
+                size_factor=float(d.get("size_factor", 1.0)),
+                reason=reason,
+                warnings=d.get("warnings", []),
+                latency_ms=latency,
+            )
+        except Exception as parse_exc:
+            logger.warning(
+                "[gate] {} response parse error ({}) — defaulting to allow with reduced size",
+                snap.symbol, parse_exc,
+            )
+            return _ALLOW_ON_ERROR
 
         _log(snap.symbol, strategy, action, decision, ctx["indicators"]["rsi_14"])
         return decision
 
     except asyncio.TimeoutError:
-        logger.warning("[gate] {} timeout — allowing trade", snap.symbol)
+        logger.warning("[gate] {} timeout — allowing trade with reduced size", snap.symbol)
         return _ALLOW_ON_ERROR
     except Exception as exc:
-        logger.warning("[gate] {} error ({}) — allowing trade", snap.symbol, exc)
+        logger.warning("[gate] {} API error ({}) — allowing trade with reduced size", snap.symbol, exc)
         return _ALLOW_ON_ERROR
 
 

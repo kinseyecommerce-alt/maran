@@ -159,6 +159,25 @@ class OrderGuard:
             self._symbol_owner.clear()
             self._symbol_cooldown.clear()
 
+    def release_stale_claims(self, max_age_sec: int = 60) -> list[str]:
+        """Release PENDING claims older than max_age_sec. Returns list of released keys."""
+        released = []
+        with self._lock:
+            now = time.time()
+            stale = [k for k, v in self._active.items()
+                     if v.pending and (now - v.placed_at) > max_age_sec]
+            for key in stale:
+                entry = self._active.pop(key)
+                owner_key = f"{entry.strategy}:{entry.side}"
+                if self._symbol_owner.get(entry.symbol) == owner_key:
+                    self._symbol_owner.pop(entry.symbol, None)
+                released.append(f"{key[0]}|{key[1]}|{key[2]}")
+                logger.warning(
+                    "[OrderGuard] Released stale PENDING claim: {} (age={:.0f}s)",
+                    released[-1], now - entry.placed_at
+                )
+        return released
+
     def status(self) -> dict:
         with self._lock:
             now = time.time()
@@ -168,6 +187,8 @@ class OrderGuard:
                         "order_id": v.order_id,
                         "placed_at": v.placed_at,
                         "pending": v.pending,
+                        "age_sec": int(now - v.placed_at),
+                        "stale": (v.pending and now - v.placed_at > 30),
                     }
                     for k, v in self._active.items()
                 },

@@ -457,8 +457,11 @@ class BaseAgent(ABC):
                         _sf = round(_sf * _evt["size_factor"], 3)
 
                     from correlation_guard import check as _corr_check
+                    _positions_data = await asyncio.get_event_loop().run_in_executor(
+                        None, kite_client.positions
+                    )
                     _open_syms = [
-                        p["tradingsymbol"] for p in kite_client.positions().get("net", [])
+                        p["tradingsymbol"] for p in _positions_data.get("net", [])
                         if p.get("quantity", 0) != 0
                     ]
                     _corr = _corr_check(snap.symbol, _open_syms)
@@ -784,9 +787,13 @@ class BaseAgent(ABC):
     async def _check_exits_on_tick(self, snap: MarketSnapshot) -> None:
         # Symbols managed by atomic bracket are handled by TSL engine callbacks
         # Only handle exits for positions NOT in atomic bracket
+        import time as _time
         sym = snap.symbol
         ind = snap.indicators
-        for pos in kite_client.positions().get("net", []):
+        _exit_pos_data = await asyncio.get_event_loop().run_in_executor(
+            None, kite_client.positions
+        )
+        for pos in _exit_pos_data.get("net", []):
             if pos.get("tradingsymbol") != sym or pos.get("quantity", 0) == 0:
                 continue
             should, reason = self.should_exit_position(pos, ind)
@@ -795,11 +802,18 @@ class BaseAgent(ABC):
             side = "SELL" if pos["quantity"] > 0 else "BUY"
             qty  = abs(pos["quantity"])
             pnl  = pos.get("pnl", 0)
-            oid  = kite_client.place_order(
-                tradingsymbol=sym, exchange=pos.get("exchange", "NSE"),
-                transaction_type=side, quantity=qty, order_type="MARKET",
-                product=pos.get("product", self.product), tag=f"Agent-{self.name}-EXIT",
+            _exit_t0 = _time.monotonic()
+            _exit_exch   = pos.get("exchange", "NSE")
+            _exit_prod   = pos.get("product", self.product)
+            _exit_tag    = f"Agent-{self.name}-EXIT"
+            oid  = await asyncio.get_event_loop().run_in_executor(
+                None, lambda: kite_client.place_order(
+                    tradingsymbol=sym, exchange=_exit_exch,
+                    transaction_type=side, quantity=qty, order_type="MARKET",
+                    product=_exit_prod, tag=_exit_tag,
+                )
             )
+            logger.info("[{}] exit order latency: {:.0f}ms", self.name, (_time.monotonic() - _exit_t0) * 1000)
             order_guard.release_order(sym, self.name, "BUY" if side == "SELL" else "SELL", pnl)
             risk_manager.record_trade(pnl)
             risk_manager.position_closed()
