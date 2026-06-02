@@ -50,14 +50,18 @@ def _setup_tsl_callbacks() -> None:
         if not entry:
             return
         sl_oid = entry["sl_order_id"]
+        _loop = asyncio.get_event_loop()
         try:
-            kite_client.modify_order(order_id=sl_oid, trigger_price=pos.current_sl)
-        except Exception:
+            await _loop.run_in_executor(
+                None, lambda: kite_client.modify_order(order_id=sl_oid, trigger_price=pos.current_sl)
+            )
+        except Exception as exc:
+            logger.error("[{}] _on_sl_moved: modify_order failed for {}: {}", pos.strategy, pos.symbol, exc)
             try:
-                kite_client.cancel_order(sl_oid)
-            except Exception:
-                pass
-            new_sl_oid = kite_client.place_order(
+                await _loop.run_in_executor(None, lambda: kite_client.cancel_order(sl_oid))
+            except Exception as exc:
+                logger.error("[{}] _on_sl_moved: cancel_order failed for {}: {}", pos.strategy, pos.symbol, exc)
+            new_sl_oid = await _loop.run_in_executor(None, lambda: kite_client.place_order(
                 tradingsymbol=pos.symbol,
                 exchange=entry.get("exchange", "NSE"),
                 transaction_type="SELL" if pos.side == "BUY" else "BUY",
@@ -65,7 +69,7 @@ def _setup_tsl_callbacks() -> None:
                 product=entry.get("product", "MIS"),
                 trigger_price=pos.current_sl,
                 tag=f"TSL-{pos.strategy}",
-            )
+            ))
             entry["sl_order_id"] = new_sl_oid
 
     async def _on_sl_hit(pos, ltp: float, pnl: float) -> None:
@@ -78,6 +82,7 @@ def _setup_tsl_callbacks() -> None:
         )
         entry = _tsl_sl_orders.pop(pos.order_id, None)
         sl_already_filled = False
+        _loop = asyncio.get_event_loop()
         if entry and entry.get("sl_order_id"):
             sl_oid = entry["sl_order_id"]
             # Check if the SL-M order already executed on the exchange
@@ -87,7 +92,7 @@ def _setup_tsl_callbacks() -> None:
                     if o and o["status"] == "COMPLETE":
                         sl_already_filled = True
                 if not sl_already_filled:
-                    history = kite_client.order_history(sl_oid)
+                    history = await _loop.run_in_executor(None, lambda: kite_client.order_history(sl_oid))
                     for h in reversed(history):
                         if h.get("status") == "COMPLETE":
                             sl_already_filled = True
@@ -96,20 +101,20 @@ def _setup_tsl_callbacks() -> None:
                 pass
             if not sl_already_filled:
                 try:
-                    kite_client.cancel_order(sl_oid)
+                    await _loop.run_in_executor(None, lambda: kite_client.cancel_order(sl_oid))
                 except Exception:
                     pass
 
         # Only place MARKET exit if the SL-M hasn't already filled
         if not sl_already_filled:
-            kite_client.place_order(
+            await _loop.run_in_executor(None, lambda: kite_client.place_order(
                 tradingsymbol=pos.symbol,
                 exchange=entry.get("exchange", "NSE") if entry else "NSE",
                 transaction_type="SELL" if pos.side == "BUY" else "BUY",
                 quantity=pos.quantity, order_type="MARKET",
                 product=entry.get("product", "MIS") if entry else "MIS",
                 tag=f"TSL-HIT-{pos.strategy}",
-            )
+            ))
         else:
             logger.info("SL-M {} already COMPLETE — skipping MARKET exit to avoid double-exit",
                         entry.get("sl_order_id") if entry else "?")
@@ -152,14 +157,19 @@ def _setup_tsl_callbacks() -> None:
         )
         if level == 2:
             entry = _tsl_sl_orders.pop(pos.order_id, None)
-            kite_client.place_order(
+            _loop = asyncio.get_event_loop()
+            await _loop.run_in_executor(None, lambda: kite_client.place_order(
                 tradingsymbol=pos.symbol,
                 exchange=entry.get("exchange", "NSE") if entry else "NSE",
                 transaction_type="SELL" if pos.side == "BUY" else "BUY",
                 quantity=pos.quantity, order_type="MARKET",
                 product=entry.get("product", "MIS") if entry else "MIS",
                 tag=f"TSL-T{level}-{pos.strategy}",
-            )
+            ))
+            order_guard.release_order(pos.symbol, pos.strategy, pos.side, pnl_est)
+            risk_manager.record_trade(pnl_est)
+            risk_manager.position_closed()
+            trailing_sl_engine.deregister(pos.order_id)
 
     # Callbacks are now passed per-position via register() — keep module-level
     # as fallbacks for any code that still registers without per-position callbacks.
@@ -677,7 +687,7 @@ class BaseAgent(ABC):
                 # PAPER or MARKET mode: place entry + SL-M concurrently in thread executor
                 entry_type = "LIMIT" if use_limit else "MARKET"
                 entry_px   = limit_px if use_limit else 0.0
-                order_id, sl_order_id = await asyncio.gather(
+                results = await asyncio.gather(
                     loop.run_in_executor(None, lambda: kite_client.place_order(
                         tradingsymbol=sym, exchange=exch,
                         transaction_type=action, quantity=qty,
@@ -691,7 +701,26 @@ class BaseAgent(ABC):
                         product=product,
                         trigger_price=sl, tag=f"Agent-{self.name}-SL",
                     )),
+                    return_exceptions=True,
                 )
+                order_id    = results[0]
+                sl_order_id = results[1]
+
+                if isinstance(order_id, Exception):
+                    # Entry failed — release claim, nothing on exchange
+                    order_guard.release_claim(sym, self.name, action)
+                    logger.error("[{}] Entry order failed: {}", self.name, order_id)
+                    return
+
+                order_guard.confirm_claim(sym, self.name, action, str(order_id))
+
+                if isinstance(sl_order_id, Exception):
+                    # Entry placed but SL failed — keep position, log critical warning
+                    logger.error(
+                        "[{}] SL-M order failed after entry {} — position unprotected! {}",
+                        self.name, order_id, sl_order_id,
+                    )
+                    sl_order_id = None
         except Exception as exc:
             logger.warning("[{}] order placement failed: {}", self.name, exc)
             order_guard.release_claim(sym, self.name, action)
@@ -702,6 +731,8 @@ class BaseAgent(ABC):
         logger.debug("[{}] _try_enter total: {:.0f}ms", self.name, (_time.monotonic() - _t0) * 1000)
 
         sebi_compliance.record_order_id(self.name, sym, order_id)
+        # LIVE (limit) path: confirm claim here. PAPER/MARKET path already confirmed
+        # inside the gather block above; confirm_claim is idempotent so double-call is safe.
         order_guard.confirm_claim(sym, self.name, action, order_id)
         risk_manager.position_opened()
         self.state.trades_today  += 1
@@ -791,7 +822,7 @@ class BaseAgent(ABC):
         sym = snap.symbol
         ind = snap.indicators
         _exit_pos_data = await asyncio.get_event_loop().run_in_executor(
-            None, kite_client.positions
+            None, kite_client.positions_cached
         )
         for pos in _exit_pos_data.get("net", []):
             if pos.get("tradingsymbol") != sym or pos.get("quantity", 0) == 0:
@@ -818,7 +849,15 @@ class BaseAgent(ABC):
             risk_manager.record_trade(pnl)
             risk_manager.position_closed()
             self.state.pnl_today += pnl
-            trailing_sl_engine.deregister(oid)
+            # FIX 5: TSL positions are keyed by ENTRY order_id, not exit order_id.
+            # Find the entry order_id for this symbol from _tsl_sl_orders.
+            _entry_oid = next(
+                (k for k, v in list(_tsl_sl_orders.items())
+                 if trailing_sl_engine._positions.get(k) is not None
+                 and trailing_sl_engine._positions[k].symbol == sym),
+                None,
+            )
+            trailing_sl_engine.deregister(_entry_oid if _entry_oid is not None else oid)
 
             # Persist to SQLite (Phase 3) — non-blocking async variant
             try:

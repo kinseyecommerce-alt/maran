@@ -133,6 +133,7 @@ class KiteClient:
         self._paper_orders:    dict[str, dict] = {}   # order_id → order dict (O(1) lookup)
         self._paper_orders_lock: Lock = Lock()
         self._paper_positions: list[dict] = []
+        self._paper_positions_lock: Lock = Lock()
         self._instruments_cache: dict[str, list[dict]] = {}
         self._pos_cache: dict = {}
         self._pos_cache_ts: float = 0.0
@@ -257,7 +258,8 @@ class KiteClient:
 
     def positions(self) -> dict:
         if settings.trading_mode == "PAPER":
-            return {"net": self._paper_positions, "day": self._paper_positions}
+            with self._paper_positions_lock:
+                return {"net": list(self._paper_positions), "day": list(self._paper_positions)}
         return _with_retry(self.kite.positions, label="positions")
 
     def positions_cached(self) -> dict:
@@ -538,28 +540,29 @@ class KiteClient:
         sym       = order["tradingsymbol"]
         qty_delta = (order["quantity"] if order["transaction_type"] == "BUY"
                      else -order["quantity"])
-        for pos in self._paper_positions:
-            if pos["tradingsymbol"] == sym:
-                old_qty = pos["quantity"]
-                new_qty = old_qty + qty_delta
-                if new_qty != 0 and abs(qty_delta) > 0:
-                    if (old_qty > 0 and qty_delta > 0) or (old_qty < 0 and qty_delta < 0):
-                        # Adding to position — weighted average
-                        pos["average_price"] = round(
-                            (pos["average_price"] * abs(old_qty) + order["price"] * abs(qty_delta))
-                            / abs(new_qty), 2
-                        )
-                pos["quantity"] = new_qty
-                return
-        self._paper_positions.append({
-            "tradingsymbol": sym,
-            "exchange":      order["exchange"],
-            "product":       order["product"],
-            "quantity":      qty_delta,
-            "average_price": order["price"],
-            "last_price":    order["price"],
-            "pnl":           0.0,
-        })
+        with self._paper_positions_lock:
+            for pos in self._paper_positions:
+                if pos["tradingsymbol"] == sym:
+                    old_qty = pos["quantity"]
+                    new_qty = old_qty + qty_delta
+                    if new_qty != 0 and abs(qty_delta) > 0:
+                        if (old_qty > 0 and qty_delta > 0) or (old_qty < 0 and qty_delta < 0):
+                            # Adding to position — weighted average
+                            pos["average_price"] = round(
+                                (pos["average_price"] * abs(old_qty) + order["price"] * abs(qty_delta))
+                                / abs(new_qty), 2
+                            )
+                    pos["quantity"] = new_qty
+                    return
+            self._paper_positions.append({
+                "tradingsymbol": sym,
+                "exchange":      order["exchange"],
+                "product":       order["product"],
+                "quantity":      qty_delta,
+                "average_price": order["price"],
+                "last_price":    order["price"],
+                "pnl":           0.0,
+            })
 
     # ── Paper-mode tick-driven updates ────────────────────────────────────
 
@@ -598,10 +601,11 @@ class KiteClient:
         """
         Update last_price and P&L for every paper position matching *symbol*.
         """
-        for pos in self._paper_positions:
-            if pos["tradingsymbol"] == symbol:
-                pos["last_price"] = ltp
-                pos["pnl"] = round((ltp - pos["average_price"]) * pos["quantity"], 2)
+        with self._paper_positions_lock:
+            for pos in self._paper_positions:
+                if pos["tradingsymbol"] == symbol:
+                    pos["last_price"] = ltp
+                    pos["pnl"] = round((ltp - pos["average_price"]) * pos["quantity"], 2)
 
 
 kite_client = KiteClient()

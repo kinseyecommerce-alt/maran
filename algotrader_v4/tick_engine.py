@@ -209,16 +209,18 @@ def _wma(series, period: int):
 
 
 def _supertrend(high, low, close, period: int = 10, mult: float = 3.0):
+    if len(close) <= period:
+        return 0.0, "NEUTRAL"
     hl2   = (high + low) / 2
     atr   = ta.volatility.AverageTrueRange(high, low, close, period).average_true_range()
-    upper = (hl2 + mult * atr).fillna(0)
-    lower = (hl2 - mult * atr).fillna(0)
+    upper = hl2 + mult * atr
+    lower = hl2 - mult * atr
     n     = len(close)
     st_val, st_dir = [0.0] * n, ["NEUTRAL"] * n
     for i in range(1, n):
-        if close.iloc[i] > upper.iloc[i - 1]:
+        if close.iloc[i] > upper.iloc[i]:
             st_dir[i] = "UP"
-        elif close.iloc[i] < lower.iloc[i - 1]:
+        elif close.iloc[i] < lower.iloc[i]:
             st_dir[i] = "DOWN"
         else:
             st_dir[i] = st_dir[i - 1]
@@ -226,6 +228,9 @@ def _supertrend(high, low, close, period: int = 10, mult: float = 3.0):
             st_val[i] = max(float(lower.iloc[i]), st_val[i - 1]) if st_val[i - 1] else float(lower.iloc[i])
         else:
             st_val[i] = min(float(upper.iloc[i]), st_val[i - 1]) if st_val[i - 1] else float(upper.iloc[i])
+    st = pd.Series(st_val)
+    if pd.isna(st.iloc[-1]):
+        return 0.0, "NEUTRAL"
     return st_val[-1], st_dir[-1]
 
 
@@ -458,7 +463,7 @@ def _kite_quote_to_quote(symbol: str, data: dict) -> Quote:
         low       = ohlc.get("low",   ltp),
         prev_close= ohlc.get("close", ltp),
         change    = data.get("change", 0.0),
-        change_pct= data.get("change", 0.0),
+        change_pct= data.get("change_percent", data.get("change_pct", 0.0)),
         volume    = data.get("volume_traded", 0),
         bid       = buys[0].get("price",  ltp) if buys  else ltp,
         ask       = sells[0].get("price", ltp) if sells else ltp,
@@ -524,6 +529,7 @@ class TickEngine:
 
         # KiteConnect WebSocket state
         self._kite_ticker = None
+        self._is_truedata_ws: bool = False
         self._use_ws: bool = False
         self._ws_received: set[str] = set()
         self._ws_down_since: Optional[float] = None  # monotonic time when WS disconnect detected
@@ -565,6 +571,7 @@ class TickEngine:
                         self._loop,
                     )
                     self._use_ws = True
+                    self._is_truedata_ws = True
                     logger.info("TickEngine: TrueData WebSocket started for {} symbols",
                                 len(self._symbols))
                 except Exception as exc:
@@ -698,8 +705,7 @@ class TickEngine:
     async def _ingest_kite_tick(self, symbol: str, tick: Tick) -> None:
         """Process a tick received directly from KiteConnect/TrueData WebSocket."""
         self._ws_received.add(symbol)
-        from truedata_client import TrueDataTicker
-        source = "TRUEDATA_WS" if isinstance(self._kite_ticker, TrueDataTicker) else "KITE_WS"
+        source = "TRUEDATA_WS" if self._is_truedata_ws else "KITE_WS"
         await self._process_tick(symbol, tick, source=source)
 
     # ── Main poll loop ────────────────────────────────────────────────
