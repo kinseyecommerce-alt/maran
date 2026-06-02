@@ -558,6 +558,69 @@ async def upstox_set_token(req: TokenRequest):
     return {"status": "ok", "token_preview": req.access_token[:6] + "…"}
 
 
+# ── Kotak Neo Auth ────────────────────────────────────────────────────────────
+
+class KotakOTPRequest(BaseModel):
+    otp: str
+
+class KotakTokenRequest(BaseModel):
+    access_token: str
+    sid: str = ""
+
+@app.get("/auth/kotak/status", tags=["Auth"])
+def kotak_status():
+    """Check whether a valid Kotak Neo access token + sid are loaded."""
+    return {
+        "connected":       bool(settings.kotak_access_token and settings.kotak_sid),
+        "consumer_key_set": bool(settings.kotak_consumer_key),
+        "token_preview":   settings.kotak_access_token[:8] + "…" if settings.kotak_access_token else "",
+        "sid_preview":     settings.kotak_sid[:8] + "…" if settings.kotak_sid else "",
+        "broker":          "kotak",
+    }
+
+@app.post("/auth/kotak/send-otp", tags=["Auth"])
+def kotak_send_otp():
+    """
+    Step 1 — trigger OTP to the registered mobile number.
+    Requires KOTAK_CONSUMER_KEY, KOTAK_MOBILE_NUMBER, KOTAK_PASSWORD in .env.
+    """
+    if not settings.kotak_consumer_key:
+        raise HTTPException(400, "KOTAK_CONSUMER_KEY not set in .env")
+    if not settings.kotak_mobile_number:
+        raise HTTPException(400, "KOTAK_MOBILE_NUMBER not set in .env")
+    from brokers.kotak_broker import KotakBroker
+    broker = KotakBroker()
+    result = broker.send_otp()
+    return {"status": "otp_sent", "detail": result}
+
+@app.post("/auth/kotak/verify-otp", tags=["Auth"])
+def kotak_verify_otp(req: KotakOTPRequest):
+    """
+    Step 2 — complete 2FA with the OTP received on mobile.
+    On success stores access_token + sid in memory (also set in settings).
+    """
+    if not req.otp:
+        raise HTTPException(400, "otp is required")
+    from brokers.kotak_broker import KotakBroker
+    broker = KotakBroker()
+    token  = broker.session_2fa(req.otp)
+    return {
+        "status":        "connected",
+        "token_preview": token[:8] + "…" if token else "",
+        "sid_preview":   settings.kotak_sid[:8] + "…" if settings.kotak_sid else "",
+        "broker":        "kotak",
+    }
+
+@app.post("/auth/kotak/token", tags=["Auth"])
+def kotak_set_token(req: KotakTokenRequest):
+    """Set Kotak access_token + sid directly (manual paste from dashboard)."""
+    if not req.access_token:
+        raise HTTPException(400, "access_token is required")
+    settings.kotak_access_token = req.access_token
+    settings.kotak_sid          = req.sid
+    return {"status": "ok", "token_preview": req.access_token[:6] + "…"}
+
+
 @app.post("/auth/kite/refresh", tags=["Auth"])
 async def kite_token_refresh():
     """Manually trigger Kite auto-login via Playwright (same as 08:50 IST scheduler job).
@@ -1672,6 +1735,9 @@ def broker_status():
     if active == "upstox":
         from brokers.upstox_broker import UpstoxBroker
         creds = UpstoxBroker().validate_credentials()
+    elif active == "kotak":
+        from brokers.kotak_broker import KotakBroker
+        creds = KotakBroker().validate_credentials()
     else:
         creds = kite_client.validate_credentials()
     return {

@@ -149,8 +149,16 @@ class Settings(BaseSettings):
     upstox_access_token: str = ""
     upstox_redirect_url: str = ""
 
+    # Kotak Neo
+    kotak_consumer_key:    str = ""   # from Kotak developer portal
+    kotak_consumer_secret: str = ""   # from Kotak developer portal
+    kotak_access_token:    str = ""   # set after OTP login (refreshed daily)
+    kotak_sid:             str = ""   # session ID returned with access token
+    kotak_mobile_number:   str = ""   # registered mobile e.g. "+919876543210"
+    kotak_password:        str = ""   # Kotak login password (for OTP trigger)
+
     # Active broker selection
-    active_broker: Literal["zerodha", "upstox"] = "zerodha"
+    active_broker: Literal["zerodha", "upstox", "kotak"] = "zerodha"
 
     # Phase 1: Transaction cost / slippage model
     bt_slippage_bps_intraday: int = 10
