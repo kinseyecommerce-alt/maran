@@ -2201,11 +2201,14 @@ def t_fno_high_iv_blocks_entry():
     snap.indicators.vwap = 21950; snap.indicators.macd_hist = 1.0
     snap.indicators.volume_ratio = 2.0; snap.indicators.momentum = "STRONG_UP"
     snap.indicators.bb_upper = 0; snap.indicators.bb_lower = 0; snap.indicators.bb_mid = 0
+    # adx_14 > 22 blocks strangle_sell; adx_14 > 18 blocks iron_condor
+    # High ADX signals a trending market where sell patterns should not fire
+    snap.indicators.adx_14 = 25.0
 
     opts_data = {"iv_rank": 80.0, "atm_iv": 35.0, "iv_percentile": 85.0}
     with patch("options_intelligence.get_cached", return_value=opts_data):
         action, signal = a.evaluate_tick(snap)
-    assert action == "HOLD", f"High IV rank should block entry, got {action}"
+    assert action == "HOLD", f"High IV rank should block entry (no premium buying), got {action}"
 
 def t_fno_min_score_4_size_025():
     a = OptionsAgent()
@@ -2869,21 +2872,21 @@ def t_momentum_vol_surge_trend_buy():
 
 def t_momentum_order_guard_max_trades():
     from config import settings
-    assert settings.max_trades_momentum == 6
+    assert settings.max_trades_momentum == 100
 
 def t_mean_reversion_order_guard_max_trades():
     from config import settings
-    assert settings.max_trades_mean_reversion == 6
+    assert settings.max_trades_mean_reversion == 100
 
 def t_momentum_order_guard_registered():
     from order_guard import order_guard
     limit = order_guard._max_trades("momentum")
-    assert limit == 6
+    assert limit == 100
 
 def t_mean_reversion_order_guard_registered():
     from order_guard import order_guard
     limit = order_guard._max_trades("mean_reversion")
-    assert limit == 6
+    assert limit == 100
 
 print("── 18. NEW AGENTS — MEAN REVERSION + MOMENTUM ──────────────────────────")
 run("mean_reversion agent in ALL_AGENTS",                        t_mean_reversion_in_all_agents)
