@@ -34,15 +34,15 @@ _GOD_OVERRIDES: dict[str, Any] = {
     # Claude gate — capture every conviction trade Opus approves
     "claude_gate_threshold": 45,
 
-    # Trade counts — 3-4× normal
-    "max_trades_intraday":       25,
-    "max_trades_scalping":       60,
-    "max_trades_options":        12,
-    "max_trades_futures":        12,
-    "max_trades_swing":           8,
-    "max_trades_mean_reversion": 18,
-    "max_trades_momentum":       18,
-    "max_trades_pairs":          24,
+    # Trade counts — unlimited (2000/day per strategy)
+    "max_trades_intraday":       2000,
+    "max_trades_scalping":       2000,
+    "max_trades_options":        2000,
+    "max_trades_futures":        2000,
+    "max_trades_swing":          2000,
+    "max_trades_mean_reversion": 2000,
+    "max_trades_momentum":       2000,
+    "max_trades_pairs":          2000,
 
     # Concurrent positions
     "max_open_positions":       20,

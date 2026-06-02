@@ -74,14 +74,14 @@ class Settings(BaseSettings):
     bt_min_calmar: float = 0.5            # minimum Calmar ratio to pass backtest gate
 
     # Overtrade prevention (per strategy per day)
-    max_trades_intraday:       int = 8
-    max_trades_options:        int = 4
-    max_trades_futures:        int = 4
-    max_trades_swing:          int = 3
-    max_trades_scalping:       int = 20
-    max_trades_mean_reversion: int = 6
-    max_trades_momentum:       int = 6
-    max_trades_pairs:          int = 8
+    max_trades_intraday:       int = 2000
+    max_trades_options:        int = 2000
+    max_trades_futures:        int = 2000
+    max_trades_swing:          int = 2000
+    max_trades_scalping:       int = 2000
+    max_trades_mean_reversion: int = 2000
+    max_trades_momentum:       int = 2000
+    max_trades_pairs:          int = 2000
     cooldown_after_loss_sec:   int = 300
 
     # Per-agent stop-loss % (intraday/scalping/futures/swing = price %; options = premium %)
