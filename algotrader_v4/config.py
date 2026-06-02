@@ -73,15 +73,17 @@ class Settings(BaseSettings):
     bt_lookback_days: int = 730
     bt_min_calmar: float = 0.5            # minimum Calmar ratio to pass backtest gate
 
-    # Overtrade prevention (per strategy per day)
-    max_trades_intraday:       int = 2000
-    max_trades_options:        int = 2000
-    max_trades_futures:        int = 2000
-    max_trades_swing:          int = 2000
-    max_trades_scalping:       int = 2000
-    max_trades_mean_reversion: int = 2000
-    max_trades_momentum:       int = 2000
-    max_trades_pairs:          int = 2000
+    # Overtrade prevention — calibrated to Kite's 2,000 orders/day hard limit.
+    # Each trade = 2 orders (entry + SL-M); 500 orders reserved for TSL modifications.
+    # Effective budget: 1,500 new orders → ~750 trades total across all agents.
+    max_trades_scalping:       int = 250   # highest frequency — ~1 trade/min
+    max_trades_intraday:       int = 150
+    max_trades_momentum:       int = 100
+    max_trades_mean_reversion: int = 100
+    max_trades_pairs:          int = 100
+    max_trades_options:        int = 75
+    max_trades_futures:        int = 75
+    max_trades_swing:          int = 25    # position trades, low turnover
     cooldown_after_loss_sec:   int = 300
 
     # Per-agent stop-loss % (intraday/scalping/futures/swing = price %; options = premium %)
