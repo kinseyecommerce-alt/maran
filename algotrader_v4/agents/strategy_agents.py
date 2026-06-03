@@ -22,22 +22,36 @@ from config import settings
 
 class IntradayAgent(BaseAgent):
     """
-    Never-miss NSE intraday agent — 5 entry patterns, all market sessions covered.
+    World-class NSE intraday agent — 18 patterns, 10-factor ctx bonus, enhanced exits.
 
-    Patterns (fire independently, best score wins each tick):
-      1. VWAP_TREND   — price+EMA above VWAP with RSI/MACD/volume (trend continuation)
-      2. EMA_PULLBACK — pullback into RSI 45-62 zone in a strong 3-EMA trend
-      3. ORB_BREAK    — opening range breakout (9:30-10:30 execution window)
-      4. BREAKOUT     — 15-bar high/low break with heavy volume (≥1.5×)
-      5. VWAP_RECLAIM — fresh VWAP cross with volume (regime change entry)
+    Patterns (all evaluate each tick, best score wins):
+      1.  VWAP_TREND         — price+EMA above VWAP with RSI/MACD/volume
+      2.  EMA_PULLBACK       — RSI cools into 45-62 zone in 3-EMA trend
+      3.  ORB_BREAK          — opening range breakout 9:30-10:30
+      4.  BREAKOUT           — 15-bar high/low break with ≥1.5× volume
+      5.  VWAP_RECLAIM       — fresh VWAP cross with volume
+      6.  TTM_SQUEEZE        — squeeze releases with momentum aligned
+      7.  VWAP_BAND_REVERT   — mean-reversion from VWAP 3σ extremes
+      8.  STOCHRSI_CROSS     — StochRSI K crosses from <20 or >80 zone
+      9.  HMA_FLIP           — HMA direction flip + EMA + volume
+      10. WILLIAMS_REVERSAL  — Williams %R extreme bounce
+      11. GAP_PLAY           — gap ≥0.5% continuation first 45 min
+      12. PREV_DAY_LEVEL     — 15-bar hi/lo break + MACD + volume
+      13. MOMENTUM_SURGE     — RSI-7 surges with 2× volume
+      14. DUAL_EMA_RETEST    — price retests EMA21 in 3-EMA stack (high conviction)
+      15. ADX_BREAKOUT       — ADX crosses 25 (range→trend) with directional confirm
+      16. SUPERTREND_ALIGN   — Supertrend + HMA + 3-EMA triple alignment (max conviction)
+      17. BB_SQUEEZE_WALK    — 3 consecutive closes outside BB band = sustained breakout
+      18. FII_INSTITUTIONAL  — strong FII buying/selling + EMA + ADX
 
-    Context bonuses (added to every pattern base score):
-      EMA full align (0-2), VWAP side (0-1), RSI zone (0-1),
-      volume (0-1), MACD direction (0-1), institutional flow (0-1)
+    Context bonuses (0-10 added to every pattern base score):
+      EMA align (0-2), VWAP (0-1), RSI zone (0-1), volume (0-1),
+      MACD (0-1), institutional (0-1), ADX strength (0-1),
+      Supertrend (0-1), depth imbalance (0-1), macro score (0-1)
 
-    Sizing tiers:  score 4 → 0.5×  |  5-6 → 0.75×  |  7+ → 1.0×
-    Cooldown:      180s per direction (BUY/SELL tracked independently)
-    SL/TGT:        ATR-based — SL=1.5×ATR14, TGT=2.5×ATR14
+    Sizing tiers:  score 4 → 0.5×  |  5-7 → 0.75×  |  8+ → 1.0×
+    Exits: SL/TGT + breakeven lock at 1×ATR + supertrend flip + RSI exhaustion
+    SL/TGT: SL=1.5×ATR14, TGT=2.5×ATR14
     """
     name    = "intraday"
     product = "MIS"
@@ -61,6 +75,7 @@ class IntradayAgent(BaseAgent):
         self._prev_stochrsi_k:  dict = {}   # sym → StochRSI K last tick
         self._prev_hma_dir:     dict = {}   # sym → hma_dir last tick
         self._prev_williams:    dict = {}   # sym → williams_r last tick
+        self._prev_adx:         dict = {}   # sym → adx_14 last tick (ADX_BREAKOUT)
         self._orb_high:         dict = {}
         self._orb_low:          dict = {}
         self._orb_fired:        dict = {}
@@ -84,7 +99,10 @@ class IntradayAgent(BaseAgent):
                        self._pat_ttm_squeeze, self._pat_vwap_band_revert,
                        self._pat_stochrsi_cross, self._pat_hma_flip,
                        self._pat_williams_reversal, self._pat_gap_play,
-                       self._pat_prev_day_level, self._pat_momentum_surge):
+                       self._pat_prev_day_level, self._pat_momentum_surge,
+                       self._pat_dual_ema_retest, self._pat_adx_breakout,
+                       self._pat_supertrend_align, self._pat_bb_squeeze_walk,
+                       self._pat_fii_institutional):
             try:
                 action, base, pname = pat_fn(sym, snap, ind, ltp, t)
             except Exception:
@@ -114,7 +132,7 @@ class IntradayAgent(BaseAgent):
         atr      = ind.atr_14 or ltp * 0.005
         sl_dist  = max(atr * self.SL_ATR,  ltp * settings.sl_pct_intraday  / 100)
         tgt_dist = max(atr * self.TGT_ATR, ltp * settings.tgt_pct_intraday / 100)
-        sf       = 1.0 if best_score >= 7 else (0.75 if best_score >= 5 else 0.5)
+        sf       = 1.0 if best_score >= 8 else (0.75 if best_score >= 5 else 0.5)
 
         if best_action == "BUY":
             sl  = round(ltp - sl_dist, 2)
@@ -135,8 +153,8 @@ class IntradayAgent(BaseAgent):
             "product":           self.product,
             "_gate_size_factor": sf,
             "trigger": (
-                f"INTRA-{best_action} [{best_pattern}] score={best_score} "
-                f"sf={sf} rsi={ind.rsi_14:.0f} trend={ind.trend}"
+                f"INTRA-{best_action} [{best_pattern}] score={best_score}/18 "
+                f"sf={sf} rsi={ind.rsi_14:.0f} atr={atr:.2f} trend={ind.trend}"
             ),
         }
 
@@ -342,13 +360,100 @@ class IntradayAgent(BaseAgent):
             return "SELL", 5, "MOMENTUM_SURGE"
         return "", 0, ""
 
-    # ── Context bonus (+0 to +6 points added to every pattern) ───────────────
+    # ── Pattern 14: DUAL_EMA_RETEST ───────────────────────────────────────────
+
+    def _pat_dual_ema_retest(self, sym, snap, ind, ltp, t):
+        """Price retests EMA21 (within 0.3%) in a full 3-EMA bull/bear stack — high conviction."""
+        ema21 = ind.ema21
+        if not ema21 or ema21 <= 0:
+            return "", 0, ""
+        bull = ind.ema9 > ind.ema21 > 0 and ind.ema21 > ind.ema50 > 0
+        bear = ind.ema9 < ind.ema21 > 0 and ind.ema21 < ind.ema50 > 0
+        dist_pct = abs(ltp - ema21) / ema21
+        if bull and dist_pct < 0.003 and ltp > ema21 and 45 <= ind.rsi_14 <= 65 and ind.volume_ratio >= 1.2:
+            return "BUY", 5, "DUAL_EMA_RETEST"
+        if bear and dist_pct < 0.003 and ltp < ema21 and 35 <= ind.rsi_14 <= 55 and ind.volume_ratio >= 1.2:
+            return "SELL", 5, "DUAL_EMA_RETEST"
+        return "", 0, ""
+
+    # ── Pattern 15: ADX_BREAKOUT ──────────────────────────────────────────────
+
+    def _pat_adx_breakout(self, sym, snap, ind, ltp, t):
+        """ADX crosses 25 (range → trend forming) + directional confirmation + volume."""
+        adx = getattr(ind, 'adx_14', 0.0)
+        prev_adx = self._prev_adx.get(sym, adx)
+        if not (prev_adx < 25 and adx >= 25 and ind.volume_ratio >= 1.3):
+            return "", 0, ""
+        if (ind.vwap and ltp > ind.vwap and ind.ema9 > ind.ema21 > 0 and ind.macd_hist > 0):
+            return "BUY", 5, "ADX_BREAKOUT"
+        if (ind.vwap and ltp < ind.vwap and ind.ema9 < ind.ema21 > 0 and ind.macd_hist < 0):
+            return "SELL", 5, "ADX_BREAKOUT"
+        return "", 0, ""
+
+    # ── Pattern 16: SUPERTREND_ALIGN ──────────────────────────────────────────
+
+    def _pat_supertrend_align(self, sym, snap, ind, ltp, t):
+        """Triple confirmation: Supertrend + HMA + 3-EMA stack + VWAP — maximum conviction."""
+        adx = getattr(ind, 'adx_14', 0.0)
+        bull = (ind.supertrend_dir == "UP" and ind.hma_dir == "UP"
+                and ind.ema9 > ind.ema21 > 0 and ind.ema21 > ind.ema50 > 0
+                and ind.vwap and ltp > ind.vwap and ind.volume_ratio >= 1.2 and adx >= 20)
+        bear = (ind.supertrend_dir == "DOWN" and ind.hma_dir == "DOWN"
+                and ind.ema9 < ind.ema21 > 0 and ind.ema21 < ind.ema50 > 0
+                and ind.vwap and ltp < ind.vwap and ind.volume_ratio >= 1.2 and adx >= 20)
+        if bull and 45 <= ind.rsi_14 <= 70:
+            return "BUY", 5, "SUPERTREND_ALIGN"
+        if bear and 30 <= ind.rsi_14 <= 55:
+            return "SELL", 5, "SUPERTREND_ALIGN"
+        return "", 0, ""
+
+    # ── Pattern 17: BB_SQUEEZE_WALK ───────────────────────────────────────────
+
+    def _pat_bb_squeeze_walk(self, sym, snap, ind, ltp, t):
+        """3 consecutive closes outside BB band = sustained breakout momentum."""
+        if len(snap.candles_1min) < 3:
+            return "", 0, ""
+        bb_u = getattr(ind, 'bb_upper', 0.0)
+        bb_l = getattr(ind, 'bb_lower', 0.0)
+        if not (bb_u > 0 and bb_l > 0):
+            return "", 0, ""
+        last3 = snap.candles_1min[-3:]
+        if (all(c.close >= bb_u for c in last3)
+                and ind.volume_ratio >= 1.3 and ind.macd_hist > 0):
+            return "BUY", 4, "BB_SQUEEZE_WALK"
+        if (all(c.close <= bb_l for c in last3)
+                and ind.volume_ratio >= 1.3 and ind.macd_hist < 0):
+            return "SELL", 4, "BB_SQUEEZE_WALK"
+        return "", 0, ""
+
+    # ── Pattern 18: FII_INSTITUTIONAL ────────────────────────────────────────
+
+    def _pat_fii_institutional(self, sym, snap, ind, ltp, t):
+        """Strong FII institutional flow + EMA alignment + ADX — smart money entry."""
+        try:
+            from alt_data import alt_data_engine
+            sent = alt_data_engine.get_fii_sentiment()
+            if not sent:
+                return "", 0, ""
+            fii = sent.get("fii_net_score", 0.5)
+            adx = getattr(ind, 'adx_14', 0.0)
+            if (fii > 0.65 and ind.ema9 > ind.ema21 > 0 and adx >= 20
+                    and ind.vwap and ltp > ind.vwap and ind.volume_ratio >= 1.2):
+                return "BUY", 5, "FII_INSTITUTIONAL"
+            if (fii < 0.35 and ind.ema9 < ind.ema21 > 0 and adx >= 20
+                    and ind.vwap and ltp < ind.vwap and ind.volume_ratio >= 1.2):
+                return "SELL", 5, "FII_INSTITUTIONAL"
+        except Exception:
+            pass
+        return "", 0, ""
+
+    # ── Context bonus (+0 to +10 points added to every pattern) ──────────────
 
     def _ctx_bonus(self, action: str, sym: str, ind: LiveIndicators, ltp: float) -> int:
         b = 0
         is_buy = action == "BUY"
 
-        # EMA alignment (0-2): full 3-EMA stack = +2, 2-EMA only = +1
+        # 1. EMA alignment (0-2): full 3-EMA stack = +2, 2-EMA only = +1
         if is_buy:
             if ind.ema9 > ind.ema21 > 0 and ind.ema21 > ind.ema50 > 0:
                 b += 2
@@ -360,30 +465,60 @@ class IntradayAgent(BaseAgent):
             elif ind.ema9 < ind.ema21 > 0:
                 b += 1
 
-        # VWAP side (0-1)
+        # 2. VWAP side (0-1)
         if ind.vwap and ind.vwap > 0:
             if (is_buy and ltp > ind.vwap) or (not is_buy and ltp < ind.vwap):
                 b += 1
 
-        # RSI zone (0-1)
+        # 3. RSI zone (0-1)
         if (is_buy and 44 <= ind.rsi_14 <= 72) or (not is_buy and 28 <= ind.rsi_14 <= 56):
             b += 1
 
-        # Volume (0-1)
+        # 4. Volume (0-1)
         if ind.volume_ratio >= 1.3:
             b += 1
 
-        # MACD direction (0-1)
+        # 5. MACD direction (0-1)
         if (is_buy and ind.macd_hist > 0) or (not is_buy and ind.macd_hist < 0):
             b += 1
 
-        # Institutional flow (0-1) — sync cache, fails silently
+        # 6. Institutional flow (0-1) — sync cache, fails silently
         try:
             from institutional_flow import get_cached_score
             inst = get_cached_score(sym)
             if inst:
                 score_val = inst.get("institutional_score", 50.0)
                 if (is_buy and score_val > 55) or (not is_buy and score_val < 45):
+                    b += 1
+        except Exception:
+            pass
+
+        # 7. ADX strength (0-1) — trend confirmed with momentum
+        adx = getattr(ind, 'adx_14', 0.0)
+        if adx >= 25:
+            b += 1
+
+        # 8. Supertrend direction (0-1) — directional trend filter
+        st = ind.supertrend_dir
+        if (is_buy and st == "UP") or (not is_buy and st == "DOWN"):
+            b += 1
+
+        # 9. L2 depth imbalance (0-1) — institutional order flow edge
+        try:
+            di = getattr(ind, 'depth_imbalance', 0.5)
+            if (is_buy and di > 0.62) or (not is_buy and di < 0.38):
+                b += 1
+        except Exception:
+            pass
+
+        # 10. Macro score (0-1) — global risk-on/risk-off alignment
+        try:
+            from macro_signals import macro_signals
+            ms = macro_signals.get_score() if hasattr(macro_signals, 'get_score') else None
+            if ms is None:
+                ms = getattr(macro_signals, '_score', None)
+            if ms is not None:
+                if (is_buy and ms > 0.1) or (not is_buy and ms < -0.1):
                     b += 1
         except Exception:
             pass
@@ -417,6 +552,7 @@ class IntradayAgent(BaseAgent):
         self._prev_stochrsi_k[sym]  = ind.stoch_rsi_k
         self._prev_hma_dir[sym]     = ind.hma_dir
         self._prev_williams[sym]    = ind.williams_r
+        self._prev_adx[sym]         = getattr(ind, 'adx_14', 0.0)
 
     def should_exit_position(self, pos: dict, ind: LiveIndicators) -> tuple[bool, str]:
         entry = pos.get("average_price", ind.ltp)
@@ -430,15 +566,48 @@ class IntradayAgent(BaseAgent):
         tgt_dist = max(atr * self.TGT_ATR, entry * self.TGT_MIN_PCT / 100)
 
         if side == "BUY":
-            if ltp <= entry - sl_dist:  return True, f"SL hit ₹{ltp:.2f}"
-            if ltp >= entry + tgt_dist: return True, f"Target ₹{ltp:.2f}"
+            sl_price = entry - sl_dist
+            profit   = ltp - entry
+            # Breakeven lock: once 1×ATR in profit, SL moves to entry
+            if profit >= atr:
+                sl_price = max(sl_price, entry)
+            if ltp <= sl_price:
+                return True, f"SL hit ₹{ltp:.2f}"
+            if ltp >= entry + tgt_dist:
+                return True, f"Target ₹{ltp:.2f}"
+            # Supertrend flip against position
+            if ind.supertrend_dir == "DOWN":
+                return True, "Supertrend flip (DOWN) exit"
+            # RSI-14 exhaustion — overbought signal on an intraday long
+            if ind.rsi_14 >= 76:
+                return True, f"RSI overbought {ind.rsi_14:.0f} exit"
+            # Trend + MACD double reversal
             if ind.trend == "DOWN" and ind.macd_hist < 0:
                 return True, "Trend reversal exit"
+            # 3-bar close below EMA9 — momentum lost
+            if ind.ema9 and len(getattr(pos, '_recent_closes', [])) == 0:
+                if ltp < ind.ema9 and ind.macd_hist < 0 and ind.rsi_14 < 45:
+                    return True, "EMA9 breakdown exit"
         else:
-            if ltp >= entry + sl_dist:  return True, f"SL hit ₹{ltp:.2f}"
-            if ltp <= entry - tgt_dist: return True, f"Target ₹{ltp:.2f}"
+            sl_price = entry + sl_dist
+            profit   = entry - ltp
+            # Breakeven lock: once 1×ATR in profit, SL moves to entry
+            if profit >= atr:
+                sl_price = min(sl_price, entry)
+            if ltp >= sl_price:
+                return True, f"SL hit ₹{ltp:.2f}"
+            if ltp <= entry - tgt_dist:
+                return True, f"Target ₹{ltp:.2f}"
+            # Supertrend flip against short
+            if ind.supertrend_dir == "UP":
+                return True, "Supertrend flip (UP) exit"
+            # RSI-14 exhaustion — oversold on an intraday short
+            if ind.rsi_14 <= 24:
+                return True, f"RSI oversold {ind.rsi_14:.0f} exit"
             if ind.trend == "UP" and ind.macd_hist > 0:
                 return True, "Trend reversal exit"
+            if ind.ema9 and ltp > ind.ema9 and ind.macd_hist > 0 and ind.rsi_14 > 55:
+                return True, "EMA9 reclaim exit"
 
         now = now_ist().time().replace(tzinfo=None)
         if now.hour >= 15:
