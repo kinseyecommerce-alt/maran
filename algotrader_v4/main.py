@@ -750,7 +750,7 @@ def pause_agent(name: str):
     a.stop(); return {"status": "paused"}
 
 @app.post("/agents/{name}/resume", tags=["Agents"])
-def resume_agent(name: str):
+async def resume_agent(name: str):
     a = ALL_AGENTS.get(name)
     if not a: raise HTTPException(404, "Not found")
     if not bot_state.is_agent_enabled(name):
@@ -1954,10 +1954,10 @@ async def prometheus_metrics():
         f"algotrader_trades_today {_rm.trades_today}",
         "# HELP algotrader_pnl_today Net P&L today (INR)",
         "# TYPE algotrader_pnl_today gauge",
-        f"algotrader_pnl_today {_rm.daily_pnl:.2f}",
+        f"algotrader_pnl_today {_rm.daily_realised_pnl:.2f}",
         "# HELP algotrader_open_positions Current open positions",
         "# TYPE algotrader_open_positions gauge",
-        f"algotrader_open_positions {len(_tsl.positions)}",
+        f"algotrader_open_positions {len(_tsl._positions)}",
         "# HELP algotrader_timestamp_seconds Unix timestamp",
         "# TYPE algotrader_timestamp_seconds gauge",
         f"algotrader_timestamp_seconds {_t.time():.0f}",
@@ -1971,7 +1971,7 @@ async def stress_test(shock_pct: float = -5.0):
     """Simulate a market shock (default -5% Nifty) and compute portfolio impact."""
     from trailing_sl_engine import trailing_sl_engine as _tsl
     from risk_manager import _BETA_MAP
-    positions = list(_tsl.positions.values())
+    positions = list(_tsl._positions.values())
     if not positions:
         return {"shock_pct": shock_pct, "positions_tested": 0, "estimated_pnl_impact": 0.0, "positions": []}
     total_impact = 0.0

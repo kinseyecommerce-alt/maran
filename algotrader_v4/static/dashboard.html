@@ -3518,7 +3518,7 @@ async function connectKiteOAuth() {
 
 async function fetchKiteStatus() {
   try {
-    const d = await api('GET', '/auth/kite-status');
+    const d = await api('GET', '/auth/kite/status');
     if (d) {
       const stxt = document.getElementById('settings-kite-status');
       if (stxt) stxt.textContent = d.connected ? `Connected (${d.user_id || 'OK'})` : 'Not connected';
