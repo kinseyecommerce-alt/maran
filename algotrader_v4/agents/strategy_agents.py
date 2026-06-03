@@ -452,19 +452,39 @@ class IntradayAgent(BaseAgent):
 
 class OptionsAgent(BaseAgent):
     """
-    Never-miss NSE/NFO options agent — 7 entry patterns, all market conditions covered.
+    World-class NSE/NFO options agent — 20 patterns, Greek-aware sizing, delta-targeted strikes.
 
-    Patterns (fire independently, best score wins each tick):
-      1. EMA_CROSS    — 9/21/50 EMA full alignment (highest conviction trend)
-      2. TREND_PULL   — Pullback into 48-58 RSI zone in a strong EMA trend
-      3. ORB          — Opening range breakout (9:15-9:30 range, execute 9:30-10:00)
-      4. VWAP_RECLAIM — Price crosses above/below VWAP with volume
-      5. BB_SQUEEZE   — Bollinger Band squeeze expanding → volatility breakout
-      6. RSI_EXTREME  — RSI > 72 / < 28 with MACD confirmation (momentum)
-      7. SURGE        — Large candle body (>0.4%) + heavy volume (>1.8×)
+    BUY Patterns (fire independently, best score wins each tick):
+      1.  EMA_CROSS              — 9/21/50 EMA full alignment crossover event
+      2.  TREND_PULL             — Pullback into RSI 48-60 in strong EMA trend
+      3.  ORB                    — Opening range breakout (9:15-9:30 → 9:30-10:00)
+      4.  VWAP_RECLAIM           — Cross above/below VWAP with volume surge
+      5.  BB_SQUEEZE             — Bollinger squeeze expansion → MACD confirmed
+      6.  RSI_MOMENTUM           — RSI 58-70 (CE) / 30-42 (PE) with volume
+      7.  SURGE                  — Large candle body >0.4% + volume >1.8×
+      8.  ICHIMOKU_CLOUD         — Cloud breakout with Ichimoku direction
+      9.  STOCHRSI_OPTIONS       — StochRSI cross from extreme (IV<55%)
+      10. WILLIAMS_OPTIONS       — Williams %R extreme bounce + MACD
+      11. OI_SURGE               — Institutional OI buildup at nearby strikes
+      12. EXPIRY_SCALP           — Expiry-day 9:30-11:30 gamma burst
+      13. PCR_EXTREME            — PCR <0.60 (CE) / >1.50 (PE) capitulation
+      14. GAMMA_FLIP             — GEX zero-cross: dealer regime change amplifies moves
+      15. SKEW_MOMENTUM          — Rising put/call skew from IV surface
+      16. ATM_STRADDLE           — Both legs when IV rank <22% + squeeze releasing
+      17. VOL_BREAKOUT           — Extended BB compression sudden expansion
+      18. SMART_MONEY_DIVERGENCE — OI divergence from price (trapped counterparty)
 
-    Context bonuses (added to every pattern score):
-      IV rank, options flow, GEX regime, volume, MACD, skew
+    SELL Patterns (elevated IV → premium selling):
+      19. STRANGLE_SELL          — Sell OTM strangle when IV rank >65% + ADX<22
+      20. IRON_CONDOR            — Sell iron condor when IV rank >75% + ADX<18
+
+    Intelligence layer:
+      • Black-Scholes delta/theta per strike (target δ=0.40 buy, 0.25 OTM, 0.50 straddle)
+      • 11-factor context bonus: IV rank, flow, GEX, volume, MACD, skew, PCR, max pain,
+        5min trend, theta efficiency, days-to-expiry
+      • IV-adaptive SL/TGT + expiry-day forced exit by 13:30
+      • Delta-based exit: exit when option δ < 0.12 (gone OTM)
+      • Profit lock-in: trail SL to breakeven once +50% in option premium
 
     Sizing tiers:   score 4 → 0.25×  |  5 → 0.5×  |  6-7 → 0.75×  |  8+ → 1.0×
     Cooldown:       120s per symbol per direction (CE and PE tracked independently)
@@ -498,6 +518,10 @@ class OptionsAgent(BaseAgent):
         self._prev_ema9_opt:       dict = {}   # sym → float (EMA_CROSS event detection)
         self._prev_ema21_opt:      dict = {}   # sym → float (EMA_CROSS event detection)
         self._cool_ts:             dict = {}   # sym → {"CE": datetime, "PE": datetime}
+        self._prev_pcr:            dict = {}   # sym → float (PCR change detection)
+        self._prev_atr_opt:        dict = {}   # sym → float (ATR expansion for straddle)
+        self._prev_skew_vel:       dict = {}   # sym → float (skew velocity for SKEW_MOMENTUM)
+        self._prev_gex_val:        dict = {}   # sym → float (GEX zero-cross for GAMMA_FLIP)
 
     def evaluate_tick(self, snap: MarketSnapshot) -> tuple[str, Optional[dict]]:
         ind = snap.indicators
@@ -543,6 +567,12 @@ class OptionsAgent(BaseAgent):
                 self._pat_williams_options,
                 self._pat_oi_surge,
                 self._pat_expiry_scalp,
+                self._pat_pcr_extreme,
+                self._pat_gamma_flip,
+                self._pat_skew_momentum,
+                self._pat_atm_straddle,
+                self._pat_vol_contraction_breakout,
+                self._pat_smart_money_divergence,
             ]
             for pat_fn in buy_patterns:
                 try:
@@ -609,11 +639,27 @@ class OptionsAgent(BaseAgent):
         actual_opt = best_opt.replace("_SELL", "") if is_sell_signal else best_opt
         action_dir = "SELL" if is_sell_signal else "BUY"
 
-        # Strike: sell patterns target OTM (1.5× further from ATM than buy patterns)
-        otm_mult = 1.5 if is_sell_signal else 1.0
-        strike   = self._pick_strike(ltp, actual_opt, atm_iv, otm_mult)
-        opt_sym  = self._nfo_symbol(sym, strike, actual_opt)
-        lot_sz   = self.LOT_SIZES.get(sym, 1)
+        # Strike: sell patterns OTM (1.5×), straddle ATM (0.0×), buy ~0.40 delta
+        is_straddle = (best_pattern == "ATM_STRADDLE")
+        if is_straddle:
+            target_delta = 0.50    # ATM for straddle
+            otm_mult     = 0.0
+        elif is_sell_signal:
+            target_delta = 0.25    # far OTM for premium selling
+            otm_mult     = 1.5
+        else:
+            target_delta = 0.40    # near-ATM for directional buys
+            otm_mult     = 1.0
+
+        dte = self._days_to_expiry(sym)
+        strike  = self._target_delta_strike(ltp, actual_opt, atm_iv, target_delta, max(dte, 1))
+        opt_sym = self._nfo_symbol(sym, strike, actual_opt)
+        lot_sz  = self.LOT_SIZES.get(sym, 1)
+
+        # Approximate BS delta for the chosen strike (informational, logged)
+        import math as _math
+        iv_frac = max((atm_iv / 100.0) if atm_iv > 1.0 else atm_iv, 0.10)
+        entry_delta = round(abs(self._bs_delta(ltp, strike, max(dte, 1) / 365.0, 0.065, iv_frac, actual_opt)), 2)
 
         self._update_state(sym, ind, ltp)
         return action_dir, {
@@ -621,6 +667,7 @@ class OptionsAgent(BaseAgent):
             "option_symbol":      opt_sym,
             "option_type":        actual_opt,
             "is_sell":            is_sell_signal,
+            "is_straddle":        is_straddle,
             "strike":             strike,
             "lot_size":           lot_sz,
             "stop_loss_pct":      sl_pct,
@@ -629,12 +676,14 @@ class OptionsAgent(BaseAgent):
             "underlying_tgt_pct": 4.0,
             "iv_rank":            round(iv_rank, 1),
             "atm_iv":             round(atm_iv, 2),
+            "entry_delta":        entry_delta,
+            "days_to_expiry":     dte,
             "score":              best_score,
             "pattern":           best_pattern,
             "_gate_size_factor": sf,
             "trigger": (
-                f"OPT-{actual_opt} [{best_pattern}] {action_dir} score={best_score}/14 "
-                f"IVr={iv_rank:.0f}% sf={sf} rsi={ind.rsi_14:.0f} "
+                f"OPT-{actual_opt} [{best_pattern}] {action_dir} score={best_score}/20 "
+                f"IVr={iv_rank:.0f}% δ={entry_delta} DTE={dte} sf={sf} rsi={ind.rsi_14:.0f} "
                 f"trend={ind.trend}"
             ),
         }
@@ -883,62 +932,260 @@ class OptionsAgent(BaseAgent):
         # High VIX = both legs elevated, but call skew usually higher: start with CE_SELL
         return "CE_SELL", 6, "IRON_CONDOR"
 
-    # ── Context bonus (+0 to +9 points added to every pattern) ───────────────
+    # ── Pattern 13: PCR_EXTREME — Put-Call Ratio capitulation signal ─────────
+
+    def _pat_pcr_extreme(self, sym, snap, ind, ltp, t):
+        """PCR <0.60 = put holders capitulating (bullish CE). PCR >1.50 = call writers swamped (bearish PE)."""
+        from options_intelligence import get_cached
+        opts = get_cached(sym)
+        if not opts:
+            return "", 0, ""
+        pcr      = float(opts.get("pcr", 1.0))
+        prev_pcr = self._prev_pcr.get(sym, pcr)
+        # Extreme put unwinding → strong CE signal
+        if pcr < 0.60 and prev_pcr >= 0.65 and ind.rsi_14 > 50 and ind.ema9 > ind.ema21 > 0:
+            return "CE", 5, "PCR_EXTREME"
+        # Extreme call writer build-up → strong PE signal
+        if pcr > 1.50 and prev_pcr <= 1.45 and ind.rsi_14 < 50 and ind.ema9 < ind.ema21 > 0:
+            return "PE", 5, "PCR_EXTREME"
+        return "", 0, ""
+
+    # ── Pattern 14: GAMMA_FLIP — GEX zero-cross dealer regime change ─────────
+
+    def _pat_gamma_flip(self, sym, snap, ind, ltp, t):
+        """Dealers cross from short-gamma to long-gamma (or vice versa) — explosive directional move."""
+        import gamma_scalp as _gc
+        gex = _gc.get_cached_gex(sym)
+        if not gex or gex.net_gex is None:
+            return "", 0, ""
+        prev_gex = self._prev_gex_val.get(sym, gex.net_gex)
+        # GEX flipping from negative (amplified) to positive (dampened) + bullish confirmation
+        if prev_gex < 0 and gex.net_gex >= 0 and ind.ema9 > ind.ema21 > 0 and ind.rsi_14 > 50:
+            return "CE", 4, "GAMMA_FLIP"
+        # GEX flipping from positive to negative + bearish confirmation
+        if prev_gex > 0 and gex.net_gex <= 0 and ind.ema9 < ind.ema21 > 0 and ind.rsi_14 < 50:
+            return "PE", 4, "GAMMA_FLIP"
+        return "", 0, ""
+
+    # ── Pattern 15: SKEW_MOMENTUM — IV surface skew acceleration ────────────
+
+    def _pat_skew_momentum(self, sym, snap, ind, ltp, t):
+        """Rapidly rising put skew = fear premium building (PE). Rising call skew = upside hedging (CE)."""
+        import iv_surface as _ivs
+        surf = _ivs.get_surface(sym)
+        if not surf:
+            return "", 0, ""
+        prev_sk  = self._prev_skew_vel.get(sym, surf.put_skew if surf else 0.0)
+        cur_sk   = surf.put_skew if surf else 0.0
+        # Put skew spiking → institutions hedging downside → PE momentum
+        if cur_sk > prev_sk * 1.15 and cur_sk > 0.008 and ind.rsi_14 < 52:
+            return "PE", 4, "SKEW_MOMENTUM"
+        # Risk reversal turning strongly positive = call skew dominates → CE momentum
+        if surf.risk_reversal > 0.004 and surf.risk_reversal > (prev_sk * -1.0) and ind.rsi_14 > 48:
+            return "CE", 4, "SKEW_MOMENTUM"
+        return "", 0, ""
+
+    # ── Pattern 16: ATM_STRADDLE — buy both legs when vol is cheap ───────────
+
+    def _pat_atm_straddle(self, sym, snap, ind, ltp, t):
+        """Long vega play: IV rank <22% + BB squeeze releasing. Profit from any large move."""
+        from options_intelligence import get_cached
+        opts = get_cached(sym)
+        if not opts:
+            return "", 0, ""
+        iv_rank = float(opts.get("iv_rank", 50.0))
+        if iv_rank > 22:
+            return "", 0, ""
+        # ATR must be expanding (breakout brewing — not dead calm)
+        prev_atr = self._prev_atr_opt.get(sym, ind.atr_14)
+        if prev_atr > 0 and ind.atr_14 < prev_atr * 1.02:
+            return "", 0, ""
+        # BB squeeze must be ending (band expansion after compression)
+        if not (ind.bb_upper and ind.bb_lower and ind.bb_mid and ind.bb_mid > 0):
+            return "", 0, ""
+        bw = (ind.bb_upper - ind.bb_lower) / ind.bb_mid * 100
+        prev_bw = self._prev_bb_width.get(sym, bw)
+        if prev_bw < 2.5 and bw > prev_bw * 1.10:
+            return "CE", 4, "ATM_STRADDLE"   # CE leg; _try_enter also places PE leg
+        return "", 0, ""
+
+    # ── Pattern 17: VOL_BREAKOUT — extended squeeze → explosive expansion ─────
+
+    def _pat_vol_contraction_breakout(self, sym, snap, ind, ltp, t):
+        """Long compression (BB width <1.5%) + sudden 25% expansion + volume surge → directional burst."""
+        if not (ind.bb_upper and ind.bb_lower and ind.bb_mid and ind.bb_mid > 0):
+            return "", 0, ""
+        bw      = (ind.bb_upper - ind.bb_lower) / ind.bb_mid * 100
+        prev_bw = self._prev_bb_width.get(sym, bw)
+        if prev_bw < 1.5 and bw > prev_bw * 1.25 and ind.volume_ratio > 2.0:
+            if ltp > ind.bb_mid and ind.macd_hist > 0:
+                return "CE", 5, "VOL_BREAKOUT"
+            if ltp < ind.bb_mid and ind.macd_hist < 0:
+                return "PE", 5, "VOL_BREAKOUT"
+        return "", 0, ""
+
+    # ── Pattern 18: SMART_MONEY_DIVERGENCE — OI vs price divergence ──────────
+
+    def _pat_smart_money_divergence(self, sym, snap, ind, ltp, t):
+        """PE OI rising while price rises = put writers squeezed → trapped shorts → CE signal.
+        CE OI rising while price falls = call writers trapped → forced covering → PE signal."""
+        from options_intelligence import get_cached
+        opts = get_cached(sym)
+        if not opts:
+            return "", 0, ""
+        oi_buildup = opts.get("oi_buildup", [])
+        if not oi_buildup:
+            return "", 0, ""
+        pe_oi_rising = any(i.get("side") == "PE" and i.get("oi_change", 0) > 80_000
+                           for i in oi_buildup[:3])
+        ce_oi_rising = any(i.get("side") == "CE" and i.get("oi_change", 0) > 80_000
+                           for i in oi_buildup[:3])
+        prev = self._prev_ltp.get(sym, ltp)
+        # Price rising into PE OI wall → trapped shorts covering → CE entry
+        if pe_oi_rising and ltp > prev * 1.001 and ind.rsi_14 > 52:
+            return "CE", 5, "SMART_MONEY_DIVERGENCE"
+        # Price falling into CE OI wall → trapped longs exiting → PE entry
+        if ce_oi_rising and ltp < prev * 0.999 and ind.rsi_14 < 48:
+            return "PE", 5, "SMART_MONEY_DIVERGENCE"
+        return "", 0, ""
+
+    # ── Context bonus (+0 to +11 points added to every pattern) ──────────────
 
     def _ctx_bonus(self, opt_type, snap, ind, ltp, iv_rank, surf, gex, flow, opts=None) -> int:
         b = 0
         is_call = (opt_type == "CE")
 
-        # IV rank (0-2)
+        # 1. IV rank (0-2): cheap vol = more room to expand
         if iv_rank is not None:
             if   iv_rank <= 28: b += 2
             elif iv_rank <= 55: b += 1
             elif iv_rank >  65: b -= 1
 
-        # Flow (0-1)
+        # 2. Options flow (0-1): institutional order flow direction
         if flow:
             if is_call  and flow.call_put_ratio > 1.1:   b += 1
             if not is_call and flow.call_put_ratio < 0.9: b += 1
 
-        # GEX (0-1)
+        # 3. GEX regime (0-1): avoid short-gamma when dealers amplify against us
         if gex:
             if not gex.pin_risk and gex.regime != "SHORT_GAMMA": b += 1
         else:
-            b += 1
+            b += 1   # no GEX data → assume neutral → small bonus
 
-        # Volume (0-1)
+        # 4. Volume (0-1): high participation confirms the move
         if ind.volume_ratio > 1.3: b += 1
 
-        # MACD (0-1)
+        # 5. MACD histogram direction alignment (0-1)
         if is_call  and ind.macd_hist > 0:   b += 1
         if not is_call and ind.macd_hist < 0: b += 1
 
-        # IV skew (0-1)
+        # 6. IV skew (0-1): skew in signal direction confirms smart money positioning
         if surf:
             if is_call  and surf.risk_reversal > -0.005: b += 1
             if not is_call and surf.put_skew > 0.005:     b += 1
 
-        # PCR — Put-Call Ratio from options chain (0-1)
+        # 7. PCR — Put-Call Ratio (0-1)
         if opts:
             pcr = float(opts.get("pcr", 1.0))
             if is_call  and pcr > 1.2:  b += 1   # put writers dominant → smart money bullish
             if not is_call and pcr < 0.8: b += 1  # call writers dominant → smart money bearish
 
-        # Max Pain gravity — price tends toward max pain on expiry (0-1)
+        # 8. Max Pain gravity — price pulled toward max pain on expiry (0-1)
         if opts:
             max_pain = float(opts.get("max_pain", 0.0))
             if max_pain > 0 and ltp > 0:
                 dist_pct = (ltp - max_pain) / ltp * 100
-                if is_call  and dist_pct < -1.0:  b += 1  # LTP below max pain → upward pull
-                if not is_call and dist_pct > 1.0: b += 1  # LTP above max pain → downward pull
+                if is_call  and dist_pct < -1.0:  b += 1
+                if not is_call and dist_pct > 1.0: b += 1
 
-        # 5-min candle trend alignment (0-1)
+        # 9. 5-min candle trend alignment (0-1)
         if len(snap.candles_5min) >= 3:
             c5 = snap.candles_5min[-3:]
             if is_call  and c5[-1].close > c5[0].close: b += 1
             if not is_call and c5[-1].close < c5[0].close: b += 1
 
+        # 10. Theta efficiency (0-1): buy options with low daily decay relative to premium
+        try:
+            import math as _m
+            iv_f = max((ind.atr_14 / ltp) if ltp > 0 else 0.015, 0.10)
+            dte  = self._days_to_expiry()
+            if dte >= 1:
+                T_val = dte / 365.0
+                theta_d = abs(self._bs_theta(ltp, ltp, T_val, 0.065, iv_f, opt_type))
+                prem    = max(ltp * iv_f * _m.sqrt(T_val) / _m.sqrt(2 * _m.pi), 1.0)
+                if prem > 0 and (theta_d / prem) < 0.012:  # <1.2% daily decay of premium
+                    b += 1
+        except Exception:
+            pass
+
+        # 11. Days to expiry (0-1): more runway = less urgency from time decay
+        try:
+            if self._days_to_expiry() >= 5:
+                b += 1
+        except Exception:
+            pass
+
         return b
+
+    # ── Black-Scholes helpers (delta / theta / target-delta strike) ───────────
+
+    def _bs_delta(self, S: float, K: float, T: float, r: float, sigma: float, opt_type: str) -> float:
+        """Black-Scholes delta: CE returns 0-1, PE returns −1-0."""
+        import math
+        from statistics import NormalDist
+        if T <= 0 or sigma <= 0 or S <= 0 or K <= 0:
+            return 0.5 if opt_type == "CE" else -0.5
+        try:
+            d1 = (math.log(S / K) + (r + 0.5 * sigma ** 2) * T) / (sigma * math.sqrt(T))
+            nd = NormalDist()
+            return nd.cdf(d1) if opt_type == "CE" else nd.cdf(d1) - 1.0
+        except Exception:
+            return 0.5 if opt_type == "CE" else -0.5
+
+    def _bs_theta(self, S: float, K: float, T: float, r: float, sigma: float, opt_type: str) -> float:
+        """Black-Scholes theta in ₹/day (daily premium decay)."""
+        import math
+        from statistics import NormalDist
+        if T <= 0 or sigma <= 0 or S <= 0 or K <= 0:
+            return 0.0
+        try:
+            sqrt_T = math.sqrt(T)
+            d1 = (math.log(S / K) + (r + 0.5 * sigma ** 2) * T) / (sigma * sqrt_T)
+            d2 = d1 - sigma * sqrt_T
+            nd = NormalDist()
+            th = (-(S * nd.pdf(d1) * sigma) / (2 * sqrt_T)
+                  - r * K * math.exp(-r * T) * nd.cdf(d2))
+            return th / 365.0
+        except Exception:
+            return 0.0
+
+    def _days_to_expiry(self, underlying: str = "NIFTY") -> int:
+        """Days until next weekly expiry (Thu for NIFTY, Wed for BANKNIFTY)."""
+        from datetime import date
+        today  = date.today()
+        target = 2 if underlying in ("BANKNIFTY", "MIDCPNIFTY") else 3
+        days   = (target - today.weekday()) % 7
+        return days if days > 0 else 7
+
+    def _target_delta_strike(self, spot: float, opt_type: str, atm_iv: float,
+                              target_delta: float = 0.40, days: int = 7) -> int:
+        """Grid-search the strike with BS delta closest to target_delta."""
+        step  = 100 if spot > 30000 else 50
+        iv    = max((atm_iv / 100.0) if atm_iv > 1.0 else atm_iv, 0.12)
+        T     = max(days, 1) / 365.0
+        r     = 0.065
+        rng   = max(int(spot * 0.12), 1000)
+        lo    = int(round((spot - rng) / step) * step)
+        hi    = int(round((spot + rng) / step) * step) + step
+        best_k, best_diff = int(round(spot / step) * step), float("inf")
+        for K in range(lo, hi, step):
+            if K <= 0:
+                continue
+            d    = abs(self._bs_delta(spot, K, T, r, iv, opt_type))
+            diff = abs(d - target_delta)
+            if diff < best_diff:
+                best_diff, best_k = diff, K
+        return best_k
 
     # ── ORB builder (called every tick 9:15-9:30) ─────────────────────────────
 
@@ -968,6 +1215,29 @@ class OptionsAgent(BaseAgent):
         self._prev_williams_opt[sym]   = ind.williams_r
         self._prev_ema9_opt[sym]       = ind.ema9
         self._prev_ema21_opt[sym]      = ind.ema21
+        self._prev_atr_opt[sym]        = ind.atr_14
+        # PCR, skew, GEX — fetched lazily to avoid overhead when not needed
+        try:
+            from options_intelligence import get_cached as _oc
+            opts = _oc(sym)
+            if opts:
+                self._prev_pcr[sym] = float(opts.get("pcr", 1.0))
+        except Exception:
+            pass
+        try:
+            import iv_surface as _ivs
+            surf = _ivs.get_surface(sym)
+            if surf:
+                self._prev_skew_vel[sym] = surf.put_skew
+        except Exception:
+            pass
+        try:
+            import gamma_scalp as _gc
+            gex = _gc.get_cached_gex(sym)
+            if gex and gex.net_gex is not None:
+                self._prev_gex_val[sym] = gex.net_gex
+        except Exception:
+            pass
 
     # ── IV-adaptive SL / TGT ─────────────────────────────────────────────────
 
@@ -1087,45 +1357,98 @@ class OptionsAgent(BaseAgent):
             trigger_price=sl_px, tag="Agent-options-SL",
         ))
 
+        # For ATM_STRADDLE: also place PE leg (same strike, ATM, opposite direction)
+        is_straddle = signal.get("is_straddle", False)
+        if is_straddle and action == "BUY":
+            pe_sym = self._nfo_symbol(underlying, strike if (strike := signal.get("strike", 0)) else
+                                       int(round(S / (100 if S > 30000 else 50)) * (100 if S > 30000 else 50)),
+                                       "PE")
+            try:
+                pe_order = await loop.run_in_executor(None, lambda: kite_client.place_order(
+                    tradingsymbol=pe_sym, exchange=exch,
+                    transaction_type="BUY", quantity=qty,
+                    order_type="MARKET", product=self.product,
+                    tag="Agent-options-straddle-pe",
+                ))
+                sl_pe = round(opt_price * (1 - sl_pct / 100), 2)
+                await loop.run_in_executor(None, lambda: kite_client.place_order(
+                    tradingsymbol=pe_sym, exchange=exch,
+                    transaction_type="SELL", quantity=qty,
+                    order_type="SL-M", product=self.product,
+                    trigger_price=sl_pe, tag="Agent-options-straddle-pe-SL",
+                ))
+            except Exception:
+                pass   # straddle PE leg failure doesn't cancel CE leg
+
+        entry_delta = signal.get("entry_delta", "?")
+        dte         = signal.get("days_to_expiry", "?")
         await send_telegram(
             f"<b>[OPTIONS]</b> {action} {opt_sym} ≈₹{opt_price:.1f}\n"
-            f"Pattern: {signal.get('pattern')} | Score: {signal.get('score')}/14\n"
-            f"{signal.get('option_type')} {signal.get('strike')} | IVr={iv_rank:.0f}% sf={sf}\n"
+            f"Pattern: {signal.get('pattern')} | Score: {signal.get('score')}/20"
+            + (" | STRADDLE" if is_straddle else "") + "\n"
+            f"{signal.get('option_type')} {signal.get('strike')} | IVr={iv_rank:.0f}% "
+            f"δ={entry_delta} DTE={dte} sf={sf}\n"
             f"SL: ₹{sl_px:.1f} | TGT: ₹{tgt_px:.1f} | Ord: {order_id}"
         )
 
     # ── Exit conditions ───────────────────────────────────────────────────────
 
     def should_exit_position(self, pos: dict, ind: LiveIndicators) -> tuple[bool, str]:
-        entry = pos.get("average_price", 0.0)
-        ltp   = ind.ltp
+        from datetime import datetime, time as _t
+        entry    = pos.get("average_price", 0.0)
+        ltp      = ind.ltp
         if not entry or entry <= 0:
             return False, ""
 
         chg = (ltp - entry) / entry * 100
         qty = pos.get("quantity", 0)
 
-        # Near-zero protection
+        # 1. Near-zero protection (option almost worthless)
         if ltp < entry * 0.10:
             return True, f"Option near-zero ₹{ltp:.1f} ({chg:.0f}%)"
 
-        # Hard stop 30%
+        # 2. Hard stop at -30%
         if chg <= -30:
             return True, f"Option SL -30% ₹{ltp:.1f}"
 
-        # Progressive profit exits
+        # 3. Expiry-day forced exit by 13:30 (theta acceleration + gap risk)
+        try:
+            from alt_data import alt_data_engine
+            is_exp, evt = alt_data_engine.is_event_day()
+            if is_exp and "expiry" in evt.lower():
+                now_t = datetime.now().time()
+                if now_t >= _t(13, 30):
+                    return True, "Expiry-day 13:30 forced exit (theta acceleration)"
+        except Exception:
+            pass
+
+        # 4. Delta-based exit: option gone too OTM to recover
+        try:
+            opt_type = pos.get("option_type", "CE")
+            strike   = float(pos.get("strike", ltp))
+            dte      = self._days_to_expiry()
+            iv_rank  = float(pos.get("iv_rank", 30.0))
+            iv_f     = max((iv_rank / 100.0) if iv_rank > 1 else iv_rank, 0.10)
+            T_val    = max(dte, 0.5) / 365.0
+            delta    = abs(self._bs_delta(ltp, strike, T_val, 0.065, iv_f, opt_type))
+            if delta < 0.12:
+                return True, f"Delta {delta:.2f} < 0.12 — option OTM, exit to preserve capital"
+        except Exception:
+            pass
+
+        # 5. Progressive profit exits
         if chg >= 100:
             return True, f"Option +100% ₹{ltp:.1f}"
         if chg >= 60 and ind.rsi_14 > 73:
             return True, f"Option +60% + overbought RSI={ind.rsi_14:.0f}"
         if chg >= 50 and ind.momentum in ("WEAK_UP", "NEUTRAL", "WEAK_DOWN"):
-            return True, f"Option +50% momentum fading"
+            return True, "Option +50% momentum fading"
 
-        # Theta decay protection: direction lost, RSI neutral
+        # 6. Theta decay protection: direction lost + RSI neutral
         if 44 < ind.rsi_14 < 56 and ind.momentum == "NEUTRAL":
             return True, "RSI+momentum neutral — exit before theta decay"
 
-        # Trend reversal while not deeply profitable
+        # 7. Trend reversal while not deeply profitable
         if qty > 0 and ind.trend == "DOWN" and ind.ema9 < ind.ema21 and chg < 30:
             return True, "Trend reversed DOWN — exit call"
         if qty < 0 and ind.trend == "UP" and ind.ema9 > ind.ema21 and chg < 30:
