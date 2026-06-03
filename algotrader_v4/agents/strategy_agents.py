@@ -1743,50 +1743,72 @@ class SwingAgent(BaseAgent):
 
 class ScalpingAgent(BaseAgent):
     """
-    Maximum-opportunity scalper — 5 entry patterns, 3-tier confidence sizing.
+    World-class scalper — 17 patterns, 14-factor scoring, ATR-regime SL/TGT.
 
-    Patterns detected every tick:
-      1. EMA9_CROSS    — LTP micro-cross over/under EMA9
-      2. EMA921_CROSS  — EMA9 crosses EMA21 (stronger, less frequent)
-      3. VWAP_BOUNCE   — price touches VWAP then reverses with volume
-      4. SURGE         — explosive candle ≥0.3% body + 2× volume
-      5. ORB           — opening-range breakout (09:30-09:45 execution window)
+    Patterns (first match wins, ordered by signal speed):
+      1.  EMA9_CROSS         — LTP micro-crosses EMA9 (tick resolution)
+      2.  EMA921_CROSS       — EMA9/EMA21 golden/death cross
+      3.  VWAP_BOUNCE        — price touches VWAP band then reverses + volume
+      4.  SURGE              — explosive candle ≥0.3% body + 2× volume (NEW: dedup fixed)
+      5.  ORB                — opening-range breakout 09:30-09:45
+      6.  SUPERTREND_FLIP    — Supertrend direction change this tick (FIXED: was dead code)
+      7.  STOCHRSI_EXTREME   — StochRSI cross from <15 or >85 (FIXED: was dead code)
+      8.  WILLIAMS_SCALP     — Williams %R extreme bounce (FIXED: was dead code)
+      9.  HMA_MICRO          — HMA direction flip + tight spread (FIXED: was dead code)
+      10. VWAP_SCALP         — price within 0.3% of VWAP + EMA direction
+      11. EMA9_MOMENTUM      — 3 consecutive closes same direction + RSI zone
+      12. SQUEEZE_RELEASE    — TTM squeeze exits + momentum direction (FIXED: was dead code)
+      13. MICROTREND         — 5 consecutive closes same direction + VWAP side
+      14. MACD_MICRO         — MACD histogram zero-cross + volume + EMA alignment (NEW)
+      15. DEPTH_PULSE        — bid/ask depth imbalance spike + price momentum (NEW)
+      16. BB_BAND_WALK       — 2 consecutive closes outside BB bands (NEW)
+      17. RSI7_SNAP          — RSI-7 crosses extreme (>80 / <20) and retreats (NEW)
 
-    Score 8 confirmation factors → adaptive size:
-      3-4/8 = 0.5×  |  5-6/8 = 0.75×  |  7-8/8 = 1.0×
-    Claude gate further refines; can still veto entirely.
+    14-factor scoring (max 14) → adaptive sizing:
+      5-7 → 0.5×  |  8-10 → 0.75×  |  11+ → 1.0×
+    Factors: VWAP, RSI-7, volume, ADX, MACD, 3-bar microstructure, 5-bar velocity,
+             EMA21, Supertrend, depth imbalance, session window, spread, momentum, 4/5-bar confirm
 
-    Hard guards (cannot be overridden):
-      spread, dead-market, level wall, loss-streak cooldown, 90s deduplication.
+    Critical fix: state now updated AFTER pattern detection so all prev-state patterns
+    correctly see LAST TICK's values (not current tick's — the original bug).
+
+    Hard guards: spread <0.05%, ATR regime, level wall, loss-streak cooldown, 90s dedup.
+    SL/TGT: ATR-dynamic — tighter in calm (0.5×/1.5×), wider in volatile (0.7×/2.0×).
     """
     name    = "scalping"
     product = "MIS"
     min_candles_1min = 10
 
-    SL_ATR  = 0.6
-    TGT_ATR = 1.4    # → 2.33:1 R:R when ATR-based wins
-    SL_PCT  = 0.30   # tight SL preserves high win rate
-    TGT_PCT = 0.70   # raised from 0.50 → 2.33:1 R:R; better profit per winning trade
+    SL_ATR_CALM    = 0.5    # calm vol (ATR ratio < 0.002): tighter SL
+    SL_ATR_NORMAL  = 0.6    # normal vol
+    SL_ATR_HIGH    = 0.75   # elevated vol
+    TGT_ATR_CALM   = 1.5    # 3.0:1 R:R in calm
+    TGT_ATR_NORMAL = 1.8    # 3.0:1 R:R in normal
+    TGT_ATR_HIGH   = 2.2    # 2.93:1 R:R in high vol
+    SL_PCT  = 0.28
+    TGT_PCT = 0.65
 
-    MIN_SCORE = 3     # keep high volume; Claude gate filters quality
+    MIN_SCORE = 5    # raised from 3 — quality over quantity
 
-    # Per-symbol rolling state
-    _prev_ema9:        dict[str, float]    = {}
-    _prev_ema21:       dict[str, float]    = {}
-    _prev_ltp:         dict[str, float]    = {}
-    _prev_near_vwap:   dict[str, bool]     = {}
-    _prev_st_dir:      dict[str, str]      = {}   # Supertrend direction last tick
-    _prev_stochrsi_k:  dict[str, float]    = {}   # StochRSI K last tick
-    _prev_hma_dir_sc:  dict[str, str]      = {}   # HMA direction last tick (scalping)
-    _prev_williams_sc: dict[str, float]    = {}   # Williams %R last tick (scalping)
-    _prev_squeeze_sc:  dict[str, bool]    = {}   # TTM squeeze state last tick (scalping)
-    _orb_high:        dict[str, float]    = {}
-    _orb_low:         dict[str, float]    = {}
-    _last_candle_ts:  dict[str, object]   = {}   # last candle that triggered SURGE
-    _last_signal_ts:  dict[str, datetime] = {}   # deduplication timestamp
-    _last_signal_dir: dict[str, str]      = {}   # deduplication direction
-    _loss_streak:     dict[str, int]      = {}
-    _cooldown_until:  dict[str, datetime] = {}
+    # Per-symbol rolling state (updated AFTER pattern detection — critical fix)
+    _prev_ema9:         dict[str, float]  = {}
+    _prev_ema21:        dict[str, float]  = {}
+    _prev_ltp:          dict[str, float]  = {}
+    _prev_near_vwap:    dict[str, bool]   = {}
+    _prev_st_dir:       dict[str, str]    = {}
+    _prev_stochrsi_k:   dict[str, float]  = {}
+    _prev_hma_dir_sc:   dict[str, str]    = {}
+    _prev_williams_sc:  dict[str, float]  = {}
+    _prev_squeeze_sc:   dict[str, bool]   = {}
+    _prev_macd_hist_sc: dict[str, float]  = {}   # MACD cross detection (NEW)
+    _prev_rsi7_sc:      dict[str, float]  = {}   # RSI-7 extreme snap (NEW)
+    _orb_high:          dict[str, float]  = {}
+    _orb_low:           dict[str, float]  = {}
+    _last_candle_ts:    dict[str, object] = {}
+    _last_signal_ts:    dict[str, datetime] = {}
+    _last_signal_dir:   dict[str, str]    = {}
+    _loss_streak:       dict[str, int]    = {}
+    _cooldown_until:    dict[str, datetime] = {}
 
     # ── Entry ─────────────────────────────────────────────────────────────────
 
@@ -1829,27 +1851,41 @@ class ScalpingAgent(BaseAgent):
         if atr_ratio < 0.0002:     # dead market — no movement
             return "HOLD", None
 
-        # ── Update rolling state ─────────────────────────────────────────────
-        prev_ema9  = self._prev_ema9.get(sym, ind.ema9)
-        prev_ema21 = self._prev_ema21.get(sym, ind.ema21 or ind.ema9)
-        prev_ltp   = self._prev_ltp.get(sym, ltp)
-        self._prev_ema9[sym]         = ind.ema9
-        self._prev_ema21[sym]        = ind.ema21 or ind.ema9
-        self._prev_ltp[sym]          = ltp
-        self._prev_st_dir[sym]       = ind.supertrend_dir
-        self._prev_stochrsi_k[sym]   = ind.stoch_rsi_k
-        self._prev_hma_dir_sc[sym]   = ind.hma_dir
-        self._prev_williams_sc[sym]  = ind.williams_r
-        self._prev_squeeze_sc[sym]   = ind.squeeze_on
+        # ── Capture ALL prev-state BEFORE any updates (critical correctness fix) ─
+        prev_ema9       = self._prev_ema9.get(sym, ind.ema9)
+        prev_ema21      = self._prev_ema21.get(sym, ind.ema21 or ind.ema9)
+        prev_ltp        = self._prev_ltp.get(sym, ltp)
+        prev_st_dir     = self._prev_st_dir.get(sym, ind.supertrend_dir)
+        prev_stochrsi_k = self._prev_stochrsi_k.get(sym, ind.stoch_rsi_k)
+        prev_hma_dir    = self._prev_hma_dir_sc.get(sym, ind.hma_dir)
+        prev_williams   = self._prev_williams_sc.get(sym, ind.williams_r)
+        prev_squeeze    = self._prev_squeeze_sc.get(sym, ind.squeeze_on)
+        prev_macd_hist  = self._prev_macd_hist_sc.get(sym, ind.macd_hist)
+        prev_rsi7       = self._prev_rsi7_sc.get(sym, ind.rsi_7)
 
         # ── Build / update opening-range high/low ────────────────────────────
         self._update_orb(sym, snap, t)
 
-        # ── Pattern detection (first match wins — ordered by priority) ───────
+        # ── Pattern detection (first match wins, all prev-state is last tick) ─
         action, pattern = self._detect_pattern(
             sym, snap, ind, ltp, t, now,
             prev_ema9, prev_ema21, prev_ltp,
+            prev_st_dir, prev_stochrsi_k, prev_hma_dir,
+            prev_williams, prev_squeeze, prev_macd_hist, prev_rsi7,
         )
+
+        # ── Update rolling state AFTER detection (so patterns saw old values) ─
+        self._prev_ema9[sym]          = ind.ema9
+        self._prev_ema21[sym]         = ind.ema21 or ind.ema9
+        self._prev_ltp[sym]           = ltp
+        self._prev_st_dir[sym]        = ind.supertrend_dir
+        self._prev_stochrsi_k[sym]    = ind.stoch_rsi_k
+        self._prev_hma_dir_sc[sym]    = ind.hma_dir
+        self._prev_williams_sc[sym]   = ind.williams_r
+        self._prev_squeeze_sc[sym]    = ind.squeeze_on
+        self._prev_macd_hist_sc[sym]  = ind.macd_hist
+        self._prev_rsi7_sc[sym]       = ind.rsi_7
+
         if action == "HOLD":
             return "HOLD", None
 
@@ -1868,12 +1904,18 @@ class ScalpingAgent(BaseAgent):
         if not self._level_ok(sym, ltp, action, ind):
             return "HOLD", None
 
-        # ── Adaptive size from score ──────────────────────────────────────────
-        sf = 0.5 if score <= 4 else (0.75 if score <= 6 else 1.0)
+        # ── Adaptive size from score (14-factor scale) ───────────────────────
+        sf = 0.5 if score <= 7 else (0.75 if score <= 10 else 1.0)
 
-        # ── ATR-based SL & target ────────────────────────────────────────────
-        sl_dist  = max(atr * self.SL_ATR,  ltp * settings.sl_pct_scalping  / 100)
-        tgt_dist = max(atr * self.TGT_ATR, ltp * settings.tgt_pct_scalping / 100)
+        # ── ATR-regime SL & target (dynamic: tighter in calm, wider in vol) ──
+        if atr_ratio < 0.002:
+            sl_mult, tgt_mult = self.SL_ATR_CALM,   self.TGT_ATR_CALM
+        elif atr_ratio < 0.003:
+            sl_mult, tgt_mult = self.SL_ATR_NORMAL,  self.TGT_ATR_NORMAL
+        else:
+            sl_mult, tgt_mult = self.SL_ATR_HIGH,    self.TGT_ATR_HIGH
+        sl_dist  = max(atr * sl_mult,  ltp * settings.sl_pct_scalping  / 100)
+        tgt_dist = max(atr * tgt_mult, ltp * settings.tgt_pct_scalping / 100)
 
         # ── Record signal timestamp for dedup ────────────────────────────────
         self._last_signal_ts[sym]  = now
@@ -1897,7 +1939,7 @@ class ScalpingAgent(BaseAgent):
             "target_pct":        round(tgt_dist / ltp * 100, 3),
             "product":           self.product,
             "_gate_size_factor": sf,
-            "trigger": f"{pattern} score={score}/8 sf={sf} {' '.join(reasons[:4])}",
+            "trigger": f"{pattern} score={score}/14 sf={sf} {' '.join(reasons[:5])}",
         }
 
     # ── Pattern detection ─────────────────────────────────────────────────────
@@ -1907,169 +1949,149 @@ class ScalpingAgent(BaseAgent):
         sym: str, snap: MarketSnapshot, ind: LiveIndicators,
         ltp: float, t: time, now: datetime,
         prev_ema9: float, prev_ema21: float, prev_ltp: float,
+        prev_st_dir: str, prev_stochrsi_k: float, prev_hma_dir: str,
+        prev_williams: float, prev_squeeze: bool, prev_macd_hist: float,
+        prev_rsi7: float,
     ) -> tuple[str, str]:
-        """Return (action, pattern_name) or ('HOLD', '')."""
+        """Return (action, pattern_name) or ('HOLD', '').
+        All prev_* args hold LAST TICK's values — state update happens after this call."""
+        import bot_state as _bs
 
-        # Pattern 1: EMA9 micro-cross (fastest, tick-resolution)
+        # 1. EMA9 micro-cross (fastest — tick resolution)
         if prev_ltp < prev_ema9 and ltp > ind.ema9:
             return "BUY",  "EMA9X"
         if prev_ltp > prev_ema9 and ltp < ind.ema9:
             return "SELL", "EMA9X"
 
-        # Pattern 2: EMA9/EMA21 cross (higher conviction)
+        # 2. EMA9/EMA21 cross (higher conviction)
         if ind.ema21 and ind.ema21 > 0:
-            prev_diff = prev_ema9 - prev_ema21
-            curr_diff = ind.ema9  - ind.ema21
+            prev_diff = prev_ema9  - prev_ema21
+            curr_diff = ind.ema9   - ind.ema21
             if prev_diff <= 0 < curr_diff:
                 return "BUY",  "EMA921X"
             if prev_diff >= 0 > curr_diff:
                 return "SELL", "EMA921X"
 
-        # Pattern 3: VWAP bounce (price touches VWAP band then reverses)
+        # 3. VWAP bounce (was near VWAP, now moving away with volume)
         if ind.vwap and ind.vwap > 0:
             was_near = self._prev_near_vwap.get(sym, False)
             near_now = abs(ltp - ind.vwap) / ind.vwap < 0.0008
             self._prev_near_vwap[sym] = near_now
             if was_near and not near_now and ind.volume_ratio >= 1.3:
-                if ltp > ind.vwap:
-                    return "BUY",  "VWAP_BOUNCE"
+                if ltp > ind.vwap:  return "BUY",  "VWAP_BOUNCE"
                 return "SELL", "VWAP_BOUNCE"
 
-        # Pattern 4: Momentum surge (explosive candle ≥0.3% body + 2× volume)
+        # 4. Momentum surge (explosive candle + volume — deduplicated by candle ts)
         if len(snap.candles_1min) >= 2:
             last_c = snap.candles_1min[-1]
             c_ts   = getattr(last_c, "ts", None)
-            if c_ts and c_ts != self._last_candle_ts.get(sym):
-                body_pct = (
-                    abs(last_c.close - last_c.open) / last_c.open
-                    if last_c.open > 0 else 0.0
-                )
+            if c_ts and c_ts != self._last_candle_ts.get(sym) and last_c.open > 0:
+                body_pct = abs(last_c.close - last_c.open) / last_c.open
                 if body_pct > 0.003 and ind.volume_ratio > 2.0:
                     self._last_candle_ts[sym] = c_ts
-                    if last_c.close > last_c.open:
-                        return "BUY",  "SURGE"
+                    if last_c.close > last_c.open:  return "BUY",  "SURGE"
                     return "SELL", "SURGE"
 
-        # Pattern 5: Opening range breakout (execute 09:30-09:45)
+        # 5. Opening range breakout (09:30-09:45)
         if time(9, 30) <= t <= time(9, 45):
-            orb_h = self._orb_high.get(sym)
-            orb_l = self._orb_low.get(sym)
+            orb_h, orb_l = self._orb_high.get(sym), self._orb_low.get(sym)
             if orb_h and orb_l and orb_h > orb_l:
-                breakout_up   = ltp > orb_h * 1.001 and prev_ltp <= orb_h * 1.001
-                breakout_down = ltp < orb_l * 0.999 and prev_ltp >= orb_l * 0.999
-                if breakout_up:
+                if ltp > orb_h * 1.001 and prev_ltp <= orb_h * 1.001:
                     return "BUY",  "ORB"
-                if breakout_down:
+                if ltp < orb_l * 0.999 and prev_ltp >= orb_l * 0.999:
                     return "SELL", "ORB"
 
-        # Pattern 6: Supertrend flip — direction changed this tick
-        prev_st_dir = self._prev_st_dir.get(sym, ind.supertrend_dir)
-        curr_st_dir = ind.supertrend_dir
-        if curr_st_dir != prev_st_dir and ind.volume_ratio >= 1.2:
-            if curr_st_dir == "UP":
-                return "BUY",  "SUPERTREND_FLIP"
-            if curr_st_dir == "DOWN":
-                return "SELL", "SUPERTREND_FLIP"
+        # 6. Supertrend flip (FIXED: uses prev_st_dir from before state update)
+        if prev_st_dir != ind.supertrend_dir and ind.volume_ratio >= 1.2:
+            if ind.supertrend_dir == "UP":   return "BUY",  "SUPERTREND_FLIP"
+            if ind.supertrend_dir == "DOWN": return "SELL", "SUPERTREND_FLIP"
 
-        # Pattern 7: StochRSI extreme cross (fast reversal scalp)
-        import bot_state as _bs
+        # 7. StochRSI extreme cross (FIXED: uses correct prev value)
         if _bs.is_pattern_enabled("scalping", "STOCHRSI_EXTREME"):
-            prev_k = self._prev_stochrsi_k.get(sym, ind.stoch_rsi_k)
-            if prev_k < 15 and ind.stoch_rsi_k > ind.stoch_rsi_d and ind.volume_ratio >= 1.3:
+            if prev_stochrsi_k < 15 and ind.stoch_rsi_k > ind.stoch_rsi_d and ind.volume_ratio >= 1.3:
                 return "BUY", "STOCHRSI_EXTREME"
-            if prev_k > 85 and ind.stoch_rsi_k < ind.stoch_rsi_d and ind.volume_ratio >= 1.3:
+            if prev_stochrsi_k > 85 and ind.stoch_rsi_k < ind.stoch_rsi_d and ind.volume_ratio >= 1.3:
                 return "SELL", "STOCHRSI_EXTREME"
 
-        # Pattern 8: Williams %R reversal (extreme zone bounce)
+        # 8. Williams %R extreme bounce (FIXED: uses correct prev value)
         if _bs.is_pattern_enabled("scalping", "WILLIAMS_SCALP"):
-            prev_w = self._prev_williams_sc.get(sym, ind.williams_r)
-            if prev_w < -80 and ind.williams_r > -75 and ind.volume_ratio >= 1.5:
-                return "BUY", "WILLIAMS_SCALP"
-            if prev_w > -20 and ind.williams_r < -25 and ind.volume_ratio >= 1.5:
+            if prev_williams < -80 and ind.williams_r > -75 and ind.volume_ratio >= 1.5:
+                return "BUY",  "WILLIAMS_SCALP"
+            if prev_williams > -20 and ind.williams_r < -25 and ind.volume_ratio >= 1.5:
                 return "SELL", "WILLIAMS_SCALP"
 
-        # Pattern 9: HMA direction flip with tight spread (micro-trend entry)
+        # 9. HMA direction flip + tight spread (FIXED: uses correct prev_hma_dir)
         if _bs.is_pattern_enabled("scalping", "HMA_MICRO"):
-            if ind.hma and ind.hma > 0 and ind.spread > 0:
+            if ind.hma and ind.hma > 0 and getattr(ind, "spread", 0) > 0:
                 spread_pct = ind.spread / ltp * 100
-                prev_hdir  = self._prev_hma_dir_sc.get(sym, ind.hma_dir)
-                if prev_hdir != "UP" and ind.hma_dir == "UP" and spread_pct < 0.03 and ind.volume_ratio >= 1.2:
-                    return "BUY", "HMA_MICRO"
-                if prev_hdir != "DOWN" and ind.hma_dir == "DOWN" and spread_pct < 0.03 and ind.volume_ratio >= 1.2:
+                if prev_hma_dir != "UP"   and ind.hma_dir == "UP"   and spread_pct < 0.03 and ind.volume_ratio >= 1.2:
+                    return "BUY",  "HMA_MICRO"
+                if prev_hma_dir != "DOWN" and ind.hma_dir == "DOWN" and spread_pct < 0.03 and ind.volume_ratio >= 1.2:
                     return "SELL", "HMA_MICRO"
 
-        # Pattern 10: VWAP scalp — price within 0.3% of VWAP + EMA direction + volume
+        # 10. VWAP scalp — within 0.3% of VWAP + EMA direction + volume
         if _bs.is_pattern_enabled("scalping", "VWAP_SCALP"):
             if ind.vwap and ind.vwap > 0 and ind.ema21 > 0:
                 dist_pct = abs(ltp - ind.vwap) / ind.vwap
                 if dist_pct < 0.003:
                     if ltp >= ind.vwap and ind.ema9 > ind.ema21 and ind.volume_ratio >= 1.3:
-                        return "BUY", "VWAP_SCALP"
+                        return "BUY",  "VWAP_SCALP"
                     if ltp < ind.vwap and ind.ema9 < ind.ema21 and ind.volume_ratio >= 1.3:
                         return "SELL", "VWAP_SCALP"
 
-        # Pattern 11: EMA9 momentum run — 3 consecutive closes same direction + RSI zone
+        # 11. EMA9 momentum run — 3 consecutive closes same direction + RSI zone
         if _bs.is_pattern_enabled("scalping", "EMA9_MOMENTUM"):
             if len(snap.candles_1min) >= 3 and ind.ema21 > 0:
-                last3  = snap.candles_1min[-3:]
-                closes = [c.close for c in last3]
+                closes = [c.close for c in snap.candles_1min[-3:]]
                 if closes[0] < closes[1] < closes[2] and ind.rsi_7 > 60 and ind.ema9 > ind.ema21:
                     return "BUY",  "EMA9_MOMENTUM"
                 if closes[0] > closes[1] > closes[2] and ind.rsi_7 < 40 and ind.ema9 < ind.ema21:
                     return "SELL", "EMA9_MOMENTUM"
 
-        # Pattern 12: TTM Squeeze release — first bar squeeze exits with momentum
+        # 12. TTM Squeeze release (FIXED: uses correct prev_squeeze value)
         if _bs.is_pattern_enabled("scalping", "SQUEEZE_RELEASE"):
-            prev_sq = self._prev_squeeze_sc.get(sym, True)
-            if prev_sq and not ind.squeeze_on and ind.squeeze_momentum != 0:
+            if prev_squeeze and not ind.squeeze_on and ind.squeeze_momentum != 0:
                 if ind.squeeze_momentum > 0 and ind.ema9 > ind.ema21 > 0:
                     return "BUY",  "SQUEEZE_RELEASE"
                 if ind.squeeze_momentum < 0 and ind.ema9 < ind.ema21 > 0:
                     return "SELL", "SQUEEZE_RELEASE"
 
-        # Pattern 13: Microtrend — 5 consecutive closes with VWAP alignment + volume
+        # 13. Microtrend — 5 consecutive closes with VWAP alignment + volume
         if _bs.is_pattern_enabled("scalping", "MICROTREND"):
             if len(snap.candles_1min) >= 5 and ind.vwap > 0 and ind.ema9 > 0:
-                last5  = snap.candles_1min[-5:]
-                closes = [c.close for c in last5]
-                if (all(closes[i] < closes[i+1] for i in range(4))
-                        and ltp > ind.vwap and ind.volume_ratio >= 1.2):
+                closes = [c.close for c in snap.candles_1min[-5:]]
+                if all(closes[i] < closes[i+1] for i in range(4)) and ltp > ind.vwap and ind.volume_ratio >= 1.2:
                     return "BUY",  "MICROTREND"
-                if (all(closes[i] > closes[i+1] for i in range(4))
-                        and ltp < ind.vwap and ind.volume_ratio >= 1.2):
+                if all(closes[i] > closes[i+1] for i in range(4)) and ltp < ind.vwap and ind.volume_ratio >= 1.2:
                     return "SELL", "MICROTREND"
 
-        # Pattern 14: SUPERTREND_FLIP — Supertrend direction just changed this tick
-        prev_st = self._prev_st_dir.get(sym)
-        curr_st = ind.supertrend_dir
-        if prev_st == "down" and curr_st == "up" and ind.volume_ratio > 1.2:
-            return "BUY",  "SUPERTREND_FLIP"
-        if prev_st == "up" and curr_st == "down" and ind.volume_ratio > 1.2:
-            return "SELL", "SUPERTREND_FLIP"
+        # 14. MACD micro-cross (NEW — clean zero-cross on 1-min, strongest momentum signal)
+        if prev_macd_hist <= 0 < ind.macd_hist and ind.volume_ratio >= 1.3 and ind.ema9 > ind.ema21 > 0:
+            return "BUY",  "MACD_MICRO"
+        if prev_macd_hist >= 0 > ind.macd_hist and ind.volume_ratio >= 1.3 and ind.ema9 < ind.ema21 > 0:
+            return "SELL", "MACD_MICRO"
 
-        # Pattern 15: HMA_CROSS — HMA direction just flipped with EMA9/21 confirmation
-        prev_hma = self._prev_hma_dir_sc.get(sym)
-        if ind.ema21 and ind.ema21 > 0:
-            if prev_hma == "down" and ind.hma_dir == "up" and ind.ema9 > ind.ema21:
-                return "BUY",  "HMA_CROSS"
-            if prev_hma == "up" and ind.hma_dir == "down" and ind.ema9 < ind.ema21:
-                return "SELL", "HMA_CROSS"
+        # 15. DEPTH_PULSE (NEW — bid/ask imbalance spike with price momentum)
+        if (ind.depth_imbalance > 0.72 and ltp > prev_ltp
+                and ind.ema9 > ind.ema21 > 0 and ind.volume_ratio >= 1.4):
+            return "BUY",  "DEPTH_PULSE"
+        if (ind.depth_imbalance < 0.28 and ltp < prev_ltp
+                and ind.ema9 < ind.ema21 > 0 and ind.volume_ratio >= 1.4):
+            return "SELL", "DEPTH_PULSE"
 
-        # Pattern 16: MICRO_SQUEEZE — TTM squeeze just released with directional momentum
-        prev_sq_new = self._prev_squeeze_sc.get(sym)
-        if prev_sq_new is True and not ind.squeeze_on:
-            if ind.squeeze_momentum > 0:
-                return "BUY",  "MICRO_SQUEEZE"
-            if ind.squeeze_momentum < 0:
-                return "SELL", "MICRO_SQUEEZE"
+        # 16. BB_BAND_WALK (NEW — 2 consecutive closes outside BB bands = strong trend)
+        if len(snap.candles_1min) >= 2 and ind.bb_upper and ind.bb_lower and ind.bb_upper > 0:
+            last2 = snap.candles_1min[-2:]
+            if all(c.close > ind.bb_upper for c in last2) and ind.volume_ratio >= 1.2:
+                return "BUY",  "BB_BAND_WALK"
+            if all(c.close < ind.bb_lower for c in last2) and ind.volume_ratio >= 1.2:
+                return "SELL", "BB_BAND_WALK"
 
-        # Pattern 17: WILLIAMS_SCALP — Williams %R crosses up from oversold / down from overbought
-        curr_w = getattr(ind, 'williams_r', -50)
-        prev_w = self._prev_williams_sc.get(sym, curr_w)
-        if prev_w < -80 and curr_w > -70:
-            return "BUY",  "WILLIAMS_SCALP"
-        if prev_w > -20 and curr_w < -30:
-            return "SELL", "WILLIAMS_SCALP"
+        # 17. RSI7_SNAP (NEW — RSI-7 extreme reversal: fast exhaustion signal)
+        if prev_rsi7 > 80 and ind.rsi_7 < 76 and ind.macd_hist < 0 and ind.volume_ratio >= 1.2:
+            return "SELL", "RSI7_SNAP"
+        if prev_rsi7 < 20 and ind.rsi_7 > 24 and ind.macd_hist > 0 and ind.volume_ratio >= 1.2:
+            return "BUY",  "RSI7_SNAP"
 
         return "HOLD", ""
 
@@ -2144,6 +2166,51 @@ class ScalpingAgent(BaseAgent):
             if (is_buy and ltp > ind.ema21) or (not is_buy and ltp < ind.ema21):
                 score += 1; reasons.append("EMA21✓")
 
+        # 9. Supertrend direction alignment — directional confirmation
+        st = ind.supertrend_dir
+        if (is_buy and st == "UP") or (not is_buy and st == "DOWN"):
+            score += 1; reasons.append("ST✓")
+
+        # 10. L2 depth imbalance — institutional order flow edge
+        try:
+            di = getattr(ind, 'depth_imbalance', 0.5)
+            if is_buy and di > 0.65:
+                score += 1; reasons.append(f"DPT{di:.2f}")
+            elif not is_buy and di < 0.35:
+                score += 1; reasons.append(f"DPT{di:.2f}")
+        except Exception:
+            pass
+
+        # 11. Session window premium — best scalp windows for NSE
+        t = snap.tick.timestamp.time() if hasattr(snap.tick, 'timestamp') and snap.tick.timestamp else None
+        if t is None:
+            from datetime import datetime as _dt
+            t = _dt.now().time()
+        if time(9, 30) <= t < time(11, 0):    # morning momentum window
+            score += 1; reasons.append("SESS_AM")
+        elif time(14, 0) <= t < time(14, 30):  # afternoon reversal window
+            score += 1; reasons.append("SESS_PM")
+
+        # 12. Spread tightness — tighter spread = better fill quality
+        spread = snap.tick.ask - snap.tick.bid if snap.tick.ask and snap.tick.bid else ltp * 0.0005
+        if ltp > 0 and spread / ltp < 0.00025:   # spread <0.025% — very tight
+            score += 1; reasons.append("TIGHT")
+
+        # 13. Momentum label — strong directional momentum from tick engine
+        mom = getattr(ind, 'momentum', '')
+        if (is_buy and mom == "STRONG_UP") or (not is_buy and mom == "STRONG_DOWN"):
+            score += 1; reasons.append("MOM✓")
+
+        # 14. 4/5-bar candle confirmation — sustained pressure
+        if len(snap.candles_1min) >= 5:
+            last5 = snap.candles_1min[-5:]
+            if is_buy:
+                bull = sum(1 for c in last5 if c.close >= c.open)
+                if bull >= 4: score += 1; reasons.append(f"{bull}/5G")
+            else:
+                bear = sum(1 for c in last5 if c.close <= c.open)
+                if bear >= 4: score += 1; reasons.append(f"{bear}/5R")
+
         return score, reasons
 
     # ── Level proximity guard ─────────────────────────────────────────────────
@@ -2206,33 +2273,77 @@ class ScalpingAgent(BaseAgent):
             return False, ""
 
         atr      = ind.atr_14 or 0.0
-        sl_dist  = max(atr * self.SL_ATR,  entry * self.SL_PCT  / 100)
-        tgt_dist = max(atr * self.TGT_ATR, entry * self.TGT_PCT / 100)
+        atr_ratio = atr / ltp if ltp > 0 else 0.003
+        if atr_ratio < 0.002:
+            sl_mult, tgt_mult = self.SL_ATR_CALM,   self.TGT_ATR_CALM
+        elif atr_ratio < 0.003:
+            sl_mult, tgt_mult = self.SL_ATR_NORMAL,  self.TGT_ATR_NORMAL
+        else:
+            sl_mult, tgt_mult = self.SL_ATR_HIGH,    self.TGT_ATR_HIGH
+        sl_dist  = max(atr * sl_mult,  entry * self.SL_PCT  / 100)
+        tgt_dist = max(atr * tgt_mult, entry * self.TGT_PCT / 100)
 
         if side == "BUY":
             sl, tgt = entry - sl_dist, entry + tgt_dist
+            profit  = ltp - entry
+
+            # Breakeven lock: once 0.8×ATR in profit, SL moves to entry
+            if profit >= atr * 0.8:
+                sl = max(sl, entry)
+
             if ltp <= sl:
                 self._record_outcome(sym, False)
                 return True, f"Scalp SL ₹{ltp:.2f}"
             if ltp >= tgt:
                 self._record_outcome(sym, True)
                 return True, f"Scalp target ₹{ltp:.2f}"
+
+            # Supertrend flip against position — early bail before SL
+            st = ind.supertrend_dir
+            if st == "DOWN":
+                self._record_outcome(sym, ltp > entry)
+                return True, "Supertrend flip (BUY→DOWN)"
+
+            # RSI-7 exhaustion — overbought on a scalp long is a gift
+            if ind.rsi_7 >= 80:
+                self._record_outcome(sym, ltp > entry)
+                return True, f"RSI7 overbought {ind.rsi_7:.0f} exit"
+
             # Early exit: strong reversal confirmed by MACD flip
             if ind.momentum == "STRONG_DOWN" and ind.macd_hist < 0:
                 self._record_outcome(sym, ltp > entry)
                 return True, "Strong momentum reversal"
+
             # VWAP breakdown — losing VWAP support on a long is a bad sign
             if ind.vwap and ltp < ind.vwap * 0.9985:
                 self._record_outcome(sym, ltp > entry)
                 return True, "VWAP breakdown exit"
         else:
             sl, tgt = entry + sl_dist, entry - tgt_dist
+            profit  = entry - ltp
+
+            # Breakeven lock: once 0.8×ATR in profit, SL moves to entry
+            if profit >= atr * 0.8:
+                sl = min(sl, entry)
+
             if ltp >= sl:
                 self._record_outcome(sym, False)
                 return True, f"Scalp SL ₹{ltp:.2f}"
             if ltp <= tgt:
                 self._record_outcome(sym, True)
                 return True, f"Scalp target ₹{ltp:.2f}"
+
+            # Supertrend flip against short
+            st = ind.supertrend_dir
+            if st == "UP":
+                self._record_outcome(sym, ltp < entry)
+                return True, "Supertrend flip (SELL→UP)"
+
+            # RSI-7 exhaustion — oversold on a scalp short is a gift
+            if ind.rsi_7 <= 20:
+                self._record_outcome(sym, ltp < entry)
+                return True, f"RSI7 oversold {ind.rsi_7:.0f} exit"
+
             if ind.momentum == "STRONG_UP" and ind.macd_hist > 0:
                 self._record_outcome(sym, ltp < entry)
                 return True, "Strong momentum reversal"
