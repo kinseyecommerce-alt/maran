@@ -1026,7 +1026,8 @@
 
     /* ── Responsive ─────────────────────────────────────────────── */
     @media (max-width: 768px) {
-      :root { --sidebar-w: 52px; }
+      :root { --sidebar-w: 0px; --topbar-h: 52px; }
+      .sidebar { display: none; }
       .logo-text, .nav-item span, .sidebar-time, .mode-badge { display: none; }
       .nav-item { padding: 10px; justify-content: center; }
       .sidebar-logo { justify-content: center; padding: 14px 8px; }
@@ -1034,11 +1035,69 @@
       .chart-regime-row { grid-template-columns: 1fr; }
       .strategy-grid { grid-template-columns: 1fr; }
       .adaptive-summary { grid-template-columns: 1fr 1fr 1fr; }
+      .topbar { padding: 0 10px; }
+      .breadcrumb { display: none; }
+      .content { padding: 12px; padding-bottom: 72px; }
+      .two-col { grid-template-columns: 1fr; }
+      /* Bottom nav bar on mobile */
+      .mobile-nav {
+        display: flex !important;
+        position: fixed; bottom: 0; left: 0; right: 0;
+        background: var(--sidebar-bg);
+        z-index: 200;
+        height: 60px;
+        box-shadow: 0 -2px 12px rgba(109,40,217,0.3);
+        border-top: 1px solid var(--sidebar-border);
+      }
     }
     @media (max-width: 480px) {
       .stat-grid { grid-template-columns: 1fr; }
       .adaptive-summary { grid-template-columns: 1fr; }
+      .topbar-right .kite-indicator { display: none; }
+      .kill-btn span { display: none; }
     }
+
+    /* ── Mobile bottom nav ──────────────────────────────────────── */
+    .mobile-nav { display: none; }
+    .mobile-nav-item {
+      flex: 1; display: flex; flex-direction: column; align-items: center;
+      justify-content: center; gap: 3px; cursor: pointer;
+      color: var(--sidebar-fg-muted); font-size: 10px; font-weight: 500;
+      transition: color 0.15s; padding: 6px 0;
+    }
+    .mobile-nav-item i { width: 20px; height: 20px; }
+    .mobile-nav-item.active { color: #C4B5FD; }
+    .mobile-nav-item:hover  { color: #FFFFFF; }
+
+    /* ── Notification bell ──────────────────────────────────────── */
+    .notif-bell {
+      position: relative; cursor: pointer;
+      display: flex; align-items: center; justify-content: center;
+      width: 34px; height: 34px;
+      background: rgba(255,255,255,0.12);
+      border: 1px solid rgba(255,255,255,0.2);
+      border-radius: 8px;
+      color: rgba(255,255,255,0.85);
+      transition: background 0.15s;
+    }
+    .notif-bell:hover { background: rgba(255,255,255,0.2); }
+    .notif-bell i { width: 16px; height: 16px; }
+    .notif-bell.muted { color: rgba(255,255,255,0.35); }
+    .notif-badge {
+      position: absolute; top: -4px; right: -4px;
+      background: #EF4444; color: #fff;
+      font-size: 9px; font-weight: 700;
+      width: 16px; height: 16px; border-radius: 50%;
+      display: flex; align-items: center; justify-content: center;
+      display: none;
+    }
+
+    /* ── Real-time P&L cells ────────────────────────────────────── */
+    .pnl-live { transition: color 0.3s; font-weight: 600; }
+    @keyframes pnl-up { 0%,100%{background:transparent} 40%{background:rgba(22,163,74,0.18)} }
+    @keyframes pnl-dn { 0%,100%{background:transparent} 40%{background:rgba(220,38,38,0.15)} }
+    .pnl-flash-up { animation: pnl-up 0.5s ease; }
+    .pnl-flash-dn { animation: pnl-dn 0.5s ease; }
 
     /* ── Scrollbars ─────────────────────────────────────────────── */
     ::-webkit-scrollbar { width: 6px; height: 6px; }
@@ -1078,8 +1137,8 @@
         <i data-lucide="activity" style="width:18px;height:18px;color:#fff"></i>
       </div>
       <div>
-        <div style="font-weight:700;font-size:14px;color:var(--fg1)">AlgoTrader Pro</div>
-        <div style="font-size:11px;color:var(--fg3)">Nirma Trade v4</div>
+        <div style="font-weight:700;font-size:14px;color:#FFFFFF">AlgoTrader Pro</div>
+        <div style="font-size:11px;color:rgba(255,255,255,0.6)">Nirma Trade v4</div>
       </div>
       <div class="pulse-dot" id="bot-pulse-dot" style="margin-left:auto"></div>
     </div>
@@ -1138,8 +1197,12 @@
           <div class="kite-dot" id="kite-status-dot"></div>
           <span id="kite-status-text">Kite</span>
         </div>
+        <button class="notif-bell" id="notif-bell" title="Trade notifications" onclick="toggleNotifications()">
+          <i data-lucide="bell"></i>
+          <div class="notif-badge" id="notif-badge">0</div>
+        </button>
         <button class="kill-btn" onclick="confirmKillSwitch()">
-          <i data-lucide="alert-octagon"></i> Kill Switch
+          <i data-lucide="alert-octagon"></i> <span>Kill Switch</span>
         </button>
       </div>
     </div>
@@ -2333,6 +2396,25 @@
   </div><!-- /main -->
 </div><!-- /app -->
 
+<!-- ── Mobile bottom nav ─────────────────────────────────────── -->
+<div class="mobile-nav" id="mobile-nav">
+  <div class="mobile-nav-item active" data-tab="overview" onclick="switchTab('overview');mobileNavActivate(this)">
+    <i data-lucide="layout-dashboard"></i><span>Home</span>
+  </div>
+  <div class="mobile-nav-item" data-tab="orders" onclick="switchTab('orders');mobileNavActivate(this)">
+    <i data-lucide="activity"></i><span>Orders</span>
+  </div>
+  <div class="mobile-nav-item" data-tab="botcontrol" onclick="switchTab('botcontrol');mobileNavActivate(this)">
+    <i data-lucide="cpu"></i><span>Bot</span>
+  </div>
+  <div class="mobile-nav-item" data-tab="analytics" onclick="switchTab('analytics');mobileNavActivate(this)">
+    <i data-lucide="bar-chart-2"></i><span>Analytics</span>
+  </div>
+  <div class="mobile-nav-item" data-tab="settings" onclick="switchTab('settings');mobileNavActivate(this)">
+    <i data-lucide="settings-2"></i><span>Settings</span>
+  </div>
+</div>
+
 <script>
 'use strict';
 
@@ -2894,17 +2976,19 @@ function renderPositions() {
     const sl = p.stop_loss || '—';
     const tg = p.target    || '—';
 
+    const sym = p.tradingsymbol || p.symbol || '—';
+    const mult = side === 'BUY' ? 1 : -1;
     return `<tr>
-      <td style="font-weight:600">${p.tradingsymbol || p.symbol || '—'}</td>
+      <td style="font-weight:600">${sym}</td>
       <td><span class="badge badge-${side.toLowerCase()}">${side}</span></td>
       <td>${fmtINR(entry)}</td>
-      <td class="ltp-cell" data-symbol="${p.tradingsymbol || p.symbol}">${fmtINR(ltp)}</td>
-      <td style="font-weight:600;color:${pnl >= 0 ? 'var(--green)' : 'var(--red)'}">${fmtINR(pnl)}</td>
-      <td style="color:${pnlPct >= 0 ? 'var(--green)' : 'var(--red)'}">${fmtPct(pnlPct)}</td>
+      <td class="ltp-cell" data-symbol="${sym}" data-entry="${entry}" data-qty="${qty}" data-mult="${mult}">${fmtINR(ltp)}</td>
+      <td class="pnl-live" id="pnl-${sym}" style="color:${pnl >= 0 ? 'var(--green)' : 'var(--red)'}">${fmtINR(pnl)}</td>
+      <td class="pnl-pct-live" id="pnlpct-${sym}" style="color:${pnlPct >= 0 ? 'var(--green)' : 'var(--red)'}">${fmtPct(pnlPct)}</td>
       <td style="color:var(--fg3)">${typeof sl === 'number' ? fmtINR(sl) : sl}</td>
       <td style="color:var(--fg3)">${typeof tg === 'number' ? fmtINR(tg) : tg}</td>
       <td style="color:var(--fg3)">${dur}</td>
-      <td><button class="btn btn-ghost btn-sm" onclick="exitPosition('${p.tradingsymbol || p.symbol}','${side}',${qty})">Exit</button></td>
+      <td><button class="btn btn-ghost btn-sm" onclick="exitPosition('${sym}','${side}',${qty})">Exit</button></td>
     </tr>`;
   }).join('');
   lucide.createIcons({ nodes: [tbody] });
@@ -4322,15 +4406,39 @@ function connectWS() {
       if (msg.event === 'tick' || msg.ltp !== undefined) {
         const sym = msg.symbol;
         if (!sym) return;
-        // Update LTP cells
+        // Update LTP cells + real-time P&L
         document.querySelectorAll(`.ltp-cell[data-symbol="${sym}"]`).forEach(cell => {
-          const prev = parseFloat(cell.dataset.prev || '0');
-          const curr = msg.ltp;
-          if (prev && curr !== prev) {
-            flashEl(cell, curr - prev);
+          const prev  = parseFloat(cell.dataset.prev || '0');
+          const curr  = msg.ltp;
+          if (prev && curr !== prev) flashEl(cell, curr - prev);
+          cell.textContent  = fmtINR(curr);
+          cell.dataset.prev = curr;
+
+          // Real-time P&L update
+          const entry = parseFloat(cell.dataset.entry || '0');
+          const qty   = parseFloat(cell.dataset.qty   || '0');
+          const mult  = parseFloat(cell.dataset.mult  || '1');
+          if (entry && qty) {
+            const pnl    = (curr - entry) * qty * mult;
+            const pnlPct = (pnl / (entry * qty)) * 100;
+            const pnlEl  = document.getElementById(`pnl-${sym}`);
+            const pctEl  = document.getElementById(`pnlpct-${sym}`);
+            if (pnlEl) {
+              const prevPnl = parseFloat(pnlEl.dataset.prev || '0');
+              if (prevPnl !== pnl) {
+                pnlEl.classList.remove('pnl-flash-up','pnl-flash-dn');
+                void pnlEl.offsetWidth; // reflow to restart animation
+                pnlEl.classList.add(pnl > prevPnl ? 'pnl-flash-up' : 'pnl-flash-dn');
+              }
+              pnlEl.textContent    = fmtINR(pnl);
+              pnlEl.style.color    = pnl >= 0 ? 'var(--green)' : 'var(--red)';
+              pnlEl.dataset.prev   = pnl;
+            }
+            if (pctEl) {
+              pctEl.textContent  = fmtPct(pnlPct);
+              pctEl.style.color  = pnlPct >= 0 ? 'var(--green)' : 'var(--red)';
+            }
           }
-          cell.textContent    = fmtINR(curr);
-          cell.dataset.prev   = curr;
         });
         // Update Abi Indicator Radar
         if (msg.supertrend !== undefined || msg.hma !== undefined || msg.squeeze_on !== undefined || msg.williams_r !== undefined) {
@@ -4343,6 +4451,22 @@ function connectWS() {
       }
       if (msg.event === 'risk_alert') {
         toast(`⚠ Risk alert: ${msg.type} — P&L ₹${msg.pnl != null ? msg.pnl.toFixed(0) : '—'}`, 'error');
+      }
+      // Trade entry notification
+      if (msg.event === 'trade_entered' || msg.event === 'order_placed') {
+        const sym  = msg.symbol || '';
+        const side = msg.side   || msg.action || '';
+        const strat = msg.strategy || msg.agent || '';
+        notifyTrade(`${strat.toUpperCase()} ${side} ${sym}`, `Entry @ ₹${msg.price ? msg.price.toFixed(2) : '—'}`, 'entry');
+        toast(`🟢 ${strat} entered ${side} ${sym}`, 'ok');
+      }
+      // Trade exit notification
+      if (msg.event === 'trade_exited' || msg.event === 'sl_hit' || msg.event === 'target_hit') {
+        const sym  = msg.symbol || '';
+        const reason = msg.event === 'sl_hit' ? 'SL Hit' : msg.event === 'target_hit' ? 'Target Hit' : 'Exit';
+        const pnlStr = msg.pnl != null ? ` P&L ₹${msg.pnl.toFixed(0)}` : '';
+        notifyTrade(`${reason}: ${sym}`, pnlStr, msg.event === 'sl_hit' ? 'sl' : 'target');
+        toast(`${msg.event === 'sl_hit' ? '🔴' : '🎯'} ${reason} ${sym}${pnlStr}`, msg.event === 'sl_hit' ? 'warn' : 'ok');
       }
     } catch {}
   };
@@ -4373,6 +4497,82 @@ async function fetchAuditLog() {
 /* ═══════════════════════════════════════════════════════════════
    INIT
 ═══════════════════════════════════════════════════════════════ */
+/* ═══════════════════════════════════════════════════════════════
+   TRADE NOTIFICATIONS
+═══════════════════════════════════════════════════════════════ */
+let _notifEnabled  = localStorage.getItem('notifEnabled') !== 'false';
+let _notifCount    = 0;
+const _chimeEntry  = new AudioContext ? null : null; // lazy init
+
+function _playChime(type) {
+  try {
+    const ctx  = new (window.AudioContext || window.webkitAudioContext)();
+    const osc  = ctx.createOscillator();
+    const gain = ctx.createGain();
+    osc.connect(gain); gain.connect(ctx.destination);
+    if (type === 'entry') {
+      osc.frequency.setValueAtTime(880, ctx.currentTime);
+      osc.frequency.exponentialRampToValueAtTime(1320, ctx.currentTime + 0.08);
+    } else if (type === 'target') {
+      osc.frequency.setValueAtTime(1047, ctx.currentTime);
+      osc.frequency.setValueAtTime(1319, ctx.currentTime + 0.1);
+      osc.frequency.setValueAtTime(1568, ctx.currentTime + 0.2);
+    } else { // sl
+      osc.frequency.setValueAtTime(440, ctx.currentTime);
+      osc.frequency.exponentialRampToValueAtTime(220, ctx.currentTime + 0.2);
+    }
+    gain.gain.setValueAtTime(0.25, ctx.currentTime);
+    gain.gain.exponentialRampToValueAtTime(0.001, ctx.currentTime + 0.35);
+    osc.start(ctx.currentTime); osc.stop(ctx.currentTime + 0.4);
+  } catch {}
+}
+
+function notifyTrade(title, body, type) {
+  if (!_notifEnabled) return;
+  _playChime(type);
+  _notifCount++;
+  const badge = document.getElementById('notif-badge');
+  if (badge) { badge.style.display = 'flex'; badge.textContent = _notifCount > 9 ? '9+' : _notifCount; }
+  if (Notification && Notification.permission === 'granted') {
+    const icons = { entry: '🟢', target: '🎯', sl: '🔴' };
+    new Notification(`${icons[type] || '📊'} ${title}`, { body, icon: '/favicon.ico', tag: type });
+  }
+}
+
+async function toggleNotifications() {
+  _notifEnabled = !_notifEnabled;
+  localStorage.setItem('notifEnabled', _notifEnabled);
+  const bell = document.getElementById('notif-bell');
+  if (bell) bell.classList.toggle('muted', !_notifEnabled);
+  // Reset badge
+  _notifCount = 0;
+  const badge = document.getElementById('notif-badge');
+  if (badge) badge.style.display = 'none';
+  // Request browser permission if enabling
+  if (_notifEnabled && Notification && Notification.permission === 'default') {
+    await Notification.requestPermission();
+  }
+  toast(_notifEnabled ? 'Trade notifications ON' : 'Trade notifications OFF', 'info');
+}
+
+async function _initNotifications() {
+  const bell = document.getElementById('notif-bell');
+  if (!bell) return;
+  if (!_notifEnabled) bell.classList.add('muted');
+  if (Notification && Notification.permission === 'default') {
+    // Ask quietly on first load
+    await Notification.requestPermission();
+  }
+}
+
+/* ═══════════════════════════════════════════════════════════════
+   MOBILE NAV
+═══════════════════════════════════════════════════════════════ */
+function mobileNavActivate(el) {
+  document.querySelectorAll('.mobile-nav-item').forEach(n => n.classList.remove('active'));
+  el.classList.add('active');
+}
+
 async function init() {
   // Validate JWT first
   try {
@@ -4401,7 +4601,8 @@ async function init() {
   // WebSocket
   connectWS();
 
-  // Render lucide icons
+  // Notifications + mobile nav
+  await _initNotifications();
   lucide.createIcons();
 }
 
