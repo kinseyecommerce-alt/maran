@@ -16,7 +16,7 @@ import json
 import threading
 import queue as _queue
 from pathlib import Path
-from datetime import date, datetime
+from datetime import date, datetime, timedelta, timezone
 from typing import Optional
 
 DB_PATH = Path("logs/algotrader.db")
@@ -88,6 +88,10 @@ def _conn() -> sqlite3.Connection:
 def init_db() -> None:
     """Create all tables if they don't exist. Idempotent — safe to call multiple times."""
     with _conn() as c:
+        # Enable WAL mode: concurrent reads don't block writes, reduces "database locked" errors
+        c.execute("PRAGMA journal_mode=WAL")
+        c.execute("PRAGMA synchronous=NORMAL")
+        c.commit()
         c.executescript("""
             CREATE TABLE IF NOT EXISTS positions (
                 order_id   TEXT PRIMARY KEY,
@@ -412,8 +416,8 @@ def get_performance_report(
 
 def get_pattern_breakdown(days: int = 30) -> list[dict]:
     """P&L grouped by entry pattern — for last N days."""
-    from datetime import datetime, timedelta
-    cutoff = (datetime.utcnow() - timedelta(days=days)).isoformat()
+    # Use timezone-aware UTC so comparison is consistent with SQLite datetime('now') (UTC)
+    cutoff = (datetime.now(timezone.utc) - timedelta(days=days)).strftime("%Y-%m-%d %H:%M:%S")
     with _conn() as conn:
         rows = conn.execute("""
             SELECT pattern,

@@ -43,6 +43,21 @@ class SignalAggregator:
                 return CONSENSUS_BOOST
         return 0.0
 
+    def get_consensus_boost(self, symbol: str, direction: str) -> float:
+        """
+        Return the current consensus boost for this symbol/direction without registering.
+        Returns CONSENSUS_BOOST if ≥CONSENSUS_MIN_AGENTS different agents have active signals,
+        0.0 otherwise. Used so all agents on a consensus trade (including the first entrant)
+        can apply the boost at entry time.
+        """
+        now = datetime.utcnow()
+        key = (symbol, direction)
+        window = now - timedelta(seconds=CONSENSUS_WINDOW_SECS)
+        with self._lock:
+            active = [(a, s, ts) for a, s, ts in self._signals.get(key, []) if ts > window]
+            unique_agents = {a for a, s, ts in active}
+            return CONSENSUS_BOOST if len(unique_agents) >= CONSENSUS_MIN_AGENTS else 0.0
+
     def recent_signals(self, symbol: str | None = None) -> list[dict]:
         """Return all active signals for dashboard/debug."""
         now = datetime.utcnow()

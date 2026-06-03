@@ -5,6 +5,7 @@ Entry logic reads from live LiveIndicators (EMA, RSI, VWAP, MACD, BB, ATR).
 """
 from __future__ import annotations
 
+import asyncio
 from datetime import datetime, time, timedelta
 from typing import Optional
 
@@ -479,22 +480,24 @@ class OptionsAgent(BaseAgent):
     MAX_IV_BUY   = 72       # hard block above this IV rank
     COOL_S       = 120      # 2-min per symbol per direction
 
-    # ── Per-symbol state ──────────────────────────────────────────────────────
-    _orb_high:           dict = {}   # sym → float (ORB high built 9:15-9:30)
-    _orb_low:            dict = {}   # sym → float
-    _orb_fired:          dict = {}   # sym → bool  (prevent ORB retrigger)
-    _last_candle_ts:     dict = {}   # sym → candle ts (SURGE dedup)
-    _prev_above_vwap:    dict = {}   # sym → bool (VWAP cross state)
-    _prev_bb_width:      dict = {}   # sym → float (squeeze detection)
-    _prev_ltp:           dict = {}   # sym → float (generic prev price)
-    _prev_rsi:           dict = {}   # sym → float (pullback detection)
-    _prev_stochrsi_k_opt: dict = {}  # sym → float (StochRSI cross detection)
-    _prev_williams_opt:  dict = {}   # sym → float (Williams %R cross detection)
-    _prev_ema9_opt:      dict = {}   # sym → float (EMA_CROSS event detection)
-    _prev_ema21_opt:     dict = {}   # sym → float (EMA_CROSS event detection)
-    _cool_ts:            dict = {}   # sym → {"CE": datetime, "PE": datetime}
-
     # ── Main entry loop ───────────────────────────────────────────────────────
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        # Per-symbol state — instance-level to avoid cross-instance sharing
+        self._orb_high:            dict = {}   # sym → float (ORB high built 9:15-9:30)
+        self._orb_low:             dict = {}   # sym → float
+        self._orb_fired:           dict = {}   # sym → bool  (prevent ORB retrigger)
+        self._last_candle_ts:      dict = {}   # sym → candle ts (SURGE dedup)
+        self._prev_above_vwap:     dict = {}   # sym → bool (VWAP cross state)
+        self._prev_bb_width:       dict = {}   # sym → float (squeeze detection)
+        self._prev_ltp:            dict = {}   # sym → float (generic prev price)
+        self._prev_rsi:            dict = {}   # sym → float (pullback detection)
+        self._prev_stochrsi_k_opt: dict = {}   # sym → float (StochRSI cross detection)
+        self._prev_williams_opt:   dict = {}   # sym → float (Williams %R cross detection)
+        self._prev_ema9_opt:       dict = {}   # sym → float (EMA_CROSS event detection)
+        self._prev_ema21_opt:      dict = {}   # sym → float (EMA_CROSS event detection)
+        self._cool_ts:             dict = {}   # sym → {"CE": datetime, "PE": datetime}
 
     def evaluate_tick(self, snap: MarketSnapshot) -> tuple[str, Optional[dict]]:
         ind = snap.indicators
@@ -1050,12 +1053,13 @@ class OptionsAgent(BaseAgent):
             logger.warning("[options] SEBI blocked {} {}: {}", action, opt_sym, sebi_reason)
             return
 
-        order_id = kite_client.place_order(
+        loop = asyncio.get_event_loop()
+        order_id = await loop.run_in_executor(None, lambda: kite_client.place_order(
             tradingsymbol=opt_sym, exchange=exch,
             transaction_type=action, quantity=qty,
             order_type="MARKET", product=self.product,
             tag="Agent-options",
-        )
+        ))
         sebi_compliance.record_order_id(self.name, opt_sym, order_id)
         order_guard.register_order(underlying, self.name, action, order_id)
         risk_manager.position_opened()
@@ -1074,12 +1078,14 @@ class OptionsAgent(BaseAgent):
         sl_px   = round(opt_price * (1 - sl_pct / 100), 2)
         tgt_px  = round(opt_price * (1 + tgt_pct / 100), 2)
 
-        kite_client.place_order(
+        # SL side: BUY to close a short (SELL entry), SELL to close a long (BUY entry)
+        sl_side = "BUY" if action == "SELL" else "SELL"
+        await loop.run_in_executor(None, lambda: kite_client.place_order(
             tradingsymbol=opt_sym, exchange=exch,
-            transaction_type="SELL", quantity=qty,
+            transaction_type=sl_side, quantity=qty,
             order_type="SL-M", product=self.product,
             trigger_price=sl_px, tag="Agent-options-SL",
-        )
+        ))
 
         await send_telegram(
             f"<b>[OPTIONS]</b> {action} {opt_sym} ≈₹{opt_price:.1f}\n"
@@ -1145,9 +1151,12 @@ class SwingAgent(BaseAgent):
     product = "CNC"
     min_candles_1min = 50
 
-    _last_eval:      dict[str, float] = {}
-    _prev_macd_hist: dict[str, float] = {}
-    _prev_ltp:       dict[str, float] = {}
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        # Per-symbol state — instance-level to avoid cross-instance sharing
+        self._last_eval:      dict[str, float] = {}
+        self._prev_macd_hist: dict[str, float] = {}
+        self._prev_ltp:       dict[str, float] = {}
 
     def evaluate_tick(self, snap: MarketSnapshot) -> tuple[str, Optional[dict]]:
         import time as _time

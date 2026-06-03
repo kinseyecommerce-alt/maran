@@ -368,6 +368,10 @@ class AltDataEngine:
 
     # ── Bulk / Block Deal Data ────────────────────────────────────────────────
 
+    # Module-level cache shared across all AltDataEngine instances
+    _bulk_cache: dict = {}         # symbol → (monotonic_ts, list[dict])
+    _BULK_CACHE_TTL = 300          # 5 minutes — bulk deals are published once daily
+
     def _nse_opener(self):
         """
         Build a urllib opener with cookie support and NSE headers.
@@ -399,9 +403,21 @@ class AltDataEngine:
         Returns list of {date, client, buy_sell, qty, price, remarks}.
         NSE endpoint: https://www.nseindia.com/api/bulk-deals?symbol={symbol}
         Falls back to [] on network failure.
+        Results are cached for _BULK_CACHE_TTL seconds to avoid blocking the event loop
+        with repeated HTTP calls (bulk deals are published once daily).
         """
         import json as _json, gzip as _gzip
-        url = f"https://www.nseindia.com/api/bulk-deals?symbol={symbol.upper()}"
+        import time as _time
+
+        sym_upper = symbol.upper()
+        # Check TTL cache first — avoids repeated 8s blocking HTTP calls
+        cached = AltDataEngine._bulk_cache.get(sym_upper)
+        if cached is not None:
+            cached_ts, cached_result = cached
+            if (_time.monotonic() - cached_ts) < AltDataEngine._BULK_CACHE_TTL:
+                return cached_result
+
+        url = f"https://www.nseindia.com/api/bulk-deals?symbol={sym_upper}"
         try:
             opener = self._nse_opener()
             resp = opener.open(url, timeout=8)
@@ -423,9 +439,12 @@ class AltDataEngine:
                     "price":    float(str(r.get("TRADE_PRICE") or r.get("price", 0) or 0)),
                     "remarks":  r.get("REMARKS") or r.get("remarks", ""),
                 })
+            AltDataEngine._bulk_cache[sym_upper] = (_time.monotonic(), result)
             return result
         except Exception as exc:
             logger.debug("NSE bulk deals fetch failed for {} (non-critical): {}", symbol, exc)
+            # Cache empty result briefly (30s) to avoid hammering on transient failures
+            AltDataEngine._bulk_cache[sym_upper] = (_time.monotonic() - AltDataEngine._BULK_CACHE_TTL + 30, [])
             return []
 
     def get_bulk_deal_signal(self, symbol: str) -> float:

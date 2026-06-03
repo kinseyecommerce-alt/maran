@@ -41,15 +41,16 @@ def _compute_score(usdinr: float, crude: float, sp_chg: float, us_vix: float) ->
     return max(-1.0, min(1.0, score))
 
 
-def _fetch_ticker_last_two(symbol: str) -> tuple[float, float]:
-    """Return (prev_close, last_close) for *symbol* via yfinance. Raises on failure."""
+def _fetch_ticker_last_two(symbol: str) -> tuple[float | None, float]:
+    """Return (prev_close, last_close) for *symbol* via yfinance. Raises on failure.
+    prev_close is None when only 1 bar is available (weekend/holiday)."""
     import yfinance as yf  # lazy import
-    df = yf.download(symbol, period="2d", interval="1d", progress=False, auto_adjust=True)
+    df = yf.download(symbol, period="5d", interval="1d", progress=False, auto_adjust=True)
     if df is None or len(df) < 1:
         raise ValueError(f"No data for {symbol}")
     closes = df["Close"].dropna()
     last = float(closes.iloc[-1])
-    prev = float(closes.iloc[-2]) if len(closes) >= 2 else last
+    prev = float(closes.iloc[-2]) if len(closes) >= 2 else None
     return prev, last
 
 
@@ -95,6 +96,8 @@ class MacroSignals:
 
         try:
             sp_prev, sp_last = _fetch_ticker_last_two("ES=F")
+            if sp_prev is None:
+                logger.debug("Macro: S&P change unavailable (single bar — weekend/holiday)")
         except Exception as exc:
             logger.debug("Macro: S&P futures (ES=F) fetch failed — {}", exc)
 
@@ -108,10 +111,15 @@ class MacroSignals:
             usdinr  = usdinr  if usdinr  is not None else prev.get("usdinr",   84.0)
             crude   = crude   if crude   is not None else prev.get("crude_wti", 80.0)
             sp_last = sp_last if sp_last is not None else prev.get("_sp_last",  5000.0)
-            sp_prev = sp_prev if sp_prev is not None else prev.get("_sp_prev",  sp_last)
+            # sp_prev may be None (single-bar weekend/holiday) — fall back to cached prev
+            if sp_prev is None:
+                sp_prev = prev.get("_sp_prev", None)
             us_vix  = us_vix  if us_vix  is not None else prev.get("us_vix",   18.0)
 
-            sp_chg = (sp_last / sp_prev - 1) * 100 if sp_prev else 0.0
+            if sp_prev is not None and sp_prev != 0:
+                sp_chg = (sp_last / sp_prev - 1) * 100
+            else:
+                sp_chg = 0.0
             score  = _compute_score(usdinr, crude, sp_chg, us_vix)
 
             logger.debug(

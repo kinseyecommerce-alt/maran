@@ -382,12 +382,14 @@ class BacktestEngine:
 
         for i in range(n_splits):
             if anchored:
-                # Anchored (expanding window): train grows from beginning each fold
-                train_end = int(n * (i + 1) / n_splits * train_frac) + window // n_splits
+                # Anchored (expanding window): each fold trains from bar 0 to fold_end * train_frac
+                fold_end  = int(n * (i + 1) / n_splits)
+                train_end = int(fold_end * train_frac)
                 oos_start = train_end
-                oos_end   = int(n * (i + 1) / n_splits)
-                if oos_end <= oos_start:
-                    oos_end = min(oos_start + window, n)
+                oos_end   = fold_end
+                # Ensure early folds have at least ~30 bars of OOS data
+                if oos_end <= oos_start or (oos_end - oos_start) < max(30, n // n_splits // 4):
+                    oos_end = min(oos_start + max(30, n // n_splits // 4), n)
             else:
                 # Rolling window
                 start     = i * window
@@ -654,9 +656,15 @@ class BacktestEngine:
         gross_loss   = sum(abs(l) for l in losses) if losses else 1.0
         pf           = gross_profit / gross_loss if gross_loss > 0 else 0.0
 
-        trading_days = max(len(pnl_list := pnls), 1)
-        ann_return = (total_pnl / 100_000.0) * (252 / (trading_days / 375))
-        calmar = ann_return / max(max_dd_pct / 100, 0.001)
+        n_trades = max(len(pnls), 1)
+        # Annualise using trade count; assume ~5 trading days per trade on average.
+        # Cap at 4× (roughly 4 years max annualisation) to prevent extreme blow-up on
+        # small samples.
+        ann_factor = min(252.0 / max(n_trades / 5, 1), 4.0)
+        ann_return = (total_pnl / max(abs(total_pnl) + 1, 1)) * ann_factor if total_pnl != 0 else 0.0
+        capital = 100_000.0  # reference capital for return calculation
+        ann_return = (total_pnl / capital) * ann_factor
+        calmar = ann_return / abs(max_dd_pct / 100) if max_dd_pct != 0 else 0.0
 
         return BacktestResult(
             symbol=symbol, strategy=strategy, passed=False,

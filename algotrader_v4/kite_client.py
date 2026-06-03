@@ -138,6 +138,7 @@ class KiteClient:
         self._pos_cache: dict = {}
         self._pos_cache_ts: float = 0.0
         self._pos_cache_ttl: float = 2.0   # 2-second TTL — fast enough for sector check
+        self._paper_ltp: dict[str, float] = {}        # sym → last known LTP for MARKET fill price
 
     # ── Auth ───────────────────────────────────────────────────────────────
 
@@ -512,6 +513,14 @@ class KiteClient:
         else:
             status = "COMPLETE"
 
+        # For MARKET orders, use last known LTP as fill price so P&L is accurate
+        fill_price = price
+        if order_type == "MARKET":
+            fill_price = (self._paper_ltp.get(tradingsymbol)
+                          or trigger_price
+                          or price
+                          or 100.0)
+
         record = {
             "order_id":         order_id,
             "tradingsymbol":    tradingsymbol,
@@ -520,7 +529,8 @@ class KiteClient:
             "quantity":         quantity,
             "order_type":       order_type,
             "product":          product,
-            "price":            price,
+            "price":            fill_price,
+            "average_price":    fill_price,
             "trigger_price":    trigger_price,
             "status":           status,
             "tag":              tag,
@@ -540,6 +550,9 @@ class KiteClient:
         sym       = order["tradingsymbol"]
         qty_delta = (order["quantity"] if order["transaction_type"] == "BUY"
                      else -order["quantity"])
+        # Use the best available fill price — never fall back to 0
+        fill_price = (order.get("price") or order.get("average_price")
+                      or order.get("last_price", 0.0))
         with self._paper_positions_lock:
             for pos in self._paper_positions:
                 if pos["tradingsymbol"] == sym:
@@ -547,11 +560,14 @@ class KiteClient:
                     new_qty = old_qty + qty_delta
                     if new_qty != 0 and abs(qty_delta) > 0:
                         if (old_qty > 0 and qty_delta > 0) or (old_qty < 0 and qty_delta < 0):
-                            # Adding to position — weighted average
+                            # Adding to existing position — weighted average
                             pos["average_price"] = round(
-                                (pos["average_price"] * abs(old_qty) + order["price"] * abs(qty_delta))
+                                (pos["average_price"] * abs(old_qty) + fill_price * abs(qty_delta))
                                 / abs(new_qty), 2
                             )
+                        elif (old_qty > 0 and new_qty < 0) or (old_qty < 0 and new_qty > 0):
+                            # Position reversed — new average is the reversal fill price
+                            pos["average_price"] = fill_price
                     pos["quantity"] = new_qty
                     return
             self._paper_positions.append({
@@ -559,8 +575,8 @@ class KiteClient:
                 "exchange":      order["exchange"],
                 "product":       order["product"],
                 "quantity":      qty_delta,
-                "average_price": order["price"],
-                "last_price":    order["price"],
+                "average_price": fill_price,
+                "last_price":    fill_price,
                 "pnl":           0.0,
             })
 
@@ -600,7 +616,10 @@ class KiteClient:
     def update_paper_pnl(self, symbol: str, ltp: float) -> None:
         """
         Update last_price and P&L for every paper position matching *symbol*.
+        Also keeps _paper_ltp current so MARKET order fill prices are realistic.
         """
+        if ltp > 0:
+            self._paper_ltp[symbol] = ltp
         with self._paper_positions_lock:
             for pos in self._paper_positions:
                 if pos["tradingsymbol"] == symbol:

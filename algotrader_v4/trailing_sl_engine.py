@@ -340,10 +340,12 @@ class TrailingSLEngine:
     async def _evaluate(
         self, pos: PositionSL, ltp: float, atr_14: float
     ) -> None:
-        # Guard: position may have been exited by a concurrent on_tick call that
-        # was interleaved at an await point inside this function for the same symbol.
-        if pos.status != SLStatus.ACTIVE:
-            return
+        # Guard: atomically check-and-set status to prevent TOCTOU double-hit.
+        # Two concurrent coroutines evaluating the same position could both pass
+        # a bare `if pos.status != ACTIVE` before either sets it to HIT.
+        with self._lock:
+            if pos.status != SLStatus.ACTIVE:
+                return
 
         cfg = pos.cfg
         old_sl = pos.current_sl
@@ -372,7 +374,12 @@ class TrailingSLEngine:
                  (pos.side == "SELL" and ltp >= pos.current_sl)
 
         if sl_hit:
-            pos.status = SLStatus.HIT
+            # Atomically claim ownership of the SL-hit under lock to prevent a
+            # concurrent _evaluate call from also triggering the callback.
+            with self._lock:
+                if pos.status != SLStatus.ACTIVE:
+                    return  # another coroutine already claimed this hit
+                pos.status = SLStatus.HIT
             pnl = (ltp - pos.entry_price) * pos.quantity * (1 if pos.side == "BUY" else -1)
             logger.warning(
                 "🔴 SL HIT: {} {} @ ₹{:.2f} | SL was ₹{:.2f} | P&L ₹{:.0f}",
@@ -523,7 +530,8 @@ class TrailingSLEngine:
         cfg = pos.cfg
 
         if cfg.mode == SLMode.ATR_TRAIL and atr > 0:
-            trail_dist = atr * cfg.atr_multiplier
+            multiplier = cfg.atr_multiplier / 2 if pos.target1_hit else cfg.atr_multiplier
+            trail_dist = atr * multiplier
         else:
             # Percentage trail — tighter after T1 hit
             pct = cfg.trail_pct / 200 if pos.target1_hit else cfg.trail_pct / 100

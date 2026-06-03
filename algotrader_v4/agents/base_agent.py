@@ -63,18 +63,21 @@ def _setup_tsl_callbacks() -> None:
                 await _loop.run_in_executor(None, lambda: kite_client.cancel_order(sl_oid))
             except Exception as exc:
                 logger.error("[{}] _on_sl_moved: cancel_order failed for {}: {}", pos.strategy, pos.symbol, exc)
-            new_sl_oid = await _loop.run_in_executor(None, lambda: kite_client.place_order(
-                tradingsymbol=pos.symbol,
-                exchange=entry.get("exchange", "NSE"),
-                transaction_type="SELL" if pos.side == "BUY" else "BUY",
-                quantity=pos.quantity, order_type="SL-M",
-                product=entry.get("product", "MIS"),
-                trigger_price=pos.current_sl,
-                tag=f"TSL-{pos.strategy}",
-            ))
-            with _tsl_sl_orders_lock:
-                if pos.order_id in _tsl_sl_orders:
-                    _tsl_sl_orders[pos.order_id]["sl_order_id"] = new_sl_oid
+            try:
+                new_sl_oid = await _loop.run_in_executor(None, lambda: kite_client.place_order(
+                    tradingsymbol=pos.symbol,
+                    exchange=entry.get("exchange", "NSE"),
+                    transaction_type="SELL" if pos.side == "BUY" else "BUY",
+                    quantity=pos.quantity, order_type="SL-M",
+                    product=entry.get("product", "MIS"),
+                    trigger_price=pos.current_sl,
+                    tag=f"TSL-{pos.strategy}",
+                ))
+                with _tsl_sl_orders_lock:
+                    if pos.order_id in _tsl_sl_orders:
+                        _tsl_sl_orders[pos.order_id]["sl_order_id"] = new_sl_oid
+            except Exception as exc:
+                logger.error("[{}] _on_sl_moved: place_order failed for {}: {}", pos.strategy, pos.symbol, exc)
 
     async def _on_sl_hit(pos, ltp: float, pnl: float) -> None:
         _activity(
@@ -556,14 +559,21 @@ class BaseAgent(ABC):
             qty = max(1, int(qty * size_factor))
 
         # Consensus signal boost: when 2+ agents independently flag same symbol/direction
+        # Check existing consensus BEFORE registering so the first agent also benefits
+        # when a consensus was already reached by earlier agents.
         try:
             from signal_aggregator import signal_aggregator as _sig_agg
             _score = signal.get("score", 0)
+            # Check if consensus already exists (first agent entering a consensus trade)
+            _pre_boost = _sig_agg.get_consensus_boost(sym, action)
+            # Register this agent's signal (may trigger consensus for subsequent agents)
             _boost = _sig_agg.register(self.name, sym, action, _score)
-            if _boost > 0:
+            # Use whichever boost is non-zero: pre-existing or just-triggered
+            _effective_boost = _pre_boost if _pre_boost > 0 else _boost
+            if _effective_boost > 0:
                 _max = int(settings.max_position_size // max(ltp, 1))
-                qty  = min(int(qty * (1 + _boost)), _max)
-                logger.info("[{}] {} CONSENSUS boost {:.0%} → qty={}", self.name, sym, _boost, qty)
+                qty  = min(int(qty * (1 + _effective_boost)), _max)
+                logger.info("[{}] {} CONSENSUS boost {:.0%} → qty={}", self.name, sym, _effective_boost, qty)
         except Exception:
             pass
 
@@ -648,9 +658,12 @@ class BaseAgent(ABC):
                 pass
 
         # Alt-data catalyst filter: skip on major negative events, boost qty on positive
+        # get_catalyst calls get_bulk_deals which makes a blocking HTTP call — run in executor
         try:
             from alt_data import alt_data_engine
-            catalyst = alt_data_engine.get_catalyst(sym)
+            catalyst = await loop.run_in_executor(
+                None, lambda: alt_data_engine.get_catalyst(sym)
+            )
             if catalyst < -0.5:
                 logger.info("[{}] {} skipped — negative catalyst: {:.2f}", self.name, sym, catalyst)
                 order_guard.release_claim(sym, self.name, action)
@@ -669,6 +682,7 @@ class BaseAgent(ABC):
         use_limit = getattr(settings, "use_limit_orders", False)
         limit_px  = round(ltp * (1.0005 if action == "BUY" else 0.9995), 1)
         lim_timeout = getattr(settings, "limit_order_timeout_sec", 8)
+        _claim_confirmed = False
 
         try:
             if use_limit and settings.trading_mode == "LIVE":
@@ -719,6 +733,7 @@ class BaseAgent(ABC):
                     return
 
                 order_guard.confirm_claim(sym, self.name, action, str(order_id))
+                _claim_confirmed = True
 
                 if isinstance(sl_order_id, Exception):
                     # Entry placed but SL failed — keep position, log critical warning
@@ -738,8 +753,9 @@ class BaseAgent(ABC):
 
         sebi_compliance.record_order_id(self.name, sym, order_id)
         # LIVE (limit) path: confirm claim here. PAPER/MARKET path already confirmed
-        # inside the gather block above; confirm_claim is idempotent so double-call is safe.
-        order_guard.confirm_claim(sym, self.name, action, order_id)
+        # inside the gather block above via _claim_confirmed flag — avoid double-call.
+        if not _claim_confirmed:
+            order_guard.confirm_claim(sym, self.name, action, order_id)
         risk_manager.position_opened()
         self.state.trades_today  += 1
         self.state.signals_fired += 1
@@ -837,7 +853,8 @@ class BaseAgent(ABC):
             should, reason = self.should_exit_position(pos, ind)
             if not should:
                 continue
-            side = "SELL" if pos["quantity"] > 0 else "BUY"
+            exit_side  = "SELL" if pos["quantity"] > 0 else "BUY"
+            entry_side = "BUY" if pos["quantity"] > 0 else "SELL"
             qty  = abs(pos["quantity"])
             pnl  = pos.get("pnl", 0)
             _exit_t0 = _time.monotonic()
@@ -847,12 +864,12 @@ class BaseAgent(ABC):
             oid  = await asyncio.get_event_loop().run_in_executor(
                 None, lambda: kite_client.place_order(
                     tradingsymbol=sym, exchange=_exit_exch,
-                    transaction_type=side, quantity=qty, order_type="MARKET",
+                    transaction_type=exit_side, quantity=qty, order_type="MARKET",
                     product=_exit_prod, tag=_exit_tag,
                 )
             )
             logger.info("[{}] exit order latency: {:.0f}ms", self.name, (_time.monotonic() - _exit_t0) * 1000)
-            order_guard.release_order(sym, self.name, "BUY" if side == "SELL" else "SELL", pnl)
+            order_guard.release_order(sym, self.name, entry_side, pnl)
             risk_manager.record_trade(pnl)
             risk_manager.position_closed()
             self.state.pnl_today += pnl
@@ -876,7 +893,7 @@ class BaseAgent(ABC):
                 from market_regime import regime_detector
                 _st_record(
                     symbol=sym, strategy=self.name,
-                    side="BUY" if side == "SELL" else "SELL",
+                    side=entry_side,
                     entry_price=entry_price,
                     exit_price=snap.tick.ltp,
                     quantity=qty,
@@ -898,13 +915,13 @@ class BaseAgent(ABC):
                 "symbol": sym,
                 "reason": reason,
                 "pnl":    pnl,
-                "side":   side,
+                "side":   exit_side,
             }))
             try:
                 from trade_memory import record_trade as _record_trade
                 from market_regime import regime_detector
                 asyncio.create_task(_record_trade(
-                    {"symbol": sym, "strategy": self.name, "side": side,
+                    {"symbol": sym, "strategy": self.name, "side": entry_side,
                      "pnl": pnl, "exit_reason": reason},
                     market_context={
                         "regime": regime_detector.current_regime.value

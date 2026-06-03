@@ -320,10 +320,11 @@ class RiskManager:
         if settings.use_kelly_capital_sizing and agent:
             kf = get_kelly_fraction(agent)
             if kf <= 0:
-                # FIX 3: No edge established yet — use minimum 2% of capital as safe fallback
+                # No edge established yet — use minimum 2% scaling as safe fallback
                 kf = 0.02
                 logger.debug("Kelly sizing: agent={} no history yet — using fallback kf=0.02", agent)
-            cap = settings.total_capital * kf
+            # Scale the per-agent bucket by half-Kelly (×2 to convert half→full, capped at 100%)
+            cap = cap * min(kf * 2, 1.0)
             logger.debug("Kelly sizing: agent={} kf={:.3f} cap=₹{:.0f}", agent, kf, cap)
         if risk_pct and price > 0:
             sl_amount = price * (settings.stop_loss_pct / 100)
