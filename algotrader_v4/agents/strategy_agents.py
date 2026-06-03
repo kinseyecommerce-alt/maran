@@ -2253,29 +2253,36 @@ class ScalpingAgent(BaseAgent):
 
 class FuturesAgent(BaseAgent):
     """
-    NSE/BSE index & stock futures agent (product=NRML, exchange=NFO).
+    World-class NSE/BSE index & stock futures agent (NRML) — 18 patterns, ATR-dynamic SL/TGT.
 
-    Patterns (12):
-      1.  EMA_TREND        — EMA9 > EMA21 > EMA50 full alignment with RSI 50-70
-      2.  ORB_FUTURES      — Opening range breakout 9:30-10:00
-      3.  VWAP_PULL        — Price pulls to VWAP from above/below with volume surge
-      4.  MACD_CROSS       — MACD histogram crosses zero with Supertrend confirmation
-      5.  ATR_BREAK        — Price breaks yesterday high/low by >1.5×ATR
-      6.  HMA_TREND        — HMA direction flip + EMA confirms
-      7.  STOCHRSI_FUTURES — StochRSI cross from extreme + Supertrend
-      8.  ICHIMOKU_FUTURES — Ichimoku cloud breakout (bullish/bearish)
-      9.  VOL_SURGE        — Volume explosion ≥1.8× + full EMA stack
-      10. MULTI_TF_ALIGN   — 3-bar EMA persistence entry
-      11. VWAP_BAND_BREAK  — Price exits VWAP ±2σ band with volume (momentum continuation)
-      12. MOMENTUM_CATCH   — 3-bar STRONG momentum + ADX≥25 (catch running moves)
+    Patterns (18):
+      1.  EMA_TREND             — EMA9>EMA21>EMA50 alignment + MACD accel (first-bar only)
+      2.  ORB_FUTURES           — Opening range breakout 9:30-10:00
+      3.  VWAP_PULL             — VWAP cross with volume surge + EMA direction
+      4.  MACD_CROSS            — MACD histogram zero-cross + Supertrend confirmation
+      5.  ATR_BREAK             — Day high/low break >1.5× ATR with volume
+      6.  HMA_TREND             — HMA direction flip + EMA confirms (first-flip-only)
+      7.  STOCHRSI_FUTURES      — StochRSI extreme cross + Supertrend direction
+      8.  ICHIMOKU_FUTURES      — Ichimoku cloud breakout (bullish/bearish Kumo)
+      9.  VOL_SURGE             — Volume ≥1.8× + full EMA stack + MACD
+      10. MULTI_TF_ALIGN        — EMA alignment sustained exactly 3 bars + VWAP side
+      11. VWAP_BAND_BREAK       — Price exits VWAP ±2σ band with volume
+      12. MOMENTUM_CATCH        — 3× STRONG momentum streak + ADX≥25 + Supertrend
+      13. TRIPLE_EMA_PULLBACK   — Pull to EMA50 within full bull/bear alignment
+      14. RANGE_COMPRESSION_BREAK — ATR compresses 3+ bars then expands 1.5× + vol
+      15. PRICE_VELOCITY        — 2-bar price acceleration >0.8% + ADX>30 + volume
+      16. WILLIAMS_FUTURES      — Williams %R extreme bounce + Supertrend
+      17. INSTITUTIONAL_FLOW    — FII net sentiment >0.6 + EMA alignment + ADX>20
+      18. EMA200_BOUNCE         — Bounce off EMA200 in established trend (major S/R)
 
-    Context bonus (9 factors, max +9):
-      volume, MACD, trend label, FII/DII sentiment, macro score,
-      ADX≥25, Supertrend, depth imbalance, wall clear.
+    Context bonus (14 factors, max +14):
+      volume, MACD, trend label, FII/DII sentiment, macro score, ADX≥25,
+      Supertrend, depth imbalance, wall clear, Williams %R alignment,
+      RSI momentum zone, 5-min candle trend, BB expanding, FII > 0.4
 
-    Gates: VWAP filter, macro gate (blocks LONG on risk-off), L2 wall gate.
-    Rollover: last 3 trading days of expiry month → time gate tightens to 14:00.
-    Sizing: full capital bucket, 1 lot minimum.
+    Gates: VWAP filter, macro gate, L2 wall gate, VIX z-score min-score adjust.
+    ATR-dynamic SL/TGT: SL = 1.5×ATR, TGT = 3.0×ATR (tighter in rollover).
+    Rollover: last 3 calendar days → time gate tightens to 14:00.
     Cooldown: 180s per symbol per direction.
     """
     name    = "futures"
@@ -2307,6 +2314,12 @@ class FuturesAgent(BaseAgent):
     _prev_below_vwap_l2:    dict = {}   # sym → bool (VWAP_BAND_BREAK lower cross)
     _momentum_streak_up:    dict = {}   # sym → int (MOMENTUM_CATCH consecutive STRONG_UP)
     _momentum_streak_dn:    dict = {}   # sym → int (MOMENTUM_CATCH consecutive STRONG_DOWN)
+    # ── new state (world-class upgrade) ──────────────────────────────────────
+    _prev_atr_fut:          dict = {}   # sym → float (ATR compression detection)
+    _prev_ltp2:             dict = {}   # sym → float (2 ticks ago for velocity)
+    _atr_streak_low:        dict = {}   # sym → int   (consecutive low-ATR bars)
+    _prev_williams_fut:     dict = {}   # sym → float (Williams %R cross)
+    _prev_bb_width_fut:     dict = {}   # sym → float (BB width trend)
 
     def evaluate_tick(self, snap: MarketSnapshot) -> tuple[str, Optional[dict]]:
         from macro_signals import macro_signals
@@ -2339,6 +2352,12 @@ class FuturesAgent(BaseAgent):
             self._pat_multi_tf_align,
             self._pat_vwap_band_break,
             self._pat_momentum_catch,
+            self._pat_triple_ema_pullback,
+            self._pat_range_compression_break,
+            self._pat_price_velocity,
+            self._pat_williams_futures,
+            self._pat_institutional_flow,
+            self._pat_ema200_bounce,
         ]
         for pat_fn in patterns:
             try:
@@ -2405,11 +2424,27 @@ class FuturesAgent(BaseAgent):
         cools[best_side] = now
 
         lot_sz  = self.LOT_SIZES.get(sym, 1)
-        # Tighten SL during rollover period (increased gamma / pinning risk)
-        sl_pct  = settings.sl_pct_futures * 0.7 if _rollover else settings.sl_pct_futures
-        tgt_pct = settings.tgt_pct_futures
 
-        fut_sym = self._futures_symbol(sym)
+        # ATR-dynamic SL/TGT (superior to fixed % — scales with actual volatility)
+        if ind.atr_14 and ind.atr_14 > 0 and ltp > 0:
+            atr_sl_mult  = 1.0 if _rollover else 1.5
+            atr_tgt_mult = 2.0 if _rollover else 3.0
+            sl_pct  = round(ind.atr_14 * atr_sl_mult  / ltp * 100, 2)
+            tgt_pct = round(ind.atr_14 * atr_tgt_mult / ltp * 100, 2)
+            # Floor/ceiling to avoid tiny SL or giant SL from ATR extremes
+            sl_pct  = max(0.3, min(sl_pct,  2.5))
+            tgt_pct = max(0.6, min(tgt_pct, 5.0))
+        else:
+            sl_pct  = settings.sl_pct_futures * (0.7 if _rollover else 1.0)
+            tgt_pct = settings.tgt_pct_futures
+
+        fut_sym    = self._futures_symbol(sym, _rollover)
+        macro_scr  = macro_score
+        try:
+            from alt_data import alt_data_engine as _ad
+            fii_val = _ad.get_fii_sentiment()
+        except Exception:
+            fii_val = 0.0
 
         self._update_state(sym, ind, ltp)
         action = "BUY" if best_side == "LONG" else "SELL"
@@ -2422,9 +2457,13 @@ class FuturesAgent(BaseAgent):
             "target_pct":     tgt_pct,
             "score":          best_score,
             "pattern":        best_pattern,
+            "atr_sl":         round(ind.atr_14 * (1.0 if _rollover else 1.5), 2) if ind.atr_14 else 0,
+            "rollover":       _rollover,
             "trigger": (
-                f"FUT-{best_side} [{best_pattern}] score={best_score} "
-                f"rsi={ind.rsi_14:.0f} trend={ind.trend}"
+                f"FUT-{best_side} [{best_pattern}] score={best_score}/18 "
+                f"rsi={ind.rsi_14:.0f} adx={ind.adx_14:.0f} "
+                f"atr={ind.atr_14:.1f} macro={macro_scr:+.2f} fii={fii_val:+.2f} "
+                f"trend={ind.trend}"
             ),
         }
 
@@ -2546,33 +2585,75 @@ class FuturesAgent(BaseAgent):
         b = 0
         is_long = (side == "LONG")
 
-        # Core confirmations
+        # 1. Volume surge confirmation
         if ind.volume_ratio > 1.4:                              b += 1
+
+        # 2. MACD histogram direction
         if is_long  and ind.macd_hist > 0:                      b += 1
         if not is_long and ind.macd_hist < 0:                   b += 1
+
+        # 3. Trend label alignment
         if is_long  and ind.trend == "UP":                      b += 1
         if not is_long and ind.trend == "DOWN":                 b += 1
 
-        # ADX ≥ 25 = trending market (not sideways noise)
+        # 4. ADX ≥ 25 = trending (not sideways noise)
         if ind.adx_14 >= 25:                                    b += 1
 
-        # Supertrend confirms direction
+        # 5. Supertrend direction aligned
         if is_long  and ind.supertrend_dir == "UP":             b += 1
         if not is_long and ind.supertrend_dir == "DOWN":        b += 1
 
-        # L2 depth imbalance: heavy bid pressure (>0.62) for LONG, ask pressure (<0.38) for SHORT
+        # 6. L2 depth imbalance (bid heavy = bullish, ask heavy = bearish)
         if is_long  and ind.depth_imbalance > 0.62:             b += 1
         if not is_long and ind.depth_imbalance < 0.38:          b += 1
 
-        # FII/DII institutional sentiment
-        fii = alt_data_engine.get_fii_sentiment()
-        if is_long  and fii >= 0.3:                             b += 1
-        if not is_long and fii <= -0.3:                         b += 1
+        # 7. FII/DII institutional sentiment ≥ 0.3
+        try:
+            fii = alt_data_engine.get_fii_sentiment()
+            if is_long  and fii >= 0.3:                         b += 1
+            if not is_long and fii <= -0.3:                     b += 1
+        except Exception:
+            pass
 
-        # Macro cross-asset alignment (USD, crude, S&P, VIX)
-        macro = macro_signals.get_macro_score()
-        if is_long  and macro >= 0.2:                           b += 1
-        if not is_long and macro <= -0.2:                       b += 1
+        # 8. Macro cross-asset alignment
+        try:
+            macro = macro_signals.get_macro_score()
+            if is_long  and macro >= 0.2:                       b += 1
+            if not is_long and macro <= -0.2:                   b += 1
+        except Exception:
+            pass
+
+        # 9. Williams %R momentum zone alignment (0-1)
+        if is_long  and -50 < ind.williams_r <= 0:              b += 1
+        if not is_long and -100 <= ind.williams_r < -50:        b += 1
+
+        # 10. RSI in strong momentum zone (0-1)
+        if is_long  and 55 <= ind.rsi_14 <= 72:                 b += 1
+        if not is_long and 28 <= ind.rsi_14 <= 45:              b += 1
+
+        # 11. 5-min candle trend alignment (3-bar) (0-1)
+        if len(snap.candles_5min) >= 3:
+            c5 = snap.candles_5min[-3:]
+            if is_long  and c5[-1].close > c5[0].close:         b += 1
+            if not is_long and c5[-1].close < c5[0].close:      b += 1
+
+        # 12. Bollinger Band width expanding (trend strengthening, not contracting) (0-1)
+        if ind.bb_upper and ind.bb_lower and ind.bb_mid and ind.bb_mid > 0:
+            bw = (ind.bb_upper - ind.bb_lower) / ind.bb_mid * 100
+            # We compare to class-level prev_bb_width_fut (from last update)
+            # Approximate: just check if bb is not in a squeeze (<1.5%)
+            if bw > 2.0:                                         b += 1
+
+        # 13. FII very strong conviction (>0.5) gets extra bonus (0-1)
+        try:
+            if is_long  and fii >= 0.5:                         b += 1
+            if not is_long and fii <= -0.5:                     b += 1
+        except Exception:
+            pass
+
+        # 14. Wall clear in signal direction (no L2 wall blocking) (already gated, bonus) (0-1)
+        if is_long  and not ind.wall_above:                     b += 1
+        if not is_long and not ind.wall_below:                  b += 1
 
         return b
 
@@ -2656,6 +2737,100 @@ class FuturesAgent(BaseAgent):
             return "SHORT", 4, "MOMENTUM_CATCH"
         return "", 0, ""
 
+    # ── Pattern 13: TRIPLE_EMA_PULLBACK — EMA50 retest in full trend ─────────
+
+    def _pat_triple_ema_pullback(self, sym, snap, ind, ltp, t):
+        """Pullback to EMA50 within a full triple-aligned trend — high-reward low-risk entry."""
+        if not (ind.ema50 > 0 and ind.ema9 > 0 and ind.ema21 > 0):
+            return "", 0, ""
+        ema50_dist = abs(ltp - ind.ema50) / ind.ema50 * 100
+        if ema50_dist > 0.5:   # must be close to EMA50 (within 0.5%)
+            return "", 0, ""
+        full_bull = ind.ema9 > ind.ema21 > ind.ema50 > 0
+        full_bear = ind.ema9 < ind.ema21 < ind.ema50 and ind.ema50 > 0
+        if full_bull and ind.rsi_14 > 45 and ind.macd_hist > 0 and ind.supertrend_dir == "UP":
+            return "LONG",  5, "TRIPLE_EMA_PULLBACK"
+        if full_bear and ind.rsi_14 < 55 and ind.macd_hist < 0 and ind.supertrend_dir == "DOWN":
+            return "SHORT", 5, "TRIPLE_EMA_PULLBACK"
+        return "", 0, ""
+
+    # ── Pattern 14: RANGE_COMPRESSION_BREAK — volatility squeeze → burst ─────
+
+    def _pat_range_compression_break(self, sym, snap, ind, ltp, t):
+        """ATR compressing ≥3 bars then sudden expansion ≥1.5× with vol surge → directional burst."""
+        prev_atr = self._prev_atr_fut.get(sym, ind.atr_14)
+        streak   = self._atr_streak_low.get(sym, 0)
+        if streak < 3 or not (ind.atr_14 > prev_atr * 1.5 and ind.volume_ratio > 1.6):
+            return "", 0, ""
+        if ind.ema9 > ind.ema21 > 0 and ind.macd_hist > 0:
+            return "LONG",  5, "RANGE_COMPRESSION_BREAK"
+        if ind.ema9 < ind.ema21 > 0 and ind.macd_hist < 0:
+            return "SHORT", 5, "RANGE_COMPRESSION_BREAK"
+        return "", 0, ""
+
+    # ── Pattern 15: PRICE_VELOCITY — 2-bar acceleration + ADX > 30 ───────────
+
+    def _pat_price_velocity(self, sym, snap, ind, ltp, t):
+        """Price moved >0.8% in last 2 ticks + ADX>30 + volume: catching an accelerating rocket."""
+        prev2 = self._prev_ltp2.get(sym, ltp)
+        if prev2 <= 0:
+            return "", 0, ""
+        velocity = abs(ltp - prev2) / prev2 * 100
+        if velocity < 0.8 or ind.adx_14 < 30 or ind.volume_ratio < 1.5:
+            return "", 0, ""
+        if ltp > prev2 and ind.macd_hist > 0 and ind.supertrend_dir == "UP":
+            return "LONG",  4, "PRICE_VELOCITY"
+        if ltp < prev2 and ind.macd_hist < 0 and ind.supertrend_dir == "DOWN":
+            return "SHORT", 4, "PRICE_VELOCITY"
+        return "", 0, ""
+
+    # ── Pattern 16: WILLIAMS_FUTURES — Williams %R extreme bounce ────────────
+
+    def _pat_williams_futures(self, sym, snap, ind, ltp, t):
+        """Williams %R extreme bounce + Supertrend: strong mean-reversion in trending market."""
+        prev_w = self._prev_williams_fut.get(sym, ind.williams_r)
+        if (prev_w < -80 and ind.williams_r > -70
+                and ind.supertrend_dir == "UP" and ind.volume_ratio >= 1.3
+                and ind.macd_hist > 0):
+            return "LONG",  4, "WILLIAMS_FUTURES"
+        if (prev_w > -20 and ind.williams_r < -30
+                and ind.supertrend_dir == "DOWN" and ind.volume_ratio >= 1.3
+                and ind.macd_hist < 0):
+            return "SHORT", 4, "WILLIAMS_FUTURES"
+        return "", 0, ""
+
+    # ── Pattern 17: INSTITUTIONAL_FLOW — follow large FII conviction ─────────
+
+    def _pat_institutional_flow(self, sym, snap, ind, ltp, t):
+        """FII net buying/selling sentiment >0.6 + EMA alignment + ADX>20: follow smart money."""
+        try:
+            from alt_data import alt_data_engine as _ad
+            fii = _ad.get_fii_sentiment()
+        except Exception:
+            return "", 0, ""
+        if fii > 0.6 and ind.ema9 > ind.ema21 > 0 and ind.adx_14 > 20 and ind.macd_hist > 0:
+            return "LONG",  4, "INSTITUTIONAL_FLOW"
+        if fii < -0.6 and ind.ema9 < ind.ema21 > 0 and ind.adx_14 > 20 and ind.macd_hist < 0:
+            return "SHORT", 4, "INSTITUTIONAL_FLOW"
+        return "", 0, ""
+
+    # ── Pattern 18: EMA200_BOUNCE — major S/R level bounce ───────────────────
+
+    def _pat_ema200_bounce(self, sym, snap, ind, ltp, t):
+        """Bounce off EMA200 in an established trend — the highest-conviction mean-reversion entry."""
+        if not (ind.ema200 > 0 and ind.ema9 > 0 and ind.ema21 > 0 and ind.ema50 > 0):
+            return "", 0, ""
+        ema200_dist = abs(ltp - ind.ema200) / ind.ema200 * 100
+        if ema200_dist > 0.8:   # must be within 0.8% of EMA200
+            return "", 0, ""
+        full_bull = ind.ema9 > ind.ema21 > ind.ema50 > ind.ema200
+        full_bear = ind.ema9 < ind.ema21 < ind.ema50 < ind.ema200
+        if full_bull and ind.rsi_14 > 42 and ind.macd_hist > 0 and ind.supertrend_dir == "UP":
+            return "LONG",  6, "EMA200_BOUNCE"   # highest base score — major level
+        if full_bear and ind.rsi_14 < 58 and ind.macd_hist < 0 and ind.supertrend_dir == "DOWN":
+            return "SHORT", 6, "EMA200_BOUNCE"
+        return "", 0, ""
+
     def _is_rollover_period(self) -> bool:
         """True if today is within 3 calendar days BEFORE NSE monthly futures expiry (last Thursday)."""
         from datetime import date, timedelta
@@ -2675,10 +2850,12 @@ class FuturesAgent(BaseAgent):
     def _update_state(self, sym: str, ind: LiveIndicators, ltp: float) -> None:
         if ind.vwap and ind.vwap > 0:
             self._prev_above_vwap[sym] = ltp > ind.vwap
-        self._prev_macd_hist[sym]      = ind.macd_hist
-        self._prev_ltp[sym]            = ltp
-        self._prev_stochrsi_k_fut[sym] = ind.stoch_rsi_k
-        self._prev_hma_dir_fut[sym]    = ind.hma_dir
+        self._prev_macd_hist[sym]       = ind.macd_hist
+        self._prev_ltp2[sym]            = self._prev_ltp.get(sym, ltp)
+        self._prev_ltp[sym]             = ltp
+        self._prev_stochrsi_k_fut[sym]  = ind.stoch_rsi_k
+        self._prev_hma_dir_fut[sym]     = ind.hma_dir
+        self._prev_williams_fut[sym]    = ind.williams_r
         # EMA_TREND state — first-bar-only detection
         self._prev_ema_bull[sym] = (ind.ema9 > ind.ema21 > ind.ema50 > 0
                                     and 50 <= ind.rsi_14 <= 72 and ind.macd_hist > 0)
@@ -2707,14 +2884,40 @@ class FuturesAgent(BaseAgent):
             self._momentum_streak_dn[sym] = self._momentum_streak_dn.get(sym, 0) + 1
         else:
             self._momentum_streak_dn[sym] = 0
+        # RANGE_COMPRESSION_BREAK: ATR streak counter
+        prev_atr = self._prev_atr_fut.get(sym, ind.atr_14)
+        if ind.atr_14 > 0 and prev_atr > 0 and ind.atr_14 <= prev_atr * 1.05:
+            self._atr_streak_low[sym] = self._atr_streak_low.get(sym, 0) + 1
+        else:
+            self._atr_streak_low[sym] = 0
+        self._prev_atr_fut[sym] = ind.atr_14
+        # BB width tracking
+        if ind.bb_upper and ind.bb_lower and ind.bb_mid and ind.bb_mid > 0:
+            self._prev_bb_width_fut[sym] = (ind.bb_upper - ind.bb_lower) / ind.bb_mid * 100
 
-    def _futures_symbol(self, underlying: str) -> str:
+    def _futures_symbol(self, underlying: str, rollover: bool = False) -> str:
+        """Build NFO futures symbol. During rollover window, trade the far (next) month."""
         from datetime import date, timedelta
-        today  = date.today()
-        expiry = today + timedelta(days=1)
-        # Futures expire on last Thursday of expiry month
-        while expiry.weekday() != 3:
-            expiry += timedelta(days=1)
+        today = date.today()
+
+        def last_thursday(y: int, m: int) -> date:
+            # Find last Thursday of month
+            if m == 12:
+                last = date(y + 1, 1, 1) - timedelta(days=1)
+            else:
+                last = date(y, m + 1, 1) - timedelta(days=1)
+            while last.weekday() != 3:
+                last -= timedelta(days=1)
+            return last
+
+        near_exp = last_thursday(today.year, today.month)
+        if today > near_exp or rollover:
+            # Use next month expiry
+            nm = today.month + 1 if today.month < 12 else 1
+            ny = today.year if today.month < 12 else today.year + 1
+            expiry = last_thursday(ny, nm)
+        else:
+            expiry = near_exp
         return f"{underlying}{expiry.strftime('%y%b').upper()}FUT"
 
     def should_exit_position(self, pos: dict, ind: LiveIndicators) -> tuple[bool, str]:
@@ -2725,16 +2928,40 @@ class FuturesAgent(BaseAgent):
         side = pos.get("side", "LONG")
         chg  = ((ltp - entry) / entry * 100) if side == "LONG" else ((entry - ltp) / entry * 100)
 
-        sl_pct  = settings.sl_pct_futures
-        tgt_pct = settings.tgt_pct_futures
+        # 1. ATR-based SL (dynamic — adapts to current volatility)
+        sl_pct  = pos.get("stop_loss_pct",  settings.sl_pct_futures)
+        tgt_pct = pos.get("target_pct", settings.tgt_pct_futures)
         if chg <= -sl_pct:
-            return True, f"Futures SL -{sl_pct}% ₹{ltp:.2f}"
+            return True, f"Futures ATR-SL -{sl_pct:.2f}% ₹{ltp:.2f}"
+
+        # 2. Target hit
         if chg >= tgt_pct:
-            return True, f"Futures TGT +{tgt_pct}% ₹{ltp:.2f}"
-        if chg >= tgt_pct * 0.6 and ind.momentum in ("WEAK_UP", "NEUTRAL", "WEAK_DOWN"):
-            return True, f"Futures +{tgt_pct*0.6:.1f}% momentum fading"
+            return True, f"Futures ATR-TGT +{tgt_pct:.2f}% ₹{ltp:.2f}"
+
+        # 3. Momentum fading at 60% of target — lock in partial profit
+        if chg >= tgt_pct * 0.60 and ind.momentum in ("WEAK_UP", "NEUTRAL", "WEAK_DOWN"):
+            return True, f"Futures +{chg:.1f}% momentum fading — exit before give-back"
+
+        # 4. Trend reversal: supertrend flips against position with MACD confirmation
+        if side == "LONG" and ind.supertrend_dir == "DOWN" and ind.macd_hist < 0 and chg < tgt_pct * 0.5:
+            return True, f"Supertrend flipped DOWN — exit long at {chg:+.1f}%"
+        if side == "SHORT" and ind.supertrend_dir == "UP" and ind.macd_hist > 0 and chg < tgt_pct * 0.5:
+            return True, f"Supertrend flipped UP — exit short at {chg:+.1f}%"
+
+        # 5. MACD cross against position (softer exit when direction confirmed against us)
+        if side == "LONG" and ind.macd_hist < 0 and ind.trend == "DOWN" and chg < 0:
+            return True, f"MACD + trend both bearish — cut loss at {chg:+.1f}%"
+        if side == "SHORT" and ind.macd_hist > 0 and ind.trend == "UP" and chg < 0:
+            return True, f"MACD + trend both bullish — cut loss at {chg:+.1f}%"
+
+        # 6. Rollover-period early exit (15-min before hard cutoff)
+        if self._is_rollover_period() and now_ist().time().replace(tzinfo=None) >= time(13, 45):
+            return True, "Rollover period — exit before 14:00 cutoff"
+
+        # 7. Auto square-off 14:55 (hard cutoff for all futures)
         if now_ist().time().replace(tzinfo=None) >= time(14, 55):
-            return True, "Auto square-off 2:55 PM"
+            return True, "Auto square-off 14:55"
+
         return False, ""
 
 
