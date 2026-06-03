@@ -295,20 +295,26 @@ async def assess(snap, action: str, signal: dict, strategy: str) -> GateDecision
     ctx = _build_context(snap, action, signal, strategy)
 
     try:
+        extra: dict = {}
+        if settings.use_extended_thinking:
+            extra["thinking"] = {"type": "enabled", "budget_tokens": settings.gate_thinking_budget}
+
         resp = await asyncio.wait_for(
             _get_client().messages.create(
                 model=settings.claude_gate_model,
-                max_tokens=1024,
+                max_tokens=settings.gate_thinking_budget + 1024,
                 system=[{"type": "text", "text": _SYSTEM_PROMPT, "cache_control": {"type": "ephemeral"}}],
                 messages=[{"role": "user", "content": json.dumps(ctx)}],
+                **extra,
             ),
-            timeout=8.0,
+            timeout=settings.gate_api_timeout,
         )
         latency = int((asyncio.get_event_loop().time() - t0) * 1000)
 
         # FIX 4: wrap response parsing so any unexpected format falls back safely
         try:
-            raw = resp.content[0].text.strip().lstrip("```json").rstrip("```").strip()
+            text_block = next(b for b in resp.content if b.type == "text")
+            raw = text_block.text.strip().lstrip("```json").rstrip("```").strip()
             d   = json.loads(raw)
 
             conf   = int(d.get("confidence", 60))

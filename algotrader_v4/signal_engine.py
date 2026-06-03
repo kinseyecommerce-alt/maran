@@ -185,9 +185,9 @@ class SignalEngine:
 
     def _call_claude(self, user_msg: str) -> dict:
         message = self._client.messages.create(
-            model="claude-sonnet-4-6",
+            model=settings.signal_engine_model,
             max_tokens=1000,
-            system=SYSTEM_PROMPT,
+            system=[{"type": "text", "text": SYSTEM_PROMPT, "cache_control": {"type": "ephemeral"}}],
             messages=[{"role": "user", "content": user_msg}],
         )
         raw = message.content[0].text.strip()

@@ -31,8 +31,8 @@ import bot_state
 # ── God Mode overrides (applied on top of whatever baseline is) ──────────────
 # These are ABSOLUTE values, not deltas, so the result is deterministic.
 _GOD_OVERRIDES: dict[str, Any] = {
-    # Claude gate — capture every conviction trade Opus approves
-    "claude_gate_threshold": 45,
+    # Claude gate — God Mode = Opus must be very confident a trade is BAD to block it
+    "claude_gate_threshold": 20,
 
     # Trade counts — at Kite's 2,000 orders/day ceiling (each trade = 2 orders)
     "max_trades_scalping":       250,

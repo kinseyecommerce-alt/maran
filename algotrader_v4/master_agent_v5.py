@@ -51,7 +51,7 @@ Return ONLY valid JSON — no markdown, no code fences:
     "scalping":  {"action": "run|pause|reduce_size", "reason": "<specific reason>"}
   },
   "capital_allocation": {"intraday": 0-100, "options": 0-100, "futures": 0-100, "swing": 0-100, "scalping": 0-100},
-  "trade_gate_threshold": 55-85,
+  "trade_gate_threshold": 30-55,
   "risk_override": {"halt_new_trades": false, "reason": ""},
   "opportunity_alert": "<null or 1-sentence alert about a specific opportunity window>",
   "summary": "<one crisp sentence on current market state and primary edge>"
@@ -64,7 +64,7 @@ MANDATORY RULES:
 - TRENDING + ADX>25 → favour intraday + swing, scalping max 20%.
 - RANGING (ADX<18) → reduce all sizes 30%, no swing entries.
 - If adaptive_status is CAUTIOUS → reduce_size. If RETIRED → pause.
-- trade_gate_threshold: raise to 75 in ranging/volatile; lower to 60 in strong trend.
+- trade_gate_threshold: raise to 50 in ranging/volatile; lower to 30 in strong trend. NEVER set above 55 — Opus is the decision maker; trust its assessment.
 - If daily_pnl < -50% of max_daily_loss → halt_new_trades for 30 min.
 - If PCR > 1.5 → bearish pressure on calls, warn FNO agent.
 - If VIX spikes > 18 intraday → immediately reduce all size_factors 50%.
@@ -304,9 +304,9 @@ class MasterAgent:
 
         try:
             msg = self._client.messages.create(
-                model="claude-sonnet-4-6",
-                max_tokens=800,
-                system=MASTER_PROMPT,
+                model=settings.master_review_model,
+                max_tokens=1000,
+                system=[{"type": "text", "text": MASTER_PROMPT, "cache_control": {"type": "ephemeral"}}],
                 messages=[{"role": "user", "content": json.dumps(report, indent=2, default=str)}],
             )
             raw = msg.content[0].text.strip().replace("```json", "").replace("```", "").strip()
@@ -515,11 +515,11 @@ class MasterAgent:
             logger.warning("[master] Claude halted new trades: {}",
                            d.get("risk_override", {}).get("reason", ""))
 
-        # Apply dynamic trade gate threshold from master
+        # Apply dynamic trade gate threshold from master — capped at 55 so Opus always gets the final say
         threshold = d.get("trade_gate_threshold")
         if threshold and settings.use_claude_trade_gate:
-            settings.claude_gate_threshold = int(threshold)
-            logger.info("[master] Gate threshold → {}", threshold)
+            settings.claude_gate_threshold = max(20, min(int(threshold), 55))
+            logger.info("[master] Gate threshold → {}", settings.claude_gate_threshold)
 
         # Apply regime-aware optimised config (from profit_optimizer.py)
         try:
