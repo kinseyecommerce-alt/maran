@@ -1368,10 +1368,10 @@
       ═══════════════════════════════════════════════════════════ -->
       <div class="tab-panel" id="tab-orders">
 
-        <!-- Agent summary cards -->
-        <div class="stat-grid" style="grid-template-columns:repeat(5,1fr);margin-bottom:18px">
+        <!-- Agent summary cards — all 8 agents -->
+        <div class="stat-grid" style="grid-template-columns:repeat(4,1fr);gap:10px;margin-bottom:18px">
           <div class="stat-card" id="ao-intraday">
-            <div class="stat-label" style="color:#3b82f6"><i data-lucide="zap"></i> Intraday</div>
+            <div class="stat-label" style="color:#3b82f6"><i data-lucide="trending-up"></i> Intraday</div>
             <div class="stat-value" id="ao-intraday-orders">0</div>
             <div class="stat-sub"  id="ao-intraday-sub">0 signals · 0 vetoed</div>
           </div>
@@ -1381,19 +1381,34 @@
             <div class="stat-sub"  id="ao-scalping-sub">0 signals · 0 vetoed</div>
           </div>
           <div class="stat-card" id="ao-options">
-            <div class="stat-label" style="color:#f59e0b"><i data-lucide="zap"></i> Options</div>
+            <div class="stat-label" style="color:#f59e0b"><i data-lucide="bar-chart-2"></i> Options</div>
             <div class="stat-value" id="ao-options-orders">0</div>
             <div class="stat-sub"  id="ao-options-sub">0 signals · 0 vetoed</div>
           </div>
           <div class="stat-card" id="ao-futures">
-            <div class="stat-label" style="color:#ef4444"><i data-lucide="zap"></i> Futures</div>
+            <div class="stat-label" style="color:#ef4444"><i data-lucide="activity"></i> Futures</div>
             <div class="stat-value" id="ao-futures-orders">0</div>
             <div class="stat-sub"  id="ao-futures-sub">0 signals · 0 vetoed</div>
           </div>
           <div class="stat-card" id="ao-swing">
-            <div class="stat-label" style="color:#10b981"><i data-lucide="zap"></i> Swing</div>
+            <div class="stat-label" style="color:#10b981"><i data-lucide="waves"></i> Swing</div>
             <div class="stat-value" id="ao-swing-orders">0</div>
             <div class="stat-sub"  id="ao-swing-sub">0 signals · 0 vetoed</div>
+          </div>
+          <div class="stat-card" id="ao-mean_reversion">
+            <div class="stat-label" style="color:#06b6d4"><i data-lucide="refresh-cw"></i> Mean Rev</div>
+            <div class="stat-value" id="ao-mean_reversion-orders">0</div>
+            <div class="stat-sub"  id="ao-mean_reversion-sub">0 signals · 0 vetoed</div>
+          </div>
+          <div class="stat-card" id="ao-momentum">
+            <div class="stat-label" style="color:#f97316"><i data-lucide="rocket"></i> Momentum</div>
+            <div class="stat-value" id="ao-momentum-orders">0</div>
+            <div class="stat-sub"  id="ao-momentum-sub">0 signals · 0 vetoed</div>
+          </div>
+          <div class="stat-card" id="ao-pairs">
+            <div class="stat-label" style="color:#a855f7"><i data-lucide="git-compare"></i> Pairs</div>
+            <div class="stat-value" id="ao-pairs-orders">0</div>
+            <div class="stat-sub"  id="ao-pairs-sub">0 signals · 0 vetoed</div>
           </div>
         </div>
 
@@ -1587,6 +1602,15 @@
             </label>
             <label class="checkbox-item">
               <input type="checkbox" id="strat-swing"> Swing
+            </label>
+            <label class="checkbox-item">
+              <input type="checkbox" id="strat-mean_reversion"> Mean Reversion
+            </label>
+            <label class="checkbox-item">
+              <input type="checkbox" id="strat-momentum"> Momentum
+            </label>
+            <label class="checkbox-item">
+              <input type="checkbox" id="strat-pairs"> Pairs (StatArb)
             </label>
           </div>
 
@@ -3034,7 +3058,9 @@ function renderBotStatus() {
    RENDER: Strategy Cards
 ═══════════════════════════════════════════════════════════════ */
 const STRATEGY_ICONS = {
-  intraday: 'trending-up', scalping: 'zap', options: 'bar-chart-2', futures: 'activity', swing: 'wave'
+  intraday: 'trending-up', scalping: 'zap', options: 'bar-chart-2',
+  futures: 'activity', swing: 'waves', mean_reversion: 'refresh-cw',
+  momentum: 'rocket', pairs: 'git-compare'
 };
 
 function renderStrategyCards() {
@@ -3043,7 +3069,7 @@ function renderStrategyCards() {
   const names  = Object.keys(agents);
 
   if (names.length === 0) {
-    grid.innerHTML = ['intraday','scalping','options','futures','swing'].map(name => strategyCardHtml(name, null)).join('');
+    grid.innerHTML = ['intraday','scalping','options','futures','swing','mean_reversion','momentum','pairs'].map(name => strategyCardHtml(name, null)).join('');
     lucide.createIcons({ nodes: [grid] });
     return;
   }
@@ -3732,11 +3758,14 @@ async function toggleBot() {
       toast('Bot stopped', 'warn');
     } else {
       const strategies = [];
-      if (document.getElementById('strat-intraday').checked) strategies.push('intraday');
-      if (document.getElementById('strat-scalping').checked) strategies.push('scalping');
-      if (document.getElementById('strat-options').checked)      strategies.push('options');
-      if (document.getElementById('strat-futures').checked)  strategies.push('futures');
-      if (document.getElementById('strat-swing').checked)    strategies.push('swing');
+      if (document.getElementById('strat-intraday').checked)      strategies.push('intraday');
+      if (document.getElementById('strat-scalping').checked)      strategies.push('scalping');
+      if (document.getElementById('strat-options').checked)       strategies.push('options');
+      if (document.getElementById('strat-futures').checked)       strategies.push('futures');
+      if (document.getElementById('strat-swing').checked)         strategies.push('swing');
+      if (document.getElementById('strat-mean_reversion').checked) strategies.push('mean_reversion');
+      if (document.getElementById('strat-momentum').checked)      strategies.push('momentum');
+      if (document.getElementById('strat-pairs').checked)         strategies.push('pairs');
 
       if (strategies.length === 0) {
         toast('Select at least one strategy', 'error');
@@ -4084,8 +4113,8 @@ async function fetchActivity() {
 }
 
 function renderActivityFeed(events) {
-  // Update per-agent summary cards
-  const agents = ['intraday','scalping','options','futures','swing'];
+  // Update per-agent summary cards — all 8 agents
+  const agents = ['intraday','scalping','options','futures','swing','mean_reversion','momentum','pairs'];
   const stats = {};
   agents.forEach(a => { stats[a] = { orders:0, signals:0, vetoed:0 }; });
 
@@ -4621,7 +4650,12 @@ async function fetchAgentEnables() {
 function renderAgentEnables() {
   const container = document.getElementById('agent-enables-list');
   if (!container) return;
-  const names = ['intraday', 'scalping', 'options', 'futures', 'swing'];
+  const AGENT_LABELS = {
+    intraday: 'Intraday', scalping: 'Scalping', options: 'Options (F&O)',
+    futures: 'Futures', swing: 'Swing', mean_reversion: 'Mean Reversion',
+    momentum: 'Momentum', pairs: 'Pairs (StatArb)'
+  };
+  const names = ['intraday', 'scalping', 'options', 'futures', 'swing', 'mean_reversion', 'momentum', 'pairs'];
   container.innerHTML = names.map(name => {
     const enabled = state.agentEnables[name] !== false;
     return `<label class="toggle-wrap" style="margin:0">
@@ -4629,7 +4663,7 @@ function renderAgentEnables() {
         <input type="checkbox" ${enabled ? 'checked' : ''} onchange="toggleAgent('${name}', this.checked)">
         <span class="toggle-slider"></span>
       </div>
-      <span class="toggle-label" style="text-transform:capitalize">${name} Agent
+      <span class="toggle-label">${AGENT_LABELS[name] || name} Agent
         <span style="font-size:11px;color:var(--fg3);margin-left:6px">${enabled ? 'Enabled' : 'Disabled'}</span>
       </span>
     </label>`;
@@ -4846,7 +4880,8 @@ async function fetchTradeJournal() {
 }
 
 function agentColor(agent) {
-  const colors = {intraday:'#3b82f6',scalping:'#8b5cf6',options:'#f59e0b',futures:'#ef4444',swing:'#10b981'};
+  const colors = {intraday:'#3b82f6',scalping:'#8b5cf6',options:'#f59e0b',futures:'#ef4444',
+                  swing:'#10b981',mean_reversion:'#06b6d4',momentum:'#f97316',pairs:'#a855f7'};
   return colors[agent] || '#6b7280';
 }
 
@@ -4965,8 +5000,9 @@ function downloadPerformanceReport() {
 function updateRollingSharpCards(adaptiveSummary) {
   const grid = document.getElementById('rolling-sharpe-grid');
   if (!grid || !adaptiveSummary) return;
-  const strategies = ['intraday','scalping','options','futures','swing'];
-  const colors = {intraday:'#3b82f6',scalping:'#8b5cf6',options:'#f59e0b',futures:'#ef4444',swing:'#10b981'};
+  const strategies = ['intraday','scalping','options','futures','swing','mean_reversion','momentum','pairs'];
+  const colors = {intraday:'#3b82f6',scalping:'#8b5cf6',options:'#f59e0b',futures:'#ef4444',
+                  swing:'#10b981',mean_reversion:'#06b6d4',momentum:'#f97316',pairs:'#a855f7'};
   grid.innerHTML = strategies.map(s => {
     const d = adaptiveSummary[s] || {};
     const sharpe = d.sharpe_20 != null ? d.sharpe_20 : null;
@@ -5007,7 +5043,7 @@ document.addEventListener('keydown', function(e) {
 function promptRunBacktest() {
   const sym = prompt('Run backtest — symbol (e.g. RELIANCE):');
   if (!sym) return;
-  const strat = prompt('Strategy (intraday/scalping/swing/options/futures):', 'intraday');
+  const strat = prompt('Strategy (intraday/scalping/swing/options/futures/mean_reversion/momentum/pairs):', 'intraday');
   if (!strat) return;
   switchTab('analytics');
   toast(`Running backtest: ${sym.trim().toUpperCase()} / ${strat}…`, 'info');

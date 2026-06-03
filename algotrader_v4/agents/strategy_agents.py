@@ -1142,10 +1142,15 @@ class SwingAgent(BaseAgent):
     """
     Multi-pattern swing trader (CNC) covering both bullish and bearish setups.
 
-    Patterns:
-      1. EMA50_BOUNCE — price pullback to EMA50 in EMA200 uptrend (classic swing)
-      2. EMA50_SHORT  — price rally to EMA50 in EMA200 downtrend (bearish swing)
-      3. MACD_SWING   — MACD histogram zero-cross with EMA200 trend alignment
+    Patterns (8 patterns):
+      1. EMA50_BOUNCE      — price pullback to EMA50 in EMA200 uptrend (classic swing)
+      2. EMA50_SHORT       — price rally to EMA50 in EMA200 downtrend (bearish swing)
+      3. MACD_SWING        — MACD histogram zero-cross with EMA200 trend alignment
+      4. SUPERTREND_BOUNCE — Supertrend UP + price above EMA21 + RSI 40-62
+      5. GOLDEN_CROSS      — EMA50 just crossed above/below EMA200 (within 0.5%)
+      6. RSI_DIP_RELOAD    — RSI bounces through 50 in uptrend (dip-and-resume)
+      7. PREV_DAY_HIGH     — price breaks prev-day high/low with volume > 1.3×
+      8. WEEKLY_VWAP_PULL  — price within 1.2% of VWAP in EMA200 uptrend, RSI 45-60
     """
     name    = "swing"
     product = "CNC"
@@ -1157,6 +1162,7 @@ class SwingAgent(BaseAgent):
         self._last_eval:      dict[str, float] = {}
         self._prev_macd_hist: dict[str, float] = {}
         self._prev_ltp:       dict[str, float] = {}
+        self._prev_rsi:       dict[str, float] = {}
 
     def evaluate_tick(self, snap: MarketSnapshot) -> tuple[str, Optional[dict]]:
         import time as _time
@@ -1243,8 +1249,145 @@ class SwingAgent(BaseAgent):
                     "trigger": f"MACD-SWING zero-cross DOWN rsi={ind.rsi_14:.0f}",
                 }
 
+        # Pattern 4: SUPERTREND_BOUNCE
+        if not best_side and bot_state.is_pattern_enabled("swing", "SUPERTREND_BOUNCE"):
+            if (ind.supertrend_dir == "up" and ltp > ind.ema21 > 0
+                    and 40 <= ind.rsi_14 <= 62 and ind.ema21 > ind.ema50 > 0):
+                sl  = round(ltp * (1 - settings.sl_pct_swing / 100), 2)
+                tgt = round(ltp * (1 + settings.tgt_pct_swing / 100), 2)
+                best_side   = "BUY"
+                best_signal = {
+                    "symbol": sym, "exchange": "NSE", "side": "BUY",
+                    "price": ltp, "stop_loss": sl, "target": tgt,
+                    "stop_loss_pct": settings.sl_pct_swing,
+                    "target_pct":    settings.tgt_pct_swing,
+                    "product": self.product, "pattern": "SUPERTREND_BOUNCE",
+                    "trigger": f"ST-BOUNCE st=up rsi={ind.rsi_14:.0f}",
+                }
+            elif (not best_side and ind.supertrend_dir == "down"
+                    and ind.ema21 > 0 and ind.ema21 < ind.ema50 > 0):
+                sl  = round(ltp * (1 + settings.sl_pct_swing / 100), 2)
+                tgt = round(ltp * (1 - settings.tgt_pct_swing / 100), 2)
+                best_side   = "SELL"
+                best_signal = {
+                    "symbol": sym, "exchange": "NSE", "side": "SELL",
+                    "price": ltp, "stop_loss": sl, "target": tgt,
+                    "stop_loss_pct": settings.sl_pct_swing,
+                    "target_pct":    settings.tgt_pct_swing,
+                    "product": self.product, "pattern": "SUPERTREND_BOUNCE",
+                    "trigger": f"ST-BOUNCE st=down rsi={ind.rsi_14:.0f}",
+                }
+
+        # Pattern 5: GOLDEN_CROSS
+        if not best_side and bot_state.is_pattern_enabled("swing", "GOLDEN_CROSS"):
+            if ind.ema200 > 0:
+                cross_near = abs(ind.ema50 - ind.ema200) / ind.ema200 < 0.005
+                if cross_near and ind.ema50 > ind.ema200:
+                    sl  = round(ltp * (1 - settings.sl_pct_swing / 100), 2)
+                    tgt = round(ltp * (1 + settings.tgt_pct_swing / 100), 2)
+                    best_side   = "BUY"
+                    best_signal = {
+                        "symbol": sym, "exchange": "NSE", "side": "BUY",
+                        "price": ltp, "stop_loss": sl, "target": tgt,
+                        "stop_loss_pct": settings.sl_pct_swing,
+                        "target_pct":    settings.tgt_pct_swing,
+                        "product": self.product, "pattern": "GOLDEN_CROSS",
+                        "trigger": f"GOLDEN-CROSS ema50={ind.ema50:.1f} ema200={ind.ema200:.1f}",
+                    }
+                elif not best_side and cross_near and ind.ema50 < ind.ema200:
+                    sl  = round(ltp * (1 + settings.sl_pct_swing / 100), 2)
+                    tgt = round(ltp * (1 - settings.tgt_pct_swing / 100), 2)
+                    best_side   = "SELL"
+                    best_signal = {
+                        "symbol": sym, "exchange": "NSE", "side": "SELL",
+                        "price": ltp, "stop_loss": sl, "target": tgt,
+                        "stop_loss_pct": settings.sl_pct_swing,
+                        "target_pct":    settings.tgt_pct_swing,
+                        "product": self.product, "pattern": "GOLDEN_CROSS",
+                        "trigger": f"DEATH-CROSS ema50={ind.ema50:.1f} ema200={ind.ema200:.1f}",
+                    }
+
+        # Pattern 6: RSI_DIP_RELOAD
+        if not best_side and bot_state.is_pattern_enabled("swing", "RSI_DIP_RELOAD"):
+            prev_rsi = self._prev_rsi.get(sym, ind.rsi_14)
+            if (ltp > ind.ema200 > 0 and ind.ema21 > ind.ema50 > 0
+                    and prev_rsi < 50 and ind.rsi_14 >= 50):
+                sl  = round(ltp * (1 - settings.sl_pct_swing / 100), 2)
+                tgt = round(ltp * (1 + settings.tgt_pct_swing / 100), 2)
+                best_side   = "BUY"
+                best_signal = {
+                    "symbol": sym, "exchange": "NSE", "side": "BUY",
+                    "price": ltp, "stop_loss": sl, "target": tgt,
+                    "stop_loss_pct": settings.sl_pct_swing,
+                    "target_pct":    settings.tgt_pct_swing,
+                    "product": self.product, "pattern": "RSI_DIP_RELOAD",
+                    "trigger": f"RSI-DIP-RELOAD rsi={ind.rsi_14:.0f} prev={prev_rsi:.0f}",
+                }
+            elif (not best_side and ltp < ind.ema200 > 0
+                    and ind.ema21 < ind.ema50 > 0
+                    and prev_rsi > 50 and ind.rsi_14 <= 50):
+                sl  = round(ltp * (1 + settings.sl_pct_swing / 100), 2)
+                tgt = round(ltp * (1 - settings.tgt_pct_swing / 100), 2)
+                best_side   = "SELL"
+                best_signal = {
+                    "symbol": sym, "exchange": "NSE", "side": "SELL",
+                    "price": ltp, "stop_loss": sl, "target": tgt,
+                    "stop_loss_pct": settings.sl_pct_swing,
+                    "target_pct":    settings.tgt_pct_swing,
+                    "product": self.product, "pattern": "RSI_DIP_RELOAD",
+                    "trigger": f"RSI-DIP-RELOAD SHORT rsi={ind.rsi_14:.0f} prev={prev_rsi:.0f}",
+                }
+
+        # Pattern 7: PREV_DAY_HIGH
+        if not best_side and bot_state.is_pattern_enabled("swing", "PREV_DAY_HIGH"):
+            pdh = getattr(ind, "prev_day_high", 0)
+            pdl = getattr(ind, "prev_day_low",  0)
+            prev_ltp = self._prev_ltp.get(sym, ltp)
+            if pdh > 0 and prev_ltp <= pdh < ltp and ind.volume_ratio > 1.3:
+                sl  = round(ltp * (1 - settings.sl_pct_swing / 100), 2)
+                tgt = round(ltp * (1 + settings.tgt_pct_swing / 100), 2)
+                best_side   = "BUY"
+                best_signal = {
+                    "symbol": sym, "exchange": "NSE", "side": "BUY",
+                    "price": ltp, "stop_loss": sl, "target": tgt,
+                    "stop_loss_pct": settings.sl_pct_swing,
+                    "target_pct":    settings.tgt_pct_swing,
+                    "product": self.product, "pattern": "PREV_DAY_HIGH",
+                    "trigger": f"PDH-BREAK ltp={ltp:.1f} pdh={pdh:.1f} vol={ind.volume_ratio:.1f}x",
+                }
+            elif not best_side and pdl > 0 and prev_ltp >= pdl > ltp and ind.volume_ratio > 1.3:
+                sl  = round(ltp * (1 + settings.sl_pct_swing / 100), 2)
+                tgt = round(ltp * (1 - settings.tgt_pct_swing / 100), 2)
+                best_side   = "SELL"
+                best_signal = {
+                    "symbol": sym, "exchange": "NSE", "side": "SELL",
+                    "price": ltp, "stop_loss": sl, "target": tgt,
+                    "stop_loss_pct": settings.sl_pct_swing,
+                    "target_pct":    settings.tgt_pct_swing,
+                    "product": self.product, "pattern": "PREV_DAY_HIGH",
+                    "trigger": f"PDL-BREAK ltp={ltp:.1f} pdl={pdl:.1f} vol={ind.volume_ratio:.1f}x",
+                }
+
+        # Pattern 8: WEEKLY_VWAP_PULL
+        if not best_side and bot_state.is_pattern_enabled("swing", "WEEKLY_VWAP_PULL"):
+            if (ind.vwap > 0 and ind.ema200 > 0
+                    and abs(ltp - ind.vwap) / ind.vwap < 0.012
+                    and 45 <= ind.rsi_14 <= 60 and ltp > ind.ema200):
+                sl  = round(ltp * (1 - settings.sl_pct_swing / 100), 2)
+                tgt = round(ltp * (1 + settings.tgt_pct_swing / 100), 2)
+                best_side   = "BUY"
+                best_signal = {
+                    "symbol": sym, "exchange": "NSE", "side": "BUY",
+                    "price": ltp, "stop_loss": sl, "target": tgt,
+                    "stop_loss_pct": settings.sl_pct_swing,
+                    "target_pct":    settings.tgt_pct_swing,
+                    "product": self.product, "pattern": "WEEKLY_VWAP_PULL",
+                    "trigger": f"VWAP-PULL ltp={ltp:.1f} vwap={ind.vwap:.1f} rsi={ind.rsi_14:.0f}",
+                }
+
         self._prev_macd_hist[sym] = ind.macd_hist
         self._prev_ltp[sym]       = ltp
+        self._prev_rsi[sym]       = ind.rsi_14
 
         if best_side and best_signal:
             return best_side, best_signal
@@ -1572,6 +1715,38 @@ class ScalpingAgent(BaseAgent):
                 if (all(closes[i] > closes[i+1] for i in range(4))
                         and ltp < ind.vwap and ind.volume_ratio >= 1.2):
                     return "SELL", "MICROTREND"
+
+        # Pattern 14: SUPERTREND_FLIP — Supertrend direction just changed this tick
+        prev_st = self._prev_st_dir.get(sym)
+        curr_st = ind.supertrend_dir
+        if prev_st == "down" and curr_st == "up" and ind.volume_ratio > 1.2:
+            return "BUY",  "SUPERTREND_FLIP"
+        if prev_st == "up" and curr_st == "down" and ind.volume_ratio > 1.2:
+            return "SELL", "SUPERTREND_FLIP"
+
+        # Pattern 15: HMA_CROSS — HMA direction just flipped with EMA9/21 confirmation
+        prev_hma = self._prev_hma_dir_sc.get(sym)
+        if ind.ema21 and ind.ema21 > 0:
+            if prev_hma == "down" and ind.hma_dir == "up" and ind.ema9 > ind.ema21:
+                return "BUY",  "HMA_CROSS"
+            if prev_hma == "up" and ind.hma_dir == "down" and ind.ema9 < ind.ema21:
+                return "SELL", "HMA_CROSS"
+
+        # Pattern 16: MICRO_SQUEEZE — TTM squeeze just released with directional momentum
+        prev_sq_new = self._prev_squeeze_sc.get(sym)
+        if prev_sq_new is True and not ind.squeeze_on:
+            if ind.squeeze_momentum > 0:
+                return "BUY",  "MICRO_SQUEEZE"
+            if ind.squeeze_momentum < 0:
+                return "SELL", "MICRO_SQUEEZE"
+
+        # Pattern 17: WILLIAMS_SCALP — Williams %R crosses up from oversold / down from overbought
+        curr_w = getattr(ind, 'williams_r', -50)
+        prev_w = self._prev_williams_sc.get(sym, curr_w)
+        if prev_w < -80 and curr_w > -70:
+            return "BUY",  "WILLIAMS_SCALP"
+        if prev_w > -20 and curr_w < -30:
+            return "SELL", "WILLIAMS_SCALP"
 
         return "HOLD", ""
 
@@ -2246,7 +2421,7 @@ class FuturesAgent(BaseAgent):
 
 class MeanReversionAgent(BaseAgent):
     """
-    Mean-reversion intraday agent — 5 patterns targeting BB extreme + RSI reversal.
+    Mean-reversion intraday agent — 9 patterns targeting BB extreme + RSI reversal.
 
     Patterns:
       1. BB_LOWER_BOUNCE  — price < BB_lower + RSI < 32 + volume surge → BUY
@@ -2254,6 +2429,10 @@ class MeanReversionAgent(BaseAgent):
       3. RSI_EXTREME      — RSI < 28 or RSI > 72 + VWAP confirmation
       4. BB_MID_REVERT    — price reclaims BB_mid after extreme touch
       5. STOCHRSI_CROSS   — StochRSI K crosses from oversold/overbought zone
+      6. VWAP_EXTREME     — price >1.5% above VWAP + RSI > 65 → SELL; inverse → BUY
+      7. WILLIAMS_EXTREME — Williams %R < -85 → BUY; > -15 → SELL
+      8. MACD_DIVERGENCE  — at BB extreme, MACD hist diverging from price
+      9. PRICE_ZSCORE     — z-score of price vs BB midline > 2.5 or < -2.5
 
     SL/TGT: ATR-based (tighter than intraday; reversion moves are quick).
     """
@@ -2287,7 +2466,9 @@ class MeanReversionAgent(BaseAgent):
         best_score, best_action, best_pattern = -1, "", ""
         for pat_fn in (self._pat_bb_lower_bounce, self._pat_bb_upper_reject,
                        self._pat_rsi_extreme, self._pat_bb_mid_revert,
-                       self._pat_stochrsi_cross):
+                       self._pat_stochrsi_cross, self._pat_vwap_extreme,
+                       self._pat_williams_extreme, self._pat_macd_divergence,
+                       self._pat_price_zscore):
             try:
                 action, base, pname = pat_fn(sym, snap, ind, ltp, t)
             except Exception:
@@ -2382,6 +2563,52 @@ class MeanReversionAgent(BaseAgent):
             return "SELL", 4, "STOCHRSI_CROSS"
         return "", 0, ""
 
+    def _pat_vwap_extreme(self, sym, snap, ind, ltp, t):
+        if not ind.vwap or ind.vwap <= 0:
+            return "", 0, ""
+        dev = (ltp - ind.vwap) / ind.vwap
+        if dev > 0.015 and ind.rsi_14 > 65:
+            return "SELL", 4, "VWAP_EXTREME"
+        if dev < -0.015 and ind.rsi_14 < 35:
+            return "BUY", 4, "VWAP_EXTREME"
+        return "", 0, ""
+
+    def _pat_williams_extreme(self, sym, snap, ind, ltp, t):
+        if not hasattr(ind, "williams_r"):
+            return "", 0, ""
+        w = ind.williams_r
+        if w == 0:
+            return "", 0, ""
+        if w < -85:
+            return "BUY", 3, "WILLIAMS_EXTREME"
+        if w > -15:
+            return "SELL", 3, "WILLIAMS_EXTREME"
+        return "", 0, ""
+
+    def _pat_macd_divergence(self, sym, snap, ind, ltp, t):
+        if not ind.bb_lower or not ind.bb_upper or not ind.bb_mid:
+            return "", 0, ""
+        near_lower = ltp <= ind.bb_lower * 1.005
+        near_upper = ltp >= ind.bb_upper * 0.995
+        if near_lower and ind.rsi_14 < 35 and ind.macd_hist > 0:
+            return "BUY", 4, "MACD_DIVERGENCE"
+        if near_upper and ind.rsi_14 > 65 and ind.macd_hist < 0:
+            return "SELL", 4, "MACD_DIVERGENCE"
+        return "", 0, ""
+
+    def _pat_price_zscore(self, sym, snap, ind, ltp, t):
+        if not ind.bb_upper or not ind.bb_lower or not ind.bb_mid:
+            return "", 0, ""
+        band_width = ind.bb_upper - ind.bb_lower
+        if band_width <= 0:
+            return "", 0, ""
+        zscore = (ltp - ind.bb_mid) / (band_width / 4)
+        if zscore < -2.5:
+            return "BUY", 5, "PRICE_ZSCORE"
+        if zscore > 2.5:
+            return "SELL", 5, "PRICE_ZSCORE"
+        return "", 0, ""
+
     def should_exit_position(self, pos: dict, ind: LiveIndicators) -> tuple[bool, str]:
         entry = pos.get("average_price", 0.0)
         ltp   = ind.ltp
@@ -2404,14 +2631,18 @@ class MeanReversionAgent(BaseAgent):
 
 class MomentumAgent(BaseAgent):
     """
-    Momentum breakout agent — 5 patterns targeting confirmed trend accelerations.
+    Momentum breakout agent — 9 patterns targeting confirmed trend accelerations.
 
     Patterns:
-      1. HL_BREAKOUT     — price exceeds 20-bar high + volume ≥1.5× + ADX > 25
-      2. LL_BREAKDOWN    — price breaks 20-bar low  + volume ≥1.5× + ADX > 25
-      3. VOL_SURGE_TREND — volume ≥2.0× + 3-EMA bullish/bearish alignment + MACD
-      4. SQUEEZE_RELEASE — TTM squeeze releases with directional momentum
-      5. SUPERTREND_FLIP — Supertrend direction just flipped with MACD confirmation
+      1. HL_BREAKOUT          — price exceeds 20-bar high + volume ≥1.5× + ADX > 25
+      2. LL_BREAKDOWN         — price breaks 20-bar low  + volume ≥1.5× + ADX > 25
+      3. VOL_SURGE_TREND      — volume ≥2.0× + 3-EMA bullish/bearish alignment + MACD
+      4. SQUEEZE_RELEASE      — TTM squeeze releases with directional momentum
+      5. SUPERTREND_FLIP      — Supertrend direction just flipped with MACD confirmation
+      6. EMA_ALIGNMENT        — all 4 EMAs aligned + MACD hist > 0 + ADX > 22
+      7. MACD_ZERO_CROSS      — MACD hist crosses zero + ADX > 20 + volume > 1.2×
+      8. VWAP_BREAKOUT        — price breaks above/below VWAP with volume > 1.8×
+      9. HIGHER_HIGH_CONFIRM  — 3 consecutive higher highs/lower lows with ADX > 25
 
     Wider SL/TGT than intraday to ride the momentum run.
     """
@@ -2426,9 +2657,11 @@ class MomentumAgent(BaseAgent):
 
     def __init__(self) -> None:
         super().__init__()
-        self._prev_st_dir:   dict = {}
-        self._prev_squeeze:  dict = {}
-        self._cool_ts:       dict = {}
+        self._prev_st_dir:    dict = {}
+        self._prev_squeeze:   dict = {}
+        self._cool_ts:        dict = {}
+        self._prev_macd_hist: dict = {}
+        self._prev_ltp_mom:   dict = {}
 
     def evaluate_tick(self, snap: MarketSnapshot) -> tuple[str, Optional[dict]]:
         ind = snap.indicators
@@ -2445,7 +2678,9 @@ class MomentumAgent(BaseAgent):
         best_score, best_action, best_pattern = -1, "", ""
         for pat_fn in (self._pat_hl_breakout, self._pat_ll_breakdown,
                        self._pat_vol_surge_trend, self._pat_squeeze_release,
-                       self._pat_supertrend_flip):
+                       self._pat_supertrend_flip, self._pat_ema_alignment,
+                       self._pat_macd_zero_cross, self._pat_vwap_breakout,
+                       self._pat_higher_high_confirm):
             try:
                 action, base, pname = pat_fn(sym, snap, ind, ltp, t)
             except Exception:
@@ -2455,8 +2690,10 @@ class MomentumAgent(BaseAgent):
             if base > best_score:
                 best_score, best_action, best_pattern = base, action, pname
 
-        self._prev_st_dir[sym]  = ind.supertrend_dir
-        self._prev_squeeze[sym] = ind.squeeze_on
+        self._prev_st_dir[sym]    = ind.supertrend_dir
+        self._prev_squeeze[sym]   = ind.squeeze_on
+        self._prev_macd_hist[sym] = ind.macd_hist
+        self._prev_ltp_mom[sym]   = ltp
 
         # VIX volatility gate: raise min_score during extreme vol, lower during calm
         _mom_vix_min = settings.min_score_momentum
@@ -2563,6 +2800,56 @@ class MomentumAgent(BaseAgent):
             return "BUY",  5, "SUPERTREND_FLIP"
         if prev_dir != "DOWN" and curr_dir == "DOWN" and ind.macd_hist < 0:
             return "SELL", 5, "SUPERTREND_FLIP"
+        return "", 0, ""
+
+    def _pat_ema_alignment(self, sym, snap, ind, ltp, t):
+        adx = getattr(ind, "adx_14", 0)
+        if (ind.ema9 > 0 and ind.ema21 > 0 and ind.ema50 > 0 and ind.ema200 > 0
+                and ind.ema9 > ind.ema21 > ind.ema50 > ind.ema200
+                and ind.macd_hist > 0 and adx > 22):
+            return "BUY", 4, "EMA_ALIGNMENT"
+        if (ind.ema9 > 0 and ind.ema21 > 0 and ind.ema50 > 0 and ind.ema200 > 0
+                and ind.ema9 < ind.ema21 < ind.ema50 < ind.ema200
+                and ind.macd_hist < 0 and adx > 22):
+            return "SELL", 4, "EMA_ALIGNMENT"
+        return "", 0, ""
+
+    def _pat_macd_zero_cross(self, sym, snap, ind, ltp, t):
+        prev_macd = self._prev_macd_hist.get(sym, ind.macd_hist)
+        adx = getattr(ind, "adx_14", 0)
+        if prev_macd <= 0 < ind.macd_hist and adx > 20 and ind.volume_ratio > 1.2:
+            return "BUY", 4, "MACD_ZERO_CROSS"
+        if prev_macd >= 0 > ind.macd_hist and adx > 20 and ind.volume_ratio > 1.2:
+            return "SELL", 4, "MACD_ZERO_CROSS"
+        return "", 0, ""
+
+    def _pat_vwap_breakout(self, sym, snap, ind, ltp, t):
+        if not ind.vwap or ind.vwap <= 0:
+            return "", 0, ""
+        prev_ltp = self._prev_ltp_mom.get(sym, ltp)
+        if (prev_ltp < ind.vwap <= ltp
+                and ind.volume_ratio > 1.8 and ind.ema9 > ind.ema21 > 0):
+            return "BUY", 4, "VWAP_BREAKOUT"
+        if (prev_ltp > ind.vwap >= ltp
+                and ind.volume_ratio > 1.8 and ind.ema9 < ind.ema21 > 0):
+            return "SELL", 4, "VWAP_BREAKOUT"
+        return "", 0, ""
+
+    def _pat_higher_high_confirm(self, sym, snap, ind, ltp, t):
+        if len(snap.candles_1min) < 3:
+            return "", 0, ""
+        adx = getattr(ind, "adx_14", 0)
+        if adx <= 25:
+            return "", 0, ""
+        c3 = snap.candles_1min[-3:]
+        # 3 consecutive higher highs with increasing volume
+        if (c3[1].close > c3[0].close and c3[2].close > c3[1].close
+                and c3[1].volume >= c3[0].volume and c3[2].volume >= c3[1].volume):
+            return "BUY", 5, "HIGHER_HIGH_CONFIRM"
+        # 3 consecutive lower lows with increasing volume
+        if (c3[1].close < c3[0].close and c3[2].close < c3[1].close
+                and c3[1].volume >= c3[0].volume and c3[2].volume >= c3[1].volume):
+            return "SELL", 5, "HIGHER_HIGH_CONFIRM"
         return "", 0, ""
 
     def should_exit_position(self, pos: dict, ind: LiveIndicators) -> tuple[bool, str]:
