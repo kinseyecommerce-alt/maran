@@ -1632,37 +1632,52 @@ class OptionsAgent(BaseAgent):
 
 class SwingAgent(BaseAgent):
     """
-    Multi-pattern swing trader (CNC) covering both bullish and bearish setups.
+    World-class swing trader (CNC) — 13 patterns, 6-factor ctx bonus, ATR-dynamic SL/TGT.
 
-    Patterns (8 patterns):
-      1. EMA50_BOUNCE      — price pullback to EMA50 in EMA200 uptrend (classic swing)
-      2. EMA50_SHORT       — price rally to EMA50 in EMA200 downtrend (bearish swing)
-      3. MACD_SWING        — MACD histogram zero-cross with EMA200 trend alignment
-      4. SUPERTREND_BOUNCE — Supertrend UP + price above EMA21 + RSI 40-62
-      5. GOLDEN_CROSS      — EMA50 just crossed above/below EMA200 (within 0.5%)
-      6. RSI_DIP_RELOAD    — RSI bounces through 50 in uptrend (dip-and-resume)
-      7. PREV_DAY_HIGH     — price breaks prev-day high/low with volume > 1.3×
-      8. WEEKLY_VWAP_PULL  — price within 1.2% of VWAP in EMA200 uptrend, RSI 45-60
+    Patterns (all evaluated, best score wins, 60s throttle):
+      1.  EMA50_BOUNCE            — pullback to EMA50 in EMA200 uptrend (classic swing)
+      2.  EMA50_SHORT             — rally to EMA50 in EMA200 downtrend (bearish)
+      3.  MACD_SWING              — MACD histogram zero-cross + EMA200 alignment
+      4.  SUPERTREND_BOUNCE       — Supertrend + EMA21 + RSI 40-62
+      5.  GOLDEN_CROSS/DEATH_CROSS— EMA50/EMA200 cross within 0.5% (rare, high conviction)
+      6.  RSI_DIP_RELOAD          — RSI bounces through 50 in trend (dip-and-resume)
+      7.  PREV_DAY_HIGH           — prev-day high/low break + volume ≥1.3×
+      8.  WEEKLY_VWAP_PULL        — within 1.2% of VWAP + EMA200 trend + RSI 45-60
+      9.  ADX_TREND_CONFIRM       — ADX rising through 25 + full EMA stack + VWAP + MACD
+      10. FII_SWING               — strong FII flow >0.65 + EMA200 trend + ADX ≥20
+      11. WEEKLY_STRUCTURE_BREAK  — 50-bar high/low break + volume ≥1.5× + EMA200
+      12. EMA200_RETEST           — within 1% of EMA200 (major dynamic S/R) + bounce
+      13. HMA_SWING               — HMA direction flip + EMA200 trend + volume
+
+    Context bonus (0-6): EMA200 side, VWAP, RSI zone, volume ≥1.3×, MACD, ADX ≥25
+    Sizing: 5-6 → 0.75×  |  7-8 → 0.9×  |  9+ → 1.0×
+    SL/TGT: ATR-based — SL=1.8×ATR, TGT=3.5×ATR (settings % as floor)
+    Exits: breakeven lock 1×ATR, EMA200 breakdown, supertrend flip, RSI exhaustion
     """
     name    = "swing"
     product = "CNC"
     min_candles_1min = 50
 
+    SL_ATR   = 1.8
+    TGT_ATR  = 3.5
+    MIN_SCORE = 4
+
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
-        # Per-symbol state — instance-level to avoid cross-instance sharing
         self._last_eval:      dict[str, float] = {}
         self._prev_macd_hist: dict[str, float] = {}
         self._prev_ltp:       dict[str, float] = {}
         self._prev_rsi:       dict[str, float] = {}
+        self._prev_adx:       dict[str, float] = {}
+        self._prev_hma_dir:   dict[str, str]   = {}
 
     def evaluate_tick(self, snap: MarketSnapshot) -> tuple[str, Optional[dict]]:
         import time as _time
-        sym = snap.symbol
-        now = _time.time()
-        if now - self._last_eval.get(sym, 0) < 60:
+        sym  = snap.symbol
+        now_s = _time.time()
+        if now_s - self._last_eval.get(sym, 0) < 60:
             return "HOLD", None
-        self._last_eval[sym] = now
+        self._last_eval[sym] = now_s
 
         ind = snap.indicators
         ltp = snap.tick.ltp
@@ -1670,239 +1685,293 @@ class SwingAgent(BaseAgent):
         if not ind.ema200:
             return "HOLD", None
 
-        low_vol = ind.volatility != "HIGH"
-
-        best_side, best_signal = "", None
-
-        # Pattern 1: EMA50_BOUNCE (bullish)
-        import bot_state
-        if bot_state.is_pattern_enabled("swing", "EMA50_BOUNCE"):
-            trend_up   = ltp > ind.ema200
-            ema50_near = ind.ema50 > 0 and abs(ltp - ind.ema50) / ind.ema50 < 0.015
-            ema_up     = ind.ema21 > 0 and ind.ema50 > 0 and ind.ema21 > ind.ema50
-            rsi_ok     = 40 < ind.rsi_14 < 60
-            if trend_up and ema50_near and ema_up and rsi_ok and low_vol:
-                sl  = round(ltp * (1 - settings.sl_pct_swing / 100), 2)
-                tgt = round(ltp * (1 + settings.tgt_pct_swing / 100), 2)
-                best_side   = "BUY"
-                best_signal = {
-                    "symbol": sym, "exchange": "NSE", "side": "BUY",
-                    "price": ltp, "stop_loss": sl, "target": tgt,
-                    "stop_loss_pct": settings.sl_pct_swing,
-                    "target_pct":    settings.tgt_pct_swing,
-                    "product": self.product, "pattern": "EMA50_BOUNCE",
-                    "trigger": f"EMA50-BOUNCE trend=UP rsi={ind.rsi_14:.0f}",
-                }
-
-        # Pattern 2: EMA50_SHORT (bearish)
-        if not best_side and bot_state.is_pattern_enabled("swing", "EMA50_SHORT"):
-            trend_dn     = ltp < ind.ema200
-            ema50_near_b = ind.ema50 > 0 and abs(ltp - ind.ema50) / ind.ema50 < 0.015
-            ema_dn       = ind.ema21 > 0 and ind.ema50 > 0 and ind.ema21 < ind.ema50
-            rsi_mid      = 40 < ind.rsi_14 < 60
-            if trend_dn and ema50_near_b and ema_dn and rsi_mid and low_vol:
-                sl  = round(ltp * (1 + settings.sl_pct_swing / 100), 2)
-                tgt = round(ltp * (1 - settings.tgt_pct_swing / 100), 2)
-                best_side   = "SELL"
-                best_signal = {
-                    "symbol": sym, "exchange": "NSE", "side": "SELL",
-                    "price": ltp, "stop_loss": sl, "target": tgt,
-                    "stop_loss_pct": settings.sl_pct_swing,
-                    "target_pct":    settings.tgt_pct_swing,
-                    "product": self.product, "pattern": "EMA50_SHORT",
-                    "trigger": f"EMA50-SHORT trend=DOWN rsi={ind.rsi_14:.0f}",
-                }
-
-        # Pattern 3: MACD_SWING (momentum zero-cross)
-        if not best_side and bot_state.is_pattern_enabled("swing", "MACD_SWING"):
-            prev_hist = self._prev_macd_hist.get(sym, ind.macd_hist)
-            if prev_hist <= 0 < ind.macd_hist and ltp > ind.ema200:
-                sl  = round(ltp * (1 - settings.sl_pct_swing / 100), 2)
-                tgt = round(ltp * (1 + settings.tgt_pct_swing / 100), 2)
-                best_side   = "BUY"
-                best_signal = {
-                    "symbol": sym, "exchange": "NSE", "side": "BUY",
-                    "price": ltp, "stop_loss": sl, "target": tgt,
-                    "stop_loss_pct": settings.sl_pct_swing,
-                    "target_pct":    settings.tgt_pct_swing,
-                    "product": self.product, "pattern": "MACD_SWING",
-                    "trigger": f"MACD-SWING zero-cross UP rsi={ind.rsi_14:.0f}",
-                }
-            elif prev_hist >= 0 > ind.macd_hist and ltp < ind.ema200:
-                sl  = round(ltp * (1 + settings.sl_pct_swing / 100), 2)
-                tgt = round(ltp * (1 - settings.tgt_pct_swing / 100), 2)
-                best_side   = "SELL"
-                best_signal = {
-                    "symbol": sym, "exchange": "NSE", "side": "SELL",
-                    "price": ltp, "stop_loss": sl, "target": tgt,
-                    "stop_loss_pct": settings.sl_pct_swing,
-                    "target_pct":    settings.tgt_pct_swing,
-                    "product": self.product, "pattern": "MACD_SWING",
-                    "trigger": f"MACD-SWING zero-cross DOWN rsi={ind.rsi_14:.0f}",
-                }
-
-        # Pattern 4: SUPERTREND_BOUNCE
-        if not best_side and bot_state.is_pattern_enabled("swing", "SUPERTREND_BOUNCE"):
-            if (ind.supertrend_dir == "up" and ltp > ind.ema21 > 0
-                    and 40 <= ind.rsi_14 <= 62 and ind.ema21 > ind.ema50 > 0):
-                sl  = round(ltp * (1 - settings.sl_pct_swing / 100), 2)
-                tgt = round(ltp * (1 + settings.tgt_pct_swing / 100), 2)
-                best_side   = "BUY"
-                best_signal = {
-                    "symbol": sym, "exchange": "NSE", "side": "BUY",
-                    "price": ltp, "stop_loss": sl, "target": tgt,
-                    "stop_loss_pct": settings.sl_pct_swing,
-                    "target_pct":    settings.tgt_pct_swing,
-                    "product": self.product, "pattern": "SUPERTREND_BOUNCE",
-                    "trigger": f"ST-BOUNCE st=up rsi={ind.rsi_14:.0f}",
-                }
-            elif (not best_side and ind.supertrend_dir == "down"
-                    and ind.ema21 > 0 and ind.ema21 < ind.ema50 > 0):
-                sl  = round(ltp * (1 + settings.sl_pct_swing / 100), 2)
-                tgt = round(ltp * (1 - settings.tgt_pct_swing / 100), 2)
-                best_side   = "SELL"
-                best_signal = {
-                    "symbol": sym, "exchange": "NSE", "side": "SELL",
-                    "price": ltp, "stop_loss": sl, "target": tgt,
-                    "stop_loss_pct": settings.sl_pct_swing,
-                    "target_pct":    settings.tgt_pct_swing,
-                    "product": self.product, "pattern": "SUPERTREND_BOUNCE",
-                    "trigger": f"ST-BOUNCE st=down rsi={ind.rsi_14:.0f}",
-                }
-
-        # Pattern 5: GOLDEN_CROSS
-        if not best_side and bot_state.is_pattern_enabled("swing", "GOLDEN_CROSS"):
-            if ind.ema200 > 0:
-                cross_near = abs(ind.ema50 - ind.ema200) / ind.ema200 < 0.005
-                if cross_near and ind.ema50 > ind.ema200:
-                    sl  = round(ltp * (1 - settings.sl_pct_swing / 100), 2)
-                    tgt = round(ltp * (1 + settings.tgt_pct_swing / 100), 2)
-                    best_side   = "BUY"
-                    best_signal = {
-                        "symbol": sym, "exchange": "NSE", "side": "BUY",
-                        "price": ltp, "stop_loss": sl, "target": tgt,
-                        "stop_loss_pct": settings.sl_pct_swing,
-                        "target_pct":    settings.tgt_pct_swing,
-                        "product": self.product, "pattern": "GOLDEN_CROSS",
-                        "trigger": f"GOLDEN-CROSS ema50={ind.ema50:.1f} ema200={ind.ema200:.1f}",
-                    }
-                elif not best_side and cross_near and ind.ema50 < ind.ema200:
-                    sl  = round(ltp * (1 + settings.sl_pct_swing / 100), 2)
-                    tgt = round(ltp * (1 - settings.tgt_pct_swing / 100), 2)
-                    best_side   = "SELL"
-                    best_signal = {
-                        "symbol": sym, "exchange": "NSE", "side": "SELL",
-                        "price": ltp, "stop_loss": sl, "target": tgt,
-                        "stop_loss_pct": settings.sl_pct_swing,
-                        "target_pct":    settings.tgt_pct_swing,
-                        "product": self.product, "pattern": "GOLDEN_CROSS",
-                        "trigger": f"DEATH-CROSS ema50={ind.ema50:.1f} ema200={ind.ema200:.1f}",
-                    }
-
-        # Pattern 6: RSI_DIP_RELOAD
-        if not best_side and bot_state.is_pattern_enabled("swing", "RSI_DIP_RELOAD"):
-            prev_rsi = self._prev_rsi.get(sym, ind.rsi_14)
-            if (ltp > ind.ema200 > 0 and ind.ema21 > ind.ema50 > 0
-                    and prev_rsi < 50 and ind.rsi_14 >= 50):
-                sl  = round(ltp * (1 - settings.sl_pct_swing / 100), 2)
-                tgt = round(ltp * (1 + settings.tgt_pct_swing / 100), 2)
-                best_side   = "BUY"
-                best_signal = {
-                    "symbol": sym, "exchange": "NSE", "side": "BUY",
-                    "price": ltp, "stop_loss": sl, "target": tgt,
-                    "stop_loss_pct": settings.sl_pct_swing,
-                    "target_pct":    settings.tgt_pct_swing,
-                    "product": self.product, "pattern": "RSI_DIP_RELOAD",
-                    "trigger": f"RSI-DIP-RELOAD rsi={ind.rsi_14:.0f} prev={prev_rsi:.0f}",
-                }
-            elif (not best_side and ltp < ind.ema200 > 0
-                    and ind.ema21 < ind.ema50 > 0
-                    and prev_rsi > 50 and ind.rsi_14 <= 50):
-                sl  = round(ltp * (1 + settings.sl_pct_swing / 100), 2)
-                tgt = round(ltp * (1 - settings.tgt_pct_swing / 100), 2)
-                best_side   = "SELL"
-                best_signal = {
-                    "symbol": sym, "exchange": "NSE", "side": "SELL",
-                    "price": ltp, "stop_loss": sl, "target": tgt,
-                    "stop_loss_pct": settings.sl_pct_swing,
-                    "target_pct":    settings.tgt_pct_swing,
-                    "product": self.product, "pattern": "RSI_DIP_RELOAD",
-                    "trigger": f"RSI-DIP-RELOAD SHORT rsi={ind.rsi_14:.0f} prev={prev_rsi:.0f}",
-                }
-
-        # Pattern 7: PREV_DAY_HIGH
-        if not best_side and bot_state.is_pattern_enabled("swing", "PREV_DAY_HIGH"):
-            pdh = getattr(ind, "prev_day_high", 0)
-            pdl = getattr(ind, "prev_day_low",  0)
-            prev_ltp = self._prev_ltp.get(sym, ltp)
-            if pdh > 0 and prev_ltp <= pdh < ltp and ind.volume_ratio > 1.3:
-                sl  = round(ltp * (1 - settings.sl_pct_swing / 100), 2)
-                tgt = round(ltp * (1 + settings.tgt_pct_swing / 100), 2)
-                best_side   = "BUY"
-                best_signal = {
-                    "symbol": sym, "exchange": "NSE", "side": "BUY",
-                    "price": ltp, "stop_loss": sl, "target": tgt,
-                    "stop_loss_pct": settings.sl_pct_swing,
-                    "target_pct":    settings.tgt_pct_swing,
-                    "product": self.product, "pattern": "PREV_DAY_HIGH",
-                    "trigger": f"PDH-BREAK ltp={ltp:.1f} pdh={pdh:.1f} vol={ind.volume_ratio:.1f}x",
-                }
-            elif not best_side and pdl > 0 and prev_ltp >= pdl > ltp and ind.volume_ratio > 1.3:
-                sl  = round(ltp * (1 + settings.sl_pct_swing / 100), 2)
-                tgt = round(ltp * (1 - settings.tgt_pct_swing / 100), 2)
-                best_side   = "SELL"
-                best_signal = {
-                    "symbol": sym, "exchange": "NSE", "side": "SELL",
-                    "price": ltp, "stop_loss": sl, "target": tgt,
-                    "stop_loss_pct": settings.sl_pct_swing,
-                    "target_pct":    settings.tgt_pct_swing,
-                    "product": self.product, "pattern": "PREV_DAY_HIGH",
-                    "trigger": f"PDL-BREAK ltp={ltp:.1f} pdl={pdl:.1f} vol={ind.volume_ratio:.1f}x",
-                }
-
-        # Pattern 8: WEEKLY_VWAP_PULL
-        if not best_side and bot_state.is_pattern_enabled("swing", "WEEKLY_VWAP_PULL"):
-            if (ind.vwap > 0 and ind.ema200 > 0
-                    and abs(ltp - ind.vwap) / ind.vwap < 0.012
-                    and 45 <= ind.rsi_14 <= 60 and ltp > ind.ema200):
-                sl  = round(ltp * (1 - settings.sl_pct_swing / 100), 2)
-                tgt = round(ltp * (1 + settings.tgt_pct_swing / 100), 2)
-                best_side   = "BUY"
-                best_signal = {
-                    "symbol": sym, "exchange": "NSE", "side": "BUY",
-                    "price": ltp, "stop_loss": sl, "target": tgt,
-                    "stop_loss_pct": settings.sl_pct_swing,
-                    "target_pct":    settings.tgt_pct_swing,
-                    "product": self.product, "pattern": "WEEKLY_VWAP_PULL",
-                    "trigger": f"VWAP-PULL ltp={ltp:.1f} vwap={ind.vwap:.1f} rsi={ind.rsi_14:.0f}",
-                }
+        best_score, best_action, best_pattern = -1, "", ""
+        for pat_fn in (
+            self._pat_ema50_bounce, self._pat_ema50_short, self._pat_macd_swing,
+            self._pat_supertrend_bounce, self._pat_golden_cross, self._pat_rsi_dip_reload,
+            self._pat_prev_day_high, self._pat_weekly_vwap_pull,
+            self._pat_adx_trend_confirm, self._pat_fii_swing,
+            self._pat_weekly_structure_break, self._pat_ema200_retest, self._pat_hma_swing,
+        ):
+            try:
+                action, base, pname = pat_fn(sym, snap, ind, ltp)
+            except Exception:
+                continue
+            if not action:
+                continue
+            total = base + self._ctx_bonus(action, sym, ind, ltp)
+            if total > best_score:
+                best_score, best_action, best_pattern = total, action, pname
 
         self._prev_macd_hist[sym] = ind.macd_hist
         self._prev_ltp[sym]       = ltp
         self._prev_rsi[sym]       = ind.rsi_14
+        self._prev_adx[sym]       = getattr(ind, 'adx_14', 0.0)
+        self._prev_hma_dir[sym]   = ind.hma_dir
 
-        if best_side and best_signal:
-            return best_side, best_signal
-        return "HOLD", None
+        if best_score < self.MIN_SCORE or not best_action:
+            return "HOLD", None
+
+        atr      = ind.atr_14 or ltp * 0.008
+        sl_dist  = max(atr * self.SL_ATR,  ltp * settings.sl_pct_swing  / 100)
+        tgt_dist = max(atr * self.TGT_ATR, ltp * settings.tgt_pct_swing / 100)
+        sf       = 1.0 if best_score >= 9 else (0.9 if best_score >= 7 else 0.75)
+
+        if best_action == "BUY":
+            sl  = round(ltp - sl_dist, 2)
+            tgt = round(ltp + tgt_dist, 2)
+        else:
+            sl  = round(ltp + sl_dist, 2)
+            tgt = round(ltp - tgt_dist, 2)
+
+        return best_action, {
+            "symbol": sym, "exchange": "NSE", "side": best_action,
+            "price": ltp, "stop_loss": sl, "target": tgt,
+            "stop_loss_pct": round(sl_dist / ltp * 100, 3),
+            "target_pct":    round(tgt_dist / ltp * 100, 3),
+            "product": self.product,
+            "_gate_size_factor": sf,
+            "trigger": (
+                f"SWING-{best_action} [{best_pattern}] score={best_score}/13 "
+                f"sf={sf} rsi={ind.rsi_14:.0f} atr={atr:.2f}"
+            ),
+        }
+
+    # ── Pattern 1 ─────────────────────────────────────────────────────────────
+
+    def _pat_ema50_bounce(self, sym, snap, ind, ltp):
+        if (ltp > ind.ema200 and ind.ema50 > 0
+                and abs(ltp - ind.ema50) / ind.ema50 < 0.015
+                and ind.ema21 > ind.ema50 and 40 < ind.rsi_14 < 60
+                and ind.volatility != "HIGH"):
+            return "BUY", 4, "EMA50_BOUNCE"
+        return "", 0, ""
+
+    # ── Pattern 2 ─────────────────────────────────────────────────────────────
+
+    def _pat_ema50_short(self, sym, snap, ind, ltp):
+        if (ltp < ind.ema200 and ind.ema50 > 0
+                and abs(ltp - ind.ema50) / ind.ema50 < 0.015
+                and ind.ema21 < ind.ema50 and 40 < ind.rsi_14 < 60
+                and ind.volatility != "HIGH"):
+            return "SELL", 4, "EMA50_SHORT"
+        return "", 0, ""
+
+    # ── Pattern 3 ─────────────────────────────────────────────────────────────
+
+    def _pat_macd_swing(self, sym, snap, ind, ltp):
+        prev_hist = self._prev_macd_hist.get(sym, ind.macd_hist)
+        if prev_hist <= 0 < ind.macd_hist and ltp > ind.ema200:
+            return "BUY",  4, "MACD_SWING"
+        if prev_hist >= 0 > ind.macd_hist and ltp < ind.ema200:
+            return "SELL", 4, "MACD_SWING"
+        return "", 0, ""
+
+    # ── Pattern 4 ─────────────────────────────────────────────────────────────
+
+    def _pat_supertrend_bounce(self, sym, snap, ind, ltp):
+        st = ind.supertrend_dir
+        if (st in ("UP", "up") and ltp > ind.ema21 > 0
+                and 40 <= ind.rsi_14 <= 62 and ind.ema21 > ind.ema50 > 0):
+            return "BUY", 4, "SUPERTREND_BOUNCE"
+        if (st in ("DOWN", "down") and ind.ema21 > 0
+                and ind.ema21 < ind.ema50 > 0 and 38 <= ind.rsi_14 <= 60):
+            return "SELL", 4, "SUPERTREND_BOUNCE"
+        return "", 0, ""
+
+    # ── Pattern 5 ─────────────────────────────────────────────────────────────
+
+    def _pat_golden_cross(self, sym, snap, ind, ltp):
+        if not ind.ema200 or ind.ema200 <= 0:
+            return "", 0, ""
+        cross_near = abs(ind.ema50 - ind.ema200) / ind.ema200 < 0.005
+        if cross_near and ind.ema50 > ind.ema200:
+            return "BUY",  5, "GOLDEN_CROSS"
+        if cross_near and ind.ema50 < ind.ema200:
+            return "SELL", 5, "DEATH_CROSS"
+        return "", 0, ""
+
+    # ── Pattern 6 ─────────────────────────────────────────────────────────────
+
+    def _pat_rsi_dip_reload(self, sym, snap, ind, ltp):
+        prev_rsi = self._prev_rsi.get(sym, ind.rsi_14)
+        if (ltp > ind.ema200 > 0 and ind.ema21 > ind.ema50 > 0
+                and prev_rsi < 50 and ind.rsi_14 >= 50):
+            return "BUY", 4, "RSI_DIP_RELOAD"
+        if (ltp < ind.ema200 > 0 and ind.ema21 < ind.ema50 > 0
+                and prev_rsi > 50 and ind.rsi_14 <= 50):
+            return "SELL", 4, "RSI_DIP_RELOAD"
+        return "", 0, ""
+
+    # ── Pattern 7 ─────────────────────────────────────────────────────────────
+
+    def _pat_prev_day_high(self, sym, snap, ind, ltp):
+        pdh      = getattr(ind, "prev_day_high", 0)
+        pdl      = getattr(ind, "prev_day_low",  0)
+        prev_ltp = self._prev_ltp.get(sym, ltp)
+        if pdh > 0 and prev_ltp <= pdh < ltp and ind.volume_ratio > 1.3:
+            return "BUY",  4, "PREV_DAY_HIGH"
+        if pdl > 0 and prev_ltp >= pdl > ltp and ind.volume_ratio > 1.3:
+            return "SELL", 4, "PREV_DAY_LOW"
+        return "", 0, ""
+
+    # ── Pattern 8 ─────────────────────────────────────────────────────────────
+
+    def _pat_weekly_vwap_pull(self, sym, snap, ind, ltp):
+        if (ind.vwap > 0 and ind.ema200 > 0
+                and abs(ltp - ind.vwap) / ind.vwap < 0.012
+                and 45 <= ind.rsi_14 <= 60 and ltp > ind.ema200):
+            return "BUY", 3, "WEEKLY_VWAP_PULL"
+        return "", 0, ""
+
+    # ── Pattern 9: ADX_TREND_CONFIRM ─────────────────────────────────────────
+
+    def _pat_adx_trend_confirm(self, sym, snap, ind, ltp):
+        adx      = getattr(ind, 'adx_14', 0.0)
+        prev_adx = self._prev_adx.get(sym, adx)
+        if adx < 25 or prev_adx >= adx:
+            return "", 0, ""
+        bull = (ind.ema9 > ind.ema21 > 0 and ind.ema21 > ind.ema50 > 0
+                and ltp > ind.ema200 and ind.vwap and ltp > ind.vwap and ind.macd_hist > 0)
+        bear = (ind.ema9 < ind.ema21 > 0 and ind.ema21 < ind.ema50 > 0
+                and ltp < ind.ema200 and ind.vwap and ltp < ind.vwap and ind.macd_hist < 0)
+        if bull: return "BUY",  5, "ADX_TREND_CONFIRM"
+        if bear: return "SELL", 5, "ADX_TREND_CONFIRM"
+        return "", 0, ""
+
+    # ── Pattern 10: FII_SWING ─────────────────────────────────────────────────
+
+    def _pat_fii_swing(self, sym, snap, ind, ltp):
+        try:
+            from alt_data import alt_data_engine
+            sent = alt_data_engine.get_fii_sentiment()
+            if not sent:
+                return "", 0, ""
+            fii = sent.get("fii_net_score", 0.5)
+            adx = getattr(ind, 'adx_14', 0.0)
+            if (fii > 0.65 and ltp > ind.ema200 > 0
+                    and ind.ema21 > ind.ema50 > 0 and adx >= 20 and 45 <= ind.rsi_14 <= 65):
+                return "BUY", 5, "FII_SWING"
+            if (fii < 0.35 and ltp < ind.ema200 > 0
+                    and ind.ema21 < ind.ema50 > 0 and adx >= 20 and 35 <= ind.rsi_14 <= 55):
+                return "SELL", 5, "FII_SWING"
+        except Exception:
+            pass
+        return "", 0, ""
+
+    # ── Pattern 11: WEEKLY_STRUCTURE_BREAK ───────────────────────────────────
+
+    def _pat_weekly_structure_break(self, sym, snap, ind, ltp):
+        n = 50
+        if len(snap.candles_1min) < n:
+            return "", 0, ""
+        last_n   = snap.candles_1min[-n:]
+        n_high   = max(c.high for c in last_n)
+        n_low    = min(c.low  for c in last_n)
+        prev_ltp = self._prev_ltp.get(sym, ltp)
+        if (prev_ltp < n_high and ltp > n_high
+                and ind.volume_ratio >= 1.5 and ltp > ind.ema200):
+            return "BUY",  5, "WEEKLY_STRUCTURE_BREAK"
+        if (prev_ltp > n_low and ltp < n_low
+                and ind.volume_ratio >= 1.5 and ltp < ind.ema200):
+            return "SELL", 5, "WEEKLY_STRUCTURE_BREAK"
+        return "", 0, ""
+
+    # ── Pattern 12: EMA200_RETEST ─────────────────────────────────────────────
+
+    def _pat_ema200_retest(self, sym, snap, ind, ltp):
+        if not ind.ema200 or ind.ema200 <= 0:
+            return "", 0, ""
+        if abs(ltp - ind.ema200) / ind.ema200 > 0.01:
+            return "", 0, ""
+        prev_ltp = self._prev_ltp.get(sym, ltp)
+        bull = (ltp > ind.ema200 and prev_ltp >= ind.ema200 and ind.ema50 > ind.ema200
+                and 40 <= ind.rsi_14 <= 60 and ind.volume_ratio >= 1.2)
+        bear = (ltp < ind.ema200 and prev_ltp <= ind.ema200 and ind.ema50 < ind.ema200
+                and 40 <= ind.rsi_14 <= 60 and ind.volume_ratio >= 1.2)
+        if bull: return "BUY",  5, "EMA200_RETEST"
+        if bear: return "SELL", 5, "EMA200_RETEST"
+        return "", 0, ""
+
+    # ── Pattern 13: HMA_SWING ─────────────────────────────────────────────────
+
+    def _pat_hma_swing(self, sym, snap, ind, ltp):
+        if not ind.hma or ind.hma <= 0:
+            return "", 0, ""
+        prev_hma = self._prev_hma_dir.get(sym, ind.hma_dir)
+        if (prev_hma != "UP" and ind.hma_dir == "UP"
+                and ltp > ind.ema200 > 0 and ind.volume_ratio >= 1.2):
+            return "BUY", 4, "HMA_SWING"
+        if (prev_hma != "DOWN" and ind.hma_dir == "DOWN"
+                and ltp < ind.ema200 > 0 and ind.volume_ratio >= 1.2):
+            return "SELL", 4, "HMA_SWING"
+        return "", 0, ""
+
+    # ── Context bonus (0-6) ───────────────────────────────────────────────────
+
+    def _ctx_bonus(self, action: str, sym: str, ind: LiveIndicators, ltp: float) -> int:
+        b      = 0
+        is_buy = action == "BUY"
+        if ind.ema200 and ((is_buy and ltp > ind.ema200) or (not is_buy and ltp < ind.ema200)):
+            b += 1
+        if ind.vwap and ((is_buy and ltp > ind.vwap) or (not is_buy and ltp < ind.vwap)):
+            b += 1
+        if (is_buy and 40 <= ind.rsi_14 <= 65) or (not is_buy and 35 <= ind.rsi_14 <= 60):
+            b += 1
+        if ind.volume_ratio >= 1.3:
+            b += 1
+        if (is_buy and ind.macd_hist > 0) or (not is_buy and ind.macd_hist < 0):
+            b += 1
+        if getattr(ind, 'adx_14', 0.0) >= 25:
+            b += 1
+        return b
+
+    # ── Exit ──────────────────────────────────────────────────────────────────
 
     def should_exit_position(self, pos: dict, ind: LiveIndicators) -> tuple[bool, str]:
         entry = pos.get("average_price", ind.ltp)
         ltp   = ind.ltp
         if not entry:
             return False, ""
-        side = pos.get("side", "BUY")
-        sl_pct  = settings.sl_pct_swing  / 100
-        tgt_pct = settings.tgt_pct_swing / 100
+        side = "BUY" if pos.get("quantity", 0) > 0 else pos.get("side", "BUY")
+
+        atr      = ind.atr_14 or entry * 0.008
+        sl_dist  = max(atr * self.SL_ATR,  entry * settings.sl_pct_swing  / 100)
+        tgt_dist = max(atr * self.TGT_ATR, entry * settings.tgt_pct_swing / 100)
+
         if side == "BUY":
-            if ltp <= entry * (1 - sl_pct):  return True, f"Swing SL ₹{ltp:.2f}"
-            if ltp >= entry * (1 + tgt_pct): return True, f"Swing TGT ₹{ltp:.2f}"
+            sl_price = entry - sl_dist
+            if ltp - entry >= atr:
+                sl_price = max(sl_price, entry)   # breakeven lock
+            if ltp <= sl_price:
+                return True, f"Swing SL ₹{ltp:.2f}"
+            if ltp >= entry + tgt_dist:
+                return True, f"Swing TGT ₹{ltp:.2f}"
+            if ind.ema200 and ltp < ind.ema200 * 0.998:
+                return True, "EMA200 breakdown exit"
+            if ind.supertrend_dir in ("DOWN", "down"):
+                return True, "Supertrend flip (DOWN) exit"
+            if ind.rsi_14 >= 78:
+                return True, f"RSI overbought {ind.rsi_14:.0f} exit"
             if ind.trend == "DOWN" and ind.ema9 < ind.ema21:
                 return True, "Trend breakdown exit"
         else:
-            if ltp >= entry * (1 + sl_pct):  return True, f"Swing SL ₹{ltp:.2f}"
-            if ltp <= entry * (1 - tgt_pct): return True, f"Swing TGT ₹{ltp:.2f}"
+            sl_price = entry + sl_dist
+            if entry - ltp >= atr:
+                sl_price = min(sl_price, entry)   # breakeven lock
+            if ltp >= sl_price:
+                return True, f"Swing SL ₹{ltp:.2f}"
+            if ltp <= entry - tgt_dist:
+                return True, f"Swing TGT ₹{ltp:.2f}"
+            if ind.ema200 and ltp > ind.ema200 * 1.002:
+                return True, "EMA200 reclaim exit"
+            if ind.supertrend_dir in ("UP", "up"):
+                return True, "Supertrend flip (UP) exit"
+            if ind.rsi_14 <= 22:
+                return True, f"RSI oversold {ind.rsi_14:.0f} exit"
             if ind.trend == "UP" and ind.ema9 > ind.ema21:
                 return True, "Trend reversal exit"
+
         return False, ""
 
 
@@ -3251,19 +3320,25 @@ class FuturesAgent(BaseAgent):
 
 class MeanReversionAgent(BaseAgent):
     """
-    Mean-reversion intraday agent — 9 patterns targeting BB extreme + RSI reversal.
+    World-class mean-reversion agent — 13 patterns, ctx bonus, BB-mid exit.
 
     Patterns:
-      1. BB_LOWER_BOUNCE  — price < BB_lower + RSI < 32 + volume surge → BUY
-      2. BB_UPPER_REJECT  — price > BB_upper + RSI > 68 + volume surge → SELL
-      3. RSI_EXTREME      — RSI < 28 or RSI > 72 + VWAP confirmation
-      4. BB_MID_REVERT    — price reclaims BB_mid after extreme touch
-      5. STOCHRSI_CROSS   — StochRSI K crosses from oversold/overbought zone
-      6. VWAP_EXTREME     — price >1.5% above VWAP + RSI > 65 → SELL; inverse → BUY
-      7. WILLIAMS_EXTREME — Williams %R < -85 → BUY; > -15 → SELL
-      8. MACD_DIVERGENCE  — at BB extreme, MACD hist diverging from price
-      9. PRICE_ZSCORE     — z-score of price vs BB midline > 2.5 or < -2.5
+      1.  BB_LOWER_BOUNCE   — price < BB_lower + RSI < 32 + volume surge → BUY
+      2.  BB_UPPER_REJECT   — price > BB_upper + RSI > 68 + volume surge → SELL
+      3.  RSI_EXTREME       — RSI < 28 or RSI > 72 + VWAP confirmation
+      4.  BB_MID_REVERT     — price reclaims BB_mid after extreme touch
+      5.  STOCHRSI_CROSS    — StochRSI K crosses from oversold/overbought zone
+      6.  VWAP_EXTREME      — price >1.5% above VWAP + RSI > 65 → SELL; inverse → BUY
+      7.  WILLIAMS_EXTREME  — Williams %R < -85 → BUY; > -15 → SELL
+      8.  MACD_DIVERGENCE   — at BB extreme, MACD hist diverging from price
+      9.  PRICE_ZSCORE      — z-score of price vs BB midline > 2.5 or < -2.5
+      10. RSI_DIVERGENCE    — price new low but RSI higher (bullish div) / vice versa
+      11. ATR_EXHAUSTION    — ATR spikes >2× average + RSI at extreme → counter-trend
+      12. BB_WIDTH_SQUEEZE  — BB very tight (<0.8% width) + price at extreme
+      13. RSI_TRIPLE_EXTREME— RSI-7 + RSI-14 both in same extreme zone simultaneously
 
+    Context bonus (4 factors): BB position, RSI extreme, volume ≥1.5×, StochRSI extreme
+    Exits: SL/TGT + BB midline touch (mission accomplished) + RSI normalization
     SL/TGT: ATR-based (tighter than intraday; reversion moves are quick).
     """
     name    = "mean_reversion"
@@ -3277,8 +3352,10 @@ class MeanReversionAgent(BaseAgent):
         super().__init__()
         self._prev_ltp:         dict = {}
         self._prev_rsi:         dict = {}
+        self._prev_rsi7:        dict = {}   # RSI-7 for RSI_TRIPLE_EXTREME
         self._prev_above_bb_mid:dict = {}
         self._prev_stochrsi_k:  dict = {}
+        self._prev_atr_mr:      dict = {}   # rolling ATR for ATR_EXHAUSTION
         self._cool_ts:          dict = {}
 
     def evaluate_tick(self, snap: MarketSnapshot) -> tuple[str, Optional[dict]]:
@@ -3298,20 +3375,25 @@ class MeanReversionAgent(BaseAgent):
                        self._pat_rsi_extreme, self._pat_bb_mid_revert,
                        self._pat_stochrsi_cross, self._pat_vwap_extreme,
                        self._pat_williams_extreme, self._pat_macd_divergence,
-                       self._pat_price_zscore):
+                       self._pat_price_zscore, self._pat_rsi_divergence,
+                       self._pat_atr_exhaustion, self._pat_bb_width_squeeze,
+                       self._pat_rsi_triple_extreme):
             try:
                 action, base, pname = pat_fn(sym, snap, ind, ltp, t)
             except Exception:
                 continue
             if not action:
                 continue
-            if base > best_score:
-                best_score, best_action, best_pattern = base, action, pname
+            total = base + self._ctx_bonus(action, ind, ltp)
+            if total > best_score:
+                best_score, best_action, best_pattern = total, action, pname
 
         self._prev_ltp[sym]          = ltp
         self._prev_rsi[sym]          = ind.rsi_14
+        self._prev_rsi7[sym]         = ind.rsi_7
         self._prev_above_bb_mid[sym] = ltp > ind.bb_mid if ind.bb_mid else None
         self._prev_stochrsi_k[sym]   = ind.stoch_rsi_k
+        self._prev_atr_mr[sym]       = ind.atr_14 or 0.0
 
         if best_score < settings.min_score_mean_reversion or not best_action:
             return "HOLD", None
@@ -3340,8 +3422,9 @@ class MeanReversionAgent(BaseAgent):
             "target_pct":    round(tgt_dist / ltp * 100, 3),
             "product": self.product,
             "trigger": (
-                f"MEANREV-{best_action} [{best_pattern}] score={best_score} "
-                f"rsi={ind.rsi_14:.0f} bb_pos={round((ltp-ind.bb_lower)/(ind.bb_upper-ind.bb_lower)*100) if ind.bb_upper != ind.bb_lower else 50:.0f}%"
+                f"MEANREV-{best_action} [{best_pattern}] score={best_score}/13 "
+                f"rsi={ind.rsi_14:.0f} bb_pos="
+                f"{round((ltp-ind.bb_lower)/(ind.bb_upper-ind.bb_lower)*100) if ind.bb_upper != ind.bb_lower else 50:.0f}%"
             ),
         }
 
@@ -3439,17 +3522,123 @@ class MeanReversionAgent(BaseAgent):
             return "SELL", 5, "PRICE_ZSCORE"
         return "", 0, ""
 
+    # ── Pattern 10: RSI_DIVERGENCE ────────────────────────────────────────────
+
+    def _pat_rsi_divergence(self, sym, snap, ind, ltp, t):
+        """Bullish: price new 5-bar low but RSI higher than prior RSI at that low."""
+        if len(snap.candles_1min) < 5:
+            return "", 0, ""
+        prev_rsi = self._prev_rsi.get(sym, ind.rsi_14)
+        prev_ltp = self._prev_ltp.get(sym, ltp)
+        closes   = [c.close for c in snap.candles_1min[-5:]]
+        # Bullish divergence: price at new low, but RSI rising from below
+        if (ltp <= min(closes[:-1]) and ind.rsi_14 > prev_rsi
+                and ind.rsi_14 < 40 and ltp < ind.bb_lower):
+            return "BUY", 5, "RSI_DIVERGENCE"
+        # Bearish divergence: price at new high, but RSI falling from above
+        if (ltp >= max(closes[:-1]) and ind.rsi_14 < prev_rsi
+                and ind.rsi_14 > 60 and ltp > ind.bb_upper):
+            return "SELL", 5, "RSI_DIVERGENCE"
+        return "", 0, ""
+
+    # ── Pattern 11: ATR_EXHAUSTION ────────────────────────────────────────────
+
+    def _pat_atr_exhaustion(self, sym, snap, ind, ltp, t):
+        """ATR spikes >2× recent average + RSI extreme → volatility exhaustion fade."""
+        prev_atr = self._prev_atr_mr.get(sym, ind.atr_14 or 0)
+        if not prev_atr or prev_atr <= 0:
+            return "", 0, ""
+        if (ind.atr_14 or 0) < prev_atr * 2.0:
+            return "", 0, ""
+        if ind.rsi_14 < 25 and ltp < ind.bb_lower:
+            return "BUY",  4, "ATR_EXHAUSTION"
+        if ind.rsi_14 > 75 and ltp > ind.bb_upper:
+            return "SELL", 4, "ATR_EXHAUSTION"
+        return "", 0, ""
+
+    # ── Pattern 12: BB_WIDTH_SQUEEZE ─────────────────────────────────────────
+
+    def _pat_bb_width_squeeze(self, sym, snap, ind, ltp, t):
+        """BB width < 0.8% of price (very tight) + price at extreme → high-prob revert."""
+        band_width = ind.bb_upper - ind.bb_lower
+        if ltp <= 0 or band_width / ltp > 0.008:
+            return "", 0, ""
+        # In a very tight band, touching either edge has strong mean-reversion probability
+        if ltp <= ind.bb_lower * 1.001 and ind.rsi_14 < 35:
+            return "BUY",  4, "BB_WIDTH_SQUEEZE"
+        if ltp >= ind.bb_upper * 0.999 and ind.rsi_14 > 65:
+            return "SELL", 4, "BB_WIDTH_SQUEEZE"
+        return "", 0, ""
+
+    # ── Pattern 13: RSI_TRIPLE_EXTREME ───────────────────────────────────────
+
+    def _pat_rsi_triple_extreme(self, sym, snap, ind, ltp, t):
+        """Both RSI-7 and RSI-14 simultaneously deep in the same extreme zone."""
+        rsi7  = ind.rsi_7
+        rsi14 = ind.rsi_14
+        if rsi7 < 20 and rsi14 < 28 and ltp < ind.bb_lower:
+            return "BUY",  5, "RSI_TRIPLE_EXTREME"
+        if rsi7 > 80 and rsi14 > 72 and ltp > ind.bb_upper:
+            return "SELL", 5, "RSI_TRIPLE_EXTREME"
+        return "", 0, ""
+
+    # ── Context bonus (0-4) ───────────────────────────────────────────────────
+
+    def _ctx_bonus(self, action: str, ind: LiveIndicators, ltp: float) -> int:
+        b      = 0
+        is_buy = action == "BUY"
+        # 1. BB position: at extreme (< 10% or > 90% of band)
+        if ind.bb_upper != ind.bb_lower:
+            bb_pos = (ltp - ind.bb_lower) / (ind.bb_upper - ind.bb_lower)
+            if (is_buy and bb_pos < 0.10) or (not is_buy and bb_pos > 0.90):
+                b += 1
+        # 2. RSI deeply extreme
+        if (is_buy and ind.rsi_14 < 25) or (not is_buy and ind.rsi_14 > 75):
+            b += 1
+        # 3. Volume surge (≥1.5× normal)
+        if ind.volume_ratio >= 1.5:
+            b += 1
+        # 4. StochRSI extreme
+        k = ind.stoch_rsi_k
+        if (is_buy and k < 15) or (not is_buy and k > 85):
+            b += 1
+        return b
+
+    # ── Exit ──────────────────────────────────────────────────────────────────
+
     def should_exit_position(self, pos: dict, ind: LiveIndicators) -> tuple[bool, str]:
         entry = pos.get("average_price", 0.0)
         ltp   = ind.ltp
         if not entry or entry <= 0:
             return False, ""
-        side = pos.get("side", "LONG")
-        chg  = ((ltp - entry) / entry * 100) if side == "LONG" else ((entry - ltp) / entry * 100)
-        sl_pct  = settings.sl_pct_mean_reversion
-        tgt_pct = settings.tgt_pct_mean_reversion
-        if chg <= -sl_pct:  return True, f"MeanRev SL -{sl_pct}%"
-        if chg >= tgt_pct:  return True, f"MeanRev TGT +{tgt_pct}%"
+        side = "BUY" if pos.get("quantity", 0) > 0 else pos.get("side", "LONG")
+        is_long = side in ("BUY", "LONG")
+
+        atr      = ind.atr_14 or entry * 0.005
+        sl_dist  = max(atr * self.SL_ATR,  entry * settings.sl_pct_mean_reversion / 100)
+        tgt_dist = max(atr * self.TGT_ATR, entry * settings.tgt_pct_mean_reversion / 100)
+
+        if is_long:
+            if ltp <= entry - sl_dist:
+                return True, f"MeanRev SL ₹{ltp:.2f}"
+            if ltp >= entry + tgt_dist:
+                return True, f"MeanRev TGT ₹{ltp:.2f}"
+            # BB midline touch = mean-reversion mission accomplished
+            if ind.bb_mid and ltp >= ind.bb_mid:
+                return True, "BB midline reached — exit"
+            # RSI normalised back from oversold
+            if ind.rsi_14 >= 50 and entry > 0 and ltp > entry:
+                return True, f"RSI normalised {ind.rsi_14:.0f} — exit"
+        else:
+            if ltp >= entry + sl_dist:
+                return True, f"MeanRev SL ₹{ltp:.2f}"
+            if ltp <= entry - tgt_dist:
+                return True, f"MeanRev TGT ₹{ltp:.2f}"
+            if ind.bb_mid and ltp <= ind.bb_mid:
+                return True, "BB midline reached — exit"
+            if ind.rsi_14 <= 50 and entry > 0 and ltp < entry:
+                return True, f"RSI normalised {ind.rsi_14:.0f} — exit"
+
         if now_ist().time().replace(tzinfo=None) >= time(14, 55):
             return True, "Auto square-off 2:55 PM"
         return False, ""
@@ -3461,20 +3650,27 @@ class MeanReversionAgent(BaseAgent):
 
 class MomentumAgent(BaseAgent):
     """
-    Momentum breakout agent — 9 patterns targeting confirmed trend accelerations.
+    World-class momentum breakout agent — 14 patterns, 8-factor ctx bonus, enhanced exits.
 
     Patterns:
-      1. HL_BREAKOUT          — price exceeds 20-bar high + volume ≥1.5× + ADX > 25
-      2. LL_BREAKDOWN         — price breaks 20-bar low  + volume ≥1.5× + ADX > 25
-      3. VOL_SURGE_TREND      — volume ≥2.0× + 3-EMA bullish/bearish alignment + MACD
-      4. SQUEEZE_RELEASE      — TTM squeeze releases with directional momentum
-      5. SUPERTREND_FLIP      — Supertrend direction just flipped with MACD confirmation
-      6. EMA_ALIGNMENT        — all 4 EMAs aligned + MACD hist > 0 + ADX > 22
-      7. MACD_ZERO_CROSS      — MACD hist crosses zero + ADX > 20 + volume > 1.2×
-      8. VWAP_BREAKOUT        — price breaks above/below VWAP with volume > 1.8×
-      9. HIGHER_HIGH_CONFIRM  — 3 consecutive higher highs/lower lows with ADX > 25
+      1.  HL_BREAKOUT         — price exceeds 20-bar high + vol ≥1.5× + ADX > 25
+      2.  LL_BREAKDOWN        — price breaks 20-bar low  + vol ≥1.5× + ADX > 25
+      3.  VOL_SURGE_TREND     — volume ≥2.0× + 3-EMA bull/bear align + MACD
+      4.  SQUEEZE_RELEASE     — TTM squeeze releases with directional momentum
+      5.  SUPERTREND_FLIP     — Supertrend direction just flipped + MACD confirmation
+      6.  EMA_ALIGNMENT       — all 4 EMAs aligned + MACD + ADX > 22
+      7.  MACD_ZERO_CROSS     — MACD hist crosses zero + ADX > 20 + vol > 1.2×
+      8.  VWAP_BREAKOUT       — price breaks VWAP with vol > 1.8×
+      9.  HIGHER_HIGH_CONFIRM — 3 consecutive higher highs/lower lows + ADX > 25
+      10. BREAKOUT_RETEST     — price within 0.8% of broken level, bouncing (second-entry)
+      11. ACCELERATION        — 3 bars with increasing body size + increasing volume
+      12. GAP_MOMENTUM        — gap ≥0.8% + holding gap + ADX ≥25 (gap continuation)
+      13. FII_MOMENTUM        — FII >0.70 + full 4-EMA stack + ADX ≥25 + MACD
+      14. VELOCITY_SURGE      — single bar ≥0.5% body + ADX ≥30 + vol ≥1.8× (explosive)
 
-    Wider SL/TGT than intraday to ride the momentum run.
+    Context bonus (0-8): EMA align (0-2), VWAP, RSI zone, vol ≥1.5×, ADX ≥25,
+                         Supertrend, MACD direction
+    Exits: breakeven lock 0.8×ATR, ADX fade, supertrend flip, RSI exhaustion
     """
     name    = "momentum"
     product = "MIS"
@@ -3510,15 +3706,18 @@ class MomentumAgent(BaseAgent):
                        self._pat_vol_surge_trend, self._pat_squeeze_release,
                        self._pat_supertrend_flip, self._pat_ema_alignment,
                        self._pat_macd_zero_cross, self._pat_vwap_breakout,
-                       self._pat_higher_high_confirm):
+                       self._pat_higher_high_confirm, self._pat_breakout_retest,
+                       self._pat_acceleration, self._pat_gap_momentum,
+                       self._pat_fii_momentum, self._pat_velocity_surge):
             try:
                 action, base, pname = pat_fn(sym, snap, ind, ltp, t)
             except Exception:
                 continue
             if not action:
                 continue
-            if base > best_score:
-                best_score, best_action, best_pattern = base, action, pname
+            total = base + self._ctx_bonus(action, sym, ind, ltp)
+            if total > best_score:
+                best_score, best_action, best_pattern = total, action, pname
 
         self._prev_st_dir[sym]    = ind.supertrend_dir
         self._prev_squeeze[sym]   = ind.squeeze_on
@@ -3567,9 +3766,10 @@ class MomentumAgent(BaseAgent):
             "stop_loss_pct": round(sl_dist / ltp * 100, 3),
             "target_pct":    round(tgt_dist / ltp * 100, 3),
             "product": self.product,
+            "_gate_size_factor": 1.0 if best_score >= 9 else 0.75,
             "trigger": (
-                f"MOM-{best_action} [{best_pattern}] score={best_score} "
-                f"vol_ratio={ind.volume_ratio:.1f} adx={ind.adx_14:.0f} trend={ind.trend}"
+                f"MOM-{best_action} [{best_pattern}] score={best_score}/14 "
+                f"vol={ind.volume_ratio:.1f}x adx={getattr(ind,'adx_14',0):.0f} trend={ind.trend}"
             ),
         }
 
@@ -3682,17 +3882,177 @@ class MomentumAgent(BaseAgent):
             return "SELL", 5, "HIGHER_HIGH_CONFIRM"
         return "", 0, ""
 
+    # ── Pattern 10: BREAKOUT_RETEST ──────────────────────────────────────────
+
+    def _pat_breakout_retest(self, sym, snap, ind, ltp, t):
+        """Price hovering just above broken 20-bar high (0-0.8%) — second-entry bounce."""
+        roll_high, roll_low = self._rolling_high_low(snap)
+        if roll_high > 0 and 0 <= (ltp - roll_high) / roll_high < 0.008:
+            if ind.macd_hist > 0 and ind.ema9 > ind.ema21 > 0 and ind.volume_ratio >= 1.2:
+                return "BUY", 5, "BREAKOUT_RETEST"
+        if roll_low > 0 and 0 <= (roll_low - ltp) / roll_low < 0.008:
+            if ind.macd_hist < 0 and ind.ema9 < ind.ema21 > 0 and ind.volume_ratio >= 1.2:
+                return "SELL", 5, "BREAKOUT_RETEST"
+        return "", 0, ""
+
+    # ── Pattern 11: ACCELERATION ─────────────────────────────────────────────
+
+    def _pat_acceleration(self, sym, snap, ind, ltp, t):
+        """3 consecutive bars with growing body + growing volume = momentum building."""
+        if len(snap.candles_1min) < 3:
+            return "", 0, ""
+        c3     = snap.candles_1min[-3:]
+        bodies = [abs(c.close - c.open) for c in c3]
+        vols   = [c.volume for c in c3]
+        if not (bodies[1] > bodies[0] and bodies[2] > bodies[1]
+                and vols[1] >= vols[0] and vols[2] >= vols[1]):
+            return "", 0, ""
+        if all(c.close > c.open for c in c3) and ind.macd_hist > 0:
+            return "BUY",  5, "ACCELERATION"
+        if all(c.close < c.open for c in c3) and ind.macd_hist < 0:
+            return "SELL", 5, "ACCELERATION"
+        return "", 0, ""
+
+    # ── Pattern 12: GAP_MOMENTUM ─────────────────────────────────────────────
+
+    def _pat_gap_momentum(self, sym, snap, ind, ltp, t):
+        """Gap ≥0.8% that's holding + ADX ≥25 + EMA align = gap-continuation trade."""
+        if not (time(9, 30) <= t <= time(10, 30)):
+            return "", 0, ""
+        adx = getattr(ind, "adx_14", 0)
+        if not (ind.day_open and ind.day_open > 0):
+            return "", 0, ""
+        if (ind.change_pct >= 0.8 and adx >= 25
+                and ltp > ind.day_open and ind.ema9 > ind.ema21 > 0
+                and ind.volume_ratio >= 1.5):
+            return "BUY",  5, "GAP_MOMENTUM"
+        if (ind.change_pct <= -0.8 and adx >= 25
+                and ltp < ind.day_open and ind.ema9 < ind.ema21 > 0
+                and ind.volume_ratio >= 1.5):
+            return "SELL", 5, "GAP_MOMENTUM"
+        return "", 0, ""
+
+    # ── Pattern 13: FII_MOMENTUM ─────────────────────────────────────────────
+
+    def _pat_fii_momentum(self, sym, snap, ind, ltp, t):
+        """Heavy FII buying/selling + full 4-EMA stack + ADX ≥25 = institutional momentum."""
+        try:
+            from alt_data import alt_data_engine
+            sent = alt_data_engine.get_fii_sentiment()
+            if not sent:
+                return "", 0, ""
+            fii = sent.get("fii_net_score", 0.5)
+            adx = getattr(ind, "adx_14", 0)
+            if (fii > 0.70 and adx >= 25 and ind.macd_hist > 0
+                    and ind.ema9 > ind.ema21 > ind.ema50 > 0
+                    and ind.ema50 > ind.ema200 > 0):
+                return "BUY",  5, "FII_MOMENTUM"
+            if (fii < 0.30 and adx >= 25 and ind.macd_hist < 0
+                    and ind.ema9 < ind.ema21 > 0 and ind.ema21 < ind.ema50
+                    and ind.ema50 < ind.ema200 > 0):
+                return "SELL", 5, "FII_MOMENTUM"
+        except Exception:
+            pass
+        return "", 0, ""
+
+    # ── Pattern 14: VELOCITY_SURGE ───────────────────────────────────────────
+
+    def _pat_velocity_surge(self, sym, snap, ind, ltp, t):
+        """Single bar ≥0.5% body + ADX ≥30 + vol ≥1.8× = explosive single-bar move."""
+        if len(snap.candles_1min) < 1:
+            return "", 0, ""
+        adx    = getattr(ind, "adx_14", 0)
+        if adx < 30:
+            return "", 0, ""
+        last_c = snap.candles_1min[-1]
+        if not last_c.open or last_c.open <= 0:
+            return "", 0, ""
+        bar_move = abs(last_c.close - last_c.open) / last_c.open
+        if bar_move < 0.005 or ind.volume_ratio < 1.8:
+            return "", 0, ""
+        if last_c.close > last_c.open and ind.ema9 > ind.ema21 > 0:
+            return "BUY",  5, "VELOCITY_SURGE"
+        if last_c.close < last_c.open and ind.ema9 < ind.ema21 > 0:
+            return "SELL", 5, "VELOCITY_SURGE"
+        return "", 0, ""
+
+    # ── Context bonus (0-8) ───────────────────────────────────────────────────
+
+    def _ctx_bonus(self, action: str, sym: str, ind: LiveIndicators, ltp: float) -> int:
+        b      = 0
+        is_buy = action == "BUY"
+        adx    = getattr(ind, "adx_14", 0)
+        # 1+2. Full EMA alignment (0-2): 4-EMA stack or 3-EMA
+        if is_buy:
+            if ind.ema9 > ind.ema21 > ind.ema50 > ind.ema200 > 0: b += 2
+            elif ind.ema9 > ind.ema21 > 0:                         b += 1
+        else:
+            if ind.ema9 < ind.ema21 < ind.ema50 < ind.ema200 and ind.ema200 > 0: b += 2
+            elif ind.ema9 < ind.ema21 > 0:                                        b += 1
+        # 3. VWAP side
+        if ind.vwap and ((is_buy and ltp > ind.vwap) or (not is_buy and ltp < ind.vwap)):
+            b += 1
+        # 4. RSI momentum zone
+        if (is_buy and 45 <= ind.rsi_14 <= 75) or (not is_buy and 25 <= ind.rsi_14 <= 55):
+            b += 1
+        # 5. Volume ≥1.5×
+        if ind.volume_ratio >= 1.5:
+            b += 1
+        # 6. ADX ≥25
+        if adx >= 25:
+            b += 1
+        # 7. Supertrend direction
+        st = ind.supertrend_dir
+        if (is_buy and st == "UP") or (not is_buy and st == "DOWN"):
+            b += 1
+        # 8. MACD direction
+        if (is_buy and ind.macd_hist > 0) or (not is_buy and ind.macd_hist < 0):
+            b += 1
+        return b
+
+    # ── Exit ──────────────────────────────────────────────────────────────────
+
     def should_exit_position(self, pos: dict, ind: LiveIndicators) -> tuple[bool, str]:
         entry = pos.get("average_price", 0.0)
         ltp   = ind.ltp
         if not entry or entry <= 0:
             return False, ""
-        side = pos.get("side", "LONG")
-        chg  = ((ltp - entry) / entry * 100) if side == "LONG" else ((entry - ltp) / entry * 100)
-        sl_pct  = settings.sl_pct_momentum
-        tgt_pct = settings.tgt_pct_momentum
-        if chg <= -sl_pct:  return True, f"Momentum SL -{sl_pct}%"
-        if chg >= tgt_pct:  return True, f"Momentum TGT +{tgt_pct}%"
+        side    = "BUY" if pos.get("quantity", 0) > 0 else pos.get("side", "LONG")
+        is_long = side in ("BUY", "LONG")
+        atr     = ind.atr_14 or entry * 0.005
+        sl_dist = max(atr * self.SL_ATR,  entry * settings.sl_pct_momentum / 100)
+        tgt_dist= max(atr * self.TGT_ATR, entry * settings.tgt_pct_momentum / 100)
+        adx     = getattr(ind, "adx_14", 0)
+
+        if is_long:
+            sl_price = entry - sl_dist
+            if ltp - entry >= atr * 0.8:
+                sl_price = max(sl_price, entry)    # breakeven lock
+            if ltp <= sl_price:
+                return True, f"Momentum SL ₹{ltp:.2f}"
+            if ltp >= entry + tgt_dist:
+                return True, f"Momentum TGT ₹{ltp:.2f}"
+            if adx < 18 and ind.macd_hist < 0:
+                return True, f"ADX fade {adx:.0f} — momentum gone"
+            if ind.supertrend_dir in ("DOWN", "down"):
+                return True, "Supertrend flip (DOWN) exit"
+            if ind.rsi_14 >= 78 and ind.macd_hist < 0:
+                return True, f"RSI exhaustion {ind.rsi_14:.0f}"
+        else:
+            sl_price = entry + sl_dist
+            if entry - ltp >= atr * 0.8:
+                sl_price = min(sl_price, entry)    # breakeven lock
+            if ltp >= sl_price:
+                return True, f"Momentum SL ₹{ltp:.2f}"
+            if ltp <= entry - tgt_dist:
+                return True, f"Momentum TGT ₹{ltp:.2f}"
+            if adx < 18 and ind.macd_hist > 0:
+                return True, f"ADX fade {adx:.0f} — momentum gone"
+            if ind.supertrend_dir in ("UP", "up"):
+                return True, "Supertrend flip (UP) exit"
+            if ind.rsi_14 <= 22 and ind.macd_hist > 0:
+                return True, f"RSI exhaustion {ind.rsi_14:.0f}"
+
         if now_ist().time().replace(tzinfo=None) >= time(14, 55):
             return True, "Auto square-off 2:55 PM"
         return False, ""
@@ -3704,18 +4064,23 @@ class MomentumAgent(BaseAgent):
 
 class PairsAgent(BaseAgent):
     """
-    Pairs trading agent: tracks price-ratio Z-score between correlated stock pairs.
-    When ratio diverges > 2σ → bet on mean reversion of the expensive leg.
+    Pairs trading (stat-arb) — 8 pairs, regime filter, confidence tiers, enhanced exits.
 
-    Pairs tracked (4):
-      HDFCBANK / ICICIBANK   — large-cap private banking
-      TCS      / INFY        — large-cap IT services
-      SBIN     / BANKBARODA  — PSU banking
-      TATAMOTORS / M&M       — large-cap auto OEM
+    Pairs tracked (8):
+      HDFCBANK  / ICICIBANK   — large-cap private banking
+      TCS       / INFY        — large-cap IT services
+      SBIN      / BANKBARODA  — PSU banking
+      TATAMOTORS / M&M        — large-cap auto OEM
+      HDFCBANK  / AXISBANK    — private banking (HDFC vs mid-tier)
+      WIPRO     / HCLTECH     — mid-cap IT services
+      MARUTI    / TATAMOTORS  — auto OEM (passenger vs commercial)
+      COALINDIA / NTPC        — energy sector (coal vs power utility)
 
-    Entry: ratio Z-score > +2σ → SHORT expensive; Z-score < -2σ → BUY cheap
-    Exit:  ratio returns to 0.5σ of mean, or SL/TGT from TSL engine
-    Time:  09:30 – 14:30 IST (exclude open/close noise)
+    Entry: ratio Z-score ≥ +2σ → SHORT expensive / BUY cheap leg
+    Exit:  Z-score reverts to 0.5σ (profit lock), or 4.0σ far-diverge cut (structural break)
+    Confidence tiers: |z|≥3.5 → 1.25× size, |z|≥2.5 → 1.0×, else 0.75×
+    Regime filter: HIGH_VOLATILE → HOLD (pairs spread widens unpredictably in panic)
+    Time: 09:30 – 14:30 IST
     """
     name    = "pairs"
     product = "MIS"
@@ -3726,22 +4091,53 @@ class PairsAgent(BaseAgent):
         ("TCS",        "INFY"),
         ("SBIN",       "BANKBARODA"),
         ("TATAMOTORS", "M&M"),
+        ("HDFCBANK",   "AXISBANK"),
+        ("WIPRO",      "HCLTECH"),
+        ("MARUTI",     "TATAMOTORS"),
+        ("COALINDIA",  "NTPC"),
     ]
     PAIR_SYMBOLS: set[str] = {s for p in PAIRS for s in p}
 
     ZSCORE_ENTRY  = 2.0
     ZSCORE_EXIT   = 0.5
-    RATIO_WINDOW  = 50      # rolling bars for ratio mean/std
+    ZSCORE_CUT    = 4.0    # far-diverge cut: structural break, exit before bigger loss
+    RATIO_WINDOW  = 50
     MIN_SCORE     = 4
     COOL_S        = 120
+    SL_ATR        = 1.5
+    TGT_ATR       = 2.5
 
     def __init__(self):
         super().__init__()
         from collections import deque
-        self._prices:  dict = {}                           # sym → latest ltp
+        self._prices:  dict = {}
         self._ratios:  dict = {p: deque(maxlen=self.RATIO_WINDOW) for p in self.PAIRS}
-        self._zscores: dict = {}                           # pair → latest zscore
-        self._cool_ts: dict = {}                           # (sym, side) → datetime
+        self._zscores: dict = {}
+        self._cool_ts: dict = {}
+
+    def _ctx_bonus(self, action: str, ind: LiveIndicators, zscore: float) -> int:
+        ctx    = 0
+        is_buy = action == "BUY"
+        abs_z  = abs(zscore)
+        # 1. Volume — liquidity needed for clean fills on both legs
+        if ind.volume_ratio > 1.3:                          ctx += 1
+        if ind.volume_ratio > 1.8:                          ctx += 1
+        # 2. MACD direction aligns with the trade leg
+        if is_buy  and ind.macd_hist > 0:                   ctx += 1
+        if not is_buy and ind.macd_hist < 0:                ctx += 1
+        # 3. Trend confirmation on the traded leg
+        if is_buy  and ind.trend == "UP":                   ctx += 1
+        if not is_buy and ind.trend == "DOWN":              ctx += 1
+        # 4. RSI not already stretched in the wrong direction
+        if is_buy  and 30 <= ind.rsi_14 <= 55:              ctx += 1
+        if not is_buy and 45 <= ind.rsi_14 <= 70:           ctx += 1
+        # 5. Z-score depth bonus — deeper divergence = stronger mean-reversion thesis
+        if abs_z >= 2.5:                                    ctx += 1
+        if abs_z >= 3.0:                                    ctx += 1
+        # 6. EMA9/21 momentum on the traded leg
+        if is_buy  and ind.ema9 > ind.ema21:                ctx += 1
+        if not is_buy and ind.ema9 < ind.ema21:             ctx += 1
+        return ctx
 
     def evaluate_tick(self, snap: MarketSnapshot) -> tuple[str, Optional[dict]]:
         sym = snap.symbol
@@ -3753,8 +4149,17 @@ class PairsAgent(BaseAgent):
         if not (time(9, 30) <= t <= time(14, 30)):
             return "HOLD", None
 
+        # Regime filter — pairs spreads blow out unpredictably in high volatility
+        try:
+            from market_regime import regime_detector as _rd
+            if getattr(_rd, "current_regime", "") == "HIGH_VOLATILE":
+                return "HOLD", None
+        except Exception:
+            pass
+
         ind = snap.indicators
-        self._prices[sym] = snap.tick.ltp
+        ltp = snap.tick.ltp
+        self._prices[sym] = ltp
 
         best_score, best_action, best_signal = -1, "HOLD", None
 
@@ -3780,50 +4185,42 @@ class PairsAgent(BaseAgent):
 
             zscore = (ratio - mean) / std
             self._zscores[pair] = zscore
+            abs_z  = abs(zscore)
 
-            # Entry only on the EXPENSIVE leg (bet it reverts down = SHORT expensive)
-            # or the CHEAP leg (bet it reverts up = BUY cheap)
             action, trade_sym = "", ""
-            score = 0
+            base_score = 0
 
             if zscore >= self.ZSCORE_ENTRY and sym == a:
-                # a is expensive relative to b → SHORT a
-                action, trade_sym = "SELL", a
-                score = 4 + min(int(abs(zscore) - self.ZSCORE_ENTRY), 3)
+                action, trade_sym = "SELL", a          # a expensive → SHORT a
+                base_score = 4 + min(int(abs_z - self.ZSCORE_ENTRY), 3)
             elif zscore <= -self.ZSCORE_ENTRY and sym == a:
-                # a is cheap relative to b → BUY a
-                action, trade_sym = "BUY", a
-                score = 4 + min(int(abs(zscore) - self.ZSCORE_ENTRY), 3)
+                action, trade_sym = "BUY", a           # a cheap → BUY a
+                base_score = 4 + min(int(abs_z - self.ZSCORE_ENTRY), 3)
             elif zscore >= self.ZSCORE_ENTRY and sym == b:
-                # a expensive, b cheap → BUY b
-                action, trade_sym = "BUY", b
-                score = 4 + min(int(abs(zscore) - self.ZSCORE_ENTRY), 3)
+                action, trade_sym = "BUY", b           # a expensive, b cheap → BUY b
+                base_score = 4 + min(int(abs_z - self.ZSCORE_ENTRY), 3)
             elif zscore <= -self.ZSCORE_ENTRY and sym == b:
-                # a cheap, b expensive → SHORT b
-                action, trade_sym = "SELL", b
-                score = 4 + min(int(abs(zscore) - self.ZSCORE_ENTRY), 3)
+                action, trade_sym = "SELL", b          # a cheap, b expensive → SHORT b
+                base_score = 4 + min(int(abs_z - self.ZSCORE_ENTRY), 3)
 
-            if not action or score < self.MIN_SCORE:
+            if not action or base_score < self.MIN_SCORE:
                 continue
 
-            # Cooldown guard
-            cool_key = (trade_sym, action)
+            cool_key  = (trade_sym, action)
             last_cool = self._cool_ts.get(cool_key)
             if last_cool and (now - last_cool).total_seconds() < settings.cooldown_pairs:
                 continue
             self._cool_ts[cool_key] = now
 
-            # Context bonus: volume + MACD direction + ind.trend
-            ctx = 0
-            is_long = (action == "BUY")
-            if ind.volume_ratio > 1.3:                           ctx += 1
-            if is_long  and ind.macd_hist > 0:                   ctx += 1
-            if not is_long and ind.macd_hist < 0:                ctx += 1
-            if is_long  and ind.trend == "UP":                   ctx += 1
-            if not is_long and ind.trend == "DOWN":              ctx += 1
-            if ind.rsi_14 < 35 and is_long:                      ctx += 1
-            if ind.rsi_14 > 65 and not is_long:                  ctx += 1
-            total = score + ctx
+            ctx   = self._ctx_bonus(action, ind, zscore)
+            total = base_score + ctx
+
+            # Confidence tier → position size multiplier
+            sf = 1.25 if abs_z >= 3.5 else (1.0 if abs_z >= 2.5 else 0.75)
+
+            atr     = getattr(ind, "atr_14", ltp * 0.01)
+            sl_pct  = max(atr * self.SL_ATR / ltp * 100, settings.sl_pct_pairs)
+            tgt_pct = max(atr * self.TGT_ATR / ltp * 100, settings.tgt_pct_pairs)
 
             if total > best_score:
                 best_score  = total
@@ -3833,11 +4230,12 @@ class PairsAgent(BaseAgent):
                     "pair":          f"{a}/{b}",
                     "zscore":        round(zscore, 2),
                     "score":         total,
-                    "stop_loss_pct": settings.sl_pct_pairs,
-                    "target_pct":    settings.tgt_pct_pairs,
+                    "size_factor":   sf,
+                    "stop_loss_pct": sl_pct,
+                    "target_pct":    tgt_pct,
                     "trigger": (
                         f"PAIRS-{action} [{a}/{b}] z={zscore:.2f} score={total} "
-                        f"rsi={ind.rsi_14:.0f}"
+                        f"sf={sf:.2f} rsi={ind.rsi_14:.0f}"
                     ),
                 }
 
@@ -3846,16 +4244,34 @@ class PairsAgent(BaseAgent):
         return best_action, best_signal
 
     def should_exit_position(self, pos: dict, ind: LiveIndicators) -> tuple[bool, str]:
-        entry = pos.get("average_price", 0.0)
-        ltp   = ind.ltp
+        entry  = pos.get("average_price", 0.0)
+        ltp    = ind.ltp
         if not entry or entry <= 0:
             return False, ""
-        side = pos.get("side", "LONG")
-        chg  = ((ltp - entry) / entry * 100) if side == "LONG" else ((entry - ltp) / entry * 100)
-        if chg <= -settings.sl_pct_pairs:
-            return True, f"Pairs SL -{settings.sl_pct_pairs}%"
-        if chg >= settings.tgt_pct_pairs:
-            return True, f"Pairs TGT +{settings.tgt_pct_pairs}%"
+        side   = pos.get("side", "LONG")
+        symbol = pos.get("symbol", "")
+        chg    = ((ltp - entry) / entry * 100) if side == "LONG" else ((entry - ltp) / entry * 100)
+
+        atr     = getattr(ind, "atr_14", ltp * 0.01)
+        sl_pct  = max(atr * self.SL_ATR / ltp * 100, settings.sl_pct_pairs)
+        tgt_pct = max(atr * self.TGT_ATR / ltp * 100, settings.tgt_pct_pairs)
+
+        if chg <= -sl_pct:
+            return True, f"Pairs SL {chg:.1f}%"
+        if chg >= tgt_pct:
+            return True, f"Pairs TGT +{chg:.1f}%"
+
+        for pair, zscore in self._zscores.items():
+            a, b = pair
+            if symbol not in pair:
+                continue
+            # Z-score reverted: spread closed → lock profit
+            if abs(zscore) <= self.ZSCORE_EXIT:
+                return True, f"Pairs z-revert z={zscore:.2f}"
+            # Far-diverge cut: spread at 4σ+ → structural break, exit to limit loss
+            if abs(zscore) >= self.ZSCORE_CUT:
+                return True, f"Pairs far-diverge z={zscore:.2f}"
+
         if now_ist().time().replace(tzinfo=None) >= time(14, 30):
             return True, "Pairs auto-square 2:30 PM"
         return False, ""
