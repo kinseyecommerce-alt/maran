@@ -49,6 +49,8 @@ def _get_td():
         import concurrent.futures as _cf
 
         def _connect():
+            import socket as _sock
+            _sock.setdefaulttimeout(4)  # TCP connect must complete within 4s (< fut.result timeout=5s)
             try:
                 from truedata_ws.websocket.TD import TD   # v5+
             except ImportError:

@@ -3281,11 +3281,11 @@ class FuturesAgent(BaseAgent):
         sl_pct  = pos.get("stop_loss_pct",  settings.sl_pct_futures)
         tgt_pct = pos.get("target_pct", settings.tgt_pct_futures)
         if chg <= -sl_pct:
-            return True, f"Futures ATR-SL -{sl_pct:.2f}% ₹{ltp:.2f}"
+            return True, f"Futures SL -{sl_pct:.2f}% ₹{ltp:.2f}"
 
         # 2. Target hit
         if chg >= tgt_pct:
-            return True, f"Futures ATR-TGT +{tgt_pct:.2f}% ₹{ltp:.2f}"
+            return True, f"Futures TGT +{tgt_pct:.2f}% ₹{ltp:.2f}"
 
         # 3. Momentum fading at 60% of target — lock in partial profit
         if chg >= tgt_pct * 0.60 and ind.momentum in ("WEAK_UP", "NEUTRAL", "WEAK_DOWN"):

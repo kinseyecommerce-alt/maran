@@ -972,15 +972,16 @@ def t_scalping_atr_sl():
 def t_scalping_exit_sl():
     agent = ScalpingAgent()
     pos = {"tradingsymbol": "RELIANCE", "quantity": 5, "average_price": 2800.0}
-    ind = _make_snap(ltp=2790.0, rsi=35.0).indicators
+    # ATR-based SL: max(atr*0.75=11.25, entry*0.28%=7.84)=11.25 → sl=2788.75; use ltp=2788
+    ind = _make_snap(ltp=2788.0, rsi=35.0).indicators
     exit_, reason = agent.should_exit_position(pos, ind)
     assert exit_ is True and "SL" in reason
 
 def t_scalping_exit_target():
     agent = ScalpingAgent()
     pos = {"tradingsymbol": "RELIANCE", "quantity": 5, "average_price": 2800.0}
-    # tgt_dist = max(atr*1.4=21.0, entry*0.70%=19.6) = 21.0  →  tgt = 2821
-    ind = _make_snap(ltp=2825.0).indicators
+    # ATR-based TGT: max(atr*2.2=33.0, entry*0.65%=18.2)=33.0 → tgt=2833; use ltp=2835
+    ind = _make_snap(ltp=2835.0).indicators
     exit_, reason = agent.should_exit_position(pos, ind)
     assert exit_ is True and "target" in reason.lower()
 
