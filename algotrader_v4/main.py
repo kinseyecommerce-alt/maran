@@ -98,7 +98,9 @@ async def _api_key_gate(request: Request, call_next):
         or request.url.path in ("/auth/login", "/login")
         or any(request.url.path.startswith(p) for p in _EXEMPT_PREFIXES)
     )
-    if needs_auth and not is_exempt and settings.api_key:
+    # Always enforce auth on mutating/sensitive routes when a key is configured.
+    # Without this check, empty api_key would skip auth entirely (falsy bypass).
+    if needs_auth and not is_exempt and (settings.api_key or settings.jwt_secret_key):
         # Accept X-API-Key (programmatic) OR JWT Bearer (browser/UI)
         api_key = request.headers.get("X-API-Key", "")
         auth_hdr = request.headers.get("Authorization", "")

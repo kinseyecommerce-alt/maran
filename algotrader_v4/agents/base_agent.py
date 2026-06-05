@@ -106,7 +106,8 @@ def _setup_tsl_callbacks() -> None:
                             sl_already_filled = True
                             break
             except Exception:
-                pass
+                # Can't confirm SL-M status — assume it filled to avoid double-exit.
+                sl_already_filled = True
             if not sl_already_filled:
                 try:
                     await _loop.run_in_executor(None, lambda: kite_client.cancel_order(sl_oid))
