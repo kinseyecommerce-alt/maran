@@ -60,10 +60,12 @@ def _enqueue(fn, *args, **kwargs) -> None:
     try:
         _write_q.put_nowait((fn, args, kwargs))
     except _queue.Full:
-        # Queue full — log and drop rather than block the event loop with a sync write.
+        # Queue full — log a warning and fall back to a synchronous write so no
+        # trade records are silently lost under burst load.
         from loguru import logger as _log
-        _log.warning("[state_store] write queue full ({} backlog); dropping write {}",
+        _log.warning("[state_store] write queue full ({} backlog); sync fallback for {}",
                      _write_q.maxsize, fn.__name__)
+        fn(*args, **kwargs)
 
 
 def record_trade_async(*args, **kwargs) -> None:

@@ -449,13 +449,13 @@ class BaseAgent(ABC):
                                 gate_assess(snap, action, signal, self.name),
                                 timeout=_gate_timeout,
                             )
+                            record_gate_decision(gate.enter)
                         except asyncio.TimeoutError:
                             logger.warning(
                                 "[{}] {} Claude gate timed out after {:.0f}s — skipping trade",
                                 self.name, snap.symbol, _gate_timeout,
                             )
                             continue
-                        record_gate_decision(gate.enter)
                         if not gate.enter:
                             _activity(
                                 agent=self.name, event="GATE_VETO",
@@ -575,7 +575,8 @@ class BaseAgent(ABC):
         return qty
 
     async def _pre_claim_checks(
-        self, snap: MarketSnapshot, action: str, loop: asyncio.AbstractEventLoop
+        self, snap: MarketSnapshot, action: str, loop: asyncio.AbstractEventLoop,
+        signal: dict,
     ) -> bool:
         """Portfolio-level filters (sector, beta, optimizer, earnings) before acquiring claim.
         Returns False if the trade should be skipped.
@@ -598,7 +599,7 @@ class BaseAgent(ABC):
             from portfolio_optimizer import portfolio_optimizer as _popt
             sig = {
                 "symbol":  sym,
-                "score":   signal.get("score", 0) if (signal := {}) else 0,
+                "score":   signal.get("score", 0),
                 "atr_pct": getattr(snap.indicators, "atr_14", 0) / max(snap.tick.ltp, 1) * 100,
                 "agent":   self.name,
             }
@@ -775,7 +776,7 @@ class BaseAgent(ABC):
             upsert_position_async(
                 order_id=order_id, symbol=sym, strategy=self.name, side=action,
                 entry_price=ltp, quantity=qty,
-                sl_price=signal.get("stop_loss", risk_manager.sl_price(ltp, action)),
+                sl_price=sl,
                 target=signal.get("target", risk_manager.target_price(ltp, action)),
                 product=product, pattern=signal.get("pattern", ""),
             )
@@ -823,11 +824,12 @@ class BaseAgent(ABC):
         import time as _time
         _t0         = _time.monotonic()
         size_factor = signal.get("_gate_size_factor", 1.0)  # capture before _compute_qty pops it
-        qty         = self._compute_qty(snap, action, signal)
         loop        = asyncio.get_event_loop()
 
-        if not await self._pre_claim_checks(snap, action, loop):
+        if not await self._pre_claim_checks(snap, action, loop, signal):
             return
+
+        qty = self._compute_qty(snap, action, signal)  # after pre-claim: avoids aggregator side-effect on vetoed trades
 
         _order_t0 = _time.monotonic()
         try:

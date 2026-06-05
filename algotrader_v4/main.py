@@ -1231,15 +1231,19 @@ async def ws_endpoint(ws: WebSocket):
         if auth_hdr.lower().startswith("bearer ")
         else ws.query_params.get("token", "")
     )
-    if settings.api_key and not hmac.compare_digest(
-        token.encode(), settings.api_key.encode()
-    ):
-        await ws.close(code=4001, reason="Unauthorized")
-        return
+    # Must accept before sending Close frames (WebSocket protocol requires it).
+    await ws.accept()
+    if settings.api_key or settings.jwt_secret_key:
+        has_key = bool(settings.api_key) and hmac.compare_digest(
+            token.encode(), settings.api_key.encode()
+        )
+        has_jwt = bool(settings.jwt_secret_key) and decode_token(token) is not None
+        if not has_key and not has_jwt:
+            await ws.close(code=4001, reason="Unauthorized")
+            return
     if len(ws_clients) >= _MAX_WS_CONNECTIONS:
         await ws.close(code=4002, reason="Too many connections")
         return
-    await ws.accept()
     ws_clients.append(ws)
     try:
         while True:
@@ -1896,16 +1900,16 @@ def symbol_constituent_history(symbol: str):
 
 # ── Startup ───────────────────────────────────────────────────────────────────
 def _install_log_redaction() -> None:
-    """Add a loguru sink filter that strips secrets from every log line."""
+    """Register a loguru patcher that strips secrets before any sink processes a record."""
     import re as _re
     _SECRET_RE = _re.compile(
         r"(api[_-]?key|secret|password|token|totp)[^\s=]*\s*[=:]\s*\S+",
         _re.IGNORECASE,
     )
-    def _redact(record: dict) -> bool:
+    def _redact(record: dict) -> None:
         record["message"] = _SECRET_RE.sub(r"\1=***REDACTED***", record["message"])
-        return True
-    logger.add(lambda msg: None, filter=_redact, level=0)
+    # patcher runs before any sink — guarantees redaction even on the default stderr sink
+    logger.configure(patcher=_redact)
 
 _install_log_redaction()
 
