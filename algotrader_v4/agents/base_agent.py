@@ -23,6 +23,7 @@ from tick_engine import MarketSnapshot, LiveIndicators
 from trailing_sl_engine import trailing_sl_engine, TrailingSLEngine
 from atomic_bracket import atomic_bracket_engine
 from agents.activity_log import push as _activity
+from sebi_compliance import sebi_compliance
 
 
 # ── TSL callback registry ────────────────────────────────────────────────────
@@ -52,7 +53,7 @@ def _setup_tsl_callbacks() -> None:
             sl_oid = entry["sl_order_id"] if entry else None
         if not entry:
             return
-        _loop = asyncio.get_event_loop()
+        _loop = asyncio.get_running_loop()
         try:
             await _loop.run_in_executor(
                 None, lambda: kite_client.modify_order(order_id=sl_oid, trigger_price=pos.current_sl)
@@ -90,7 +91,7 @@ def _setup_tsl_callbacks() -> None:
         with _tsl_sl_orders_lock:
             entry = _tsl_sl_orders.pop(pos.order_id, None)
         sl_already_filled = False
-        _loop = asyncio.get_event_loop()
+        _loop = asyncio.get_running_loop()
         if entry and entry.get("sl_order_id"):
             sl_oid = entry["sl_order_id"]
             # Check if the SL-M order already executed on the exchange
@@ -167,7 +168,7 @@ def _setup_tsl_callbacks() -> None:
         if level == 2:
             with _tsl_sl_orders_lock:
                 entry = _tsl_sl_orders.pop(pos.order_id, None)
-            _loop = asyncio.get_event_loop()
+            _loop = asyncio.get_running_loop()
             await _loop.run_in_executor(None, lambda: kite_client.place_order(
                 tradingsymbol=pos.symbol,
                 exchange=entry.get("exchange", "NSE") if entry else "NSE",
@@ -488,7 +489,7 @@ class BaseAgent(ABC):
                         _sf = round(_sf * _evt["size_factor"], 3)
 
                     from correlation_guard import check as _corr_check
-                    _positions_data = await asyncio.get_event_loop().run_in_executor(
+                    _positions_data = await asyncio.get_running_loop().run_in_executor(
                         None, kite_client.positions
                     )
                     _open_syms = [
@@ -517,7 +518,7 @@ class BaseAgent(ABC):
         """Poll order status for up to `timeout` seconds. Returns True if COMPLETE."""
         import asyncio as _aio
         import time as _t
-        loop = asyncio.get_event_loop()
+        loop = asyncio.get_running_loop()
         t0 = _t.monotonic()
         while (_t.monotonic() - t0) < timeout:
             await _aio.sleep(1)
@@ -643,7 +644,6 @@ class BaseAgent(ABC):
             order_guard.release_claim(sym, self.name, action)
             raise RuntimeError("risk_denied")
 
-        from sebi_compliance import sebi_compliance
         from market_regime import regime_detector
         sebi_ok, _algo_id, sebi_reason = sebi_compliance.pre_order_check(
             strategy=self.name, symbol=sym, exchange=exch,
@@ -657,32 +657,30 @@ class BaseAgent(ABC):
             raise RuntimeError("sebi_denied")
 
         if action == "BUY":
+            macro_score = 0.0
             try:
                 from macro_signals import macro_signals
                 macro_score = macro_signals.get_macro_score()
-                if macro_score < -0.5:
-                    logger.info("[{}] {} BUY skipped — macro headwind: {:.2f}", self.name, sym, macro_score)
-                    order_guard.release_claim(sym, self.name, action)
-                    raise RuntimeError("macro_headwind")
-            except RuntimeError:
-                raise
             except Exception:
                 pass
+            if macro_score < -0.5:
+                logger.info("[{}] {} BUY skipped — macro headwind: {:.2f}", self.name, sym, macro_score)
+                order_guard.release_claim(sym, self.name, action)
+                raise RuntimeError("macro_headwind")
 
+        catalyst = 0.0
         try:
             from alt_data import alt_data_engine
             catalyst = await loop.run_in_executor(None, lambda: alt_data_engine.get_catalyst(sym))
-            if catalyst < -0.5:
-                logger.info("[{}] {} skipped — negative catalyst: {:.2f}", self.name, sym, catalyst)
-                order_guard.release_claim(sym, self.name, action)
-                raise RuntimeError("catalyst_negative")
-            if catalyst > 0.3:
-                qty = min(int(qty * 1.2), int(settings.max_position_size // ltp))
-                logger.debug("[{}] {} positive catalyst {:.2f} → qty bumped to {}", self.name, sym, catalyst, qty)
-        except RuntimeError:
-            raise
         except Exception:
             pass
+        if catalyst < -0.5:
+            logger.info("[{}] {} skipped — negative catalyst: {:.2f}", self.name, sym, catalyst)
+            order_guard.release_claim(sym, self.name, action)
+            raise RuntimeError("catalyst_negative")
+        if catalyst > 0.3:
+            qty = min(int(qty * 1.2), int(settings.max_position_size // ltp))
+            logger.debug("[{}] {} positive catalyst {:.2f} → qty bumped to {}", self.name, sym, catalyst, qty)
 
         sl          = signal.get("stop_loss", risk_manager.sl_price(ltp, action))
         product     = signal.get("product", self.product)
@@ -758,7 +756,6 @@ class BaseAgent(ABC):
         latency_ms: float,
     ) -> None:
         """Post-entry bookkeeping: state, DB, TSL, activity log, Telegram, n8n."""
-        from sebi_compliance import sebi_compliance
         sym     = snap.symbol
         ltp     = snap.tick.ltp
         exch    = signal.get("exchange", "NSE")
@@ -824,7 +821,7 @@ class BaseAgent(ABC):
         import time as _time
         _t0         = _time.monotonic()
         size_factor = signal.get("_gate_size_factor", 1.0)  # capture before _compute_qty pops it
-        loop        = asyncio.get_event_loop()
+        loop        = asyncio.get_running_loop()
 
         if not await self._pre_claim_checks(snap, action, loop, signal):
             return
@@ -850,7 +847,7 @@ class BaseAgent(ABC):
         import time as _time
         sym = snap.symbol
         ind = snap.indicators
-        _exit_pos_data = await asyncio.get_event_loop().run_in_executor(
+        _exit_pos_data = await asyncio.get_running_loop().run_in_executor(
             None, kite_client.positions_cached
         )
         for pos in _exit_pos_data.get("net", []):
@@ -867,7 +864,7 @@ class BaseAgent(ABC):
             _exit_exch   = pos.get("exchange", "NSE")
             _exit_prod   = pos.get("product", self.product)
             _exit_tag    = f"Agent-{self.name}-EXIT"
-            oid  = await asyncio.get_event_loop().run_in_executor(
+            oid  = await asyncio.get_running_loop().run_in_executor(
                 None, lambda: kite_client.place_order(
                     tradingsymbol=sym, exchange=_exit_exch,
                     transaction_type=exit_side, quantity=qty, order_type="MARKET",
