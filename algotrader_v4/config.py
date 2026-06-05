@@ -224,6 +224,13 @@ class Settings(BaseSettings):
     database_url: str = ""   # e.g. postgresql+asyncpg://user:pass@host/db
     redis_url:    str = ""   # e.g. redis://localhost:6379/0
 
+    # Runtime tuning — named constants (avoids magic numbers scattered across modules)
+    db_write_queue_size:      int   = 2000   # state_store write backlog before drops
+    adaptive_refresh_sec:     int   = 300    # how often base_agent re-reads adaptive params
+    ws_max_connections:       int   = 50     # max simultaneous WebSocket clients
+    order_max_retries:        int   = 3      # kite_client retry attempts on transient error
+    gate_api_timeout:         float = 8.0    # seconds before Claude gate call is abandoned
+
     # Server
     host: str = "0.0.0.0"
     port: int = 8000

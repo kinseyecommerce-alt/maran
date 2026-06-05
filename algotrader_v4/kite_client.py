@@ -322,7 +322,7 @@ class KiteClient:
         validity:         str   = "DAY",
         tag:              str   = "AlgoTraderPro",
     ) -> str:
-        tag      = tag[:_KITE_ORDER_TAG_MAX]          # enforce 20-char limit
+        tag      = tag.replace("\n", " ").replace("\r", " ")[:_KITE_ORDER_TAG_MAX]
         quantity = self._validated_quantity(tradingsymbol, exchange, product, quantity)
 
         if settings.trading_mode == "PAPER":

@@ -217,7 +217,7 @@ async def send_telegram(text: str) -> None:
         pass
 
 
-_ADAPTIVE_REFRESH_INTERVAL = 300  # seconds between adaptive param refreshes
+_ADAPTIVE_REFRESH_INTERVAL = settings.adaptive_refresh_sec
 
 # ── Session profiling ────────────────────────────────────────────────────────
 # NSE trading sessions with quality characteristics
@@ -443,7 +443,18 @@ class BaseAgent(ABC):
                     if settings.use_claude_trade_gate:
                         from claude_trade_gate import assess as gate_assess
                         from master_agent_v5 import record_gate_decision
-                        gate = await gate_assess(snap, action, signal, self.name)
+                        _gate_timeout = getattr(settings, "gate_api_timeout", 8.0)
+                        try:
+                            gate = await asyncio.wait_for(
+                                gate_assess(snap, action, signal, self.name),
+                                timeout=_gate_timeout,
+                            )
+                        except asyncio.TimeoutError:
+                            logger.warning(
+                                "[{}] {} Claude gate timed out after {:.0f}s — skipping trade",
+                                self.name, snap.symbol, _gate_timeout,
+                            )
+                            continue
                         record_gate_decision(gate.enter)
                         if not gate.enter:
                             _activity(

@@ -172,7 +172,7 @@ def _clean_strategy(strategy: str) -> str:
 
 
 # ── WebSocket connection pool ────────────────────────────────────────────────
-_MAX_WS_CONNECTIONS = 50
+_MAX_WS_CONNECTIONS = settings.ws_max_connections
 ws_clients: list[WebSocket] = []
 
 
@@ -1221,11 +1221,19 @@ def patch_pattern_toggle(req: PatternToggleRequest):
 
 
 # ── WebSocket ────────────────────────────────────────────────────────────────────
-# HIGH-1: token auth via ?token= query param + max connection cap
+# Auth via Authorization header (preferred) or legacy ?token= query param.
+# Header form keeps token out of server logs, browser history, and proxy logs.
 @app.websocket("/ws")
 async def ws_endpoint(ws: WebSocket):
-    token = ws.query_params.get("token", "")
-    if settings.api_key and token != settings.api_key:
+    auth_hdr = ws.headers.get("authorization", "")
+    token = (
+        auth_hdr.removeprefix("Bearer ").strip()
+        if auth_hdr.lower().startswith("bearer ")
+        else ws.query_params.get("token", "")
+    )
+    if settings.api_key and not hmac.compare_digest(
+        token.encode(), settings.api_key.encode()
+    ):
         await ws.close(code=4001, reason="Unauthorized")
         return
     if len(ws_clients) >= _MAX_WS_CONNECTIONS:
@@ -1887,6 +1895,21 @@ def symbol_constituent_history(symbol: str):
 
 
 # ── Startup ───────────────────────────────────────────────────────────────────
+def _install_log_redaction() -> None:
+    """Add a loguru sink filter that strips secrets from every log line."""
+    import re as _re
+    _SECRET_RE = _re.compile(
+        r"(api[_-]?key|secret|password|token|totp)[^\s=]*\s*[=:]\s*\S+",
+        _re.IGNORECASE,
+    )
+    def _redact(record: dict) -> bool:
+        record["message"] = _SECRET_RE.sub(r"\1=***REDACTED***", record["message"])
+        return True
+    logger.add(lambda msg: None, filter=_redact, level=0)
+
+_install_log_redaction()
+
+
 @app.on_event("startup")
 async def on_startup():
     # Initialise SQLite state store

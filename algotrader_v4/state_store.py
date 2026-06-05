@@ -25,7 +25,9 @@ DB_PATH = Path("logs/algotrader.db")
 # All mutating DB calls (record_trade, upsert_position, close_position) put
 # (fn, args, kwargs) tuples onto this queue. A background thread drains it
 # sequentially — no event-loop blocking, no write contention.
-_write_q: "_queue.Queue[tuple | None]" = _queue.Queue(maxsize=2000)
+_write_q: "_queue.Queue[tuple | None]" = _queue.Queue(
+    maxsize=__import__("config").settings.db_write_queue_size
+)
 _writer_started = threading.Event()
 
 
@@ -58,8 +60,10 @@ def _enqueue(fn, *args, **kwargs) -> None:
     try:
         _write_q.put_nowait((fn, args, kwargs))
     except _queue.Full:
-        # Queue full (backlog > 2000 writes) — fall back to synchronous
-        fn(*args, **kwargs)
+        # Queue full — log and drop rather than block the event loop with a sync write.
+        from loguru import logger as _log
+        _log.warning("[state_store] write queue full ({} backlog); dropping write {}",
+                     _write_q.maxsize, fn.__name__)
 
 
 def record_trade_async(*args, **kwargs) -> None:
