@@ -533,131 +533,128 @@ class BaseAgent(ABC):
                 pass
         return False
 
-    async def _try_enter(self, snap: MarketSnapshot, action: str, signal: dict) -> None:
-        import time as _time
-        _t0  = _time.monotonic()
-        sym  = snap.symbol
-        ltp  = snap.tick.ltp
-        exch = signal.get("exchange", "NSE")
+    # ── Entry helpers (split from _try_enter for readability) ──────────────
 
-        # ATR-based sizing (Phase 2)
+    def _compute_qty(self, snap: MarketSnapshot, action: str, signal: dict) -> int:
+        """Compute final order quantity applying all sizing factors."""
+        ltp    = snap.tick.ltp
         atr_14 = getattr(snap.indicators, "atr_14", 0)
         if getattr(settings, "use_atr_sizing", False) and atr_14 > 0:
             qty = risk_manager.calculate_quantity_atr(ltp, atr_14, agent=self.name)
         else:
             qty = risk_manager.calculate_quantity(ltp, agent=self.name)
 
-        # Kelly sizing (uses adaptive engine win stats)
         if settings.use_kelly_sizing:
-            kf  = risk_manager.kelly_fraction(self.name, snap.symbol)
-            qty = max(1, int(qty * kf))
+            qty = max(1, int(qty * risk_manager.kelly_fraction(self.name, snap.symbol)))
 
-        # Universal conviction sizing: score 4-5=0.5×, 6-7=0.75×, 8-9=1.0×, 10+=1.25×
-        # Deploys more capital on high-confidence signals across all agents uniformly
         if settings.use_conviction_sizing:
-            _sig_score = signal.get("score", 0)
-            _conv = 0.50 if _sig_score <= 5 else (0.75 if _sig_score <= 7 else (1.0 if _sig_score <= 9 else 1.25))
-            qty = max(1, int(qty * _conv))
+            score = signal.get("score", 0)
+            conv  = 0.50 if score <= 5 else (0.75 if score <= 7 else (1.0 if score <= 9 else 1.25))
+            qty   = max(1, int(qty * conv))
 
-        # Phase 3E: Apply adaptive engine's size_factor (from online learning)
         if self._adaptive_min_score_override is not None and isinstance(
             self._adaptive_min_score_override, float
         ):
             qty = max(1, int(qty * float(self._adaptive_min_score_override)))
 
-        # Apply gate size factor on top
         size_factor = signal.pop("_gate_size_factor", 1.0)
         if size_factor < 1.0:
             qty = max(1, int(qty * size_factor))
 
-        # Consensus signal boost: when 2+ agents independently flag same symbol/direction
-        # Check existing consensus BEFORE registering so the first agent also benefits
-        # when a consensus was already reached by earlier agents.
         try:
-            from signal_aggregator import signal_aggregator as _sig_agg
-            _score = signal.get("score", 0)
-            # Check if consensus already exists (first agent entering a consensus trade)
-            _pre_boost = _sig_agg.get_consensus_boost(sym, action)
-            # Register this agent's signal (may trigger consensus for subsequent agents)
-            _boost = _sig_agg.register(self.name, sym, action, _score)
-            # Use whichever boost is non-zero: pre-existing or just-triggered
-            _effective_boost = _pre_boost if _pre_boost > 0 else _boost
-            if _effective_boost > 0:
-                _max = int(settings.max_position_size // max(ltp, 1))
-                qty  = min(int(qty * (1 + _effective_boost)), _max)
-                logger.info("[{}] {} CONSENSUS boost {:.0%} → qty={}", self.name, sym, _effective_boost, qty)
+            from signal_aggregator import signal_aggregator as _agg
+            pre   = _agg.get_consensus_boost(snap.symbol, action)
+            post  = _agg.register(self.name, snap.symbol, action, signal.get("score", 0))
+            boost = pre if pre > 0 else post
+            if boost > 0:
+                cap = int(settings.max_position_size // max(ltp, 1))
+                qty = min(int(qty * (1 + boost)), cap)
+                logger.info("[{}] {} CONSENSUS boost {:.0%} → qty={}", self.name, snap.symbol, boost, qty)
         except Exception:
             pass
+        return qty
 
-        # Sector limit check — run in executor so it doesn't block the event loop
-        loop = asyncio.get_event_loop()
-        _pos_data = await loop.run_in_executor(None, kite_client.positions_cached)
-        _open_syms_for_sector = [
-            p["tradingsymbol"] for p in _pos_data.get("net", [])
-            if p.get("quantity", 0) != 0
-        ]
-        sector_ok, sector_reason = risk_manager.check_sector_limit(sym, _open_syms_for_sector)
+    async def _pre_claim_checks(
+        self, snap: MarketSnapshot, action: str, loop: asyncio.AbstractEventLoop
+    ) -> bool:
+        """Portfolio-level filters (sector, beta, optimizer, earnings) before acquiring claim.
+        Returns False if the trade should be skipped.
+        """
+        sym      = snap.symbol
+        pos_data = await loop.run_in_executor(None, kite_client.positions_cached)
+        open_syms = [p["tradingsymbol"] for p in pos_data.get("net", []) if p.get("quantity", 0) != 0]
+
+        sector_ok, sector_reason = risk_manager.check_sector_limit(sym, open_syms)
         if not sector_ok:
             logger.debug("[{}] {} sector BLOCK: {}", self.name, sym, sector_reason)
-            return
+            return False
 
-        # Beta neutralization — block BUY if portfolio beta would exceed max_portfolio_beta
-        beta_ok, beta_reason = risk_manager.check_portfolio_beta(sym, _open_syms_for_sector, action)
+        beta_ok, beta_reason = risk_manager.check_portfolio_beta(sym, open_syms, action)
         if not beta_ok:
             logger.debug("[{}] {} beta BLOCK: {}", self.name, sym, beta_reason)
-            return
+            return False
 
-        # Portfolio optimizer soft gate — skip if a same-sector rival has >20% better Sharpe
         try:
             from portfolio_optimizer import portfolio_optimizer as _popt
-            _sig_for_gate = {
+            sig = {
                 "symbol":  sym,
-                "score":   signal.get("score", 0),
+                "score":   signal.get("score", 0) if (signal := {}) else 0,
                 "atr_pct": getattr(snap.indicators, "atr_14", 0) / max(snap.tick.ltp, 1) * 100,
                 "agent":   self.name,
             }
-            _allowed, _suggested_capital = _popt.should_trade(sym, _sig_for_gate, {})
-            if not _allowed:
+            allowed, _ = _popt.should_trade(sym, sig, {})
+            if not allowed:
                 logger.debug("[{}] {} portfolio optimizer SKIP", self.name, sym)
-                return
+                return False
         except Exception:
             pass
 
-        # Earnings blackout — block entries within ±2 days of earnings event
         try:
             from alt_data import alt_data_engine as _alt
             if _alt.is_earnings_period(sym):
                 logger.debug("[{}] {} EARNINGS BLACKOUT — skipping entry", self.name, sym)
-                return
+                return False
         except Exception:
             pass
+        return True
 
-        # Atomic claim: reserves the slot so no concurrent agent can place the same order
-        # while we await the Claude gate, SEBI checks, or order placement below.
-        claimed, reason = order_guard.try_claim(sym, self.name, action)
+    async def _place_orders(
+        self,
+        snap: MarketSnapshot,
+        action: str,
+        signal: dict,
+        qty: int,
+        loop: asyncio.AbstractEventLoop,
+    ) -> tuple[str, str | None, int]:
+        """Acquire claim, run compliance + catalyst checks, then place entry + SL-M.
+        Returns (order_id, sl_order_id, final_qty).
+        Raises RuntimeError on any rejection so _try_enter can return cleanly.
+        """
+        sym  = snap.symbol
+        ltp  = snap.tick.ltp
+        exch = signal.get("exchange", "NSE")
+
+        claimed, _ = order_guard.try_claim(sym, self.name, action)
         if not claimed:
-            return
+            raise RuntimeError("claim_denied")
         allowed, _ = risk_manager.check_before_order(sym, qty, ltp, action)
         if not allowed:
             order_guard.release_claim(sym, self.name, action)
-            return
+            raise RuntimeError("risk_denied")
 
-        # LOW-2: SEBI pre-order compliance check
         from sebi_compliance import sebi_compliance
         from market_regime import regime_detector
-        sebi_ok, algo_id, sebi_reason = sebi_compliance.pre_order_check(
+        sebi_ok, _algo_id, sebi_reason = sebi_compliance.pre_order_check(
             strategy=self.name, symbol=sym, exchange=exch,
-            transaction_type=action, quantity=qty,
-            order_type="MARKET", price_at_signal=ltp,
-            signal_source=f"agent_{self.name}",
+            transaction_type=action, quantity=qty, order_type="MARKET",
+            price_at_signal=ltp, signal_source=f"agent_{self.name}",
             regime=regime_detector.current_regime.value,
         )
         if not sebi_ok:
             logger.warning("[{}] SEBI blocked {} {}: {}", self.name, action, sym, sebi_reason)
             order_guard.release_claim(sym, self.name, action)
-            return
+            raise RuntimeError("sebi_denied")
 
-        # Macro filter: skip BUY entries during strong global macro headwinds
         if action == "BUY":
             try:
                 from macro_signals import macro_signals
@@ -665,46 +662,42 @@ class BaseAgent(ABC):
                 if macro_score < -0.5:
                     logger.info("[{}] {} BUY skipped — macro headwind: {:.2f}", self.name, sym, macro_score)
                     order_guard.release_claim(sym, self.name, action)
-                    return
+                    raise RuntimeError("macro_headwind")
+            except RuntimeError:
+                raise
             except Exception:
                 pass
 
-        # Alt-data catalyst filter: skip on major negative events, boost qty on positive
-        # get_catalyst calls get_bulk_deals which makes a blocking HTTP call — run in executor
         try:
             from alt_data import alt_data_engine
-            catalyst = await loop.run_in_executor(
-                None, lambda: alt_data_engine.get_catalyst(sym)
-            )
+            catalyst = await loop.run_in_executor(None, lambda: alt_data_engine.get_catalyst(sym))
             if catalyst < -0.5:
                 logger.info("[{}] {} skipped — negative catalyst: {:.2f}", self.name, sym, catalyst)
                 order_guard.release_claim(sym, self.name, action)
-                return
+                raise RuntimeError("catalyst_negative")
             if catalyst > 0.3:
                 qty = min(int(qty * 1.2), int(settings.max_position_size // ltp))
                 logger.debug("[{}] {} positive catalyst {:.2f} → qty bumped to {}", self.name, sym, catalyst, qty)
+        except RuntimeError:
+            raise
         except Exception:
             pass
 
-        sl       = signal.get("stop_loss", risk_manager.sl_price(ltp, action))
-        product  = signal.get("product", self.product)
-        sl_side  = "SELL" if action == "BUY" else "BUY"
-        _order_t0 = _time.monotonic()
-
-        use_limit = getattr(settings, "use_limit_orders", False)
-        limit_px  = round(ltp * (1.0005 if action == "BUY" else 0.9995), 1)
+        sl          = signal.get("stop_loss", risk_manager.sl_price(ltp, action))
+        product     = signal.get("product", self.product)
+        sl_side     = "SELL" if action == "BUY" else "BUY"
+        use_limit   = getattr(settings, "use_limit_orders", False)
+        limit_px    = round(ltp * (1.0005 if action == "BUY" else 0.9995), 1)
         lim_timeout = getattr(settings, "limit_order_timeout_sec", 8)
         _claim_confirmed = False
 
         try:
             if use_limit and settings.trading_mode == "LIVE":
-                # LIVE: place LIMIT, wait for fill, cancel+fallback to MARKET if timeout
                 order_id = await loop.run_in_executor(None, lambda: kite_client.place_order(
                     tradingsymbol=sym, exchange=exch, transaction_type=action, quantity=qty,
                     order_type="LIMIT", product=product, price=limit_px, tag=f"Agent-{self.name}",
                 ))
-                filled = await self._await_limit_fill(order_id, lim_timeout)
-                if not filled:
+                if not await self._await_limit_fill(order_id, lim_timeout):
                     await loop.run_in_executor(None, lambda: kite_client.cancel_order(order_id))
                     order_id = await loop.run_in_executor(None, lambda: kite_client.place_order(
                         tradingsymbol=sym, exchange=exch, transaction_type=action, quantity=qty,
@@ -716,79 +709,75 @@ class BaseAgent(ABC):
                     trigger_price=sl, tag=f"Agent-{self.name}-SL",
                 ))
             else:
-                # PAPER or MARKET mode: place entry + SL-M concurrently in thread executor
                 entry_type = "LIMIT" if use_limit else "MARKET"
                 entry_px   = limit_px if use_limit else 0.0
                 results = await asyncio.gather(
                     loop.run_in_executor(None, lambda: kite_client.place_order(
-                        tradingsymbol=sym, exchange=exch,
-                        transaction_type=action, quantity=qty,
-                        order_type=entry_type, product=product,
-                        price=entry_px, tag=f"Agent-{self.name}",
+                        tradingsymbol=sym, exchange=exch, transaction_type=action, quantity=qty,
+                        order_type=entry_type, product=product, price=entry_px, tag=f"Agent-{self.name}",
                     )),
                     loop.run_in_executor(None, lambda: kite_client.place_order(
-                        tradingsymbol=sym, exchange=exch,
-                        transaction_type=sl_side,
-                        quantity=qty, order_type="SL-M",
-                        product=product,
+                        tradingsymbol=sym, exchange=exch, transaction_type=sl_side,
+                        quantity=qty, order_type="SL-M", product=product,
                         trigger_price=sl, tag=f"Agent-{self.name}-SL",
                     )),
                     return_exceptions=True,
                 )
-                order_id    = results[0]
-                sl_order_id = results[1]
-
+                order_id, sl_order_id = results[0], results[1]
                 if isinstance(order_id, Exception):
-                    # Entry failed — release claim, nothing on exchange
                     order_guard.release_claim(sym, self.name, action)
                     logger.error("[{}] Entry order failed: {}", self.name, order_id)
-                    return
-
+                    raise RuntimeError("entry_failed")
                 order_guard.confirm_claim(sym, self.name, action, str(order_id))
                 _claim_confirmed = True
-
                 if isinstance(sl_order_id, Exception):
-                    # Entry placed but SL failed — keep position, log critical warning
-                    logger.error(
-                        "[{}] SL-M order failed after entry {} — position unprotected! {}",
-                        self.name, order_id, sl_order_id,
-                    )
+                    logger.error("[{}] SL-M failed after entry {} — position unprotected! {}",
+                                 self.name, order_id, sl_order_id)
                     sl_order_id = None
+        except RuntimeError:
+            raise
         except Exception as exc:
             logger.warning("[{}] order placement failed: {}", self.name, exc)
             order_guard.release_claim(sym, self.name, action)
-            return
+            raise RuntimeError(f"placement_error: {exc}")
 
-        _latency_ms = (_time.monotonic() - _order_t0) * 1000
-        logger.info("[{}] order latency: {:.0f}ms | entry={} sl={}", self.name, _latency_ms, order_id, sl_order_id)
-        logger.debug("[{}] _try_enter total: {:.0f}ms", self.name, (_time.monotonic() - _t0) * 1000)
-
-        sebi_compliance.record_order_id(self.name, sym, order_id)
-        # LIVE (limit) path: confirm claim here. PAPER/MARKET path already confirmed
-        # inside the gather block above via _claim_confirmed flag — avoid double-call.
         if not _claim_confirmed:
             order_guard.confirm_claim(sym, self.name, action, order_id)
+        return order_id, sl_order_id, qty
+
+    async def _register_position(
+        self,
+        snap: MarketSnapshot,
+        action: str,
+        signal: dict,
+        qty: int,
+        order_id: str,
+        sl_order_id: str | None,
+        size_factor: float,
+        latency_ms: float,
+    ) -> None:
+        """Post-entry bookkeeping: state, DB, TSL, activity log, Telegram, n8n."""
+        from sebi_compliance import sebi_compliance
+        sym     = snap.symbol
+        ltp     = snap.tick.ltp
+        exch    = signal.get("exchange", "NSE")
+        product = signal.get("product", self.product)
+        sl      = signal.get("stop_loss", risk_manager.sl_price(ltp, action))
+
+        sebi_compliance.record_order_id(self.name, sym, order_id)
         risk_manager.position_opened()
         self.state.trades_today  += 1
         self.state.signals_fired += 1
         self.state.last_signal    = signal
 
-        # Persist position to SQLite (Phase 3) — non-blocking async variant
         try:
             from state_store import upsert_position_async
-            sl_price_val = signal.get("stop_loss", risk_manager.sl_price(ltp, action))
-            tgt_val      = signal.get("target", risk_manager.target_price(ltp, action))
             upsert_position_async(
-                order_id=order_id,
-                symbol=sym,
-                strategy=self.name,
-                side=action,
-                entry_price=ltp,
-                quantity=qty,
-                sl_price=sl_price_val,
-                target=tgt_val,
-                product=signal.get("product", self.product),
-                pattern=signal.get("pattern", ""),
+                order_id=order_id, symbol=sym, strategy=self.name, side=action,
+                entry_price=ltp, quantity=qty,
+                sl_price=signal.get("stop_loss", risk_manager.sl_price(ltp, action)),
+                target=signal.get("target", risk_manager.target_price(ltp, action)),
+                product=product, pattern=signal.get("pattern", ""),
             )
         except Exception:
             pass
@@ -798,16 +787,12 @@ class BaseAgent(ABC):
             symbol=sym, side=action, price=ltp, qty=qty,
             pattern=signal.get("pattern", ""),
             gate_conf=int(signal.get("_gate_confidence", 0)),
-            sl=signal.get("stop_loss", 0.0),
-            target=signal.get("target", 0.0),
+            sl=sl, target=signal.get("target", 0.0),
             order_id=str(order_id),
-            detail=f"product={product} size_factor={size_factor} latency={_latency_ms:.0f}ms",
+            detail=f"product={product} size_factor={size_factor} latency={latency_ms:.0f}ms",
         )
 
-        # Wire TSL callbacks (idempotent — only installs module-level fallbacks once)
         _setup_tsl_callbacks()
-
-        # Register with trailing SL engine (monitors every tick)
         trailing_sl_engine.register(
             symbol=sym, strategy=self.name, side=action,
             entry_price=ltp, quantity=qty, order_id=order_id,
@@ -816,14 +801,8 @@ class BaseAgent(ABC):
             on_target_hit=trailing_sl_engine.on_target_hit,
             on_sl_moved=trailing_sl_engine.on_sl_moved,
         )
-
-        # Register SL-M order so TSL callbacks can modify/cancel it
         with _tsl_sl_orders_lock:
-            _tsl_sl_orders[order_id] = {
-                "sl_order_id": sl_order_id,
-                "product":     product,
-                "exchange":    exch,
-            }
+            _tsl_sl_orders[order_id] = {"sl_order_id": sl_order_id, "product": product, "exchange": exch}
 
         ind = snap.indicators
         await send_telegram(
@@ -834,19 +813,32 @@ class BaseAgent(ABC):
         )
         from n8n_bridge import notify as _n8n
         asyncio.create_task(_n8n("trade_entry", {
-            "agent":     self.name,
-            "symbol":    sym,
-            "action":    action,
-            "price":     ltp,
-            "quantity":  qty,
-            "stop_loss": sl,
-            "target":    signal.get("target", 0),
-            "order_id":  order_id,
-            "pattern":   signal.get("trigger", ""),
-            "rsi":       ind.rsi_14,
-            "trend":     ind.trend,
-            "vol_ratio": ind.volume_ratio,
+            "agent": self.name, "symbol": sym, "action": action, "price": ltp,
+            "quantity": qty, "stop_loss": sl, "target": signal.get("target", 0),
+            "order_id": order_id, "pattern": signal.get("trigger", ""),
+            "rsi": ind.rsi_14, "trend": ind.trend, "vol_ratio": ind.volume_ratio,
         }))
+
+    async def _try_enter(self, snap: MarketSnapshot, action: str, signal: dict) -> None:
+        import time as _time
+        _t0         = _time.monotonic()
+        size_factor = signal.get("_gate_size_factor", 1.0)  # capture before _compute_qty pops it
+        qty         = self._compute_qty(snap, action, signal)
+        loop        = asyncio.get_event_loop()
+
+        if not await self._pre_claim_checks(snap, action, loop):
+            return
+
+        _order_t0 = _time.monotonic()
+        try:
+            order_id, sl_order_id, qty = await self._place_orders(snap, action, signal, qty, loop)
+        except RuntimeError:
+            return
+
+        latency_ms = (_time.monotonic() - _order_t0) * 1000
+        logger.info("[{}] order latency: {:.0f}ms | entry={} sl={}", self.name, latency_ms, order_id, sl_order_id)
+        logger.debug("[{}] _try_enter total: {:.0f}ms", self.name, (_time.monotonic() - _t0) * 1000)
+        await self._register_position(snap, action, signal, qty, order_id, sl_order_id, size_factor, latency_ms)
 
     # ── Exit ──────────────────────────────────────────────────────────
 
