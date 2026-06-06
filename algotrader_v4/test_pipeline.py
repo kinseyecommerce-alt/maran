@@ -565,7 +565,7 @@ section("7. SEBI COMPLIANCE")
 from sebi_compliance import SEBICompliance, KillSwitchState, APPROVED_ALGO_IDS
 
 def t_sebi_5_algos():
-    assert len(APPROVED_ALGO_IDS) == 6   # 5 strategies + 1 manual API ID
+    assert len(APPROVED_ALGO_IDS) == 9   # 8 strategy algos + 1 manual API ID
 
 def t_sebi_algo_id_format():
     assert all(v.startswith("ALGO-") for v in APPROVED_ALGO_IDS.values())
@@ -650,7 +650,7 @@ def t_sebi_strategy_disclosure():
 def t_sebi_full_disclosure():
     sc = SEBICompliance()
     doc = sc.get_disclosure_document()
-    assert len(doc["algo_strategies"]) == 5
+    assert len(doc["algo_strategies"]) == 8   # 8 strategy algos (manual excluded)
 
 def t_sebi_ip_empty_allows_all():
     sc = SEBICompliance()
@@ -667,7 +667,7 @@ def t_sebi_otr_tracking():
     sc.pre_order_check("intraday","RELIANCE","NSE","BUY",1,"MARKET",100.0,"sig","RANGING")
     assert sc.status()["orders_placed_today"] == 1
 
-run("5 approved algo IDs registered",          t_sebi_5_algos)
+run("9 approved algo IDs registered",          t_sebi_5_algos)
 run("algo IDs have ALGO- prefix",              t_sebi_algo_id_format)
 run("pre_order_check approves valid order",    t_sebi_approves_valid)
 run("rejects unregistered strategy",           t_sebi_rejects_unknown_strategy)
@@ -681,7 +681,7 @@ run("record_order_id increments executed",     t_sebi_record_executed)
 run("audit log records today's orders",        t_sebi_audit_log_today)
 run("audit log filters by strategy",           t_sebi_audit_filter_strategy)
 run("strategy disclosure returns algo_id",     t_sebi_strategy_disclosure)
-run("full disclosure has 5 strategies",        t_sebi_full_disclosure)
+run("full disclosure has 8 strategies",        t_sebi_full_disclosure)
 run("empty whitelist allows all IPs",          t_sebi_ip_empty_allows_all)
 run("whitelist blocks non-whitelisted IPs",    t_sebi_ip_whitelist)
 run("OTR counter increments per check",        t_sebi_otr_tracking)

@@ -33,12 +33,15 @@ _AUDIT_LOG_DIR = Path("logs")
 
 # ── Reg 1: Approved algo registry ─────────────────────────────────────────────
 APPROVED_ALGO_IDS: dict[str, str] = {
-    "intraday": "ALGO-INTRA-001",
-    "options":  "ALGO-OPT-002",
-    "futures":  "ALGO-FUT-006",
-    "swing":    "ALGO-SWING-003",
-    "scalping": "ALGO-SCALP-004",
-    "manual":   "ALGO-MANUAL-005",
+    "intraday":       "ALGO-INTRA-001",
+    "options":        "ALGO-OPT-002",
+    "futures":        "ALGO-FUT-006",
+    "swing":          "ALGO-SWING-003",
+    "scalping":       "ALGO-SCALP-004",
+    "manual":         "ALGO-MANUAL-005",
+    "mean_reversion": "ALGO-MREV-007",
+    "momentum":       "ALGO-MOM-008",
+    "pairs":          "ALGO-PAIRS-009",
 }
 
 _STRATEGY_DISCLOSURES: dict[str, dict] = {
@@ -95,6 +98,33 @@ _STRATEGY_DISCLOSURES: dict[str, dict] = {
         "holding_period": "As decided by trader",
         "risk_controls": "All standard risk checks apply",
         "parameters": {},
+    },
+    "mean_reversion": {
+        "name": "Bollinger Mean Reversion",
+        "description": "Fades extremes: BB-band bounce/reject, RSI/Williams/Z-score reversion to the mean",
+        "instruments": "NSE equities (MIS)",
+        "order_types": ["MARKET"],
+        "holding_period": "Intraday — no new entries after 14:45",
+        "risk_controls": "1.2% stop-loss, 2% target, 3-min cooldown, ATR-scaled sizing",
+        "parameters": {"sl_pct": 1.2, "tgt_pct": 2.0, "cooldown_sec": 180, "z_entry": 2.0},
+    },
+    "momentum": {
+        "name": "Breakout Momentum",
+        "description": "Trades breakouts: HL/LL breaks, volume-surge trend, squeeze release, EMA alignment with ADX",
+        "instruments": "NSE equities (MIS)",
+        "order_types": ["MARKET"],
+        "holding_period": "Intraday — no new entries after 14:50",
+        "risk_controls": "1.5% stop-loss, 3% target, 3-min cooldown, VIX-scaled sizing",
+        "parameters": {"sl_pct": 1.5, "tgt_pct": 3.0, "cooldown_sec": 180, "adx_min": 22},
+    },
+    "pairs": {
+        "name": "Statistical Arbitrage Pairs",
+        "description": "Ratio Z-score mean reversion across 8 correlated pairs; long cheap leg / short expensive leg",
+        "instruments": "NSE equities (MIS)",
+        "order_types": ["MARKET"],
+        "holding_period": "Intraday — squared off by 14:30",
+        "risk_controls": "Z-score entry ±2σ, 4σ structural-break cut, regime filter, 2-min cooldown",
+        "parameters": {"z_entry": 2.0, "z_exit": 0.5, "z_cut": 4.0, "ratio_window": 50},
     },
 }
 

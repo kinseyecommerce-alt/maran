@@ -26,6 +26,20 @@ from agents.activity_log import push as _activity
 from sebi_compliance import sebi_compliance
 
 
+# ── Order tags ───────────────────────────────────────────────────────────────
+# Kite caps order tags at 20 chars. Blind truncation drops the role suffix, so a
+# long agent name (e.g. "mean_reversion") makes the SL tag "Agent-mean_reversion-SL"
+# collapse to "Agent-mean_reversion" — identical to the entry tag, breaking
+# entry/SL reconciliation in the Kite console. Clamp the *name* and keep the role.
+_TAG_MAX = 20
+
+def _otag(base: str, role: str = "") -> str:
+    """Build a Kite order tag ≤20 chars that preserves the role suffix.
+    e.g. _otag("Agent-mean_reversion", "SL") → "Agent-mean_rever-SL" (distinct from entry)."""
+    suffix = f"-{role}" if role else ""
+    return base[: _TAG_MAX - len(suffix)] + suffix
+
+
 # ── TSL callback registry ────────────────────────────────────────────────────
 # Maps main order_id → {sl_order_id, product, exchange}
 _tsl_sl_orders: dict[str, dict] = {}
@@ -72,7 +86,7 @@ def _setup_tsl_callbacks() -> None:
                     quantity=pos.quantity, order_type="SL-M",
                     product=entry.get("product", "MIS"),
                     trigger_price=pos.current_sl,
-                    tag=f"TSL-{pos.strategy}",
+                    tag=_otag(f"TSL-{pos.strategy}"),
                 ))
                 with _tsl_sl_orders_lock:
                     if pos.order_id in _tsl_sl_orders:
@@ -123,7 +137,7 @@ def _setup_tsl_callbacks() -> None:
                 transaction_type="SELL" if pos.side == "BUY" else "BUY",
                 quantity=pos.quantity, order_type="MARKET",
                 product=entry.get("product", "MIS") if entry else "MIS",
-                tag=f"TSL-HIT-{pos.strategy}",
+                tag=_otag(f"TSL-HIT-{pos.strategy}"),
             ))
         else:
             logger.info("SL-M {} already COMPLETE — skipping MARKET exit to avoid double-exit",
@@ -175,7 +189,7 @@ def _setup_tsl_callbacks() -> None:
                 transaction_type="SELL" if pos.side == "BUY" else "BUY",
                 quantity=pos.quantity, order_type="MARKET",
                 product=entry.get("product", "MIS") if entry else "MIS",
-                tag=f"TSL-T{level}-{pos.strategy}",
+                tag=_otag(f"TSL-T{level}-{pos.strategy}"),
             ))
             order_guard.release_order(pos.symbol, pos.strategy, pos.side, pnl_est)
             risk_manager.record_trade(pnl_est)
@@ -694,18 +708,18 @@ class BaseAgent(ABC):
             if use_limit and settings.trading_mode == "LIVE":
                 order_id = await loop.run_in_executor(None, lambda: kite_client.place_order(
                     tradingsymbol=sym, exchange=exch, transaction_type=action, quantity=qty,
-                    order_type="LIMIT", product=product, price=limit_px, tag=f"Agent-{self.name}",
+                    order_type="LIMIT", product=product, price=limit_px, tag=_otag(f"Agent-{self.name}"),
                 ))
                 if not await self._await_limit_fill(order_id, lim_timeout):
                     await loop.run_in_executor(None, lambda: kite_client.cancel_order(order_id))
                     order_id = await loop.run_in_executor(None, lambda: kite_client.place_order(
                         tradingsymbol=sym, exchange=exch, transaction_type=action, quantity=qty,
-                        order_type="MARKET", product=product, tag=f"Agent-{self.name}",
+                        order_type="MARKET", product=product, tag=_otag(f"Agent-{self.name}"),
                     ))
                 sl_order_id = await loop.run_in_executor(None, lambda: kite_client.place_order(
                     tradingsymbol=sym, exchange=exch, transaction_type=sl_side,
                     quantity=qty, order_type="SL-M", product=product,
-                    trigger_price=sl, tag=f"Agent-{self.name}-SL",
+                    trigger_price=sl, tag=_otag(f"Agent-{self.name}", "SL"),
                 ))
             else:
                 entry_type = "LIMIT" if use_limit else "MARKET"
@@ -713,12 +727,12 @@ class BaseAgent(ABC):
                 results = await asyncio.gather(
                     loop.run_in_executor(None, lambda: kite_client.place_order(
                         tradingsymbol=sym, exchange=exch, transaction_type=action, quantity=qty,
-                        order_type=entry_type, product=product, price=entry_px, tag=f"Agent-{self.name}",
+                        order_type=entry_type, product=product, price=entry_px, tag=_otag(f"Agent-{self.name}"),
                     )),
                     loop.run_in_executor(None, lambda: kite_client.place_order(
                         tradingsymbol=sym, exchange=exch, transaction_type=sl_side,
                         quantity=qty, order_type="SL-M", product=product,
-                        trigger_price=sl, tag=f"Agent-{self.name}-SL",
+                        trigger_price=sl, tag=_otag(f"Agent-{self.name}", "SL"),
                     )),
                     return_exceptions=True,
                 )
@@ -863,7 +877,7 @@ class BaseAgent(ABC):
             _exit_t0 = _time.monotonic()
             _exit_exch   = pos.get("exchange", "NSE")
             _exit_prod   = pos.get("product", self.product)
-            _exit_tag    = f"Agent-{self.name}-EXIT"
+            _exit_tag    = _otag(f"Agent-{self.name}", "EXIT")
             oid  = await asyncio.get_running_loop().run_in_executor(
                 None, lambda: kite_client.place_order(
                     tradingsymbol=sym, exchange=_exit_exch,
