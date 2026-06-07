@@ -748,6 +748,8 @@ async def stop_bot():
 @app.post("/bot/test-order", tags=["Bot"])
 async def test_order(symbol: str = "SBIN", qty: int = 1):
     """Place 1-share MARKET BUY to verify Kite connectivity, then immediately cancel."""
+    if sebi_compliance._state.value == "KILLED":
+        raise HTTPException(status_code=503, detail="Kill switch active — test order blocked")
     symbol = _clean_symbol(symbol)
     order_id = kite_client.place_order(
         tradingsymbol=symbol, exchange="NSE",
