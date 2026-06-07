@@ -3086,4 +3086,9 @@ run("depth: _detect_walls() returns (False,False,0.5) with no depth", t_wall_det
 # FINAL SUMMARY
 # ══════════════════════════════════════════════════════════════════════════
 failed = summary()
-sys.exit(1 if failed else 0)
+# Force-exit without waiting for background executor threads (ThreadPoolExecutor
+# in the symbol scanner's run_in_executor() uses non-daemon threads; with real
+# TrueData credentials configured these threads block on network I/O after the
+# asyncio event loop closes, causing a 12+ second hang on sys.exit()).
+import os as _os
+_os._exit(1 if failed else 0)

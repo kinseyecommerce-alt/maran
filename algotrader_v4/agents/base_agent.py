@@ -815,11 +815,29 @@ class BaseAgent(ABC):
                     order_type="LIMIT", product=product, price=limit_px, tag=_otag(f"Agent-{self.name}"),
                 ))
                 if not await self._await_limit_fill(order_id, lim_timeout):
-                    await loop.run_in_executor(None, lambda: kite_client.cancel_order(order_id))
-                    order_id = await loop.run_in_executor(None, lambda: kite_client.place_order(
-                        tradingsymbol=trade_sym, exchange=exch, transaction_type=action, quantity=qty,
-                        order_type="MARKET", product=product, tag=_otag(f"Agent-{self.name}"),
-                    ))
+                    # LIMIT timed out — cancel it, but check whether it raced to a fill
+                    # before our cancel landed. If it filled (any qty > 0) we MUST NOT
+                    # place a MARKET order or we double the position.
+                    try:
+                        await loop.run_in_executor(None, lambda: kite_client.cancel_order(order_id))
+                    except Exception:
+                        pass  # cancel may fail if the order already completed
+                    # Re-check fill status after the cancel
+                    _post_fill = await self._reconcile_fill(order_id, 0, loop)
+                    if _post_fill > 0:
+                        # LIMIT order filled in the race window — use it; skip MARKET
+                        qty = _post_fill
+                        logger.info(
+                            "[{}] LIMIT {} filled {} lots during cancel race — "
+                            "skipping MARKET follow-up",
+                            self.name, order_id, _post_fill,
+                        )
+                    else:
+                        order_id = await loop.run_in_executor(None, lambda: kite_client.place_order(
+                            tradingsymbol=trade_sym, exchange=exch, transaction_type=action,
+                            quantity=qty, order_type="MARKET", product=product,
+                            tag=_otag(f"Agent-{self.name}"),
+                        ))
                 sl_order_id = await loop.run_in_executor(None, lambda: kite_client.place_order(
                     tradingsymbol=trade_sym, exchange=exch, transaction_type=sl_side,
                     quantity=qty, order_type="SL-M", product=product,

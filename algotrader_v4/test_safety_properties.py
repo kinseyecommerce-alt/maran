@@ -659,11 +659,16 @@ async def p11_partial_fill_resizes_sl():
                          volume_ratio=1.4, trend="UP")
     snap = MarketSnapshot(symbol="RELIANCE", tick=tick, indicators=ind)
 
-    original_mode = settings.trading_mode
+    original_mode  = settings.trading_mode
+    original_limit = getattr(settings, "use_limit_orders", False)
     order_guard.release_order("RELIANCE", "intraday", "BUY", 0.0)
     order_guard.release_order("RELIANCE", "intraday", "SELL", 0.0)
     try:
         settings.trading_mode = "LIVE"
+        # Force MARKET path so this test is environment-independent.
+        # The LIMIT-path cancel/fill race is covered by the use_limit_orders path;
+        # this property tests the MARKET parallel-gather path specifically.
+        settings.use_limit_orders = False
         # Isolate the SL-resize logic: the risk gate (P-5) and SEBI gate (P-3) are
         # covered elsewhere and would reject here purely on wall-clock market hours.
         with mock.patch.object(kite_client, "place_order", side_effect=_place), \
@@ -681,6 +686,7 @@ async def p11_partial_fill_resizes_sl():
             )
     finally:
         settings.trading_mode = original_mode
+        settings.use_limit_orders = original_limit
         order_guard.release_order("RELIANCE", "intraday", "BUY", 0.0)
         order_guard.release_order("RELIANCE", "intraday", "SELL", 0.0)
 
