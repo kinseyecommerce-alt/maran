@@ -3000,19 +3000,20 @@ function renderPositions() {
     const sl = p.stop_loss || '—';
     const tg = p.target    || '—';
 
-    const sym = p.tradingsymbol || p.symbol || '—';
+    const sym    = p.tradingsymbol || p.symbol || '—';
+    const symEsc = escHtml(sym);
     const mult = side === 'BUY' ? 1 : -1;
     return `<tr>
-      <td style="font-weight:600">${sym}</td>
-      <td><span class="badge badge-${side.toLowerCase()}">${side}</span></td>
+      <td style="font-weight:600">${symEsc}</td>
+      <td><span class="badge badge-${side.toLowerCase()}">${escHtml(side)}</span></td>
       <td>${fmtINR(entry)}</td>
-      <td class="ltp-cell" data-symbol="${sym}" data-entry="${entry}" data-qty="${qty}" data-mult="${mult}">${fmtINR(ltp)}</td>
-      <td class="pnl-live" id="pnl-${sym}" style="color:${pnl >= 0 ? 'var(--green)' : 'var(--red)'}">${fmtINR(pnl)}</td>
-      <td class="pnl-pct-live" id="pnlpct-${sym}" style="color:${pnlPct >= 0 ? 'var(--green)' : 'var(--red)'}">${fmtPct(pnlPct)}</td>
-      <td style="color:var(--fg3)">${typeof sl === 'number' ? fmtINR(sl) : sl}</td>
-      <td style="color:var(--fg3)">${typeof tg === 'number' ? fmtINR(tg) : tg}</td>
-      <td style="color:var(--fg3)">${dur}</td>
-      <td><button class="btn btn-ghost btn-sm" onclick="exitPosition('${sym}','${side}',${qty})">Exit</button></td>
+      <td class="ltp-cell" data-symbol="${symEsc}" data-entry="${entry}" data-qty="${qty}" data-mult="${mult}">${fmtINR(ltp)}</td>
+      <td class="pnl-live" id="pnl-${symEsc}" style="color:${pnl >= 0 ? 'var(--green)' : 'var(--red)'}">${fmtINR(pnl)}</td>
+      <td class="pnl-pct-live" id="pnlpct-${symEsc}" style="color:${pnlPct >= 0 ? 'var(--green)' : 'var(--red)'}">${fmtPct(pnlPct)}</td>
+      <td style="color:var(--fg3)">${typeof sl === 'number' ? fmtINR(sl) : escHtml(String(sl))}</td>
+      <td style="color:var(--fg3)">${typeof tg === 'number' ? fmtINR(tg) : escHtml(String(tg))}</td>
+      <td style="color:var(--fg3)">${escHtml(dur)}</td>
+      <td><button class="btn btn-ghost btn-sm" onclick="exitPosition('${symEsc}','${escHtml(side)}',${qty})">Exit</button></td>
     </tr>`;
   }).join('');
   lucide.createIcons({ nodes: [tbody] });
@@ -3251,10 +3252,10 @@ function renderAuditLog(records) {
     return;
   }
   tbody.innerHTML = records.slice(-20).reverse().map(r => `<tr>
-    <td style="color:var(--fg3);white-space:nowrap">${r.time || r.timestamp || '—'}</td>
-    <td>${r.event || r.action || '—'}</td>
-    <td>${r.symbol || '—'}</td>
-    <td style="color:var(--fg3);max-width:220px;overflow:hidden;text-overflow:ellipsis">${r.details || r.reason || '—'}</td>
+    <td style="color:var(--fg3);white-space:nowrap">${escHtml(r.time || r.timestamp || '—')}</td>
+    <td>${escHtml(r.event || r.action || '—')}</td>
+    <td>${escHtml(r.symbol || '—')}</td>
+    <td style="color:var(--fg3);max-width:220px;overflow:hidden;text-overflow:ellipsis">${escHtml(r.details || r.reason || '—')}</td>
   </tr>`).join('');
   lucide.createIcons({ nodes: [tbody] });
 }

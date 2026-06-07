@@ -86,6 +86,10 @@ _SENSITIVE_GETS = frozenset({
     "/portfolio/positions", "/portfolio/orders", "/sebi/audit-log",
     "/docs", "/redoc",
     "/gate/log", "/agents/activity", "/brackets", "/trailing-sl/status", "/metrics",
+    "/portfolio/performance-report",  # full P&L history — requires auth
+    "/config/god-mode/status",        # exposes live risk profile — requires auth
+    "/risk/status",                   # exposes daily P&L limits
+    "/settings/trading-limits",       # exposes risk config
 })
 
 @app.middleware("http")
@@ -115,6 +119,18 @@ async def _api_key_gate(request: Request, call_next):
     return await call_next(request)
 
 
+# ── Security response headers ─────────────────────────────────────────────────
+@app.middleware("http")
+async def _security_headers(request: Request, call_next):
+    response = await call_next(request)
+    response.headers["X-Frame-Options"]        = "DENY"
+    response.headers["X-Content-Type-Options"] = "nosniff"
+    response.headers["Referrer-Policy"]        = "strict-origin-when-cross-origin"
+    if request.url.scheme == "https":
+        response.headers["Strict-Transport-Security"] = "max-age=31536000; includeSubDomains"
+    return response
+
+
 # ── HIGH-5: IP whitelist enforcement for orders and SEBI admin ──────────────────
 _IP_GUARDED_PREFIXES = ("/orders/", "/sebi/kill-switch", "/sebi/resume",
                          "/sebi/reset-kill-switch", "/sebi/pause")
@@ -137,6 +153,7 @@ _RATE_LIMITS = {
     "/backtest/run": 5,
     "/backtest/compare": 3,
     "/optimizer/run": 2,
+    "/auth/login": 10,   # brute-force protection: 10 login attempts / 60s per IP
 }
 
 @app.middleware("http")

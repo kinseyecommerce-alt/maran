@@ -128,6 +128,10 @@ if [[ ! -f "$ENV_FILE" ]]; then
 
     chmod 600 "$ENV_FILE"
     chown "$APP_USER":"$APP_USER" "$ENV_FILE"
+    # kite_accounts.json contains plaintext API secrets — restrict to app user only
+    touch "$APP_DIR/kite_accounts.json" 2>/dev/null || true
+    chmod 600 "$APP_DIR/kite_accounts.json"
+    chown "$APP_USER":"$APP_USER" "$APP_DIR/kite_accounts.json" 2>/dev/null || true
 
     echo ""
     echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"

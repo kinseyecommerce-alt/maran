@@ -229,7 +229,6 @@ class Settings(BaseSettings):
     adaptive_refresh_sec:     int   = 300    # how often base_agent re-reads adaptive params
     ws_max_connections:       int   = 50     # max simultaneous WebSocket clients
     order_max_retries:        int   = 3      # kite_client retry attempts on transient error
-    gate_api_timeout:         float = 8.0    # seconds before Claude gate call is abandoned
 
     # Server
     host: str = "0.0.0.0"

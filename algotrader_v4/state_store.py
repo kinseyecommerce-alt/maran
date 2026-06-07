@@ -361,12 +361,14 @@ def get_performance_report(
         if std > 0:
             sharpe = round((mean / std) * math.sqrt(252), 2)
 
-    # Calmar ratio = annualised return / max drawdown
+    # Calmar ratio = annualised return % / max drawdown %
+    # Both numerator and denominator must be in the same units (percent of capital).
+    # peak is the highest cumulative equity reached — use it as the capital base.
     calmar = None
-    if max_dd > 0 and len(daily_vals) >= 1:
-        trading_days = len(daily_vals)
-        ann_return   = total_net * (252 / trading_days)
-        calmar       = round(ann_return / max_dd, 2)
+    if max_dd > 0 and len(daily_vals) >= 1 and peak > 0:
+        trading_days   = len(daily_vals)
+        ann_return_pct = (total_net / peak) * (252 / trading_days) * 100
+        calmar         = round(ann_return_pct / max_dd, 2)
 
     # Monthly breakdown
     monthly: dict[str, dict] = {}
