@@ -15,7 +15,7 @@ from ist_clock import now_ist
 from pathlib import Path
 from typing import Literal
 
-from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect, Request, Query, Depends, Body
+from fastapi import BackgroundTasks, FastAPI, HTTPException, WebSocket, WebSocketDisconnect, Request, Query, Depends, Body
 from fastapi.responses import StreamingResponse, HTMLResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.middleware.cors import CORSMiddleware
@@ -1247,7 +1247,12 @@ async def ws_endpoint(ws: WebSocket):
     ws_clients.append(ws)
     try:
         while True:
-            data = await ws.receive_text()
+            try:
+                data = await asyncio.wait_for(ws.receive_text(), timeout=30.0)
+            except asyncio.TimeoutError:
+                # Send a keep-alive ping; client must respond or it will be disconnected next cycle.
+                await ws.send_json({"event": "ping", "ts": datetime.now().isoformat()})
+                continue
             if data == "ping":
                 await ws.send_json({"event": "pong", "ts": datetime.now().isoformat()})
     except WebSocketDisconnect:
@@ -1931,6 +1936,18 @@ async def on_startup():
             if ip:
                 sebi_compliance.add_whitelisted_ip(ip)
         logger.info("SEBI: loaded {} whitelisted IP(s) from env", len(sebi_compliance._whitelisted_ips))
+
+    # Wire kill-switch → immediate squareoff of all open positions.
+    async def _kill_switch_squareoff() -> None:
+        try:
+            ids = kite_client.squareoff_all_positions()
+            order_guard.reset_daily()
+            logger.critical("SEBI kill-switch squareoff: {} position(s) closed", len(ids))
+            await broadcast({"event": "kill_switch", "squared_off": len(ids)})
+        except Exception as exc:
+            logger.error("SEBI kill-switch squareoff error: {}", exc)
+
+    sebi_compliance.on_kill_switch = _kill_switch_squareoff
 
     tick_engine.start_loop()
     atomic_bracket_engine.ws_broadcast = broadcast

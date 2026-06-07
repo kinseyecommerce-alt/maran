@@ -472,50 +472,53 @@ class BacktestEngine:
         volume = df["volume"]
         signals = pd.Series(0, index=df.index)
 
+        n = len(df)
+
         if strategy == "intraday":
             ema9  = ta.trend.EMAIndicator(close, 9).ema_indicator()
             ema21 = ta.trend.EMAIndicator(close, 21).ema_indicator()
             rsi   = ta.momentum.RSIIndicator(close, 14).rsi()
             vwap  = ta.volume.VolumeWeightedAveragePrice(high, low, close, volume).volume_weighted_average_price()
-            for i in range(2, len(df)):
+            for i in range(2, n - 1):
                 vwap_cross = close.iloc[i-1] < vwap.iloc[i-1] and close.iloc[i] > vwap.iloc[i]
                 ema_bull   = ema9.iloc[i] > ema21.iloc[i]
                 rsi_ok     = 45 < rsi.iloc[i] < 65
                 if vwap_cross and ema_bull and rsi_ok:
-                    signals.iloc[i] = 1
+                    # Signal confirmed on bar i; entry fills at open of bar i+1 (no look-ahead).
+                    signals.iloc[i + 1] = 1
 
         elif strategy == "options":
             rsi    = ta.momentum.RSIIndicator(close, 14).rsi()
             atr    = ta.volatility.AverageTrueRange(high, low, close, 14).average_true_range()
             atr_ma = atr.rolling(30).mean()
-            for i in range(30, len(df)):
+            for i in range(30, n - 1):
                 iv_proxy = (atr.iloc[i] / atr_ma.iloc[i] * 50) if atr_ma.iloc[i] else 50
                 if iv_proxy < 40 and rsi.iloc[i] < 40:
-                    signals.iloc[i] = 1
+                    signals.iloc[i + 1] = 1
                 elif iv_proxy < 40 and rsi.iloc[i] > 60:
-                    signals.iloc[i] = 1
+                    signals.iloc[i + 1] = 1
 
         elif strategy == "swing":
             ema50 = ta.trend.EMAIndicator(close, 50).ema_indicator()
             ema20 = ta.trend.EMAIndicator(close, 20).ema_indicator()
             rsi   = ta.momentum.RSIIndicator(close, 14).rsi()
-            for i in range(50, len(df)):
+            for i in range(50, n - 1):
                 near   = abs(close.iloc[i] - ema50.iloc[i]) / ema50.iloc[i] < 0.015
                 ema_up = ema20.iloc[i] > ema50.iloc[i]
                 rsi_ok = 40 < rsi.iloc[i] < 60
                 if near and ema_up and rsi_ok:
-                    signals.iloc[i] = 1
+                    signals.iloc[i + 1] = 1
 
         elif strategy == "scalping":
             ema9   = ta.trend.EMAIndicator(close, 9).ema_indicator()
             rsi    = ta.momentum.RSIIndicator(close, 7).rsi()
             vol_ma = volume.rolling(10).mean()
-            for i in range(10, len(df)):
+            for i in range(10, n - 1):
                 cross = close.iloc[i-1] < ema9.iloc[i-1] and close.iloc[i] > ema9.iloc[i]
                 spike = volume.iloc[i] > vol_ma.iloc[i] * 1.5
                 mom   = 50 < rsi.iloc[i] < 70
                 if cross and spike and mom:
-                    signals.iloc[i] = 1
+                    signals.iloc[i + 1] = 1
 
         return signals
 

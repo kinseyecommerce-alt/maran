@@ -744,9 +744,20 @@ class BaseAgent(ABC):
                 order_guard.confirm_claim(sym, self.name, action, str(order_id))
                 _claim_confirmed = True
                 if isinstance(sl_order_id, Exception):
-                    logger.error("[{}] SL-M failed after entry {} — position unprotected! {}",
-                                 self.name, order_id, sl_order_id)
-                    sl_order_id = None
+                    # SL-M failed after entry succeeded → cancel entry immediately.
+                    # An unprotected open position is worse than a missed trade.
+                    logger.critical(
+                        "[{}] SL-M failed after entry {} — cancelling entry to prevent "
+                        "unprotected position. Error: {}",
+                        self.name, order_id, sl_order_id,
+                    )
+                    try:
+                        await loop.run_in_executor(None, lambda: kite_client.cancel_order(str(order_id)))
+                    except Exception as cancel_exc:
+                        logger.error("[{}] Failed to cancel unprotected entry {}: {}",
+                                     self.name, order_id, cancel_exc)
+                    order_guard.release_claim(sym, self.name, action)
+                    raise RuntimeError("sl_placement_failed")
         except RuntimeError:
             raise
         except Exception as exc:

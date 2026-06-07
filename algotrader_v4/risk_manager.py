@@ -471,6 +471,16 @@ class RiskManager:
             )
         return True, "OK"
 
+    def restore_daily_pnl_from_db(self) -> None:
+        """Reload today's realised P&L from the DB. Call once at startup so a crash/restart
+        does not reset the daily-loss guard to zero."""
+        try:
+            from state_store import get_daily_pnl
+            self.daily_realised_pnl = get_daily_pnl()
+            logger.info("Risk manager: restored daily P&L ₹{:.0f} from DB", self.daily_realised_pnl)
+        except Exception as exc:
+            logger.warning("Risk manager: could not restore daily P&L from DB — {}", exc)
+
     def record_trade(self, pnl: float) -> None:
         prev_pnl = self.daily_realised_pnl
         self.daily_realised_pnl += pnl

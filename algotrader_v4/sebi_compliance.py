@@ -23,7 +23,7 @@ from datetime import datetime, date
 from enum import Enum
 from pathlib import Path
 from threading import Lock
-from typing import Optional
+from typing import Awaitable, Callable, Optional
 
 from loguru import logger
 from config import settings
@@ -178,11 +178,27 @@ class SEBICompliance:
         logger.info("SEBICompliance module initialised — 10 regulations active")
 
     # ── Reg 2: Kill switch ─────────────────────────────────────────────────────
+
+    # Wired by main.py: async callable() that cancels all open orders + squares off.
+    on_kill_switch: "Callable[[], Awaitable[None]] | None" = None
+
     def trigger_kill_switch(self, reason: str = "Emergency halt") -> None:
         with self._lock:
             self._state       = KillSwitchState.KILLED
             self._kill_reason = reason
         logger.critical("SEBI KILL SWITCH TRIGGERED: {}", reason)
+        # Cancel all open orders and square off positions immediately.
+        if self.on_kill_switch is not None:
+            import asyncio
+            try:
+                loop = asyncio.get_running_loop()
+                loop.create_task(self.on_kill_switch())
+            except RuntimeError:
+                # No running event loop — fire-and-forget via a new loop.
+                try:
+                    asyncio.run(self.on_kill_switch())
+                except Exception as exc:
+                    logger.error("SEBI kill-switch squareoff failed: {}", exc)
 
     def pause_trading(self, reason: str = "Manual pause") -> None:
         with self._lock:
