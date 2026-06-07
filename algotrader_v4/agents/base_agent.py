@@ -108,7 +108,7 @@ def _setup_tsl_callbacks() -> None:
         _loop = asyncio.get_running_loop()
         if entry and entry.get("sl_order_id"):
             sl_oid = entry["sl_order_id"]
-            # Check if the SL-M order already executed on the exchange
+            # Check if the SL-M order already executed on the exchange.
             try:
                 if hasattr(kite_client, "_paper_orders"):
                     o = kite_client._paper_orders.get(sl_oid)
@@ -120,25 +120,41 @@ def _setup_tsl_callbacks() -> None:
                         if h.get("status") == "COMPLETE":
                             sl_already_filled = True
                             break
-            except Exception:
-                # Can't confirm SL-M status — assume it filled to avoid double-exit.
-                sl_already_filled = True
+            except Exception as _hist_exc:
+                # Cannot confirm SL-M status — default to NOT filled and place MARKET exit.
+                # A duplicate exit attempt is rejected by the exchange; a missed exit
+                # accumulates real losses. Always prefer to try the exit.
+                logger.warning("[TSL] order_history() failed for SL-M {} — will attempt MARKET exit: {}",
+                               sl_oid, _hist_exc)
+                sl_already_filled = False
             if not sl_already_filled:
                 try:
                     await _loop.run_in_executor(None, lambda: kite_client.cancel_order(sl_oid))
                 except Exception:
                     pass
 
+        # Use the stored tradingsymbol (actual instrument, e.g. futures/options contract).
+        # Fall back to pos.symbol (underlying) only for equity agents where they match.
+        exit_sym  = entry.get("tradingsymbol", pos.symbol) if entry else pos.symbol
+        exit_exch = entry.get("exchange", "NSE") if entry else "NSE"
+        exit_prod = entry.get("product", "MIS") if entry else "MIS"
+
         # Only place MARKET exit if the SL-M hasn't already filled
         if not sl_already_filled:
-            await _loop.run_in_executor(None, lambda: kite_client.place_order(
-                tradingsymbol=pos.symbol,
-                exchange=entry.get("exchange", "NSE") if entry else "NSE",
-                transaction_type="SELL" if pos.side == "BUY" else "BUY",
-                quantity=pos.quantity, order_type="MARKET",
-                product=entry.get("product", "MIS") if entry else "MIS",
-                tag=_otag(f"TSL-HIT-{pos.strategy}"),
-            ))
+            try:
+                await _loop.run_in_executor(None, lambda: kite_client.place_order(
+                    tradingsymbol=exit_sym,
+                    exchange=exit_exch,
+                    transaction_type="SELL" if pos.side == "BUY" else "BUY",
+                    quantity=pos.quantity, order_type="MARKET",
+                    product=exit_prod,
+                    tag=_otag(f"TSL-HIT-{pos.strategy}"),
+                ))
+            except Exception as _exit_exc:
+                logger.critical(
+                    "[TSL] MARKET exit FAILED for {} {} — position may be stuck open! {}",
+                    pos.symbol, pos.strategy, _exit_exc,
+                )
         else:
             logger.info("SL-M {} already COMPLETE — skipping MARKET exit to avoid double-exit",
                         entry.get("sl_order_id") if entry else "?")
@@ -183,12 +199,24 @@ def _setup_tsl_callbacks() -> None:
             with _tsl_sl_orders_lock:
                 entry = _tsl_sl_orders.pop(pos.order_id, None)
             _loop = asyncio.get_running_loop()
+            # Cancel the pending SL-M order BEFORE placing the MARKET exit.
+            # If SL-M is left active and price later dips to its trigger, it would
+            # fire after the position is already closed, opening an unwanted reverse position.
+            if entry and entry.get("sl_order_id"):
+                try:
+                    await _loop.run_in_executor(None, lambda: kite_client.cancel_order(entry["sl_order_id"]))
+                    logger.info("[TSL] Cancelled SL-M {} before T2 MARKET exit", entry["sl_order_id"])
+                except Exception as _ce:
+                    logger.warning("[TSL] Failed to cancel SL-M {} before T2 exit: {}", entry["sl_order_id"], _ce)
+            exit_sym  = entry.get("tradingsymbol", pos.symbol) if entry else pos.symbol
+            exit_exch = entry.get("exchange", "NSE") if entry else "NSE"
+            exit_prod = entry.get("product", "MIS") if entry else "MIS"
             await _loop.run_in_executor(None, lambda: kite_client.place_order(
-                tradingsymbol=pos.symbol,
-                exchange=entry.get("exchange", "NSE") if entry else "NSE",
+                tradingsymbol=exit_sym,
+                exchange=exit_exch,
                 transaction_type="SELL" if pos.side == "BUY" else "BUY",
                 quantity=pos.quantity, order_type="MARKET",
-                product=entry.get("product", "MIS") if entry else "MIS",
+                product=exit_prod,
                 tag=_otag(f"TSL-T{level}-{pos.strategy}"),
             ))
             order_guard.release_order(pos.symbol, pos.strategy, pos.side, pnl_est)
@@ -649,6 +677,11 @@ class BaseAgent(ABC):
         sym  = snap.symbol
         ltp  = snap.tick.ltp
         exch = signal.get("exchange", "NSE")
+        # Futures/options agents embed the actual instrument symbol in the signal.
+        # Use it as the tradingsymbol; fall back to the underlying snap.symbol for equity agents.
+        trade_sym = signal.get("tradingsymbol",
+                    signal.get("futures_symbol",
+                    signal.get("option_symbol", sym)))
 
         claimed, _ = order_guard.try_claim(sym, self.name, action)
         if not claimed:
@@ -707,17 +740,17 @@ class BaseAgent(ABC):
         try:
             if use_limit and settings.trading_mode == "LIVE":
                 order_id = await loop.run_in_executor(None, lambda: kite_client.place_order(
-                    tradingsymbol=sym, exchange=exch, transaction_type=action, quantity=qty,
+                    tradingsymbol=trade_sym, exchange=exch, transaction_type=action, quantity=qty,
                     order_type="LIMIT", product=product, price=limit_px, tag=_otag(f"Agent-{self.name}"),
                 ))
                 if not await self._await_limit_fill(order_id, lim_timeout):
                     await loop.run_in_executor(None, lambda: kite_client.cancel_order(order_id))
                     order_id = await loop.run_in_executor(None, lambda: kite_client.place_order(
-                        tradingsymbol=sym, exchange=exch, transaction_type=action, quantity=qty,
+                        tradingsymbol=trade_sym, exchange=exch, transaction_type=action, quantity=qty,
                         order_type="MARKET", product=product, tag=_otag(f"Agent-{self.name}"),
                     ))
                 sl_order_id = await loop.run_in_executor(None, lambda: kite_client.place_order(
-                    tradingsymbol=sym, exchange=exch, transaction_type=sl_side,
+                    tradingsymbol=trade_sym, exchange=exch, transaction_type=sl_side,
                     quantity=qty, order_type="SL-M", product=product,
                     trigger_price=sl, tag=_otag(f"Agent-{self.name}", "SL"),
                 ))
@@ -726,11 +759,11 @@ class BaseAgent(ABC):
                 entry_px   = limit_px if use_limit else 0.0
                 results = await asyncio.gather(
                     loop.run_in_executor(None, lambda: kite_client.place_order(
-                        tradingsymbol=sym, exchange=exch, transaction_type=action, quantity=qty,
+                        tradingsymbol=trade_sym, exchange=exch, transaction_type=action, quantity=qty,
                         order_type=entry_type, product=product, price=entry_px, tag=_otag(f"Agent-{self.name}"),
                     )),
                     loop.run_in_executor(None, lambda: kite_client.place_order(
-                        tradingsymbol=sym, exchange=exch, transaction_type=sl_side,
+                        tradingsymbol=trade_sym, exchange=exch, transaction_type=sl_side,
                         quantity=qty, order_type="SL-M", product=product,
                         trigger_price=sl, tag=_otag(f"Agent-{self.name}", "SL"),
                     )),
@@ -825,7 +858,16 @@ class BaseAgent(ABC):
             on_sl_moved=trailing_sl_engine.on_sl_moved,
         )
         with _tsl_sl_orders_lock:
-            _tsl_sl_orders[order_id] = {"sl_order_id": sl_order_id, "product": product, "exchange": exch}
+            _tsl_sl_orders[order_id] = {
+                "sl_order_id": sl_order_id,
+                "product": product,
+                "exchange": exch,
+                # Store the actual instrument symbol (contract for F&O, underlying for equities)
+                # so TSL exit callbacks place the order on the correct tradingsymbol.
+                "tradingsymbol": signal.get("tradingsymbol",
+                                  signal.get("futures_symbol",
+                                  signal.get("option_symbol", sym))),
+            }
 
         ind = snap.indicators
         await send_telegram(
