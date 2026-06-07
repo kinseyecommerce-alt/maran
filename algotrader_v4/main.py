@@ -16,7 +16,7 @@ from pathlib import Path
 from typing import Literal
 
 from fastapi import BackgroundTasks, FastAPI, HTTPException, WebSocket, WebSocketDisconnect, Request, Query, Depends, Body
-from fastapi.responses import StreamingResponse, HTMLResponse, JSONResponse
+from fastapi.responses import StreamingResponse, HTMLResponse, JSONResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.openapi.docs import get_swagger_ui_html, get_redoc_html
@@ -112,20 +112,43 @@ async def _api_key_gate(request: Request, call_next):
             api_key.encode(), settings.api_key.encode()
         )
         has_jwt = False
-        if auth_hdr.startswith("Bearer ") and settings.jwt_secret_key:
-            has_jwt = decode_token(auth_hdr[7:]) is not None
+        if settings.jwt_secret_key:
+            # Accept Bearer token (API clients) OR HttpOnly cookie (browser dashboard)
+            if auth_hdr.startswith("Bearer "):
+                has_jwt = decode_token(auth_hdr[7:]) is not None
+            if not has_jwt:
+                cookie_jwt = request.cookies.get("jwt", "")
+                has_jwt = bool(cookie_jwt) and decode_token(cookie_jwt) is not None
         if not has_key and not has_jwt:
             return JSONResponse({"detail": "Unauthorized: provide X-API-Key or Bearer token"}, status_code=401)
     return await call_next(request)
 
 
 # ── Security response headers ─────────────────────────────────────────────────
+# CSP breakdown:
+#   script-src 'self' 'unsafe-inline' — local JS + inline dashboard script block
+#   style-src  'self' 'unsafe-inline' https://fonts.googleapis.com — local CSS + Google Fonts
+#   font-src   'self' https://fonts.gstatic.com — Google Fonts files
+#   connect-src 'self' wss: ws: — same-origin REST + WebSocket
+#   img-src 'self' data: — favicon and inline data URIs
+#   frame-ancestors 'none' — superset of X-Frame-Options: DENY
+_CSP = (
+    "default-src 'self'; "
+    "script-src 'self' 'unsafe-inline'; "
+    "style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; "
+    "font-src 'self' https://fonts.gstatic.com; "
+    "connect-src 'self' wss: ws:; "
+    "img-src 'self' data:; "
+    "frame-ancestors 'none'"
+)
+
 @app.middleware("http")
 async def _security_headers(request: Request, call_next):
     response = await call_next(request)
     response.headers["X-Frame-Options"]        = "DENY"
     response.headers["X-Content-Type-Options"] = "nosniff"
     response.headers["Referrer-Policy"]        = "strict-origin-when-cross-origin"
+    response.headers["Content-Security-Policy"] = _CSP
     if request.url.scheme == "https":
         response.headers["Strict-Transport-Security"] = "max-age=31536000; includeSubDomains"
     return response
@@ -394,14 +417,38 @@ def clear_agent_activity():
 
 
 # ── App auth (JWT) ──────────────────────────────────────────────────────────
+_JWT_COOKIE_MAX_AGE = 86400  # 24 hours — same as token lifetime
+
 @app.post("/auth/login", tags=["Auth"])
-def app_login(form: OAuth2PasswordRequestForm = Depends()):
-    """Exchange username + password for a JWT access token."""
+def app_login(request: Request, form: OAuth2PasswordRequestForm = Depends()):
+    """Exchange username + password for a JWT access token.
+    Sets an HttpOnly cookie (browser flow) AND returns the token in the JSON body
+    (API/CLI flow). Both auth methods remain valid.
+    """
     if not authenticate(form.username, form.password):
         raise HTTPException(status_code=401, detail="Incorrect username or password",
                             headers={"WWW-Authenticate": "Bearer"})
     token, expires_in = create_token(form.username)
-    return {"access_token": token, "token_type": "bearer", "expires_in": expires_in}
+    response = JSONResponse({"access_token": token, "token_type": "bearer", "expires_in": expires_in})
+    is_https = request.url.scheme == "https"
+    response.set_cookie(
+        key="jwt",
+        value=token,
+        max_age=_JWT_COOKIE_MAX_AGE,
+        httponly=True,          # inaccessible to JavaScript
+        secure=is_https,        # HTTPS-only flag when served over TLS
+        samesite="strict",      # no cross-site requests
+        path="/",
+    )
+    return response
+
+
+@app.post("/auth/logout", tags=["Auth"], include_in_schema=True)
+def app_logout():
+    """Clear the JWT cookie and end the browser session."""
+    response = JSONResponse({"status": "logged_out"})
+    response.delete_cookie(key="jwt", path="/")
+    return response
 
 @app.get("/auth/me", tags=["Auth"])
 def me(request: Request):

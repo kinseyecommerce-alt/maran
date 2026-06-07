@@ -224,6 +224,11 @@ class Settings(BaseSettings):
     database_url: str = ""   # e.g. postgresql+asyncpg://user:pass@host/db
     redis_url:    str = ""   # e.g. redis://localhost:6379/0
 
+    # kite_accounts.json encryption — Fernet key (base64-url, 32 bytes).
+    # Generate: python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"
+    # When set, API key/secret are encrypted at rest. When empty, fallback to plaintext + chmod 600.
+    kite_accounts_key: str = ""
+
     # Runtime tuning — named constants (avoids magic numbers scattered across modules)
     db_write_queue_size:      int   = 2000   # state_store write backlog before drops
     adaptive_refresh_sec:     int   = 300    # how often base_agent re-reads adaptive params

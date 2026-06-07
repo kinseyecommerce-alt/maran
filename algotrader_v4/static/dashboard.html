@@ -2446,7 +2446,6 @@
    STATE
 ═══════════════════════════════════════════════════════════════ */
 const state = {
-  jwt:         localStorage.getItem('jwtToken'),
   botRunning:  false,
   positions:   [],
   agents:      {},
@@ -2468,10 +2467,10 @@ const state = {
 
 /* ═══════════════════════════════════════════════════════════════
    AUTH GUARD
+   Auth is now cookie-based (HttpOnly jwt cookie set by /auth/login).
+   The browser sends it automatically; JS cannot read or steal it.
+   On 401 we redirect to /login — the server clears the cookie there.
 ═══════════════════════════════════════════════════════════════ */
-if (!state.jwt) {
-  window.location.href = '/login';
-}
 
 /* ═══════════════════════════════════════════════════════════════
    API HELPER
@@ -2479,16 +2478,13 @@ if (!state.jwt) {
 async function api(method, path, body) {
   const opts = {
     method,
-    headers: {
-      'Authorization': `Bearer ${state.jwt}`,
-      'Content-Type':  'application/json',
-    },
+    credentials: 'same-origin',   // include HttpOnly jwt cookie automatically
+    headers: { 'Content-Type': 'application/json' },
   };
   if (body !== undefined) opts.body = JSON.stringify(body);
   try {
     const res = await fetch(path, opts);
     if (res.status === 401) {
-      localStorage.removeItem('jwtToken');
       window.location.href = '/login';
       return null;
     }

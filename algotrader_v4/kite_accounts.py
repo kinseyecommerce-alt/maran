@@ -1,7 +1,10 @@
 """
 kite_accounts.py — Multi-account Kite credential store.
 Persists accounts to kite_accounts.json alongside main.py.
-Secrets are stored as-is (plain text on disk) — protect the file.
+
+Security tiers (best → acceptable):
+  1. Set KITE_ACCOUNTS_KEY in .env — secrets are Fernet-encrypted at rest.
+  2. No key set — secrets are plaintext JSON; file is chmod 600 (set by deploy script).
 """
 from __future__ import annotations
 
@@ -15,6 +18,52 @@ _lock = threading.Lock()
 _accounts: dict[str, dict] = {}
 _loaded = False
 
+# ── Encryption helpers ────────────────────────────────────────────────────────
+
+def _get_fernet():
+    """Return a Fernet instance if KITE_ACCOUNTS_KEY is configured, else None."""
+    try:
+        from config import settings
+        key = (settings.kite_accounts_key or "").strip()
+        if not key:
+            return None
+        from cryptography.fernet import Fernet
+        return Fernet(key.encode())
+    except Exception:
+        return None
+
+
+def _encrypt_fields(account: dict) -> dict:
+    """Encrypt sensitive string fields in-place for storage."""
+    f = _get_fernet()
+    if f is None:
+        return account
+    out = dict(account)
+    for field in ("api_key", "api_secret", "access_token"):
+        val = out.get(field, "")
+        if val:
+            out[field] = f.encrypt(val.encode()).decode()
+    return out
+
+
+def _decrypt_fields(account: dict) -> dict:
+    """Decrypt sensitive string fields loaded from storage."""
+    f = _get_fernet()
+    if f is None:
+        return account
+    out = dict(account)
+    for field in ("api_key", "api_secret", "access_token"):
+        val = out.get(field, "")
+        if val:
+            try:
+                out[field] = f.decrypt(val.encode()).decode()
+            except Exception:
+                # Value wasn't encrypted (e.g. migration from plaintext) — keep as-is
+                pass
+    return out
+
+
+# ── Persistence ───────────────────────────────────────────────────────────────
 
 def _load() -> None:
     global _accounts, _loaded
@@ -22,21 +71,23 @@ def _load() -> None:
         return
     if _STORE_PATH.exists():
         try:
-            _accounts = json.loads(_STORE_PATH.read_text())
+            raw = json.loads(_STORE_PATH.read_text())
+            _accounts = {name: _decrypt_fields(acc) for name, acc in raw.items()}
         except Exception:
             _accounts = {}
     _loaded = True
 
 
 def _save() -> None:
-    _STORE_PATH.write_text(json.dumps(_accounts, indent=2))
+    stored = {name: _encrypt_fields(acc) for name, acc in _accounts.items()}
+    _STORE_PATH.write_text(json.dumps(stored, indent=2))
 
 
 def _mask(key: str) -> str:
     return f"{key[:4]}…{key[-4:]}" if len(key) >= 8 else ("*" * len(key))
 
 
-# ── Public API ─────────────────────────────────────────────────────────────────
+# ── Public API ────────────────────────────────────────────────────────────────
 
 def list_accounts() -> list[dict]:
     """Return all accounts with secrets masked."""
