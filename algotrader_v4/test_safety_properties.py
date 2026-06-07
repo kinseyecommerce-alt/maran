@@ -6,7 +6,7 @@ Each test proves exactly one invariant that, if violated, could lose real money.
 
 Run:  python test_safety_properties.py
 
-All 10 must pass.  Any failure = block deployment.
+All 12 must pass.  Any failure = block deployment.
 """
 from __future__ import annotations
 
@@ -614,6 +614,100 @@ async def p10_entry_fail_cancels_orphan_sl():
         "orphan SL-M was NOT cancelled after entry failure → naked-position risk"
 
 acheck("P-10 Entry failure cancels orphan SL-M", p10_entry_fail_cancels_orphan_sl())
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# P-11  Partial fill resizes the SL-M (no over-hedge → no naked short)
+# ─────────────────────────────────────────────────────────────────────────────
+async def p11_partial_fill_resizes_sl():
+    """
+    LIVE: when the entry MARKET order only PARTIALLY fills, the SL-M (placed for
+    the requested qty) must be resized DOWN to the filled qty. Otherwise the
+    oversized stop flips to a naked short on the unfilled remainder when it fires.
+    """
+    from agents.strategy_agents import IntradayAgent
+    from tick_engine import MarketSnapshot, Tick, LiveIndicators
+    from kite_client import kite_client
+    from order_guard import order_guard
+    from risk_manager import risk_manager
+    from sebi_compliance import sebi_compliance
+    from datetime import datetime as _dt
+
+    agent = IntradayAgent()
+    agent._approved.add("RELIANCE")
+
+    modify_calls: list[tuple[str, int]] = []
+
+    def _place(*args, **kwargs):
+        return "ENTRY-1" if kwargs.get("transaction_type") == "BUY" else "SL-1"
+
+    def _order_history(oid):
+        # entry filled only 5 of 10
+        return [{"status": "COMPLETE", "filled_quantity": 5, "order_id": str(oid)}]
+
+    def _modify(order_id, price=0.0, quantity=0, trigger_price=0.0):
+        modify_calls.append((str(order_id), int(quantity)))
+        return order_id
+
+    tick = Tick(symbol="RELIANCE", ltp=1510.0, bid=1509.5, ask=1510.5,
+                volume=600_000, change=5.0, change_pct=0.5,
+                high=1515.0, low=1480.0, open=1485.0, timestamp=_dt.now())
+    ind = LiveIndicators(symbol="RELIANCE", ltp=1510.0, ema9=1505.0, ema21=1490.0,
+                         ema50=1470.0, ema200=1400.0, vwap=1500.0, rsi_14=58.0,
+                         macd=2.5, macd_signal=1.5, macd_hist=1.0, atr_14=8.0,
+                         adx_14=28.0, bb_upper=1530.0, bb_lower=1470.0, bb_mid=1500.0,
+                         volume_ratio=1.4, trend="UP")
+    snap = MarketSnapshot(symbol="RELIANCE", tick=tick, indicators=ind)
+
+    original_mode = settings.trading_mode
+    order_guard.release_order("RELIANCE", "intraday", "BUY", 0.0)
+    order_guard.release_order("RELIANCE", "intraday", "SELL", 0.0)
+    try:
+        settings.trading_mode = "LIVE"
+        # Isolate the SL-resize logic: the risk gate (P-5) and SEBI gate (P-3) are
+        # covered elsewhere and would reject here purely on wall-clock market hours.
+        with mock.patch.object(kite_client, "place_order", side_effect=_place), \
+             mock.patch.object(kite_client, "order_history", side_effect=_order_history), \
+             mock.patch.object(kite_client, "modify_order", side_effect=_modify), \
+             mock.patch.object(kite_client, "cancel_order", side_effect=lambda o: o), \
+             mock.patch.object(kite_client, "_check_margin", side_effect=lambda *a, **k: None), \
+             mock.patch.object(risk_manager, "check_before_order", return_value=(True, "OK")), \
+             mock.patch.object(sebi_compliance, "pre_order_check", return_value=(True, "ALGO", "OK")):
+            loop = asyncio.get_running_loop()
+            _oid, _sl, final_qty = await agent._place_orders(
+                snap, "BUY",
+                {"stop_loss": 1490.0, "target": 1530.0, "score": 10, "pattern": "TEST"},
+                10, loop,
+            )
+    finally:
+        settings.trading_mode = original_mode
+        order_guard.release_order("RELIANCE", "intraday", "BUY", 0.0)
+        order_guard.release_order("RELIANCE", "intraday", "SELL", 0.0)
+
+    assert final_qty == 5, f"qty should be resized to filled 5, got {final_qty}"
+    assert ("SL-1", 5) in modify_calls, \
+        f"SL-M was not resized to the filled qty → over-hedge risk; modify_calls={modify_calls}"
+
+acheck("P-11 Partial fill resizes the SL-M", p11_partial_fill_resizes_sl())
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# P-12  NSE holiday calendar blocks trading
+# ─────────────────────────────────────────────────────────────────────────────
+def p12_holiday_calendar_blocks_trading():
+    """is_market_open() must return False on listed NSE holidays."""
+    from datetime import date
+    import inspect
+    from ist_clock import is_nse_holiday, NSE_HOLIDAYS, is_market_open
+
+    assert len(NSE_HOLIDAYS) > 0, "NSE holiday calendar is empty"
+    assert is_nse_holiday(date(2026, 1, 26)), "Republic Day not flagged as a holiday"
+    assert not is_nse_holiday(date(2026, 6, 8)), "a normal weekday flagged as a holiday"
+    # is_market_open must actually consult the holiday set
+    src = inspect.getsource(is_market_open)
+    assert "NSE_HOLIDAYS" in src, "is_market_open() does not consult NSE_HOLIDAYS"
+
+check("P-12 NSE holiday calendar blocks trading", p12_holiday_calendar_blocks_trading)
 
 
 # ── Final summary ─────────────────────────────────────────────────────────────

@@ -576,6 +576,77 @@ class BaseAgent(ABC):
                 pass
         return False
 
+    async def _reconcile_fill(self, order_id: str, requested_qty: int,
+                              loop: asyncio.AbstractEventLoop) -> int:
+        """LIVE: poll order status briefly for the ACTUAL filled quantity.
+
+        MARKET orders reach a terminal state within a few hundred ms. If the
+        status feed is unreachable we assume a FULL fill — leaving a real
+        position unprotected is worse than a rare over-hedge. PAPER → full qty.
+        """
+        if settings.trading_mode != "LIVE":
+            return requested_qty
+        last_filled = 0
+        for _ in range(6):                       # ~1.5s budget for terminal state
+            try:
+                hist = await loop.run_in_executor(
+                    None, lambda: kite_client.order_history(str(order_id)))
+            except Exception as exc:
+                logger.warning("[{}] fill reconcile: order_history({}) failed: {} "
+                               "— assuming full fill", self.name, order_id, exc)
+                return requested_qty
+            if hist:
+                last = hist[-1]
+                status = str(last.get("status", "")).upper()
+                try:
+                    last_filled = int(last.get("filled_quantity", 0) or 0)
+                except (TypeError, ValueError):
+                    last_filled = 0
+                if status == "COMPLETE":
+                    return last_filled or requested_qty
+                if status in ("REJECTED", "CANCELLED"):
+                    return last_filled            # 0 = nothing filled; else partial
+            await asyncio.sleep(0.25)
+        return last_filled or requested_qty       # no terminal status — best known
+
+    async def _reconcile_fill_and_resize_sl(
+        self, order_id: str, sl_order_id: str | None,
+        requested_qty: int, loop: asyncio.AbstractEventLoop,
+    ) -> int:
+        """LIVE: confirm the entry fill and keep the SL-M matched to it.
+
+        • partial fill → resize the SL-M down to the filled qty (no over-hedge,
+          which would otherwise flip to a naked short when the stop triggers).
+        • zero fill    → tear down the SL-M and the (unfilled) entry, then raise
+          RuntimeError('entry_unfilled').
+        Returns the quantity actually filled (== requested in PAPER).
+        """
+        if settings.trading_mode != "LIVE":
+            return requested_qty
+        filled = await self._reconcile_fill(order_id, requested_qty, loop)
+        if filled <= 0:
+            logger.critical("[{}] entry {} filled 0 — tearing down SL {} and aborting",
+                            self.name, order_id, sl_order_id)
+            for oid in (sl_order_id, order_id):
+                if not oid:
+                    continue
+                try:
+                    await loop.run_in_executor(
+                        None, lambda o=oid: kite_client.cancel_order(str(o)))
+                except Exception as exc:
+                    logger.error("[{}] teardown cancel {} failed: {}", self.name, oid, exc)
+            raise RuntimeError("entry_unfilled")
+        if filled < requested_qty and sl_order_id:
+            logger.warning("[{}] PARTIAL fill {}/{} on entry {} — resizing SL {} to {}",
+                           self.name, filled, requested_qty, order_id, sl_order_id, filled)
+            try:
+                await loop.run_in_executor(
+                    None, lambda: kite_client.modify_order(str(sl_order_id), quantity=filled))
+            except Exception as exc:
+                logger.error("[{}] FAILED to resize SL {} to filled qty {} — over-hedge "
+                             "risk remains: {}", self.name, sl_order_id, filled, exc)
+        return filled
+
     # ── Entry helpers (split from _try_enter for readability) ──────────────
 
     def _compute_qty(self, snap: MarketSnapshot, action: str, signal: dict) -> int:
@@ -754,6 +825,12 @@ class BaseAgent(ABC):
                     quantity=qty, order_type="SL-M", product=product,
                     trigger_price=sl, tag=_otag(f"Agent-{self.name}", "SL"),
                 ))
+                # H2: confirm actual fill; resize SL on partial; abort on zero fill.
+                try:
+                    qty = await self._reconcile_fill_and_resize_sl(order_id, sl_order_id, qty, loop)
+                except RuntimeError:
+                    order_guard.release_claim(sym, self.name, action)
+                    raise
             else:
                 entry_type = "LIMIT" if use_limit else "MARKET"
                 entry_px   = limit_px if use_limit else 0.0
@@ -805,6 +882,13 @@ class BaseAgent(ABC):
                                      self.name, order_id, cancel_exc)
                     order_guard.release_claim(sym, self.name, action)
                     raise RuntimeError("sl_placement_failed")
+                # H2: both orders landed — confirm actual fill; resize SL on
+                # partial; abort on zero fill. (LIVE only; PAPER is a no-op.)
+                try:
+                    qty = await self._reconcile_fill_and_resize_sl(order_id, sl_order_id, qty, loop)
+                except RuntimeError:
+                    order_guard.release_claim(sym, self.name, action)
+                    raise
         except RuntimeError:
             raise
         except Exception as exc:
