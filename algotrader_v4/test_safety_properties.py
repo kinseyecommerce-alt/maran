@@ -6,7 +6,7 @@ Each test proves exactly one invariant that, if violated, could lose real money.
 
 Run:  python test_safety_properties.py
 
-All 8 must pass.  Any failure = block deployment.
+All 10 must pass.  Any failure = block deployment.
 """
 from __future__ import annotations
 
@@ -461,6 +461,159 @@ def p8_production_build_succeeds():
         "BLK-4 fix not present: exception path must default to sl_already_filled=False"
 
 check("P-8  Production build succeeds", p8_production_build_succeeds)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# P-9  Network failure does not place a duplicate live order
+# ─────────────────────────────────────────────────────────────────────────────
+def p9_network_failure_no_duplicate_order():
+    """
+    A NetworkException can be raised AFTER the order reaches the exchange.
+    place_order must reconcile against the order book and NEVER blind-retry:
+      (a) error + order present in book   → return it, kite.place_order called once
+      (b) error + book confirms not landed→ safe to retry (called > 1)
+      (c) error + book ALSO unreachable   → raise, kite.place_order called once
+    """
+    from kiteconnect.exceptions import NetworkException
+
+    original_mode = settings.trading_mode
+    try:
+        settings.trading_mode = "LIVE"
+
+        # ── (a) order landed despite the network error → no duplicate ──────────
+        kc = KiteClient()
+        fake = mock.MagicMock()
+        fake.place_order.side_effect = NetworkException("read timeout")
+        fake.orders.return_value = [{
+            "tradingsymbol": "RELIANCE", "transaction_type": "BUY",
+            "quantity": 10, "tag": "Agent-intraday", "status": "OPEN",
+            "order_id": "BOOK-555",
+        }]
+        kc._kite = fake
+        oid = kc.place_order(
+            tradingsymbol="RELIANCE", exchange="NSE", transaction_type="BUY",
+            quantity=10, order_type="MARKET", product="MIS", tag="Agent-intraday",
+        )
+        assert oid == "BOOK-555", f"reconcile should return the landed order id, got {oid!r}"
+        assert fake.place_order.call_count == 1, \
+            f"order was BLIND-RETRIED after it had landed: {fake.place_order.call_count} calls"
+
+        # ── (b) order genuinely did not land → safe to retry ──────────────────
+        kc2 = KiteClient()
+        fake2 = mock.MagicMock()
+        # fail twice, then succeed; book always empty (confirmed not landed)
+        fake2.place_order.side_effect = [
+            NetworkException("conn reset"),
+            NetworkException("conn reset"),
+            "OK-RETRY-1",
+        ]
+        fake2.orders.return_value = []
+        kc2._kite = fake2
+        import kite_client as _kcmod
+        with mock.patch.object(_kcmod.time, "sleep", lambda *_: None):  # no real backoff wait
+            oid2 = kc2.place_order(
+                tradingsymbol="TCS", exchange="NSE", transaction_type="BUY",
+                quantity=5, order_type="MARKET", product="MIS", tag="Agent-intraday",
+            )
+        assert oid2 == "OK-RETRY-1", f"expected retry to succeed, got {oid2!r}"
+        assert fake2.place_order.call_count == 3, \
+            f"expected 2 retries then success, got {fake2.place_order.call_count} calls"
+
+        # ── (c) cannot confirm (book unreachable) → raise, never blind-retry ──
+        kc3 = KiteClient()
+        fake3 = mock.MagicMock()
+        fake3.place_order.side_effect = NetworkException("timeout")
+        fake3.orders.side_effect = NetworkException("book unreachable")
+        kc3._kite = fake3
+        raised = False
+        try:
+            kc3.place_order(
+                tradingsymbol="INFY", exchange="NSE", transaction_type="BUY",
+                quantity=5, order_type="MARKET", product="MIS", tag="Agent-intraday",
+            )
+        except Exception:
+            raised = True
+        assert raised, "place_order must raise when placement cannot be confirmed"
+        assert fake3.place_order.call_count == 1, \
+            f"order was BLIND-RETRIED while unconfirmable: {fake3.place_order.call_count} calls"
+    finally:
+        settings.trading_mode = original_mode
+
+check("P-9  Network failure does not duplicate live order", p9_network_failure_no_duplicate_order)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# P-10  Entry failure cancels the orphan SL-M (no naked position)
+# ─────────────────────────────────────────────────────────────────────────────
+async def p10_entry_fail_cancels_orphan_sl():
+    """
+    Entry and SL-M are placed in PARALLEL. If the entry FAILS but the SL-M
+    SUCCEEDS, the orphan stop must be cancelled — otherwise hitting its trigger
+    opens a naked (unbounded-risk) position with no underlying.
+    """
+    from agents.strategy_agents import IntradayAgent
+    from tick_engine import MarketSnapshot, Tick, LiveIndicators
+    from kite_client import kite_client
+    from order_guard import order_guard
+    from datetime import datetime as _dt
+
+    agent = IntradayAgent()
+    agent._approved.add("RELIANCE")
+
+    cancel_calls: list[str] = []
+
+    def _place_side(*args, **kwargs):
+        # BUY = entry (fails);  SELL = protective SL-M (lands)
+        if kwargs.get("transaction_type") == "BUY":
+            raise Exception("entry rejected: insufficient margin")
+        return "SL-ORPHAN-123"
+
+    def _cancel(oid):
+        cancel_calls.append(str(oid))
+        return oid
+
+    tick = Tick(
+        symbol="RELIANCE", ltp=1510.0, bid=1509.5, ask=1510.5,
+        volume=600_000, change=5.0, change_pct=0.5,
+        high=1515.0, low=1480.0, open=1485.0, timestamp=_dt.now(),
+    )
+    ind = LiveIndicators(
+        symbol="RELIANCE", ltp=1510.0, ema9=1505.0, ema21=1490.0,
+        ema50=1470.0, ema200=1400.0, vwap=1500.0, rsi_14=58.0,
+        macd=2.5, macd_signal=1.5, macd_hist=1.0, atr_14=8.0, adx_14=28.0,
+        bb_upper=1530.0, bb_lower=1470.0, bb_mid=1500.0,
+        volume_ratio=1.4, trend="UP",
+    )
+    snap = MarketSnapshot(symbol="RELIANCE", tick=tick, indicators=ind)
+
+    original_mode = settings.trading_mode
+    order_guard.release_order("RELIANCE", "intraday", "BUY", 0.0)
+    order_guard.release_order("RELIANCE", "intraday", "SELL", 0.0)
+    try:
+        settings.trading_mode = "PAPER"   # gates simple; placement is mocked regardless
+        with mock.patch.object(kite_client, "place_order", side_effect=_place_side), \
+             mock.patch.object(kite_client, "cancel_order", side_effect=_cancel):
+            loop = asyncio.get_running_loop()
+            raised = False
+            try:
+                await agent._place_orders(
+                    snap, "BUY",
+                    {"stop_loss": 1490.0, "target": 1530.0, "score": 10, "pattern": "TEST"},
+                    10, loop,
+                )
+            except RuntimeError as e:
+                raised = True
+                assert "entry_failed" in str(e), f"unexpected failure reason: {e}"
+            assert raised, "expected entry_failed RuntimeError"
+    finally:
+        settings.trading_mode = original_mode
+        order_guard.release_order("RELIANCE", "intraday", "BUY", 0.0)
+        order_guard.release_order("RELIANCE", "intraday", "SELL", 0.0)
+
+    assert "SL-ORPHAN-123" in cancel_calls, \
+        "orphan SL-M was NOT cancelled after entry failure → naked-position risk"
+
+acheck("P-10 Entry failure cancels orphan SL-M", p10_entry_fail_cancels_orphan_sl())
 
 
 # ── Final summary ─────────────────────────────────────────────────────────────

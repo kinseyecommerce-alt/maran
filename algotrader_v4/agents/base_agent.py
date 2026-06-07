@@ -771,6 +771,20 @@ class BaseAgent(ABC):
                 )
                 order_id, sl_order_id = results[0], results[1]
                 if isinstance(order_id, Exception):
+                    # Entry failed. The SL-M was placed in PARALLEL and may have
+                    # SUCCEEDED — leaving an orphan stop with no underlying position.
+                    # If left live, hitting its trigger becomes a naked MARKET order
+                    # (unbounded risk). Cancel it before bailing out.
+                    if not isinstance(sl_order_id, Exception) and sl_order_id:
+                        logger.critical(
+                            "[{}] Entry failed but SL-M {} landed — cancelling orphan "
+                            "stop to prevent a naked position.", self.name, sl_order_id)
+                        try:
+                            await loop.run_in_executor(
+                                None, lambda: kite_client.cancel_order(str(sl_order_id)))
+                        except Exception as orphan_exc:
+                            logger.error("[{}] FAILED to cancel orphan SL-M {} — MANUAL "
+                                         "INTERVENTION REQUIRED: {}", self.name, sl_order_id, orphan_exc)
                     order_guard.release_claim(sym, self.name, action)
                     logger.error("[{}] Entry order failed: {}", self.name, order_id)
                     raise RuntimeError("entry_failed")

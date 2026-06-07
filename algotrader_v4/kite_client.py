@@ -333,26 +333,101 @@ class KiteClient:
         if transaction_type == "BUY" and order_type in ("MARKET", "LIMIT"):
             self._check_margin(tradingsymbol, quantity, price)
 
-        def _place():
-            return self.kite.place_order(
-                variety=KiteConnect.VARIETY_REGULAR,
-                exchange=exchange,
-                tradingsymbol=tradingsymbol,
-                transaction_type=transaction_type,
-                quantity=quantity,
-                product=product,
-                order_type=order_type,
-                price=price or None,
-                trigger_price=trigger_price or None,
-                validity=validity,
-                tag=tag,
-            )
+        # CRIT: order placement is NOT blind-retried. A NetworkException can be
+        # raised AFTER the order reached the exchange; a naive retry would place a
+        # DUPLICATE live order. Instead we reconcile against the order book and
+        # only retry when we can positively confirm the order did not land.
+        return self._place_live_reconcile(
+            tradingsymbol, exchange, transaction_type, quantity,
+            order_type, product, price, trigger_price, validity, tag,
+        )
 
-        order_id = _with_retry(_place, label="place_order")
-        logger.info("LIVE order | {} {} {} qty={} @ {} | id={}",
-                    transaction_type, tradingsymbol, order_type,
-                    quantity, price, order_id)
-        return order_id
+    def _place_live_reconcile(
+        self, tradingsymbol, exchange, transaction_type, quantity,
+        order_type, product, price, trigger_price, validity, tag,
+    ) -> str:
+        """Place a LIVE order with network-failure reconciliation.
+
+        Retry policy for order placement (differs from idempotent GET retries):
+          • Success                      → return broker order_id.
+          • TokenException/InputException→ raise immediately (no retry).
+          • Network/Data/General/Order   → query the order book:
+              - matching order found     → return its id (it DID land; no duplicate).
+              - book confirms not landed → safe to retry with backoff.
+              - book fetch ALSO failed   → raise; we will NOT gamble on a duplicate.
+        """
+        delay = _RETRY_BASE_SEC
+        for attempt in range(_RETRY_MAX + 1):
+            placed_after = time.time() - 2.0   # small clock-skew window
+            _rest_bucket.acquire()
+            try:
+                order_id = self.kite.place_order(
+                    variety=KiteConnect.VARIETY_REGULAR,
+                    exchange=exchange,
+                    tradingsymbol=tradingsymbol,
+                    transaction_type=transaction_type,
+                    quantity=quantity,
+                    product=product,
+                    order_type=order_type,
+                    price=price or None,
+                    trigger_price=trigger_price or None,
+                    validity=validity,
+                    tag=tag,
+                )
+                logger.info("LIVE order | {} {} {} qty={} @ {} | id={}",
+                            transaction_type, tradingsymbol, order_type,
+                            quantity, price, order_id)
+                return order_id
+            except TokenException:
+                raise
+            except InputException:
+                raise
+            except (NetworkException, DataException, GeneralException, OrderException) as exc:
+                existing, book_ok = self._reconcile_recent_order(
+                    tradingsymbol, transaction_type, quantity, tag, placed_after)
+                if existing:
+                    logger.warning(
+                        "LIVE order reconcile: '{}' raised but order {} IS in the book "
+                        "— returning it, NOT retrying (prevents duplicate)", exc, existing)
+                    return existing
+                if not book_ok:
+                    logger.critical(
+                        "LIVE order '{}' failed AND order book unreachable — cannot "
+                        "confirm placement; refusing to blind-retry. Surfacing error.", exc)
+                    raise
+                if attempt == _RETRY_MAX:
+                    raise
+                logger.warning(
+                    "LIVE order failed and confirmed NOT in book — safe retry {}/{} in {:.0f}s: {}",
+                    attempt + 1, _RETRY_MAX, delay, exc)
+                time.sleep(delay)
+                delay *= 2
+
+    def _reconcile_recent_order(
+        self, tradingsymbol: str, transaction_type: str,
+        quantity: int, tag: str, since_ts: float,
+    ) -> tuple[Optional[str], bool]:
+        """Look for a recently-placed order matching these params.
+
+        Returns (order_id_or_None, book_fetch_succeeded). A non-rejected,
+        non-cancelled order matching symbol/side/qty/tag is treated as ours.
+        """
+        try:
+            book = self.kite.orders()          # direct call — avoid retry recursion
+        except Exception as exc:
+            logger.error("LIVE reconcile: order book fetch failed: {}", exc)
+            return None, False
+        for o in book:
+            try:
+                if (o.get("tradingsymbol") == tradingsymbol
+                        and o.get("transaction_type") == transaction_type
+                        and int(o.get("quantity", 0)) == int(quantity)
+                        and (not tag or o.get("tag") == tag)
+                        and str(o.get("status", "")).upper() not in ("REJECTED", "CANCELLED")):
+                    return str(o.get("order_id")), True
+            except (TypeError, ValueError):
+                continue
+        return None, True
 
     def modify_order(
         self, order_id: str, price: float = 0.0,
