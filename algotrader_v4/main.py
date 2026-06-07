@@ -1975,7 +1975,14 @@ async def on_startup():
         logger.warning("SECURITY: API_KEY is not set — all mutating endpoints are unprotected. Set API_KEY in .env before deploying.")
     if not settings.jwt_secret_key:
         logger.warning("SECURITY: JWT_SECRET_KEY is not set — browser login tokens cannot be issued. Set JWT_SECRET_KEY in .env before deploying.")
-    elif len(settings.jwt_secret_key) < 32:
+    # FAIL-CLOSED: refuse to start LIVE if neither auth mechanism is configured.
+    # Without api_key AND jwt_secret_key the auth middleware is a no-op, leaving
+    # /orders/* and the kill switch fully open — unacceptable with real money.
+    if settings.trading_mode == "LIVE" and not settings.api_key and not settings.jwt_secret_key:
+        logger.critical("SECURITY: TRADING_MODE=LIVE with NO API_KEY and NO JWT_SECRET_KEY — "
+                        "all order/kill-switch endpoints would be unauthenticated. Refusing to start.")
+        raise RuntimeError("LIVE mode requires API_KEY or JWT_SECRET_KEY to be set")
+    if settings.jwt_secret_key and len(settings.jwt_secret_key) < 32:
         logger.error("SECURITY: JWT_SECRET_KEY is too short ({} chars) — minimum 32 chars required. Refusing to start in LIVE mode.", len(settings.jwt_secret_key))
         if settings.trading_mode == "LIVE":
             raise RuntimeError("JWT_SECRET_KEY must be at least 32 characters in LIVE mode")
