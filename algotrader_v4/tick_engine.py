@@ -146,12 +146,14 @@ class LiveIndicators:
 
 @dataclass
 class MarketSnapshot:
-    symbol:       str
-    tick:         Tick
-    indicators:   LiveIndicators
-    candles_1min: list[Candle] = field(default_factory=list)
-    candles_5min: list[Candle] = field(default_factory=list)
-    bar_seconds:  int = 60       # 60 = 1m, 300 = 5m, 900 = 15m
+    symbol:            str
+    tick:              Tick
+    indicators:        LiveIndicators
+    candles_1min:      list[Candle] = field(default_factory=list)
+    candles_5min:      list[Candle] = field(default_factory=list)
+    bar_seconds:       int  = 60       # 60 = 1m, 300 = 5m, 900 = 15m
+    black_swan_active: bool = False    # True when market_regime == BLACK_SWAN
+    black_swan_phase:  str  = ""       # "FALLING" | "STABILIZING" | "RECOVERING" | ""
 
 
 # ── Tick buffer ───────────────────────────────────────────────────────────────
@@ -535,6 +537,9 @@ class TickEngine:
         self._ws_received: set[str] = set()
         self._ws_down_since: Optional[float] = None  # monotonic time when WS disconnect detected
 
+        # Black swan phase (updated from NIFTY 1-min candles; shared across all symbol snapshots)
+        self._black_swan_phase: str = ""
+
     # ── Setup ─────────────────────────────────────────────────────────
 
     def subscribe(self, watchlist: list[dict]) -> None:
@@ -655,6 +660,17 @@ class TickEngine:
             candles_1min=self._bufs_1min[symbol].candles()[-60:],
             candles_5min=self._bufs_5min[symbol].candles()[-30:],
         )
+
+        # Black swan phase — evaluated once per NIFTY tick; shared across all symbol snapshots
+        try:
+            from market_regime import regime_detector as _rd, Regime as _R
+            snap.black_swan_active = (_rd.current_regime == _R.BLACK_SWAN)
+            if snap.black_swan_active:
+                if symbol in ("NIFTY 50", "NIFTY50"):
+                    self._black_swan_phase = self._compute_bs_phase(snap.candles_1min)
+                snap.black_swan_phase = self._black_swan_phase
+        except Exception:
+            pass
 
         # Record tick for later replay (no-op when recorder is disabled)
         try:
@@ -846,6 +862,36 @@ class TickEngine:
 
     def symbols(self) -> list[str]:
         return list(self._symbols)
+
+    def get_nifty_1min_chg(self) -> float:
+        """Return % change of latest 1-min NIFTY candle vs prior close (for flash crash detection)."""
+        for sym in ("NIFTY 50", "NIFTY50"):
+            buf = self._bufs_1min.get(sym)
+            if buf:
+                candles = buf.candles()
+                if len(candles) >= 2:
+                    prev_close = candles[-2].close
+                    curr_close = candles[-1].close
+                    if prev_close > 0:
+                        return (curr_close - prev_close) / prev_close * 100
+        return 0.0
+
+    @staticmethod
+    def _compute_bs_phase(candles: list) -> str:
+        """Determine black swan sub-phase from recent 1-min candles.
+        FALLING=panic still active, STABILIZING=exhaustion, RECOVERING=reversal confirmed."""
+        if len(candles) < 5:
+            return "FALLING"
+        last5 = candles[-5:]
+        red_count = sum(1 for c in last5 if c.close < c.open)
+        vols = [c.volume for c in last5]
+        vol_increasing = vols[-1] > vols[0]
+        if red_count >= 4 and vol_increasing:
+            return "FALLING"
+        # RECOVERING: 2+ consecutive green candles
+        if last5[-1].close > last5[-1].open and last5[-2].close > last5[-2].open:
+            return "RECOVERING"
+        return "STABILIZING"
 
     # ── Historical data (for backtesting + warm-up) ───────────────────
 

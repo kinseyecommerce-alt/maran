@@ -769,12 +769,36 @@ class OptionsAgent(BaseAgent):
 
         # NOTE: _update_state() runs after patterns intentionally — patterns see
         # the PREVIOUS tick's _prev_rsi, _prev_ltp, _prev_above_vwap, _prev_bb_width.
-        if best_score < settings.min_score_options:
+
+        # BLACK SWAN veteran: phase-gated options strategy
+        if snap.black_swan_active:
+            phase = snap.black_swan_phase
+            if phase == "FALLING":
+                # FALLING: buy ATM puts for protection — bypass normal IV gate, use limit orders
+                if best_score < settings.min_score_options and (best_opt != "PE" or is_sell_signal):
+                    # Force put protection signal if no normal put pattern fired
+                    best_opt       = "PE"
+                    best_score     = settings.min_score_options
+                    best_pattern   = "BLACK_SWAN_PUT_PROTECT"
+                    is_sell_signal = False
+                elif is_sell_signal:
+                    self._update_state(sym, ind, ltp)
+                    return "HOLD", None  # no premium selling during FALLING
+            else:
+                # STABILIZING/RECOVERING: require elevated IV (> 75%) for condor selling
+                if is_sell_signal and iv_rank < settings.black_swan_iv_rank_min:
+                    self._update_state(sym, ind, ltp)
+                    return "HOLD", None  # IV not elevated enough for IV crush trade
+                if best_score < settings.min_score_options:
+                    self._update_state(sym, ind, ltp)
+                    return "HOLD", None
+
+        elif best_score < settings.min_score_options:
             self._update_state(sym, ind, ltp)
             return "HOLD", None
 
         # After 13:00 only high-conviction signals (≥8/17) are taken
-        if t >= time(13, 0) and best_score < 8:
+        if not snap.black_swan_active and t >= time(13, 0) and best_score < 8:
             self._update_state(sym, ind, ltp)
             return "HOLD", None
 
@@ -831,6 +855,9 @@ class OptionsAgent(BaseAgent):
         entry_delta = round(abs(self._bs_delta(ltp, strike, max(dte, 1) / 365.0, 0.065, iv_frac, actual_opt)), 2)
 
         self._update_state(sym, ind, ltp)
+        # BLACK SWAN: always use limit orders (never market orders for options in panic)
+        _use_limit = snap.black_swan_active
+
         return action_dir, {
             "exchange":           "NFO",
             "option_symbol":      opt_sym,
@@ -850,8 +877,10 @@ class OptionsAgent(BaseAgent):
             "score":              best_score,
             "pattern":           best_pattern,
             "_gate_size_factor": sf,
+            "use_limit":         _use_limit,
             "trigger": (
-                f"OPT-{actual_opt} [{best_pattern}] {action_dir} score={best_score}/20 "
+                f"{'BSW-' if snap.black_swan_active else ''}OPT-{actual_opt} [{best_pattern}] "
+                f"{action_dir} score={best_score}/20 "
                 f"IVr={iv_rank:.0f}% δ={entry_delta} DTE={dte} sf={sf} rsi={ind.rsi_14:.0f} "
                 f"trend={ind.trend}"
             ),
@@ -2127,6 +2156,20 @@ class ScalpingAgent(BaseAgent):
         if action == "HOLD":
             return "HOLD", None
 
+        # BLACK SWAN veteran: scalping only valid in RECOVERING phase on VWAP reclaim + 3× volume
+        if snap.black_swan_active:
+            if snap.black_swan_phase != "RECOVERING":
+                return "HOLD", None
+            # Require institutional-grade volume (3× average confirms real buyers)
+            if ind.volume_ratio < settings.black_swan_volume_mult:
+                return "HOLD", None
+            # Require VWAP reclaim (price crossed above VWAP — mean is re-established)
+            if not ind.vwap or snap.tick.ltp <= ind.vwap:
+                return "HOLD", None
+            # Only trade BUY (bounce direction) — no counter-trend shorts during black swan
+            if action != "BUY":
+                return "HOLD", None
+
         # ── Signal deduplication: same symbol+direction within cooldown → skip ─
         last_ts  = self._last_signal_ts.get(sym)
         last_dir = self._last_signal_dir.get(sym)
@@ -2158,6 +2201,15 @@ class ScalpingAgent(BaseAgent):
         # ── Record signal timestamp for dedup ────────────────────────────────
         self._last_signal_ts[sym]  = now
         self._last_signal_dir[sym] = action
+
+        # BLACK SWAN veteran: tighter SL + quick profit target on bounce
+        if snap.black_swan_active:
+            sl_pct_bs  = settings.black_swan_sl_pct if hasattr(settings, "black_swan_sl_pct") else 0.5
+            tgt_pct_bs = 0.75
+            sl_dist  = ltp * sl_pct_bs  / 100
+            tgt_dist = ltp * tgt_pct_bs / 100
+            sf = 1.0   # full conviction on confirmed RECOVERING bounce
+            pattern = f"BSW_BOUNCE/{pattern}"
 
         if action == "BUY":
             sl  = round(ltp - sl_dist, 2)
@@ -2765,6 +2817,21 @@ class FuturesAgent(BaseAgent):
             self._update_state(sym, ind, ltp)
             return "HOLD", None
 
+        # BLACK SWAN veteran: futures only on confirmed RECOVERING phase; LONG only; VWAP reclaim + bid wall
+        if snap.black_swan_active:
+            if snap.black_swan_phase != "RECOVERING":
+                self._update_state(sym, ind, ltp)
+                return "HOLD", None
+            if best_side == "SHORT":
+                self._update_state(sym, ind, ltp)
+                return "HOLD", None  # never short into a crash — only buy the bounce
+            if ind.vwap and snap.tick.ltp <= ind.vwap:
+                self._update_state(sym, ind, ltp)
+                return "HOLD", None  # require full VWAP reclaim (close above VWAP, not just touch)
+            if ind.depth_imbalance <= 0.6:
+                self._update_state(sym, ind, ltp)
+                return "HOLD", None  # require bid-heavy L2 (institutional buyers confirmed)
+
         cools = self._cool_ts.setdefault(sym, {})
         last  = cools.get(best_side)
         if last and (now - last).total_seconds() < settings.cooldown_futures:
@@ -2795,9 +2862,17 @@ class FuturesAgent(BaseAgent):
         except Exception:
             fii_val = 0.0
 
+        # BLACK SWAN veteran: tighter SL, quicker target, 1.5× size on confirmed bounce
+        _bs_sf = None
+        if snap.black_swan_active:
+            sl_pct  = 1.0   # tighter than normal 1.5% — protect capital
+            tgt_pct = 2.0   # quick exit — don't be greedy on the bounce
+            _bs_sf  = 1.5   # 1.5× size: conviction is highest on 3-sigma dislocations
+            best_pattern = f"BSW_{best_pattern}"
+
         self._update_state(sym, ind, ltp)
         action = "BUY" if best_side == "LONG" else "SELL"
-        return action, {
+        sig = {
             "exchange":       "NFO",
             "futures_symbol": fut_sym,
             "side":           best_side,
@@ -2815,6 +2890,9 @@ class FuturesAgent(BaseAgent):
                 f"trend={ind.trend}"
             ),
         }
+        if _bs_sf is not None:
+            sig["_gate_size_factor"] = _bs_sf
+        return action, sig
 
     def _pat_ema_trend(self, sym, snap, ind, ltp, t):
         was_bull = self._prev_ema_bull.get(sym, False)
@@ -3370,6 +3448,10 @@ class MeanReversionAgent(BaseAgent):
         if not ind.bb_upper or ind.bb_upper <= 0 or not ind.bb_lower or ind.bb_lower <= 0:
             return "HOLD", None
 
+        # BLACK SWAN veteran: FALLING phase = never catch a falling knife
+        if snap.black_swan_active and snap.black_swan_phase == "FALLING":
+            return "HOLD", None
+
         best_score, best_action, best_pattern = -1, "", ""
         for pat_fn in (self._pat_bb_lower_bounce, self._pat_bb_upper_reject,
                        self._pat_rsi_extreme, self._pat_bb_mid_revert,
@@ -3415,18 +3497,45 @@ class MeanReversionAgent(BaseAgent):
             sl  = round(ltp + sl_dist, 2)
             tgt = round(ltp - tgt_dist, 2)
 
-        return best_action, {
+        # BLACK SWAN veteran: apply stricter entry requirements + adjusted sizing
+        sf = None
+        if snap.black_swan_active:
+            phase = snap.black_swan_phase
+            if best_action == "BUY":
+                # Require deep extreme oversold (RSI < 25, Williams < -85, price > 1.5% below VWAP)
+                if ind.rsi_14 >= 25:
+                    return "HOLD", None
+                if ind.williams_r > -85:
+                    return "HOLD", None
+                if ind.vwap > 0 and (ind.vwap - ltp) / ind.vwap * 100 < 1.5:
+                    return "HOLD", None
+            # Tighter SL during black swan (protect capital)
+            bs_sl_pct = getattr(settings, "black_swan_sl_pct", 0.8)
+            sl_dist = max(atr * self.SL_ATR, ltp * bs_sl_pct / 100)
+            if best_action == "BUY":
+                sl  = round(ltp - sl_dist, 2)
+                tgt = round(ltp + tgt_dist, 2)
+            else:
+                sl  = round(ltp + sl_dist, 2)
+                tgt = round(ltp - tgt_dist, 2)
+            # Tranche sizing: RECOVERING = full 1.0×, STABILIZING = 0.6× (tranches 1+2)
+            sf = 1.0 if phase == "RECOVERING" else 0.6
+
+        sig: dict = {
             "symbol": sym, "exchange": "NSE", "side": best_action,
             "price": ltp, "stop_loss": sl, "target": tgt,
             "stop_loss_pct": round(sl_dist / ltp * 100, 3),
             "target_pct":    round(tgt_dist / ltp * 100, 3),
             "product": self.product,
             "trigger": (
-                f"MEANREV-{best_action} [{best_pattern}] score={best_score}/13 "
+                f"{'BSW-' if snap.black_swan_active else ''}MEANREV-{best_action} [{best_pattern}] score={best_score}/13 "
                 f"rsi={ind.rsi_14:.0f} bb_pos="
                 f"{round((ltp-ind.bb_lower)/(ind.bb_upper-ind.bb_lower)*100) if ind.bb_upper != ind.bb_lower else 50:.0f}%"
             ),
         }
+        if sf is not None:
+            sig["_gate_size_factor"] = sf
+        return best_action, sig
 
     def _pat_bb_lower_bounce(self, sym, snap, ind, ltp, t):
         if ltp < ind.bb_lower and ind.rsi_14 < 32 and ind.volume_ratio >= 1.1:

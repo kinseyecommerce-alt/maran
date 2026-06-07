@@ -551,6 +551,31 @@ class TrailingSLEngine:
     def get_position(self, order_id: str) -> Optional[PositionSL]:
         return self._positions.get(order_id)
 
+    def tighten_all(self, trail_pct: float = 0.5) -> int:
+        """Emergency TSL tightening — called on BLACK_SWAN detection.
+        Moves current_sl to trail_pct% behind best_price for all active positions.
+        Only moves SL in the favorable direction (never widens it). Returns count tightened."""
+        count = 0
+        with self._lock:
+            for pos in self._positions.values():
+                if pos.status != SLStatus.ACTIVE:
+                    continue
+                if pos.best_price <= 0:
+                    continue
+                if pos.side == "BUY":
+                    tighter = round(pos.best_price * (1 - trail_pct / 100), 2)
+                    if tighter > pos.current_sl:
+                        pos.current_sl = tighter
+                        count += 1
+                else:
+                    tighter = round(pos.best_price * (1 + trail_pct / 100), 2)
+                    if tighter < pos.current_sl:
+                        pos.current_sl = tighter
+                        count += 1
+        logger.warning("[TSL] BLACK SWAN: tightened {}/{} positions to {:.1f}% trail",
+                       count, len(self._positions), trail_pct)
+        return count
+
     def all_positions(self) -> list[dict]:
         with self._lock:
             return [p.to_dict() for p in self._positions.values()

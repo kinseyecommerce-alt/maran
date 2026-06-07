@@ -1032,6 +1032,24 @@ async def gen_signal(req: SignalRequest):
 @app.get("/risk/status", tags=["Risk"])
 def risk_st(): return risk_manager.status()
 
+
+@app.get("/black-swan/status", tags=["Risk"])
+def black_swan_status():
+    from market_regime import regime_detector, Regime
+    from trailing_sl_engine import trailing_sl_engine as _tsl
+    is_active = regime_detector.current_regime == Regime.BLACK_SWAN
+    vix_z = None
+    if regime_detector._vix_history:
+        vix_z = round(regime_detector._vix_zscore(regime_detector._vix_history[-1]), 2)
+    return {
+        "active":          is_active,
+        "phase":           tick_engine._black_swan_phase if is_active else None,
+        "current_regime":  regime_detector.current_regime.value,
+        "vix_zscore":      vix_z,
+        "tsl_tightened":   len([p for p in _tsl._positions.values() if p.current_sl > 0]),
+        "plan":            regime_detector.current_plan.reasoning if is_active else None,
+    }
+
 @app.patch("/risk/update", tags=["Risk"])
 def risk_update(req: RiskUpdateRequest):
     if req.max_daily_loss    is not None: settings.max_daily_loss    = req.max_daily_loss

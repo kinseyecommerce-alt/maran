@@ -1127,6 +1127,21 @@
 <!-- ── Toast container ──────────────────────────────────────── -->
 <div id="toast-container"></div>
 
+<!-- ── BLACK SWAN banner (hidden by default, shown during BLACK_SWAN regime) ── -->
+<div id="black-swan-banner" style="display:none;position:fixed;top:0;left:0;right:0;z-index:9999;
+  padding:10px 16px;font-weight:700;font-size:0.85rem;letter-spacing:0.04em;text-align:center;
+  color:#fff;animation:bsw-pulse 1.2s ease-in-out infinite;">
+  <span id="bsw-text">BLACK SWAN</span>
+  <span id="bsw-phase" style="margin-left:8px;padding:2px 8px;border-radius:4px;font-size:0.75rem;background:rgba(0,0,0,0.3)"></span>
+  <span id="bsw-vix" style="margin-left:8px;opacity:0.85;font-weight:400"></span>
+  <button onclick="document.getElementById('black-swan-banner').style.display='none'"
+    style="margin-left:16px;background:rgba(0,0,0,0.25);border:none;color:#fff;cursor:pointer;
+    border-radius:4px;padding:2px 8px;font-size:0.75rem">Dismiss</button>
+</div>
+<style>
+@keyframes bsw-pulse { 0%,100%{opacity:1} 50%{opacity:0.82} }
+</style>
+
 <!-- ── App shell ─────────────────────────────────────────────── -->
 <div class="app">
 
@@ -2497,6 +2512,34 @@ async function api(method, path, body) {
     if (e.message !== 'Failed to fetch') throw e;
     throw new Error('Network error — server unreachable');
   }
+}
+
+/* ═══════════════════════════════════════════════════════════════
+   BLACK SWAN BANNER
+═══════════════════════════════════════════════════════════════ */
+const BSW_PHASE_COLORS = {
+  FALLING:     '#DC2626',   // red
+  STABILIZING: '#D97706',   // amber
+  RECOVERING:  '#16A34A',   // green
+};
+function showBlackSwanBanner(phase, vixZ) {
+  const banner = document.getElementById('black-swan-banner');
+  const color  = BSW_PHASE_COLORS[phase] || '#DC2626';
+  banner.style.background = color;
+  banner.style.display    = 'block';
+  updateBlackSwanPhase(phase, vixZ);
+}
+function updateBlackSwanPhase(phase, vixZ) {
+  const phaseEl = document.getElementById('bsw-phase');
+  const vixEl   = document.getElementById('bsw-vix');
+  const banner  = document.getElementById('black-swan-banner');
+  if (phaseEl) phaseEl.textContent = phase || '';
+  if (vixEl && vixZ != null) vixEl.textContent = `VIX z=${vixZ}`;
+  if (banner && phase) banner.style.background = BSW_PHASE_COLORS[phase] || '#DC2626';
+}
+function clearBlackSwanBanner() {
+  const banner = document.getElementById('black-swan-banner');
+  if (banner) banner.style.display = 'none';
 }
 
 /* ═══════════════════════════════════════════════════════════════
@@ -4474,6 +4517,17 @@ function connectWS() {
       if (msg.event === 'regime_change') {
         toast(`Regime changed → ${msg.regime}`, 'info');
         fetchRegimeHistory();
+      }
+      if (msg.event === 'black_swan_detected') {
+        showBlackSwanBanner(msg.phase || 'FALLING', msg.vix_zscore);
+        toast('⚡ BLACK SWAN: emergency regime active — TSL tightened', 'error');
+      }
+      if (msg.event === 'black_swan_phase_update') {
+        updateBlackSwanPhase(msg.phase);
+      }
+      if (msg.event === 'black_swan_cleared') {
+        clearBlackSwanBanner();
+        toast(`BLACK SWAN cleared → ${msg.new_regime || 'normal regime'}`, 'info');
       }
       if (msg.event === 'risk_alert') {
         toast(`⚠ Risk alert: ${msg.type} — P&L ₹${msg.pnl != null ? msg.pnl.toFixed(0) : '—'}`, 'error');

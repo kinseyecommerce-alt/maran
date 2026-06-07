@@ -57,6 +57,7 @@ class Regime(str, Enum):
     BEAR_VOLATILE  = "BEAR_VOLATILE"
     RANGING        = "RANGING"
     HIGH_VOLATILE  = "HIGH_VOLATILE"
+    BLACK_SWAN     = "BLACK_SWAN"
     UNKNOWN        = "UNKNOWN"
 
 
@@ -129,6 +130,15 @@ REGIME_PLANS: dict[Regime, StrategyPlan] = {
                      "very tight scalping. Position sizes at 25%. Intraday only if clear signal.",
         regime     = Regime.HIGH_VOLATILE,
     ),
+    Regime.BLACK_SWAN: StrategyPlan(
+        active     = ["mean_reversion", "options", "scalping", "futures"],
+        paused     = ["swing", "intraday", "momentum", "pairs"],
+        allocation = {"mean_reversion":40, "options":30, "scalping":20, "futures":10},
+        size_factor= 0.5,   # base; agents scale up to 1.5× in RECOVERING phase per veteran logic
+        reasoning  = "BLACK SWAN: 3-sigma VIX spike or flash crash — phase-aware veteran response: "
+                     "FALLING=protect/puts, STABILIZING=ladder mean-reversion, RECOVERING=IV crush+bounce",
+        regime     = Regime.BLACK_SWAN,
+    ),
     Regime.UNKNOWN: StrategyPlan(
         active     = ["scalping"],
         paused     = ["swing", "intraday", "options"],
@@ -175,6 +185,9 @@ class RegimeSignals:
     # Options
     pcr:               float = 1.0   # put-call ratio (>1.2 = bearish, <0.7 = bullish)
     pcr_trend:         str   = "NEUTRAL"
+
+    # Flash crash detection (populated from tick_engine NIFTY 1-min buffer)
+    nifty_1min_chg_pct: float = 0.0  # % change of latest 1-min NIFTY candle vs prior
 
     def to_dict(self) -> dict:
         return {
@@ -266,6 +279,13 @@ class MarketRegimeDetector:
             if len(self._vix_history) > 480:  # 480 = 20 trading days × 24 readings/day at 60s interval
                 self._vix_history = self._vix_history[-480:]
         signals.vix_zscore = self._vix_zscore(signals.india_vix)
+
+        # Populate 1-min NIFTY change % for flash crash detection
+        try:
+            from tick_engine import tick_engine as _te
+            signals.nifty_1min_chg_pct = _te.get_nifty_1min_chg()
+        except Exception:
+            pass
 
         regime = self._classify(signals)
         plan   = REGIME_PLANS.get(regime, REGIME_PLANS[Regime.UNKNOWN])
@@ -516,6 +536,14 @@ class MarketRegimeDetector:
             extreme_vix = vix > self.VIX_EXTREME
             volatile_vix = vix > self.VIX_HIGH
 
+        # BLACK SWAN: 3-sigma VIX spike OR single-candle flash crash (> 3% drop)
+        # Must check BEFORE HIGH_VOLATILE — BLACK_SWAN is a superset of that regime
+        from config import settings as _cfg
+        _bs_vix      = vix_z > _cfg.black_swan_vix_zscore
+        _flash_crash = s.nifty_1min_chg_pct < -_cfg.black_swan_price_drop_pct
+        if _bs_vix or _flash_crash:
+            return Regime.BLACK_SWAN
+
         # STEP 1 — extreme volatility overrides everything
         if extreme_vix:
             return Regime.HIGH_VOLATILE
@@ -586,6 +614,7 @@ class MarketRegimeDetector:
             Regime.BEAR_VOLATILE: "Bear Volatile",
             Regime.RANGING:       "Ranging / Sideways",
             Regime.HIGH_VOLATILE: "Extreme Volatile",
+            Regime.BLACK_SWAN:    "BLACK SWAN — Veteran Opportunity Mode",
             Regime.UNKNOWN:       "Unknown",
         }
         return labels.get(self.current_regime, "Unknown")

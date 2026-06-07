@@ -3083,6 +3083,238 @@ run("depth: _detect_walls() returns (False,False,0.5) with no depth", t_wall_det
 
 
 # ══════════════════════════════════════════════════════════════════════════
+# 22. BLACK SWAN VETERAN
+# ══════════════════════════════════════════════════════════════════════════
+section("22. BLACK SWAN VETERAN")
+
+def t_bsw_regime_enum():
+    from market_regime import Regime
+    assert Regime.BLACK_SWAN == "BLACK_SWAN"
+
+def t_bsw_plan_exists():
+    from market_regime import REGIME_PLANS, Regime
+    plan = REGIME_PLANS[Regime.BLACK_SWAN]
+    assert plan.size_factor == 0.5
+    assert "mean_reversion" in plan.active
+    assert "options" in plan.active
+    assert "scalping" in plan.active
+    assert "futures" in plan.active
+    assert "swing" in plan.paused
+
+def t_bsw_marketsnapshot_fields():
+    from tick_engine import MarketSnapshot
+    import dataclasses
+    fields = {f.name for f in dataclasses.fields(MarketSnapshot)}
+    assert "black_swan_active" in fields
+    assert "black_swan_phase"  in fields
+
+def t_bsw_classify_vix_zscore():
+    from market_regime import regime_detector, Regime, RegimeSignals
+    import unittest.mock as m
+    with m.patch.object(regime_detector, "_vix_zscore", return_value=3.5):
+        s = RegimeSignals(india_vix=45, nifty_ltp=21000, nifty_1min_chg_pct=0.0)
+        result = regime_detector._classify(s)
+    assert result == Regime.BLACK_SWAN, f"Expected BLACK_SWAN, got {result}"
+
+def t_bsw_classify_flash_crash():
+    from market_regime import regime_detector, Regime, RegimeSignals
+    import unittest.mock as m
+    with m.patch.object(regime_detector, "_vix_zscore", return_value=0.5):
+        s = RegimeSignals(india_vix=18, nifty_ltp=21000, nifty_1min_chg_pct=-4.0)
+        result = regime_detector._classify(s)
+    assert result == Regime.BLACK_SWAN, f"Expected BLACK_SWAN, got {result}"
+
+def t_bsw_compute_phase_falling():
+    from tick_engine import TickEngine, Candle
+    from datetime import datetime
+    now = datetime.now()
+    # 4 red candles + increasing volume = FALLING
+    falling = [
+        Candle(100,101,95,96, 1000, now), Candle(96,97,90,91,  2000, now),
+        Candle(91,92,85,86,   3000, now), Candle(86,87,80,81,  4000, now),
+        Candle(81,82,75,76,   5000, now),
+    ]
+    assert TickEngine._compute_bs_phase(falling) == "FALLING"
+
+def t_bsw_compute_phase_recovering():
+    from tick_engine import TickEngine, Candle
+    from datetime import datetime
+    now = datetime.now()
+    candles = [
+        Candle(100,101,95,96,1000,now), Candle(96,97,90,91,2000,now),
+        Candle(91,92,85,86,3000,now),
+        Candle(76,82,75,81,8000,now),  # green
+        Candle(81,86,80,85,7000,now),  # green
+    ]
+    assert TickEngine._compute_bs_phase(candles) == "RECOVERING"
+
+def t_bsw_compute_phase_stabilizing():
+    from tick_engine import TickEngine, Candle
+    from datetime import datetime
+    now = datetime.now()
+    candles = [
+        Candle(100,101,95,96,3000,now), Candle(96,97,90,91,4000,now),
+        Candle(91,95,88,94,5000,now),  # green
+        Candle(94,95,89,90,3000,now),  # red
+        Candle(90,93,88,91,2000,now),  # green (not 2 consecutive from end)
+    ]
+    # Last two: red then green — not 2 consecutive greens → STABILIZING
+    assert TickEngine._compute_bs_phase(candles) == "STABILIZING"
+
+def t_bsw_tighten_all_method():
+    from trailing_sl_engine import trailing_sl_engine
+    # tighten_all should exist and return int (0 when no positions open)
+    result = trailing_sl_engine.tighten_all(trail_pct=0.5)
+    assert isinstance(result, int)
+
+def t_bsw_meanrev_hold_falling():
+    from agents.strategy_agents import MeanReversionAgent
+    from tick_engine import MarketSnapshot, Tick, LiveIndicators, Candle
+    from datetime import datetime, time as dtime
+    import unittest.mock as m
+
+    agent = MeanReversionAgent()
+    tick  = Tick(symbol="TEST", ltp=100, bid=99.9, ask=100.1, volume=5000,
+                 change=0.0, change_pct=-2.0,
+                 high=105, low=90, open=103, timestamp=datetime.now())
+    ind = LiveIndicators(symbol="TEST")
+    ind.rsi_14 = 20.0; ind.rsi_7 = 18.0; ind.bb_upper = 110.0; ind.bb_lower = 90.0
+    ind.bb_mid = 100.0; ind.williams_r = -92.0; ind.vwap = 104.0; ind.volume_ratio = 2.0
+    snap = MarketSnapshot(symbol="TEST", tick=tick, indicators=ind,
+                          candles_1min=[], candles_5min=[],
+                          black_swan_active=True, black_swan_phase="FALLING")
+    action, sig = agent.evaluate_tick(snap)
+    assert action == "HOLD", f"Expected HOLD in FALLING, got {action}"
+
+def t_bsw_meanrev_hold_rsi_not_extreme():
+    from agents.strategy_agents import MeanReversionAgent
+    from tick_engine import MarketSnapshot, Tick, LiveIndicators, Candle
+    from datetime import datetime
+    import unittest.mock as m
+
+    agent = MeanReversionAgent()
+    tick  = Tick(symbol="TEST", ltp=100, bid=99.9, ask=100.1, volume=5000,
+                 change=0.0, change_pct=-2.0,
+                 high=105, low=90, open=103, timestamp=datetime.now())
+    ind = LiveIndicators(symbol="TEST")
+    ind.rsi_14 = 27.0; ind.rsi_7 = 25.0; ind.bb_upper = 110.0; ind.bb_lower = 88.0
+    ind.bb_mid = 99.0; ind.williams_r = -88.0; ind.vwap = 104.0; ind.volume_ratio = 2.0
+    snap = MarketSnapshot(symbol="TEST", tick=tick, indicators=ind,
+                          candles_1min=[], candles_5min=[],
+                          black_swan_active=True, black_swan_phase="STABILIZING")
+    # RSI = 27 (>= 25 threshold) → should HOLD
+    action, _ = agent.evaluate_tick(snap)
+    assert action == "HOLD", f"Expected HOLD (RSI not extreme enough), got {action}"
+
+def t_bsw_scalping_hold_non_recovering():
+    from agents.strategy_agents import ScalpingAgent
+    from tick_engine import MarketSnapshot, Tick, LiveIndicators
+    from datetime import datetime
+
+    agent = ScalpingAgent()
+    tick  = Tick(symbol="TEST", ltp=100, bid=99.95, ask=100.05, volume=10000,
+                 change=0.0, change_pct=-1.5,
+                 high=102, low=97, open=101, timestamp=datetime.now())
+    ind = LiveIndicators(symbol="TEST")
+    ind.ema9 = 99.5; ind.vwap = 98.0; ind.volume_ratio = 5.0; ind.atr_14 = 0.3
+    snap = MarketSnapshot(symbol="TEST", tick=tick, indicators=ind,
+                          candles_1min=[], candles_5min=[],
+                          black_swan_active=True, black_swan_phase="STABILIZING")
+    action, _ = agent.evaluate_tick(snap)
+    assert action == "HOLD", f"Expected HOLD in STABILIZING phase, got {action}"
+
+def t_bsw_scalping_hold_low_volume():
+    from agents.strategy_agents import ScalpingAgent
+    from tick_engine import MarketSnapshot, Tick, LiveIndicators
+    from datetime import datetime
+
+    agent = ScalpingAgent()
+    tick  = Tick(symbol="TEST", ltp=102, bid=101.95, ask=102.05, volume=10000,
+                 change=0.0, change_pct=1.5,
+                 high=103, low=97, open=99, timestamp=datetime.now())
+    ind = LiveIndicators(symbol="TEST")
+    ind.ema9 = 100.0; ind.vwap = 101.0; ind.volume_ratio = 2.0; ind.atr_14 = 0.3
+    snap = MarketSnapshot(symbol="TEST", tick=tick, indicators=ind,
+                          candles_1min=[], candles_5min=[],
+                          black_swan_active=True, black_swan_phase="RECOVERING")
+    # volume_ratio=2.0 < 3.0 threshold → HOLD
+    action, _ = agent.evaluate_tick(snap)
+    assert action == "HOLD", f"Expected HOLD (low volume), got {action}"
+
+def t_bsw_options_use_limit():
+    """OptionsAgent must set use_limit=True during any black swan phase."""
+    from agents.strategy_agents import OptionsAgent
+    from tick_engine import MarketSnapshot, Tick, LiveIndicators
+    from datetime import datetime
+    import unittest.mock as m
+
+    agent = OptionsAgent()
+    tick  = Tick(symbol="NIFTY", ltp=22000, bid=21995, ask=22005, volume=100000,
+                 change=0.0, change_pct=-2.0,
+                 high=22500, low=21000, open=22300, timestamp=datetime.now())
+    ind = LiveIndicators(symbol="NIFTY")
+    ind.ema9 = 21800; ind.ema21 = 21700; ind.ema50 = 21600; ind.ema200 = 21500
+    ind.rsi_14 = 25; ind.vwap = 22100; ind.volume_ratio = 2.0; ind.macd_hist = -10
+    snap = MarketSnapshot(symbol="NIFTY", tick=tick, indicators=ind,
+                          candles_1min=[], candles_5min=[],
+                          black_swan_active=True, black_swan_phase="FALLING")
+    with m.patch("options_intelligence.get_cached", return_value={"iv_rank": 85, "atm_iv": 45}), \
+         m.patch("iv_surface.get_surface", return_value=None), \
+         m.patch("gamma_scalp.get_cached_gex", return_value=None), \
+         m.patch("options_flow.get_cached_flow", return_value=None):
+        action, sig = agent.evaluate_tick(snap)
+    # Either HOLD (no pattern fires) or a signal with use_limit=True
+    if sig is not None:
+        assert sig.get("use_limit") is True, "BLACK_SWAN options must use limit orders"
+
+def t_bsw_futures_hold_non_recovering():
+    from agents.strategy_agents import FuturesAgent
+    from tick_engine import MarketSnapshot, Tick, LiveIndicators
+    from datetime import datetime
+
+    agent = FuturesAgent()
+    tick  = Tick(symbol="NIFTY", ltp=21000, bid=20998, ask=21002, volume=500000,
+                 change=0.0, change_pct=-3.0,
+                 high=21500, low=20500, open=21400, timestamp=datetime.now())
+    ind = LiveIndicators(symbol="NIFTY")
+    ind.ema9 = 20900; ind.ema21 = 20800; ind.ema50 = 20700; ind.rsi_14 = 35
+    ind.vwap = 21100; ind.macd_hist = -5; ind.atr_14 = 80; ind.adx_14 = 30
+    ind.supertrend_dir = "DOWN"; ind.depth_imbalance = 0.7
+    snap = MarketSnapshot(symbol="NIFTY", tick=tick, indicators=ind,
+                          candles_1min=[], candles_5min=[],
+                          black_swan_active=True, black_swan_phase="FALLING")
+    action, _ = agent.evaluate_tick(snap)
+    assert action == "HOLD", f"Expected HOLD in FALLING phase, got {action}"
+
+def t_bsw_config_settings():
+    from config import settings
+    assert hasattr(settings, "black_swan_vix_zscore")
+    assert hasattr(settings, "black_swan_price_drop_pct")
+    assert hasattr(settings, "black_swan_iv_rank_min")
+    assert hasattr(settings, "black_swan_volume_mult")
+    assert settings.black_swan_vix_zscore  == 3.0
+    assert settings.black_swan_price_drop_pct == 3.0
+    assert settings.black_swan_iv_rank_min == 75.0
+
+run("BLACK_SWAN in Regime enum",                                       t_bsw_regime_enum)
+run("BLACK_SWAN REGIME_PLANS entry: size_factor=0.5, active=[mr,opt,sc,fut]", t_bsw_plan_exists)
+run("MarketSnapshot has black_swan_active + black_swan_phase fields",  t_bsw_marketsnapshot_fields)
+run("_classify() returns BLACK_SWAN when VIX z-score > 3.0",          t_bsw_classify_vix_zscore)
+run("_classify() returns BLACK_SWAN when 1-min NIFTY drop > 3%",      t_bsw_classify_flash_crash)
+run("_compute_bs_phase() → FALLING for 4 red candles + rising vol",   t_bsw_compute_phase_falling)
+run("_compute_bs_phase() → RECOVERING for 2 consecutive green candles", t_bsw_compute_phase_recovering)
+run("_compute_bs_phase() → STABILIZING for mixed candles",             t_bsw_compute_phase_stabilizing)
+run("trailing_sl_engine.tighten_all() exists and returns int",         t_bsw_tighten_all_method)
+run("MeanReversionAgent returns HOLD during FALLING phase",            t_bsw_meanrev_hold_falling)
+run("MeanReversionAgent returns HOLD when RSI >= 25 in STABILIZING",  t_bsw_meanrev_hold_rsi_not_extreme)
+run("ScalpingAgent returns HOLD in non-RECOVERING phase",              t_bsw_scalping_hold_non_recovering)
+run("ScalpingAgent returns HOLD when volume_ratio < 3.0 in RECOVERING", t_bsw_scalping_hold_low_volume)
+run("OptionsAgent sets use_limit=True during BLACK_SWAN",              t_bsw_options_use_limit)
+run("FuturesAgent returns HOLD during FALLING phase",                  t_bsw_futures_hold_non_recovering)
+run("config.py has all 4 black_swan_* settings with correct defaults", t_bsw_config_settings)
+
+
+# ══════════════════════════════════════════════════════════════════════════
 # FINAL SUMMARY
 # ══════════════════════════════════════════════════════════════════════════
 failed = summary()

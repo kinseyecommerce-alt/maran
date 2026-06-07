@@ -229,6 +229,13 @@ class Settings(BaseSettings):
     # When set, API key/secret are encrypted at rest. When empty, fallback to plaintext + chmod 600.
     kite_accounts_key: str = ""
 
+    # Black Swan detection + opportunity response (veteran trader mode)
+    black_swan_vix_zscore:     float = 3.0    # VIX z-score threshold (beyond HIGH_VOLATILE's 2.0)
+    black_swan_price_drop_pct: float = 3.0    # 1-min NIFTY drop % to trigger flash crash detect
+    black_swan_exit_time:      str   = "14:30" # hard cut-off for all black swan positions
+    black_swan_iv_rank_min:    float = 75.0   # min IV rank required to sell condors (IV crush trade)
+    black_swan_volume_mult:    float = 3.0    # volume multiple required for bounce confirmation
+
     # Runtime tuning — named constants (avoids magic numbers scattered across modules)
     db_write_queue_size:      int   = 2000   # state_store write backlog before drops
     adaptive_refresh_sec:     int   = 300    # how often base_agent re-reads adaptive params

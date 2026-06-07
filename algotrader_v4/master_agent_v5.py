@@ -242,19 +242,70 @@ class MasterAgent:
             regime = regime_detector.current_regime
             plan   = regime_detector.current_plan
 
-        # Phase 3A: Regime hysteresis — only accept a new regime after 2 consecutive confirmations
-        self._regime_buffer.append(regime.value)
-        if len(self._regime_buffer) > 2:
-            self._regime_buffer = self._regime_buffer[-2:]
-        if len(self._regime_buffer) == 2 and self._regime_buffer[0] == self._regime_buffer[1]:
-            if self._confirmed_regime != regime.value:
-                logger.info("[master] Regime confirmed: {} → {} (2-cycle hysteresis)",
-                            self._confirmed_regime, regime.value)
+        # BLACK SWAN emergency bypass — no hysteresis, act immediately
+        if regime == Regime.BLACK_SWAN and self._confirmed_regime != Regime.BLACK_SWAN.value:
+            logger.critical("[master] BLACK SWAN DETECTED — emergency dispatch, tightening all TSL positions")
+            self._confirmed_regime = Regime.BLACK_SWAN.value
+            self._regime_buffer.clear()
+            # Step 1: tighten all existing TSL stops immediately to protect current P&L
+            try:
+                from trailing_sl_engine import trailing_sl_engine as _tsl
+                _tsl.tighten_all(trail_pct=0.5)
+            except Exception as _e:
+                logger.warning("[master] TSL tighten_all failed: {}", _e)
+            # Step 2: activate opportunity agents
+            self._apply_regime_plan(regime, plan)
+            # Step 3: broadcast to dashboard WebSocket
+            try:
+                if tick_engine.ws_broadcast:
+                    import asyncio
+                    asyncio.create_task(tick_engine.ws_broadcast({
+                        "event":      "black_swan_detected",
+                        "phase":      "FALLING",
+                        "regime":     regime.value,
+                        "reason":     plan.reasoning,
+                        "vix_zscore": round(regime_detector._vix_zscore(
+                                          regime_detector._vix_history[-1]
+                                          if regime_detector._vix_history else 0), 2),
+                    }))
+            except Exception as _e:
+                logger.warning("[master] BLACK SWAN broadcast failed: {}", _e)
+            asyncio.create_task(send_telegram(
+                "<b>⚡ BLACK SWAN DETECTED</b>\nEmergency regime dispatch. "
+                "TSL tightened. Opportunity agents active.\n"
+                f"VIX z-score: {regime_detector._vix_zscore(regime_detector._vix_history[-1] if regime_detector._vix_history else 0):.2f}"
+            ))
+
+        # Fast single-cycle recovery from BLACK_SWAN (don't hold panic mode longer than needed)
+        elif self._confirmed_regime == Regime.BLACK_SWAN.value and regime != Regime.BLACK_SWAN:
+            logger.info("[master] BLACK SWAN clearing: {} → {} (fast single-cycle recovery)",
+                        self._confirmed_regime, regime.value)
+            self._confirmed_regime = regime.value
+            self._regime_buffer.clear()
+            self._apply_regime_plan(regime, plan)
+            try:
+                if tick_engine.ws_broadcast:
+                    asyncio.create_task(tick_engine.ws_broadcast({
+                        "event":      "black_swan_cleared",
+                        "new_regime": regime.value,
+                    }))
+            except Exception:
+                pass
+
+        else:
+            # Phase 3A: Normal regime hysteresis — only accept new regime after 2 consecutive confirmations
+            self._regime_buffer.append(regime.value)
+            if len(self._regime_buffer) > 2:
+                self._regime_buffer = self._regime_buffer[-2:]
+            if len(self._regime_buffer) == 2 and self._regime_buffer[0] == self._regime_buffer[1]:
+                if self._confirmed_regime != regime.value:
+                    logger.info("[master] Regime confirmed: {} → {} (2-cycle hysteresis)",
+                                self._confirmed_regime, regime.value)
+                    self._confirmed_regime = regime.value
+                    self._apply_regime_plan(regime, plan)
+            elif self._confirmed_regime is None:
                 self._confirmed_regime = regime.value
                 self._apply_regime_plan(regime, plan)
-        elif self._confirmed_regime is None:
-            self._confirmed_regime = regime.value
-            self._apply_regime_plan(regime, plan)
 
         sigs = regime_detector.current_signals
         live = tick_engine.all_latest()
