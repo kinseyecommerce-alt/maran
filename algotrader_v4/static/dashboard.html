@@ -1868,6 +1868,106 @@
           <div id="pr-strat" style="overflow-x:auto;margin-top:12px"></div>
         </div>
 
+        <!-- ── Backtest Lab ──────────────────────────────────────────── -->
+        <div class="card" style="margin-top:16px" id="backtest-lab-card">
+          <div class="card-title"><i data-lucide="flask-conical"></i> Backtest Lab</div>
+
+          <!-- Mode switcher -->
+          <div style="display:flex;gap:0;margin-bottom:16px;border:1px solid var(--line);border-radius:var(--r-md);overflow:hidden;width:fit-content">
+            <button id="bt-mode-single" onclick="switchBtMode('single')"
+              style="padding:6px 16px;font-size:13px;font-weight:600;border:none;cursor:pointer;
+                     background:var(--brand);color:#fff;transition:background .15s">Single Symbol</button>
+            <button id="bt-mode-portfolio" onclick="switchBtMode('portfolio')"
+              style="padding:6px 16px;font-size:13px;font-weight:600;border:none;cursor:pointer;
+                     background:var(--bg-subtle);color:var(--fg2);transition:background .15s">Portfolio</button>
+          </div>
+
+          <!-- Single Symbol Form -->
+          <div id="bt-form-single">
+            <div style="display:flex;gap:10px;flex-wrap:wrap;align-items:flex-end">
+              <div>
+                <label style="font-size:11px;font-weight:600;color:var(--fg3);display:block;margin-bottom:4px;text-transform:uppercase;letter-spacing:.04em">Symbol</label>
+                <input id="bt-symbol" type="text" placeholder="RELIANCE" value="RELIANCE"
+                  style="width:130px;border:1px solid var(--line);border-radius:var(--r-md);padding:6px 10px;font-family:var(--font-mono);font-size:13px;background:var(--bg-card);color:var(--fg1);outline:none">
+              </div>
+              <div>
+                <label style="font-size:11px;font-weight:600;color:var(--fg3);display:block;margin-bottom:4px;text-transform:uppercase;letter-spacing:.04em">Strategy</label>
+                <select id="bt-strategy"
+                  style="border:1px solid var(--line);border-radius:var(--r-md);padding:6px 10px;font-size:13px;background:var(--bg-card);color:var(--fg1);outline:none">
+                  <option value="intraday">Intraday (15m)</option>
+                  <option value="scalping">Scalping (5m)</option>
+                  <option value="swing">Swing (Daily)</option>
+                  <option value="options">Options (60m)</option>
+                </select>
+              </div>
+              <div>
+                <label style="font-size:11px;font-weight:600;color:var(--fg3);display:block;margin-bottom:4px;text-transform:uppercase;letter-spacing:.04em">Lookback (days)</label>
+                <input id="bt-lookback" type="number" value="730" min="30" max="730"
+                  style="width:110px;border:1px solid var(--line);border-radius:var(--r-md);padding:6px 10px;font-size:13px;background:var(--bg-card);color:var(--fg1);outline:none">
+              </div>
+              <button class="btn btn-blue" id="bt-single-run-btn" onclick="runSingleBacktest()" style="height:34px">
+                Run Backtest
+              </button>
+            </div>
+          </div>
+
+          <!-- Portfolio Form -->
+          <div id="bt-form-portfolio" style="display:none">
+            <div style="display:grid;grid-template-columns:1fr 1fr;gap:16px;align-items:start">
+              <div>
+                <label style="font-size:11px;font-weight:600;color:var(--fg3);display:block;margin-bottom:4px;text-transform:uppercase;letter-spacing:.04em">Symbols (comma-separated)</label>
+                <textarea id="bt-portfolio-symbols" placeholder="RELIANCE,TCS,HDFCBANK,INFY,SBIN"
+                  style="width:100%;height:80px;border:1px solid var(--line);border-radius:var(--r-md);padding:8px 10px;
+                         font-family:var(--font-mono);font-size:12px;background:var(--bg-card);color:var(--fg1);
+                         outline:none;resize:vertical">RELIANCE,TCS,HDFCBANK,INFY,SBIN</textarea>
+              </div>
+              <div style="display:flex;flex-direction:column;gap:8px">
+                <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px">
+                  <div>
+                    <label style="font-size:11px;font-weight:600;color:var(--fg3);display:block;margin-bottom:4px;text-transform:uppercase;letter-spacing:.04em">Strategy</label>
+                    <select id="bt-portfolio-strategy"
+                      style="width:100%;border:1px solid var(--line);border-radius:var(--r-md);padding:6px 8px;font-size:12px;background:var(--bg-card);color:var(--fg1);outline:none">
+                      <option value="intraday">Intraday</option>
+                      <option value="scalping">Scalping</option>
+                      <option value="swing">Swing</option>
+                      <option value="options">Options</option>
+                    </select>
+                  </div>
+                  <div>
+                    <label style="font-size:11px;font-weight:600;color:var(--fg3);display:block;margin-bottom:4px;text-transform:uppercase;letter-spacing:.04em">Max Positions</label>
+                    <input id="bt-portfolio-maxpos" type="number" value="5" min="1" max="20"
+                      style="width:100%;border:1px solid var(--line);border-radius:var(--r-md);padding:6px 8px;font-size:12px;background:var(--bg-card);color:var(--fg1);outline:none">
+                  </div>
+                  <div>
+                    <label style="font-size:11px;font-weight:600;color:var(--fg3);display:block;margin-bottom:4px;text-transform:uppercase;letter-spacing:.04em">Total Capital (₹)</label>
+                    <input id="bt-portfolio-capital" type="number" value="500000" min="10000"
+                      style="width:100%;border:1px solid var(--line);border-radius:var(--r-md);padding:6px 8px;font-size:12px;background:var(--bg-card);color:var(--fg1);outline:none">
+                  </div>
+                  <div>
+                    <label style="font-size:11px;font-weight:600;color:var(--fg3);display:block;margin-bottom:4px;text-transform:uppercase;letter-spacing:.04em">Lookback (days)</label>
+                    <input id="bt-portfolio-lookback" type="number" value="730" min="30" max="730"
+                      style="width:100%;border:1px solid var(--line);border-radius:var(--r-md);padding:6px 8px;font-size:12px;background:var(--bg-card);color:var(--fg1);outline:none">
+                  </div>
+                </div>
+              </div>
+            </div>
+            <button class="btn btn-blue" id="bt-portfolio-run-btn" onclick="runPortfolioBacktest()"
+              style="margin-top:12px">Run Portfolio Backtest</button>
+          </div>
+
+          <!-- Results (hidden until a backtest runs) -->
+          <div id="bt-results" style="display:none;margin-top:20px;border-top:1px solid var(--line);padding-top:16px">
+            <div id="bt-pass-badge" style="margin-bottom:12px"></div>
+            <div id="bt-chips" style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:14px"></div>
+            <div id="bt-fail-reasons" style="display:none;margin-bottom:12px;padding:8px 12px;
+              background:var(--sell-tint);border-radius:var(--r-md);color:var(--sell);font-size:12px"></div>
+            <div style="height:200px;margin-bottom:14px;position:relative">
+              <canvas id="bt-equity-chart"></canvas>
+            </div>
+            <div id="bt-symbol-table" style="display:none"></div>
+          </div>
+        </div><!-- /backtest-lab-card -->
+
       </div><!-- /tab-analytics -->
 
 
@@ -2522,20 +2622,39 @@ const BSW_PHASE_COLORS = {
   STABILIZING: '#D97706',   // amber
   RECOVERING:  '#16A34A',   // green
 };
+const BSW_PHASE_DESC = {
+  FALLING:     'Protecting TSL — awaiting exhaustion, no new entries',
+  STABILIZING: 'Scaling mean-reversion in tranches — extreme oversold',
+  RECOVERING:  'IV crush + bounce active — all exits by 14:30',
+};
+async function fetchBlackSwanStatus() {
+  try {
+    const d = await api('GET', '/black-swan/status');
+    if (d && d.active) showBlackSwanBanner(d.phase || 'FALLING', d.vix_zscore);
+    else clearBlackSwanBanner();
+  } catch { /* non-critical */ }
+}
 function showBlackSwanBanner(phase, vixZ) {
   const banner = document.getElementById('black-swan-banner');
   const color  = BSW_PHASE_COLORS[phase] || '#DC2626';
   banner.style.background = color;
   banner.style.display    = 'block';
+  // FALLING phase gets faster pulse to signal urgency
+  banner.style.animationDuration = phase === 'FALLING' ? '0.7s' : '1.2s';
   updateBlackSwanPhase(phase, vixZ);
 }
 function updateBlackSwanPhase(phase, vixZ) {
   const phaseEl = document.getElementById('bsw-phase');
   const vixEl   = document.getElementById('bsw-vix');
+  const textEl  = document.getElementById('bsw-text');
   const banner  = document.getElementById('black-swan-banner');
   if (phaseEl) phaseEl.textContent = phase || '';
-  if (vixEl && vixZ != null) vixEl.textContent = `VIX z=${vixZ}`;
-  if (banner && phase) banner.style.background = BSW_PHASE_COLORS[phase] || '#DC2626';
+  if (vixEl  && vixZ != null) vixEl.textContent = `VIX z=${vixZ}`;
+  if (textEl) textEl.textContent = 'BLACK SWAN — ' + (BSW_PHASE_DESC[phase] || phase);
+  if (banner && phase) {
+    banner.style.background     = BSW_PHASE_COLORS[phase] || '#DC2626';
+    banner.style.animationDuration = phase === 'FALLING' ? '0.7s' : '1.2s';
+  }
 }
 function clearBlackSwanBanner() {
   const banner = document.getElementById('black-swan-banner');
@@ -4681,6 +4800,9 @@ async function init() {
   // WebSocket
   connectWS();
 
+  // Initial Black Swan status (in case active before page load)
+  fetchBlackSwanStatus();
+
   // Notifications + mobile nav
   await _initNotifications();
   lucide.createIcons();
@@ -5091,19 +5213,221 @@ document.addEventListener('keydown', function(e) {
   }
 });
 
+/* ═══════════════════════════════════════════════════════════════
+   BACKTEST LAB — Single Symbol + Portfolio
+═══════════════════════════════════════════════════════════════ */
+let _btEquityChart = null;
+
+function switchBtMode(mode) {
+  document.getElementById('bt-form-single').style.display    = mode === 'single'    ? '' : 'none';
+  document.getElementById('bt-form-portfolio').style.display = mode === 'portfolio' ? '' : 'none';
+  const active   = 'background:var(--brand);color:#fff';
+  const inactive = 'background:var(--bg-subtle);color:var(--fg2)';
+  document.getElementById('bt-mode-single').style.cssText    += ';' + (mode === 'single'    ? active : inactive);
+  document.getElementById('bt-mode-portfolio').style.cssText += ';' + (mode === 'portfolio' ? active : inactive);
+  document.getElementById('bt-results').style.display = 'none';
+}
+
+async function runSingleBacktest() {
+  const sym     = (document.getElementById('bt-symbol').value || '').trim().toUpperCase();
+  const strat   = document.getElementById('bt-strategy').value;
+  const lookback = parseInt(document.getElementById('bt-lookback').value) || 730;
+  if (!sym) { toast('Enter a symbol', 'warn'); return; }
+
+  const btn = document.getElementById('bt-single-run-btn');
+  btn.textContent = 'Running…'; btn.disabled = true;
+  document.getElementById('bt-results').style.display = 'none';
+
+  try {
+    const d = await api('POST', '/backtest/run', {
+      symbol: sym, strategy: strat, lookback_days: lookback, walk_forward: true,
+    });
+    if (!d) return;
+    _renderBtResults(d, 'single');
+    toast(`${sym} ${strat}: ${d.passed ? '✅ PASS' : '❌ FAIL'} | Sharpe=${d.sharpe_ratio} WR=${d.win_rate}%`,
+          d.passed ? 'ok' : 'error');
+  } catch (e) {
+    toast('Backtest error: ' + e.message, 'error');
+  } finally {
+    btn.textContent = 'Run Backtest'; btn.disabled = false;
+  }
+}
+
+async function runPortfolioBacktest() {
+  const raw = document.getElementById('bt-portfolio-symbols').value || '';
+  const symbols = raw.split(',').map(s => s.trim().toUpperCase()).filter(Boolean)
+                     .map(s => ({ symbol: s, exchange: 'NSE' }));
+  if (!symbols.length) { toast('Enter at least one symbol', 'warn'); return; }
+
+  const strat   = document.getElementById('bt-portfolio-strategy').value;
+  const capital = parseFloat(document.getElementById('bt-portfolio-capital').value) || 500000;
+  const maxPos  = parseInt(document.getElementById('bt-portfolio-maxpos').value)   || 5;
+  const lookback = parseInt(document.getElementById('bt-portfolio-lookback').value) || 730;
+
+  const btn = document.getElementById('bt-portfolio-run-btn');
+  btn.textContent = 'Running…'; btn.disabled = true;
+  document.getElementById('bt-results').style.display = 'none';
+
+  try {
+    const d = await api('POST', '/backtest/portfolio', {
+      symbols, strategy: strat, total_capital: capital,
+      max_open_positions: maxPos, lookback_days: lookback,
+    });
+    if (!d) return;
+    _renderBtResults(d, 'portfolio');
+    const pnl = typeof d.total_net_pnl === 'number' ? fmtINR(d.total_net_pnl) : '—';
+    toast(`Portfolio: ${d.total_trades} trades | Sharpe ${d.sharpe_ratio} | P&L ₹${pnl}`, 'ok');
+  } catch (e) {
+    toast('Portfolio backtest error: ' + e.message, 'error');
+  } finally {
+    btn.textContent = 'Run Portfolio Backtest'; btn.disabled = false;
+  }
+}
+
+function _btChip(label, value, negative = false) {
+  const color = negative ? 'var(--sell)' : 'var(--fg1)';
+  return `<div style="display:inline-flex;flex-direction:column;align-items:center;min-width:84px;
+    background:var(--bg-subtle);border:1px solid var(--line);border-radius:var(--r-md);padding:6px 10px">
+    <div style="font-size:10px;font-weight:600;color:var(--fg3);text-transform:uppercase;letter-spacing:.04em;margin-bottom:2px">${label}</div>
+    <div style="font-size:14px;font-weight:700;color:${color};font-family:var(--font-mono)">${value}</div>
+  </div>`;
+}
+
+function _renderBtResults(d, mode) {
+  const resultsEl = document.getElementById('bt-results');
+  const badgeEl   = document.getElementById('bt-pass-badge');
+  const chipsEl   = document.getElementById('bt-chips');
+  const failEl    = document.getElementById('bt-fail-reasons');
+  const tableEl   = document.getElementById('bt-symbol-table');
+
+  resultsEl.style.display = '';
+
+  if (mode === 'single') {
+    const passed = d.passed;
+    badgeEl.innerHTML = `<span style="display:inline-flex;align-items:center;gap:6px;padding:5px 14px;
+      border-radius:20px;font-weight:700;font-size:13px;
+      background:${passed ? 'var(--buy-tint)' : 'var(--sell-tint)'};
+      color:${passed ? 'var(--buy)' : 'var(--sell)'};
+      border:1px solid ${passed ? 'var(--buy)' : 'var(--sell)'}">
+      ${passed ? '✓ PASS' : '✗ FAIL'} — ${d.symbol} ${d.strategy}
+    </span>`;
+
+    chipsEl.innerHTML =
+      _btChip('Win Rate',  d.win_rate + '%')   +
+      _btChip('Sharpe',    d.sharpe_ratio)      +
+      _btChip('Calmar',    d.calmar_ratio)      +
+      _btChip('Max DD',    d.max_drawdown_pct + '%', true) +
+      _btChip('Total P&L', '₹' + fmtINR(d.total_pnl || d.total_net_pnl || 0), (d.total_pnl || 0) < 0) +
+      _btChip('Trades',    d.total_trades)      +
+      _btChip('OOS Sharpe', d.oos_sharpe ?? '—');
+
+    if (!passed && d.fail_reasons?.length) {
+      failEl.style.display = '';
+      failEl.innerHTML = d.fail_reasons.map(r => `<div>• ${r}</div>`).join('');
+    } else { failEl.style.display = 'none'; }
+    tableEl.style.display = 'none';
+
+  } else {
+    badgeEl.innerHTML = `<span style="display:inline-flex;align-items:center;gap:6px;padding:5px 14px;
+      border-radius:20px;font-weight:700;font-size:13px;
+      background:var(--brand-tint);color:var(--brand);border:1px solid var(--brand)">
+      Portfolio — ${d.symbols?.length ?? 0} symbols · ${d.strategy}
+    </span>`;
+
+    const pnl = d.total_net_pnl ?? 0;
+    chipsEl.innerHTML =
+      _btChip('Trades',      d.total_trades)                      +
+      _btChip('Win Rate',    d.win_rate + '%')                    +
+      _btChip('Sharpe',      d.sharpe_ratio)                      +
+      _btChip('Calmar',      d.calmar_ratio)                      +
+      _btChip('Max DD',      d.max_drawdown_pct + '%', true)      +
+      _btChip('Net P&L',     '₹' + fmtINR(pnl), pnl < 0)        +
+      _btChip('Max Concurrent', `${d.max_concurrent_positions}/${d.max_open_positions}`) +
+      _btChip('Avg Capital', d.capital_utilization_avg + '%');
+
+    failEl.style.display = 'none';
+
+    if (d.per_symbol && Object.keys(d.per_symbol).length) {
+      tableEl.style.display = '';
+      const rows = Object.entries(d.per_symbol).map(([sym, s]) => {
+        const pnlColor = s.net_pnl >= 0 ? 'var(--buy)' : 'var(--sell)';
+        return `<tr>
+          <td style="font-family:var(--font-mono);font-weight:600">${sym}</td>
+          <td>${s.trades}</td>
+          <td style="color:var(--buy)">${s.wins}</td>
+          <td style="color:var(--sell)">${s.losses}</td>
+          <td>${s.win_rate}%</td>
+          <td style="font-family:var(--font-mono);color:${pnlColor}">₹${fmtINR(s.net_pnl)}</td>
+        </tr>`;
+      }).join('');
+      tableEl.innerHTML = `
+        <div style="font-size:11px;font-weight:700;color:var(--fg2);text-transform:uppercase;letter-spacing:.04em;margin-bottom:6px">
+          Per-Symbol Breakdown
+        </div>
+        <div class="table-wrap">
+          <table><thead><tr>
+            <th>Symbol</th><th>Trades</th><th>Wins</th><th>Losses</th><th>Win Rate</th><th>Net P&amp;L</th>
+          </tr></thead><tbody>${rows}</tbody></table>
+        </div>`;
+    } else { tableEl.style.display = 'none'; }
+  }
+
+  // Equity curve chart
+  const curve = d.equity_curve;
+  if (Array.isArray(curve) && curve.length > 1) {
+    if (_btEquityChart) { _btEquityChart.destroy(); _btEquityChart = null; }
+    const ctx = document.getElementById('bt-equity-chart').getContext('2d');
+    const pos = curve.map(v => v >= 0 ? v : null);
+    const neg = curve.map(v => v <  0 ? v : null);
+    _btEquityChart = new Chart(ctx, {
+      type: 'line',
+      data: {
+        labels: curve.map((_, i) => i + 1),
+        datasets: [
+          {
+            data: pos,
+            borderColor: '#16A34A', backgroundColor: 'rgba(22,163,74,.08)',
+            fill: true, tension: 0.3,
+            pointRadius: curve.length > 150 ? 0 : 2, borderWidth: 1.5, spanGaps: true,
+          },
+          {
+            data: neg,
+            borderColor: '#DC2626', backgroundColor: 'rgba(220,38,38,.08)',
+            fill: true, tension: 0.3,
+            pointRadius: curve.length > 150 ? 0 : 2, borderWidth: 1.5, spanGaps: true,
+          },
+        ],
+      },
+      options: {
+        responsive: true, maintainAspectRatio: false,
+        interaction: { mode: 'index', intersect: false },
+        plugins: {
+          legend: { display: false },
+          tooltip: { callbacks: { label: ctx => '₹' + fmtINR(ctx.raw ?? 0) } },
+        },
+        scales: {
+          x: { display: false },
+          y: {
+            grid: { color: 'rgba(0,0,0,0.04)' },
+            ticks: { callback: v => '₹' + fmtINR(v), font: { family: 'JetBrains Mono', size: 10 } },
+          },
+        },
+      },
+    });
+  }
+
+  // Scroll into view
+  document.getElementById('backtest-lab-card').scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+}
+
+// Keyboard shortcut B → open backtest lab in analytics tab
 function promptRunBacktest() {
-  const sym = prompt('Run backtest — symbol (e.g. RELIANCE):');
-  if (!sym) return;
-  const strat = prompt('Strategy (intraday/scalping/swing/options/futures/mean_reversion/momentum/pairs):', 'intraday');
-  if (!strat) return;
   switchTab('analytics');
-  toast(`Running backtest: ${sym.trim().toUpperCase()} / ${strat}…`, 'info');
-  api('POST', '/backtest/run', { symbol: sym.trim().toUpperCase(), strategy: strat, walk_forward: true })
-    .then(d => {
-      if (!d) return;
-      toast(`${d.symbol} ${d.strategy}: ${d.passed ? 'PASS ✓' : 'FAIL ✗'} | WR=${d.win_rate}% Sharpe=${d.sharpe_ratio}`, d.passed ? 'ok' : 'error');
-    })
-    .catch(e => toast(`Backtest error: ${e.message}`, 'error'));
+  setTimeout(() => {
+    switchBtMode('single');
+    document.getElementById('bt-symbol').focus();
+    document.getElementById('backtest-lab-card').scrollIntoView({ behavior: 'smooth', block: 'start' });
+  }, 100);
 }
 
 // ── Multi-Leg Builder ──────────────────────────────────────────────────────────
