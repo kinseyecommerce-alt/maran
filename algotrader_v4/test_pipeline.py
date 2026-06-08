@@ -3464,6 +3464,73 @@ run("to_dict() contains all required portfolio keys",                 t_portfoli
 
 
 # ══════════════════════════════════════════════════════════════════════════
+# 24. FILTER_WATCHLIST BUG-FIX — empty pre-learned list regression
+# ══════════════════════════════════════════════════════════════════════════
+section("24. FILTER_WATCHLIST BUG-FIX")
+
+def t_filter_empty_prelearned_zero_approvals():
+    """BUG-FIX: empty pre-learned list must yield 0 approvals, not 'approve all'."""
+    name = "scalping"
+    pre_data = {name: []}  # agent present, but zero symbols passed backtest
+    wl = [{"symbol": "RELIANCE"}, {"symbol": "TCS"}]
+    # New code path: key present in dict → filter by pre_set
+    assert name in pre_data
+    pre_set = set(pre_data[name])
+    approved = [i for i in wl if i["symbol"] in pre_set]
+    assert approved == [], f"Expected [] but got {approved}"
+
+def t_filter_missing_agent_approves_all():
+    """If agent not in seed file at all → approve entire watchlist (new agent path)."""
+    name = "mean_reversion"
+    pre_data = {"intraday": ["RELIANCE"]}  # mean_reversion absent from file
+    wl = [{"symbol": "RELIANCE"}, {"symbol": "TCS"}, {"symbol": "HDFCBANK"}]
+    if name in pre_data:
+        approved = [i for i in wl if i["symbol"] in set(pre_data[name])]
+    else:
+        approved = list(wl)
+    assert len(approved) == len(wl), f"New agent should get all {len(wl)} symbols"
+
+def t_filter_non_empty_prelearned_filters_correctly():
+    """Non-empty pre-learned list must include only listed symbols."""
+    name = "intraday"
+    pre_data = {name: ["RELIANCE", "TCS"]}
+    wl = [{"symbol": "RELIANCE"}, {"symbol": "TCS"}, {"symbol": "HDFCBANK"}]
+    assert name in pre_data
+    pre_set = set(pre_data[name])
+    approved = [i for i in wl if i["symbol"] in pre_set]
+    assert len(approved) == 2
+    syms = {a["symbol"] for a in approved}
+    assert syms == {"RELIANCE", "TCS"}, f"Unexpected approvals: {syms}"
+
+def t_filter_integration_empty_list():
+    """Integration: filter_watchlist with skip_startup_backtest + empty pre-learned list."""
+    import json, unittest.mock as m
+    from agents.strategy_agents import ALL_AGENTS
+    from config import settings
+
+    agent = ALL_AGENTS["scalping"]
+    agent._approved.clear()
+    old_skip = settings.skip_startup_backtest
+    settings.skip_startup_backtest = True
+
+    pre_data = {"scalping": []}
+    with m.patch("agents.base_agent.Path") as mp:
+        mp.return_value.exists.return_value = True
+        mp.return_value.read_text.return_value = json.dumps(pre_data)
+        approved = agent.filter_watchlist([{"symbol": "RELIANCE"}, {"symbol": "TCS"}])
+
+    settings.skip_startup_backtest = old_skip
+    assert approved == [], f"Empty pre-learned list should yield [], got {approved}"
+    assert "RELIANCE" not in agent._approved
+    assert "TCS" not in agent._approved
+
+run("Empty pre-learned list yields 0 approvals (not approve-all)", t_filter_empty_prelearned_zero_approvals)
+run("Agent missing from seed file approves full watchlist",         t_filter_missing_agent_approves_all)
+run("Non-empty pre-learned list filters to listed symbols only",    t_filter_non_empty_prelearned_filters_correctly)
+run("Integration: filter_watchlist empty pre-learned → 0 approved",t_filter_integration_empty_list)
+
+
+# ══════════════════════════════════════════════════════════════════════════
 # FINAL SUMMARY
 # ══════════════════════════════════════════════════════════════════════════
 failed = summary()

@@ -315,11 +315,18 @@ class BaseAgent(ABC):
             approved_path = Path("logs/approved_symbols.json")
             if approved_path.exists():
                 import json
-                pre = json.loads(approved_path.read_text()).get(self.name, [])
-                pre_set = set(pre)
-                approved = [i for i in watchlist if i["symbol"] in pre_set] if pre_set \
-                           else list(watchlist)
-                label = f"pre-learned ({len(pre_set)} approved symbols on file)"
+                pre_data = json.loads(approved_path.read_text())
+                if self.name in pre_data:
+                    # Agent has been pre-learned — use exactly what passed backtest.
+                    # An empty list is intentional (all symbols failed backtest).
+                    pre_set = set(pre_data[self.name])
+                    approved = [i for i in watchlist if i["symbol"] in pre_set]
+                    label = f"pre-learned ({len(pre_set)} approved symbols on file)"
+                else:
+                    # Agent not in seed file (new agent added after historical_learner ran).
+                    # Approve all watchlist symbols so the agent can start immediately.
+                    approved = list(watchlist)
+                    label = "agent not in seed file — approving all watchlist symbols"
             else:
                 # No file yet — approve everything (user trusts their watchlist)
                 approved = list(watchlist)
