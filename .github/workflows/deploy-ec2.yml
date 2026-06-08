@@ -1,0 +1,30 @@
+name: Deploy to EC2
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'algotrader_v4/**'
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Deploy to EC2
+        uses: appleboy/ssh-action@v1.0.3
+        with:
+          host: ${{ secrets.EC2_HOST }}
+          username: ${{ secrets.EC2_USER }}
+          key: ${{ secrets.EC2_SSH_KEY }}
+          timeout: 120s
+          script: |
+            set -e
+            cd /opt/algotrader
+            git fetch origin main
+            git checkout main
+            git pull origin main
+            venv/bin/pip install -q -r requirements.txt
+            sudo systemctl restart algotrader
+            sleep 4
+            curl -sf http://localhost:8000/health | grep -q '"status":"ok"'
+            echo "✓ Deploy complete — algotrader is healthy"

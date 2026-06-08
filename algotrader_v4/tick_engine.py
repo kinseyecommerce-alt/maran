@@ -54,6 +54,8 @@ class Tick:
     low:       float
     open:      float
     timestamp: datetime
+    bid_depth: list = field(default_factory=list)  # [(price, qty), ...] top 5 bids
+    ask_depth: list = field(default_factory=list)  # [(price, qty), ...] top 5 asks
 
     @classmethod
     def from_quote(cls, q: Quote) -> "Tick":
@@ -61,6 +63,8 @@ class Tick:
             symbol=q.symbol, ltp=q.ltp, bid=q.bid, ask=q.ask,
             volume=q.volume, change=q.change, change_pct=q.change_pct,
             high=q.high, low=q.low, open=q.open, timestamp=q.ts,
+            bid_depth=getattr(q, "bid_depth", []),
+            ask_depth=getattr(q, "ask_depth", []),
         )
 
 
@@ -77,6 +81,9 @@ class LiveIndicators:
     bid:         float = 0.0
     ask:         float = 0.0
     spread:      float = 0.0
+    wall_above:       bool  = False   # large sell wall within 0.5% above LTP
+    wall_below:       bool  = False   # large buy wall within 0.5% below LTP
+    depth_imbalance:  float = 0.5     # bid_qty/(bid_qty+ask_qty), >0.6=buy pressure
     # EMA
     ema9:        float = 0.0
     ema21:       float = 0.0
@@ -139,12 +146,14 @@ class LiveIndicators:
 
 @dataclass
 class MarketSnapshot:
-    symbol:       str
-    tick:         Tick
-    indicators:   LiveIndicators
-    candles_1min: list[Candle] = field(default_factory=list)
-    candles_5min: list[Candle] = field(default_factory=list)
-    bar_seconds:  int = 60       # 60 = 1m, 300 = 5m, 900 = 15m
+    symbol:            str
+    tick:              Tick
+    indicators:        LiveIndicators
+    candles_1min:      list[Candle] = field(default_factory=list)
+    candles_5min:      list[Candle] = field(default_factory=list)
+    bar_seconds:       int  = 60       # 60 = 1m, 300 = 5m, 900 = 15m
+    black_swan_active: bool = False    # True when market_regime == BLACK_SWAN
+    black_swan_phase:  str  = ""       # "FALLING" | "STABILIZING" | "RECOVERING" | ""
 
 
 # ── Tick buffer ───────────────────────────────────────────────────────────────
@@ -183,6 +192,13 @@ class TickBuffer:
                 result.append(self._current)
             return result
 
+    def reset(self) -> None:
+        """Clear all candles — called at 09:15 IST session open so VWAP starts fresh."""
+        with self._lock:
+            self._candles.clear()
+            self._current    = None
+            self._current_ts = None
+
     def as_dataframe(self) -> pd.DataFrame:
         cs = self.candles()
         if not cs:
@@ -202,16 +218,18 @@ def _wma(series, period: int):
 
 
 def _supertrend(high, low, close, period: int = 10, mult: float = 3.0):
+    if len(close) <= period:
+        return 0.0, "NEUTRAL"
     hl2   = (high + low) / 2
     atr   = ta.volatility.AverageTrueRange(high, low, close, period).average_true_range()
-    upper = (hl2 + mult * atr).fillna(0)
-    lower = (hl2 - mult * atr).fillna(0)
+    upper = hl2 + mult * atr
+    lower = hl2 - mult * atr
     n     = len(close)
     st_val, st_dir = [0.0] * n, ["NEUTRAL"] * n
     for i in range(1, n):
-        if close.iloc[i] > upper.iloc[i - 1]:
+        if close.iloc[i] > upper.iloc[i]:
             st_dir[i] = "UP"
-        elif close.iloc[i] < lower.iloc[i - 1]:
+        elif close.iloc[i] < lower.iloc[i]:
             st_dir[i] = "DOWN"
         else:
             st_dir[i] = st_dir[i - 1]
@@ -219,6 +237,9 @@ def _supertrend(high, low, close, period: int = 10, mult: float = 3.0):
             st_val[i] = max(float(lower.iloc[i]), st_val[i - 1]) if st_val[i - 1] else float(lower.iloc[i])
         else:
             st_val[i] = min(float(upper.iloc[i]), st_val[i - 1]) if st_val[i - 1] else float(upper.iloc[i])
+    st = pd.Series(st_val)
+    if pd.isna(st.iloc[-1]):
+        return 0.0, "NEUTRAL"
     return st_val[-1], st_dir[-1]
 
 
@@ -316,9 +337,15 @@ class IndicatorCalc:
 
     @staticmethod
     def compute(sym: str, tick: Tick, df: pd.DataFrame) -> LiveIndicators:
+        wall_above, wall_below, depth_imbalance = _detect_walls(
+            tick.ltp, tick.bid_depth, tick.ask_depth,
+        )
         ind = LiveIndicators(
             symbol=sym, ltp=tick.ltp, bid=tick.bid, ask=tick.ask,
             spread=round(tick.ask - tick.bid, 2),
+            wall_above=wall_above,
+            wall_below=wall_below,
+            depth_imbalance=depth_imbalance,
             day_high=tick.high, day_low=tick.low,
             day_open=tick.open, change_pct=tick.change_pct,
             computed_at=time.time(),
@@ -432,9 +459,11 @@ class IndicatorCalc:
 def _kite_quote_to_quote(symbol: str, data: dict) -> Quote:
     ohlc  = data.get("ohlc", {})
     depth = data.get("depth", {})
-    buys  = depth.get("buy",  [{}])
-    sells = depth.get("sell", [{}])
+    buys  = depth.get("buy",  [])
+    sells = depth.get("sell", [])
     ltp   = data.get("last_price", 0.0)
+    bid_depth = [(b.get("price", 0.0), b.get("quantity", 0)) for b in buys[:5]]
+    ask_depth = [(s.get("price", 0.0), s.get("quantity", 0)) for s in sells[:5]]
     return Quote(
         symbol    = symbol,
         ltp       = ltp,
@@ -443,11 +472,38 @@ def _kite_quote_to_quote(symbol: str, data: dict) -> Quote:
         low       = ohlc.get("low",   ltp),
         prev_close= ohlc.get("close", ltp),
         change    = data.get("change", 0.0),
-        change_pct= data.get("change", 0.0),
+        change_pct= data.get("change_percent", data.get("change_pct", 0.0)),
         volume    = data.get("volume_traded", 0),
         bid       = buys[0].get("price",  ltp) if buys  else ltp,
         ask       = sells[0].get("price", ltp) if sells else ltp,
+        bid_depth = bid_depth,
+        ask_depth = ask_depth,
     )
+
+
+def _detect_walls(ltp: float, bid_depth: list, ask_depth: list) -> tuple[bool, bool, float]:
+    """Return (wall_above, wall_below, depth_imbalance)."""
+    if not bid_depth and not ask_depth:
+        return False, False, 0.5
+
+    bid_total = sum(q for _, q in bid_depth)
+    ask_total = sum(q for _, q in ask_depth)
+    total = bid_total + ask_total
+    imbalance = bid_total / total if total > 0 else 0.5
+
+    threshold = ltp * 0.005  # 0.5% of price
+    avg_ask_qty = ask_total / len(ask_depth) if ask_depth else 0
+    avg_bid_qty = bid_total / len(bid_depth) if bid_depth else 0
+
+    wall_above = any(
+        0 < price - ltp < threshold and qty > avg_ask_qty * 3
+        for price, qty in ask_depth
+    )
+    wall_below = any(
+        0 < ltp - price < threshold and qty > avg_bid_qty * 3
+        for price, qty in bid_depth
+    )
+    return wall_above, wall_below, round(imbalance, 3)
 
 
 # ── Tick Engine ───────────────────────────────────────────────────────────────
@@ -471,16 +527,28 @@ class TickEngine:
         self._latest_ind:  dict[str, LiveIndicators]  = {}
 
         self._subscribers:  dict[str, asyncio.Queue]  = {}
+        self._queue_drop_count: dict[str, int]        = {}  # dropped-tick counter per subscriber
         self.ws_broadcast:  Optional[Callable]        = None
 
         self._loop: Optional[asyncio.AbstractEventLoop] = None
         self._task: Optional[asyncio.Task]              = None
 
+        # Duplicate-tick deduplication — skip indicator recompute when same LTP within 100ms
+        self._last_tick_ltp: dict[str, float] = {}
+        self._last_tick_ts:  dict[str, float] = {}   # monotonic seconds
+
         # KiteConnect WebSocket state
         self._kite_ticker = None
+        self._is_truedata_ws: bool = False
         self._use_ws: bool = False
         self._ws_received: set[str] = set()
         self._ws_down_since: Optional[float] = None  # monotonic time when WS disconnect detected
+
+        # Black swan phase (updated from NIFTY 1-min candles; shared across all symbol snapshots)
+        self._black_swan_phase: str = ""
+
+        # Daily session reset — VWAP is session-scoped; buffers are cleared at 09:15 IST
+        self._session_date: Optional[str] = None  # "YYYY-MM-DD" in IST
 
     # ── Setup ─────────────────────────────────────────────────────────
 
@@ -519,6 +587,7 @@ class TickEngine:
                         self._loop,
                     )
                     self._use_ws = True
+                    self._is_truedata_ws = True
                     logger.info("TickEngine: TrueData WebSocket started for {} symbols",
                                 len(self._symbols))
                 except Exception as exc:
@@ -569,6 +638,32 @@ class TickEngine:
         if symbol not in self._bufs_1min:
             return
 
+        # Guard against zero/None ltp — avoids division by zero in VWAP/ATR calculations
+        ltp = tick.ltp
+        if not ltp or ltp <= 0:
+            return
+
+        # Skip indicator recompute for duplicate LTP within 100ms (WS fires rapidly)
+        now_mono = time.monotonic()
+        if (self._last_tick_ltp.get(symbol) == tick.ltp
+                and now_mono - self._last_tick_ts.get(symbol, 0.0) < 0.1):
+            return
+        self._last_tick_ltp[symbol] = tick.ltp
+        self._last_tick_ts[symbol]  = now_mono
+
+        # VWAP is session-scoped: reset all buffers at the start of each IST trading day.
+        # This prevents yesterday's volume from contaminating today's VWAP computation.
+        tick_date = tick.timestamp.strftime("%Y-%m-%d")
+        if tick_date != self._session_date:
+            self._session_date = tick_date
+            for buf in self._bufs_1min.values():
+                buf.reset()
+            for buf in self._bufs_5min.values():
+                buf.reset()
+            self._last_tick_ltp.clear()
+            self._last_tick_ts.clear()
+            logger.info("TickEngine: daily buffer reset for IST session {}", tick_date)
+
         self._bufs_1min[symbol].push(tick.ltp, tick.volume, tick.timestamp)
         self._bufs_5min[symbol].push(tick.ltp, tick.volume, tick.timestamp)
 
@@ -589,9 +684,32 @@ class TickEngine:
             candles_5min=self._bufs_5min[symbol].candles()[-30:],
         )
 
-        for q in self._subscribers.values():
-            try:    q.put_nowait(snap)
-            except asyncio.QueueFull: pass
+        # Black swan phase — evaluated once per NIFTY tick; shared across all symbol snapshots
+        try:
+            from market_regime import regime_detector as _rd, Regime as _R
+            snap.black_swan_active = (_rd.current_regime == _R.BLACK_SWAN)
+            if snap.black_swan_active:
+                if symbol in ("NIFTY 50", "NIFTY50"):
+                    self._black_swan_phase = self._compute_bs_phase(snap.candles_1min)
+                snap.black_swan_phase = self._black_swan_phase
+        except Exception:
+            pass
+
+        # Record tick for later replay (no-op when recorder is disabled)
+        try:
+            from tick_recorder import tick_recorder
+            tick_recorder.record(symbol, tick)
+        except Exception:
+            pass
+
+        for name, q in self._subscribers.items():
+            try:
+                q.put_nowait(snap)
+            except asyncio.QueueFull:
+                cnt = self._queue_drop_count.get(name, 0) + 1
+                self._queue_drop_count[name] = cnt
+                if cnt % 100 == 1:
+                    logger.warning("[TickEngine] Queue full for '{}': {} ticks dropped (size={})", name, cnt, q.maxsize)
 
         if self.ws_broadcast:
             try:
@@ -632,8 +750,7 @@ class TickEngine:
     async def _ingest_kite_tick(self, symbol: str, tick: Tick) -> None:
         """Process a tick received directly from KiteConnect/TrueData WebSocket."""
         self._ws_received.add(symbol)
-        from truedata_client import TrueDataTicker
-        source = "TRUEDATA_WS" if isinstance(self._kite_ticker, TrueDataTicker) else "KITE_WS"
+        source = "TRUEDATA_WS" if self._is_truedata_ws else "KITE_WS"
         await self._process_tick(symbol, tick, source=source)
 
     # ── Main poll loop ────────────────────────────────────────────────
@@ -768,6 +885,36 @@ class TickEngine:
 
     def symbols(self) -> list[str]:
         return list(self._symbols)
+
+    def get_nifty_1min_chg(self) -> float:
+        """Return % change of latest 1-min NIFTY candle vs prior close (for flash crash detection)."""
+        for sym in ("NIFTY 50", "NIFTY50"):
+            buf = self._bufs_1min.get(sym)
+            if buf:
+                candles = buf.candles()
+                if len(candles) >= 2:
+                    prev_close = candles[-2].close
+                    curr_close = candles[-1].close
+                    if prev_close > 0:
+                        return (curr_close - prev_close) / prev_close * 100
+        return 0.0
+
+    @staticmethod
+    def _compute_bs_phase(candles: list) -> str:
+        """Determine black swan sub-phase from recent 1-min candles.
+        FALLING=panic still active, STABILIZING=exhaustion, RECOVERING=reversal confirmed."""
+        if len(candles) < 5:
+            return "FALLING"
+        last5 = candles[-5:]
+        red_count = sum(1 for c in last5 if c.close < c.open)
+        vols = [c.volume for c in last5]
+        vol_increasing = vols[-1] > vols[0]
+        if red_count >= 4 and vol_increasing:
+            return "FALLING"
+        # RECOVERING: 2+ consecutive green candles
+        if last5[-1].close > last5[-1].open and last5[-2].close > last5[-2].open:
+            return "RECOVERING"
+        return "STABILIZING"
 
     # ── Historical data (for backtesting + warm-up) ───────────────────
 

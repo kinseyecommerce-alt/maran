@@ -76,17 +76,18 @@ class _TokenBucket:
         self._lock     = Lock()
 
     def acquire(self) -> None:
-        with self._lock:
-            now   = time.monotonic()
-            delta = now - self._last
-            self._tokens = min(self._rate, self._tokens + delta * self._rate)
-            self._last   = now
-            if self._tokens < 1:
+        while True:
+            with self._lock:
+                now   = time.monotonic()
+                delta = now - self._last
+                self._tokens = min(self._rate, self._tokens + delta * self._rate)
+                self._last   = now
+                if self._tokens >= 1:
+                    self._tokens -= 1
+                    return
                 wait = (1 - self._tokens) / self._rate
-                time.sleep(wait)
-                self._tokens = 0
-            else:
-                self._tokens -= 1
+            # Sleep outside the lock so other callers are not blocked during the wait.
+            time.sleep(wait)
 
 
 _rest_bucket = _TokenBucket(_KITE_REST_RPS)
@@ -129,9 +130,15 @@ class KiteClient:
 
     def __init__(self) -> None:
         self._kite: Optional[KiteConnect] = None
-        self._paper_orders:    list[dict] = []
+        self._paper_orders:    dict[str, dict] = {}   # order_id → order dict (O(1) lookup)
+        self._paper_orders_lock: Lock = Lock()
         self._paper_positions: list[dict] = []
+        self._paper_positions_lock: Lock = Lock()
         self._instruments_cache: dict[str, list[dict]] = {}
+        self._pos_cache: dict = {}
+        self._pos_cache_ts: float = 0.0
+        self._pos_cache_ttl: float = 2.0   # 2-second TTL — fast enough for sector check
+        self._paper_ltp: dict[str, float] = {}        # sym → last known LTP for MARKET fill price
 
     # ── Auth ───────────────────────────────────────────────────────────────
 
@@ -252,8 +259,20 @@ class KiteClient:
 
     def positions(self) -> dict:
         if settings.trading_mode == "PAPER":
-            return {"net": self._paper_positions, "day": self._paper_positions}
+            with self._paper_positions_lock:
+                return {"net": list(self._paper_positions), "day": list(self._paper_positions)}
         return _with_retry(self.kite.positions, label="positions")
+
+    def positions_cached(self) -> dict:
+        """Return cached positions (TTL=2s) to avoid per-trade REST round-trips."""
+        import time as _time
+        now = _time.monotonic()
+        if now - self._pos_cache_ts < self._pos_cache_ttl and self._pos_cache:
+            return self._pos_cache
+        result = self.positions()
+        self._pos_cache = result
+        self._pos_cache_ts = now
+        return result
 
     def holdings(self) -> list[dict]:
         if settings.trading_mode == "PAPER":
@@ -262,12 +281,15 @@ class KiteClient:
 
     def orders(self) -> list[dict]:
         if settings.trading_mode == "PAPER":
-            return self._paper_orders
+            with self._paper_orders_lock:
+                return list(self._paper_orders.values())
         return _with_retry(self.kite.orders, label="orders")
 
     def order_history(self, order_id: str) -> list[dict]:
         if settings.trading_mode == "PAPER":
-            return [o for o in self._paper_orders if o["order_id"] == order_id]
+            with self._paper_orders_lock:
+                o = self._paper_orders.get(order_id)
+                return [o] if o else []
         return _with_retry(
             lambda: self.kite.order_history(order_id), label="order_history"
         )
@@ -300,7 +322,7 @@ class KiteClient:
         validity:         str   = "DAY",
         tag:              str   = "AlgoTraderPro",
     ) -> str:
-        tag      = tag[:_KITE_ORDER_TAG_MAX]          # enforce 20-char limit
+        tag      = tag.replace("\n", " ").replace("\r", " ")[:_KITE_ORDER_TAG_MAX]
         quantity = self._validated_quantity(tradingsymbol, exchange, product, quantity)
 
         if settings.trading_mode == "PAPER":
@@ -311,34 +333,110 @@ class KiteClient:
         if transaction_type == "BUY" and order_type in ("MARKET", "LIMIT"):
             self._check_margin(tradingsymbol, quantity, price)
 
-        def _place():
-            return self.kite.place_order(
-                variety=KiteConnect.VARIETY_REGULAR,
-                exchange=exchange,
-                tradingsymbol=tradingsymbol,
-                transaction_type=transaction_type,
-                quantity=quantity,
-                product=product,
-                order_type=order_type,
-                price=price or None,
-                trigger_price=trigger_price or None,
-                validity=validity,
-                tag=tag,
-            )
+        # CRIT: order placement is NOT blind-retried. A NetworkException can be
+        # raised AFTER the order reached the exchange; a naive retry would place a
+        # DUPLICATE live order. Instead we reconcile against the order book and
+        # only retry when we can positively confirm the order did not land.
+        return self._place_live_reconcile(
+            tradingsymbol, exchange, transaction_type, quantity,
+            order_type, product, price, trigger_price, validity, tag,
+        )
 
-        order_id = _with_retry(_place, label="place_order")
-        logger.info("LIVE order | {} {} {} qty={} @ {} | id={}",
-                    transaction_type, tradingsymbol, order_type,
-                    quantity, price, order_id)
-        return order_id
+    def _place_live_reconcile(
+        self, tradingsymbol, exchange, transaction_type, quantity,
+        order_type, product, price, trigger_price, validity, tag,
+    ) -> str:
+        """Place a LIVE order with network-failure reconciliation.
+
+        Retry policy for order placement (differs from idempotent GET retries):
+          • Success                      → return broker order_id.
+          • TokenException/InputException→ raise immediately (no retry).
+          • Network/Data/General/Order   → query the order book:
+              - matching order found     → return its id (it DID land; no duplicate).
+              - book confirms not landed → safe to retry with backoff.
+              - book fetch ALSO failed   → raise; we will NOT gamble on a duplicate.
+        """
+        delay = _RETRY_BASE_SEC
+        for attempt in range(_RETRY_MAX + 1):
+            placed_after = time.time() - 2.0   # small clock-skew window
+            _rest_bucket.acquire()
+            try:
+                order_id = self.kite.place_order(
+                    variety=KiteConnect.VARIETY_REGULAR,
+                    exchange=exchange,
+                    tradingsymbol=tradingsymbol,
+                    transaction_type=transaction_type,
+                    quantity=quantity,
+                    product=product,
+                    order_type=order_type,
+                    price=price or None,
+                    trigger_price=trigger_price or None,
+                    validity=validity,
+                    tag=tag,
+                )
+                logger.info("LIVE order | {} {} {} qty={} @ {} | id={}",
+                            transaction_type, tradingsymbol, order_type,
+                            quantity, price, order_id)
+                return order_id
+            except TokenException:
+                raise
+            except InputException:
+                raise
+            except (NetworkException, DataException, GeneralException, OrderException) as exc:
+                existing, book_ok = self._reconcile_recent_order(
+                    tradingsymbol, transaction_type, quantity, tag, placed_after)
+                if existing:
+                    logger.warning(
+                        "LIVE order reconcile: '{}' raised but order {} IS in the book "
+                        "— returning it, NOT retrying (prevents duplicate)", exc, existing)
+                    return existing
+                if not book_ok:
+                    logger.critical(
+                        "LIVE order '{}' failed AND order book unreachable — cannot "
+                        "confirm placement; refusing to blind-retry. Surfacing error.", exc)
+                    raise
+                if attempt == _RETRY_MAX:
+                    raise
+                logger.warning(
+                    "LIVE order failed and confirmed NOT in book — safe retry {}/{} in {:.0f}s: {}",
+                    attempt + 1, _RETRY_MAX, delay, exc)
+                time.sleep(delay)
+                delay *= 2
+
+    def _reconcile_recent_order(
+        self, tradingsymbol: str, transaction_type: str,
+        quantity: int, tag: str, since_ts: float,
+    ) -> tuple[Optional[str], bool]:
+        """Look for a recently-placed order matching these params.
+
+        Returns (order_id_or_None, book_fetch_succeeded). A non-rejected,
+        non-cancelled order matching symbol/side/qty/tag is treated as ours.
+        """
+        try:
+            book = self.kite.orders()          # direct call — avoid retry recursion
+        except Exception as exc:
+            logger.error("LIVE reconcile: order book fetch failed: {}", exc)
+            return None, False
+        for o in book:
+            try:
+                if (o.get("tradingsymbol") == tradingsymbol
+                        and o.get("transaction_type") == transaction_type
+                        and int(o.get("quantity", 0)) == int(quantity)
+                        and (not tag or o.get("tag") == tag)
+                        and str(o.get("status", "")).upper() not in ("REJECTED", "CANCELLED")):
+                    return str(o.get("order_id")), True
+            except (TypeError, ValueError):
+                continue
+        return None, True
 
     def modify_order(
         self, order_id: str, price: float = 0.0,
         quantity: int = 0, trigger_price: float = 0.0,
     ) -> str:
         if settings.trading_mode == "PAPER":
-            for o in self._paper_orders:
-                if o["order_id"] == order_id:
+            with self._paper_orders_lock:
+                o = self._paper_orders.get(order_id)
+                if o:
                     if price:         o["price"]         = price
                     if quantity:      o["quantity"]       = quantity
                     if trigger_price: o["trigger_price"]  = trigger_price
@@ -354,8 +452,9 @@ class KiteClient:
 
     def cancel_order(self, order_id: str) -> str:
         if settings.trading_mode == "PAPER":
-            for o in self._paper_orders:
-                if o["order_id"] == order_id:
+            with self._paper_orders_lock:
+                o = self._paper_orders.get(order_id)
+                if o:
                     o["status"] = "CANCELLED"
             return order_id
         return _with_retry(
@@ -461,18 +560,22 @@ class KiteClient:
 
     def _check_margin(self, symbol: str, quantity: int, price: float) -> None:
         """
-        Warn (not block) if estimated order value exceeds available live balance.
-        Only called in LIVE mode for BUY orders.
+        Block if estimated order value exceeds available live balance in LIVE mode.
+        A non-blocking warning previously allowed over-margin orders to reach the exchange,
+        which would be rejected by Kite causing the entry to fail mid-bracket (no SL placed).
+        Raising here lets the caller release the claim cleanly before touching the broker.
         """
         try:
             m         = self.margins()
             available = m.get("equity", {}).get("available", {}).get("live_balance", 0)
             order_val = quantity * max(price, 1)
             if order_val > available:
-                logger.warning(
-                    "[kite] Margin warning: order ₹{:,.0f} > available ₹{:,.0f} for {}",
-                    order_val, available, symbol,
+                raise InputException(
+                    f"Insufficient margin: order ₹{order_val:,.0f} > available ₹{available:,.0f} "
+                    f"for {symbol} qty={quantity}"
                 )
+        except InputException:
+            raise
         except Exception as exc:
             logger.warning("[kite] Margin check failed (non-blocking): {}", exc)
 
@@ -489,6 +592,14 @@ class KiteClient:
         else:
             status = "COMPLETE"
 
+        # For MARKET orders, use last known LTP as fill price so P&L is accurate
+        fill_price = price
+        if order_type == "MARKET":
+            fill_price = (self._paper_ltp.get(tradingsymbol)
+                          or trigger_price
+                          or price
+                          or 100.0)
+
         record = {
             "order_id":         order_id,
             "tradingsymbol":    tradingsymbol,
@@ -497,13 +608,15 @@ class KiteClient:
             "quantity":         quantity,
             "order_type":       order_type,
             "product":          product,
-            "price":            price,
+            "price":            fill_price,
+            "average_price":    fill_price,
             "trigger_price":    trigger_price,
             "status":           status,
             "tag":              tag,
             "placed_at":        datetime.now().isoformat(),
         }
-        self._paper_orders.append(record)
+        with self._paper_orders_lock:
+            self._paper_orders[order_id] = record
         # Only update position for immediately filled orders
         if status == "COMPLETE":
             self._update_paper_position(record)
@@ -516,28 +629,35 @@ class KiteClient:
         sym       = order["tradingsymbol"]
         qty_delta = (order["quantity"] if order["transaction_type"] == "BUY"
                      else -order["quantity"])
-        for pos in self._paper_positions:
-            if pos["tradingsymbol"] == sym:
-                old_qty = pos["quantity"]
-                new_qty = old_qty + qty_delta
-                if new_qty != 0 and abs(qty_delta) > 0:
-                    if (old_qty > 0 and qty_delta > 0) or (old_qty < 0 and qty_delta < 0):
-                        # Adding to position — weighted average
-                        pos["average_price"] = round(
-                            (pos["average_price"] * abs(old_qty) + order["price"] * abs(qty_delta))
-                            / abs(new_qty), 2
-                        )
-                pos["quantity"] = new_qty
-                return
-        self._paper_positions.append({
-            "tradingsymbol": sym,
-            "exchange":      order["exchange"],
-            "product":       order["product"],
-            "quantity":      qty_delta,
-            "average_price": order["price"],
-            "last_price":    order["price"],
-            "pnl":           0.0,
-        })
+        # Use the best available fill price — never fall back to 0
+        fill_price = (order.get("price") or order.get("average_price")
+                      or order.get("last_price", 0.0))
+        with self._paper_positions_lock:
+            for pos in self._paper_positions:
+                if pos["tradingsymbol"] == sym:
+                    old_qty = pos["quantity"]
+                    new_qty = old_qty + qty_delta
+                    if new_qty != 0 and abs(qty_delta) > 0:
+                        if (old_qty > 0 and qty_delta > 0) or (old_qty < 0 and qty_delta < 0):
+                            # Adding to existing position — weighted average
+                            pos["average_price"] = round(
+                                (pos["average_price"] * abs(old_qty) + fill_price * abs(qty_delta))
+                                / abs(new_qty), 2
+                            )
+                        elif (old_qty > 0 and new_qty < 0) or (old_qty < 0 and new_qty > 0):
+                            # Position reversed — new average is the reversal fill price
+                            pos["average_price"] = fill_price
+                    pos["quantity"] = new_qty
+                    return
+            self._paper_positions.append({
+                "tradingsymbol": sym,
+                "exchange":      order["exchange"],
+                "product":       order["product"],
+                "quantity":      qty_delta,
+                "average_price": fill_price,
+                "last_price":    fill_price,
+                "pnl":           0.0,
+            })
 
     # ── Paper-mode tick-driven updates ────────────────────────────────────
 
@@ -547,7 +667,11 @@ class KiteClient:
         If ltp crosses the trigger_price, mark the order COMPLETE
         and update the paper position.
         """
-        for order in self._paper_orders:
+        if ltp <= 0:
+            return
+        with self._paper_orders_lock:
+            orders_snapshot = list(self._paper_orders.values())
+        for order in orders_snapshot:
             if order["tradingsymbol"] != symbol:
                 continue
             if order["status"] != "TRIGGER PENDING":
@@ -571,11 +695,15 @@ class KiteClient:
     def update_paper_pnl(self, symbol: str, ltp: float) -> None:
         """
         Update last_price and P&L for every paper position matching *symbol*.
+        Also keeps _paper_ltp current so MARKET order fill prices are realistic.
         """
-        for pos in self._paper_positions:
-            if pos["tradingsymbol"] == symbol:
-                pos["last_price"] = ltp
-                pos["pnl"] = round((ltp - pos["average_price"]) * pos["quantity"], 2)
+        if ltp > 0:
+            self._paper_ltp[symbol] = ltp
+        with self._paper_positions_lock:
+            for pos in self._paper_positions:
+                if pos["tradingsymbol"] == symbol:
+                    pos["last_price"] = ltp
+                    pos["pnl"] = round((ltp - pos["average_price"]) * pos["quantity"], 2)
 
 
 kite_client = KiteClient()

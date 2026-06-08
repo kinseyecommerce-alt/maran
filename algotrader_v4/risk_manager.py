@@ -7,6 +7,7 @@ the trade is skipped and a reason is logged / alerted.
 from __future__ import annotations
 
 import json as _json
+from dataclasses import dataclass
 from datetime import time
 from pathlib import Path
 from loguru import logger
@@ -23,8 +24,131 @@ try:
 except Exception:
     pass
 
+# ── Stock beta map (loaded once at module level) ─────────────────────────────
+_BETA_MAP_PATH = Path(__file__).parent / "data" / "stock_betas.json"
+_BETA_MAP: dict[str, float] = {}
+try:
+    _BETA_MAP = _json.loads(_BETA_MAP_PATH.read_text())
+except Exception:
+    pass
+
+# ── Correlation matrix cache ──────────────────────────────────────────────────
+# Pre-loaded pairs with correlation > 0.75 (NSE major stocks, based on 1-year data)
+_HIGH_CORR_PAIRS: set[frozenset] = {
+    frozenset({"HDFCBANK", "ICICIBANK"}),
+    frozenset({"HDFCBANK", "AXISBANK"}),
+    frozenset({"ICICIBANK", "AXISBANK"}),
+    frozenset({"ICICIBANK", "KOTAKBANK"}),
+    frozenset({"TCS", "INFY"}),
+    frozenset({"TCS", "WIPRO"}),
+    frozenset({"INFY", "WIPRO"}),
+    frozenset({"INFY", "HCLTECH"}),
+    frozenset({"TCS", "HCLTECH"}),
+    frozenset({"TATASTEEL", "JSWSTEEL"}),
+    frozenset({"TATASTEEL", "HINDALCO"}),
+    frozenset({"TATAMOTORS", "M&M"}),
+    frozenset({"SBIN", "BANKBARODA"}),
+    frozenset({"SBIN", "AXISBANK"}),
+    frozenset({"BAJFINANCE", "BAJAJFINSV"}),
+    frozenset({"RELIANCE", "ONGC"}),
+    frozenset({"SUNPHARMA", "DRREDDY"}),
+    frozenset({"SUNPHARMA", "CIPLA"}),
+    frozenset({"DRREDDY", "CIPLA"}),
+}
+
 
 # ── Transaction cost model (Zerodha structure) ──────────────────────────────
+
+@dataclass
+class TransactionCost:
+    brokerage:    float
+    stt:          float
+    exchange_txn: float
+    sebi_charges: float
+    gst:          float
+    stamp_duty:   float
+    total:        float
+
+
+def compute_costs(
+    symbol: str,
+    qty: int,
+    price: float,
+    order_type: str = "MARKET",
+    product: str = "MIS",
+) -> TransactionCost:
+    """Single-leg Zerodha transaction cost for one order."""
+    if not settings.use_transaction_costs:
+        return TransactionCost(0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0)
+
+    value        = qty * price
+    brokerage    = min(value * 0.0003, 20.0)
+    stt          = value * 0.00025
+    exchange_txn = value * 0.0000345
+    sebi_charges = value * 0.000001
+    gst          = (brokerage + exchange_txn) * 0.18
+    stamp_duty   = value * (0.00015 if product == "CNC" else 0.00003)
+    total        = brokerage + stt + exchange_txn + sebi_charges + gst + stamp_duty
+    return TransactionCost(
+        brokerage=round(brokerage, 4),
+        stt=round(stt, 4),
+        exchange_txn=round(exchange_txn, 4),
+        sebi_charges=round(sebi_charges, 4),
+        gst=round(gst, 4),
+        stamp_duty=round(stamp_duty, 4),
+        total=round(total, 4),
+    )
+
+
+def compute_round_trip_cost(
+    symbol: str,
+    qty: int,
+    price: float,
+    product: str = "MIS",
+) -> float:
+    """Full entry+exit round-trip cost (2× single-leg total)."""
+    leg = compute_costs(symbol, qty, price, product=product)
+    return round(leg.total * 2, 4)
+
+
+def _compute_kelly(win_rate: float, avg_win: float, avg_loss: float) -> float:
+    """Pure half-Kelly formula → fraction of capital in [0.0, 0.25].
+
+    Args:
+        win_rate: fraction of winning trades (0.0–1.0)
+        avg_win:  average winning trade magnitude (positive)
+        avg_loss: average losing trade magnitude (positive)
+    Returns float in [0.0, 0.25]; 0.0 when inputs are invalid or edge < 0.
+    """
+    if avg_loss <= 0 or avg_win <= 0:
+        return 0.0
+    win_loss_ratio = avg_win / avg_loss
+    kelly_f = win_rate - (1 - win_rate) / win_loss_ratio
+    kelly_f = kelly_f * 0.5                    # half-Kelly
+    return max(0.0, min(kelly_f, 0.25))
+
+
+def get_kelly_fraction(agent_name: str) -> float:
+    """Aggregate half-Kelly fraction across all symbols for an agent.
+
+    Pulls win_rate_20, avg_win_pct, avg_loss_pct from adaptive_engine params.
+    Returns 0.0 when < 10 trades recorded (fall back to fixed sizing).
+    """
+    try:
+        from adaptive_engine import adaptive_engine as _ae
+        prefix = f"{agent_name}::"
+        params_list = [v for k, v in _ae._params.items() if k.startswith(prefix)]
+        trades_total = sum(len(t) for k, t in _ae._trades.items() if k.startswith(prefix))
+        if trades_total < 10 or not params_list:
+            return 0.0
+        n = len(params_list)
+        win_rate = sum(p.win_rate_20 for p in params_list) / n
+        avg_win  = sum(p.avg_win_pct for p in params_list) / n
+        avg_loss = abs(sum(p.avg_loss_pct for p in params_list) / n)
+        return _compute_kelly(win_rate, avg_win, avg_loss)
+    except Exception:
+        return 0.0
+
 
 def compute_tx_costs(
     qty: int,
@@ -134,7 +258,7 @@ class RiskManager:
             return True, "OK"
         now_t = ist_time()
         open_t  = time(9, 15)
-        sq_h, sq_m = [int(x) for x in settings.squareoff_time.split(":")]
+        sq_h, sq_m = [int(x) for x in (settings.squareoff_time or "15:10").split(":")]
         close_t = time(sq_h, sq_m)
         if not (open_t <= now_t <= close_t):
             return False, f"Outside trading hours (market {open_t}–{close_t})"
@@ -181,16 +305,51 @@ class RiskManager:
         capital: float | None = None,
         risk_pct: float | None = None,
     ) -> int:
+        # FIX 2: guard against zero / None ltp to prevent ZeroDivisionError
+        if not price or price <= 0:
+            logger.warning(
+                "[RiskManager] calculate_quantity: ltp={} invalid for {}", price, agent or "unknown"
+            )
+            return 0
         if capital is not None:
             cap = capital
         elif agent:
             cap = self.max_capital_for_agent(agent)
         else:
             cap = settings.max_position_size
+        if settings.use_kelly_capital_sizing and agent:
+            kf = get_kelly_fraction(agent)
+            if kf <= 0:
+                # No edge established yet — use minimum 2% scaling as safe fallback
+                kf = 0.02
+                logger.debug("Kelly sizing: agent={} no history yet — using fallback kf=0.02", agent)
+            # Scale the per-agent bucket by half-Kelly (×2 to convert half→full, capped at 100%)
+            cap = cap * min(kf * 2, 1.0)
+            logger.debug("Kelly sizing: agent={} kf={:.3f} cap=₹{:.0f}", agent, kf, cap)
         if risk_pct and price > 0:
             sl_amount = price * (settings.stop_loss_pct / 100)
             cap = min(cap, (cap * risk_pct / 100) / sl_amount * price)
         qty = int(cap // price)
+        # Halve position size on F&O expiry / RBI MPC days (higher volatility)
+        try:
+            from alt_data import alt_data_engine
+            if alt_data_engine.is_high_risk_day():
+                qty = max(1, qty // 2)
+                logger.debug("Event-day sizing: qty halved to {}", qty)
+            # FII/DII sentiment scaling: strong FII buying → +20% qty, strong selling → -30%
+            fii_score = alt_data_engine.get_fii_sentiment()
+            if fii_score >= 0.4:
+                qty = int(qty * 1.20)
+                logger.debug("FII strong buy: qty scaled +20% → {}", qty)
+            elif fii_score >= 0.2:
+                qty = int(qty * 1.10)
+            elif fii_score <= -0.4:
+                qty = max(1, int(qty * 0.70))
+                logger.debug("FII strong sell: qty scaled -30% → {}", qty)
+            elif fii_score <= -0.2:
+                qty = max(1, int(qty * 0.85))
+        except Exception:
+            pass
         return max(qty, 1)
 
     def sl_price(self, entry: float, side: str) -> float:
@@ -262,19 +421,65 @@ class RiskManager:
         """
         Returns (allowed, reason).
         Blocks if the symbol's sector already has max_positions_per_sector open positions.
+        Correlation-aware: a highly correlated open position (r>0.75) counts as 1.5×.
         INDEX and OTHERS sectors are exempt from the limit.
         """
         sector = _SECTOR_MAP.get(symbol.upper(), "OTHERS")
         if sector in ("INDEX", "OTHERS"):
             return True, "OK"
-        count = sum(
-            1 for s in open_symbols
-            if _SECTOR_MAP.get(s.upper(), "OTHERS") == sector
-        )
+        sym_up = symbol.upper()
+        count: float = 0.0
+        for s in open_symbols:
+            if _SECTOR_MAP.get(s.upper(), "OTHERS") != sector:
+                continue
+            # Correlated positions count as 1.5× against the limit
+            if frozenset({sym_up, s.upper()}) in _HIGH_CORR_PAIRS:
+                count += 1.5
+            else:
+                count += 1.0
         limit = getattr(settings, "max_positions_per_sector", 2)
         if count >= limit:
-            return False, f"Sector limit: {sector} already has {count}/{limit} positions"
+            return False, f"Sector limit: {sector} weighted {count:.1f}/{limit} positions"
         return True, "OK"
+
+    def check_portfolio_beta(
+        self,
+        symbol: str,
+        open_symbols: list[str],
+        action: str = "BUY",
+    ) -> tuple[bool, str]:
+        """
+        Returns (allowed, reason).
+        Blocks BUY if adding this symbol would push portfolio beta above max_portfolio_beta.
+        Only applicable when open_symbols is non-empty and symbol has a known beta.
+        """
+        max_beta = getattr(settings, "max_portfolio_beta", 1.3)
+        if max_beta <= 0:
+            return True, "OK"
+        sym_beta = _BETA_MAP.get(symbol.upper(), 1.0)
+        if not open_symbols:
+            return True, "OK"
+        # Compute current portfolio beta (equal-weight approximation)
+        betas = [_BETA_MAP.get(s.upper(), 1.0) for s in open_symbols]
+        portfolio_beta = sum(betas) / len(betas)
+        # Simulate adding the new position
+        new_beta = (sum(betas) + sym_beta) / (len(betas) + 1)
+        if action == "BUY" and new_beta > max_beta:
+            return False, (
+                f"Portfolio beta {new_beta:.2f} > max {max_beta:.2f} "
+                f"(current {portfolio_beta:.2f}, {symbol}={sym_beta:.2f})"
+            )
+        return True, "OK"
+
+    def restore_daily_pnl_from_db(self) -> None:
+        """Reload today's realised P&L from the DB. Call once at startup so a crash/restart
+        does not reset the daily-loss guard to zero."""
+        try:
+            from state_store import get_daily_pnl
+            self.daily_realised_pnl = get_daily_pnl()
+            logger.info("Risk manager: restored daily P&L ₹{:.0f} from DB", self.daily_realised_pnl)
+        except Exception as exc:
+            logger.warning("Risk manager: could not restore daily P&L from DB — {}", exc)
 
     def record_trade(self, pnl: float) -> None:
         prev_pnl = self.daily_realised_pnl

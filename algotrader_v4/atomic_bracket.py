@@ -40,10 +40,45 @@ from typing import Optional, Callable
 
 from loguru import logger
 
+from config import settings
 from kite_client import kite_client
 from trailing_sl_engine import trailing_sl_engine, TRAIL_CONFIGS
 from order_guard import order_guard
-from risk_manager import risk_manager
+from risk_manager import risk_manager, compute_round_trip_cost
+from twap_engine import twap_engine
+
+_SLIPPAGE_BPS: dict[str, int] = {"large": 3, "mid": 7, "small": 15}
+
+
+def _estimate_fill_price(
+    signal_price: float,
+    side: str,
+    avg_volume: float = 0.0,
+    atr: float = 0.0,
+) -> float:
+    """ATR-proportional slippage for PAPER/backtest fills.
+
+    Only applied when settings.apply_slippage is True and trading_mode is PAPER.
+    Uses volume tier to pick bps: large (>1M vol) = 3 bps, mid (>200K) = 7 bps,
+    small = 15 bps. Override via settings.slippage_bps_override > 0.
+    """
+    if not settings.apply_slippage or settings.trading_mode != "PAPER":
+        return signal_price
+    if settings.slippage_bps_override > 0:
+        bps = settings.slippage_bps_override
+    else:
+        if avg_volume > 1_000_000:
+            tier = "large"
+        elif avg_volume > 200_000:
+            tier = "mid"
+        else:
+            tier = "small"
+        bps = _SLIPPAGE_BPS[tier]
+    if side == "BUY":
+        fill = signal_price * (1 + bps / 10_000)
+    else:
+        fill = signal_price * (1 - bps / 10_000)
+    return round(fill, 2)
 
 
 class BracketStatus(str, Enum):
@@ -80,6 +115,9 @@ class BracketOrder:
     sl_moves:      int   = 0
     locked_profit: float = 0.0
     pnl:           float = 0.0
+    gross_pnl:     float = 0.0
+    tx_cost:       float = 0.0
+    net_pnl:       float = 0.0
     sub_strategy:  str   = ""
     trigger_reason:str   = ""
 
@@ -105,6 +143,9 @@ class BracketOrder:
             "sl_moves":      self.sl_moves,
             "locked_profit": round(self.locked_profit, 2),
             "pnl":           round(self.pnl, 2),
+            "gross_pnl":     round(self.gross_pnl, 2),
+            "tx_cost":       round(self.tx_cost, 2),
+            "net_pnl":       round(self.net_pnl, 2),
             "sub_strategy":  self.sub_strategy,
             "trigger":       self.trigger_reason,
             "created_at":    datetime.fromtimestamp(self.created_at).isoformat(),
@@ -126,7 +167,8 @@ class AtomicBracketEngine:
                       quantity: int, signal_price: float, product: str = "MIS",
                       stop_loss: Optional[float] = None, target_1: Optional[float] = None,
                       target_2: Optional[float] = None, sub_strategy: str = "",
-                      trigger: str = "") -> Optional[BracketOrder]:
+                      trigger: str = "", avg_volume: float = 0.0,
+                      atr: float = 0.0) -> Optional[BracketOrder]:
         bracket_id = f"BRK-{uuid.uuid4().hex[:8].upper()}"
         cfg = TRAIL_CONFIGS.get(strategy, TRAIL_CONFIGS["intraday"])
         entry_est = signal_price
@@ -145,10 +187,18 @@ class AtomicBracketEngine:
             sub_strategy=sub_strategy, trigger_reason=trigger)
         self._brackets[bracket_id] = bracket
         try:
-            entry_oid = kite_client.place_order(
-                tradingsymbol=symbol, exchange=exchange, transaction_type=side,
-                quantity=quantity, order_type="MARKET", product=product,
-                tag=f"BRK-{strategy}-ENTRY")
+            if twap_engine.should_twap(quantity):
+                child_ids = await twap_engine.execute(
+                    symbol=symbol, action=side, qty=quantity,
+                    product=product, tag=f"BRK-{strategy}-ENTRY", exchange=exchange)
+                if not child_ids:
+                    raise RuntimeError("TWAP execution produced no filled slices")
+                entry_oid = child_ids[0]
+            else:
+                entry_oid = kite_client.place_order(
+                    tradingsymbol=symbol, exchange=exchange, transaction_type=side,
+                    quantity=quantity, order_type="MARKET", product=product,
+                    tag=f"BRK-{strategy}-ENTRY")
             bracket.entry_order_id = entry_oid
         except Exception as exc:
             bracket.status = BracketStatus.FAILED
@@ -162,6 +212,13 @@ class AtomicBracketEngine:
             bracket.status = BracketStatus.CANCELLED
             await self._broadcast_update(bracket)
             return None
+        adjusted = _estimate_fill_price(fill_price, side, avg_volume, atr)
+        if adjusted != fill_price:
+            tier = ("large" if avg_volume > 1_000_000 else "mid" if avg_volume > 200_000 else "small")
+            bps  = settings.slippage_bps_override or _SLIPPAGE_BPS[tier]
+            logger.info("Slippage applied: {} {} signal={} fill={} ({} bps, {} tier)",
+                        symbol, side, fill_price, adjusted, bps, tier)
+            fill_price = adjusted
         bracket.entry_price = fill_price
         bracket.best_price  = fill_price
         bracket.filled_at   = time.time()
@@ -194,9 +251,9 @@ class AtomicBracketEngine:
         while time.monotonic() < deadline:
             await asyncio.sleep(self.FILL_POLL_INTERVAL_MS / 1000)
             if hasattr(kite_client, "_paper_orders"):
-                for o in kite_client._paper_orders:
-                    if o["order_id"] == oid and o["status"] == "COMPLETE":
-                        return float(o.get("price") or bracket.signal_price)
+                o = kite_client._paper_orders.get(oid)
+                if o and o["status"] == "COMPLETE":
+                    return float(o.get("price") or bracket.signal_price)
             try:
                 history = kite_client.order_history(oid)
                 for h in reversed(history):
@@ -255,8 +312,12 @@ class AtomicBracketEngine:
     async def _on_tsl_sl_hit(self, pos, ltp: float, pnl: float) -> None:
         bracket = self._find_by_symbol_strategy(pos.symbol, pos.strategy)
         if not bracket: return
-        bracket.status = BracketStatus.SL_HIT
-        bracket.pnl    = pnl
+        bracket.status    = BracketStatus.SL_HIT
+        bracket.gross_pnl = pnl
+        bracket.tx_cost   = compute_round_trip_cost(bracket.symbol, bracket.quantity,
+                                                    bracket.entry_price, bracket.product)
+        bracket.net_pnl   = round(bracket.gross_pnl - bracket.tx_cost, 2)
+        bracket.pnl       = bracket.net_pnl
         bracket.closed_at = time.time()
 
         # Check if the SL-M order already executed on the exchange.
@@ -266,10 +327,9 @@ class AtomicBracketEngine:
         if bracket.sl_order_id:
             try:
                 if hasattr(kite_client, "_paper_orders"):
-                    for o in kite_client._paper_orders:
-                        if o["order_id"] == bracket.sl_order_id and o["status"] == "COMPLETE":
-                            sl_already_filled = True
-                            break
+                    o = kite_client._paper_orders.get(bracket.sl_order_id)
+                    if o and o["status"] == "COMPLETE":
+                        sl_already_filled = True
                 if not sl_already_filled:
                     history = kite_client.order_history(bracket.sl_order_id)
                     for h in reversed(history):
@@ -293,8 +353,8 @@ class AtomicBracketEngine:
         else:
             logger.info("SL-M {} already COMPLETE on exchange — skipping MARKET exit",
                         bracket.sl_order_id)
-        order_guard.release_order(bracket.symbol, bracket.strategy, bracket.side, pnl)
-        risk_manager.record_trade(pnl)
+        order_guard.release_order(bracket.symbol, bracket.strategy, bracket.side, bracket.net_pnl)
+        risk_manager.record_trade(bracket.net_pnl)
         risk_manager.position_closed()
         trailing_sl_engine.deregister(bracket.bracket_id)
         await self._broadcast_update(bracket)
@@ -303,8 +363,12 @@ class AtomicBracketEngine:
         bracket = self._find_by_symbol_strategy(pos.symbol, pos.strategy)
         if not bracket: return
         if level == 2:
-            bracket.status = BracketStatus.TARGET_HIT
-            bracket.pnl = (ltp - bracket.entry_price) * bracket.quantity * (1 if bracket.side == "BUY" else -1)
+            bracket.status    = BracketStatus.TARGET_HIT
+            bracket.gross_pnl = (ltp - bracket.entry_price) * bracket.quantity * (1 if bracket.side == "BUY" else -1)
+            bracket.tx_cost   = compute_round_trip_cost(bracket.symbol, bracket.quantity,
+                                                        bracket.entry_price, bracket.product)
+            bracket.net_pnl   = round(bracket.gross_pnl - bracket.tx_cost, 2)
+            bracket.pnl       = bracket.net_pnl
             bracket.closed_at = time.time()
             exit_side = "SELL" if bracket.side == "BUY" else "BUY"
             try:
@@ -316,8 +380,8 @@ class AtomicBracketEngine:
                     except: pass
             except Exception as exc:
                 logger.error("Target exit failed: {}", exc)
-            order_guard.release_order(bracket.symbol, bracket.strategy, bracket.side, bracket.pnl)
-            risk_manager.record_trade(bracket.pnl)
+            order_guard.release_order(bracket.symbol, bracket.strategy, bracket.side, bracket.net_pnl)
+            risk_manager.record_trade(bracket.net_pnl)
             risk_manager.position_closed()
             trailing_sl_engine.deregister(bracket.bracket_id)
             await self._broadcast_update(bracket)

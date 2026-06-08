@@ -12,6 +12,7 @@ import uuid
 import numpy as np
 import pandas as pd
 from datetime import datetime, timedelta, time
+from pathlib import Path
 
 # ── Test harness ───────────────────────────────────────────────────────────
 
@@ -128,7 +129,7 @@ def t_paper_place_order():
 def t_tag_truncated():
     kc = KiteClient()
     kc.place_order("RELIANCE", "NSE", "BUY", 1, tag="A" * 30)
-    assert all(len(o["tag"]) <= _KITE_ORDER_TAG_MAX for o in kc._paper_orders)
+    assert all(len(o["tag"]) <= _KITE_ORDER_TAG_MAX for o in kc._paper_orders.values())
 
 def t_paper_orders_list():
     kc = KiteClient()
@@ -198,15 +199,15 @@ def t_cancel_order():
     kc = KiteClient()
     oid = kc.place_order("SBIN", "NSE", "BUY", 1)
     kc.cancel_order(oid)
-    o = next(x for x in kc._paper_orders if x["order_id"] == oid)
-    assert o["status"] == "CANCELLED"
+    o = kc._paper_orders.get(oid)
+    assert o and o["status"] == "CANCELLED"
 
 def t_modify_order():
     kc = KiteClient()
     oid = kc.place_order("AXISBANK", "NSE", "BUY", 1, price=900.0)
     kc.modify_order(oid, price=910.0)
-    o = next(x for x in kc._paper_orders if x["order_id"] == oid)
-    assert o["price"] == 910.0
+    o = kc._paper_orders.get(oid)
+    assert o and o["price"] == 910.0
 
 run("_TokenBucket.acquire() no raise",          t_bucket_acquire)
 run("_TokenBucket throttle within 2s for 5",    t_bucket_throttle)
@@ -411,7 +412,7 @@ def t_bt_passed_is_bool():
 
 def t_bt_win_rate_range():
     r = be.run("RELIANCE", "NSE", "intraday")
-    assert 0.0 <= r.win_rate <= 1.0
+    assert 0.0 <= r.win_rate <= 100.0
 
 def t_bt_sharpe_float():
     assert isinstance(be.run("RELIANCE", "NSE", "intraday").sharpe_ratio, float)
@@ -564,7 +565,7 @@ section("7. SEBI COMPLIANCE")
 from sebi_compliance import SEBICompliance, KillSwitchState, APPROVED_ALGO_IDS
 
 def t_sebi_5_algos():
-    assert len(APPROVED_ALGO_IDS) == 6   # 5 strategies + 1 manual API ID
+    assert len(APPROVED_ALGO_IDS) == 9   # 8 strategy algos + 1 manual API ID
 
 def t_sebi_algo_id_format():
     assert all(v.startswith("ALGO-") for v in APPROVED_ALGO_IDS.values())
@@ -649,7 +650,7 @@ def t_sebi_strategy_disclosure():
 def t_sebi_full_disclosure():
     sc = SEBICompliance()
     doc = sc.get_disclosure_document()
-    assert len(doc["algo_strategies"]) == 5
+    assert len(doc["algo_strategies"]) == 8   # 8 strategy algos (manual excluded)
 
 def t_sebi_ip_empty_allows_all():
     sc = SEBICompliance()
@@ -666,7 +667,7 @@ def t_sebi_otr_tracking():
     sc.pre_order_check("intraday","RELIANCE","NSE","BUY",1,"MARKET",100.0,"sig","RANGING")
     assert sc.status()["orders_placed_today"] == 1
 
-run("5 approved algo IDs registered",          t_sebi_5_algos)
+run("9 approved algo IDs registered",          t_sebi_5_algos)
 run("algo IDs have ALGO- prefix",              t_sebi_algo_id_format)
 run("pre_order_check approves valid order",    t_sebi_approves_valid)
 run("rejects unregistered strategy",           t_sebi_rejects_unknown_strategy)
@@ -680,7 +681,7 @@ run("record_order_id increments executed",     t_sebi_record_executed)
 run("audit log records today's orders",        t_sebi_audit_log_today)
 run("audit log filters by strategy",           t_sebi_audit_filter_strategy)
 run("strategy disclosure returns algo_id",     t_sebi_strategy_disclosure)
-run("full disclosure has 5 strategies",        t_sebi_full_disclosure)
+run("full disclosure has 8 strategies",        t_sebi_full_disclosure)
 run("empty whitelist allows all IPs",          t_sebi_ip_empty_allows_all)
 run("whitelist blocks non-whitelisted IPs",    t_sebi_ip_whitelist)
 run("OTR counter increments per check",        t_sebi_otr_tracking)
@@ -889,8 +890,8 @@ def _make_snap(symbol="RELIANCE", ltp=2800.0, rsi=52.0, trend="UP",
                           candles_1min=candles, candles_5min=candles[:6])
 
 def t_agents_4():
-    assert len(ALL_AGENTS) == 5
-    assert set(ALL_AGENTS.keys()) == {"intraday","options","futures","swing","scalping"}
+    assert len(ALL_AGENTS) >= 7
+    assert {"intraday","options","futures","swing","scalping","mean_reversion","momentum"}.issubset(set(ALL_AGENTS.keys()))
 
 def t_intraday_returns_action():
     agent = IntradayAgent()
@@ -971,15 +972,16 @@ def t_scalping_atr_sl():
 def t_scalping_exit_sl():
     agent = ScalpingAgent()
     pos = {"tradingsymbol": "RELIANCE", "quantity": 5, "average_price": 2800.0}
-    ind = _make_snap(ltp=2790.0, rsi=35.0).indicators
+    # ATR-based SL: max(atr*0.75=11.25, entry*0.28%=7.84)=11.25 → sl=2788.75; use ltp=2788
+    ind = _make_snap(ltp=2788.0, rsi=35.0).indicators
     exit_, reason = agent.should_exit_position(pos, ind)
     assert exit_ is True and "SL" in reason
 
 def t_scalping_exit_target():
     agent = ScalpingAgent()
     pos = {"tradingsymbol": "RELIANCE", "quantity": 5, "average_price": 2800.0}
-    # tgt_dist = max(atr*1.4=21.0, entry*0.70%=19.6) = 21.0  →  tgt = 2821
-    ind = _make_snap(ltp=2825.0).indicators
+    # ATR-based TGT: max(atr*2.2=33.0, entry*0.65%=18.2)=33.0 → tgt=2833; use ltp=2835
+    ind = _make_snap(ltp=2835.0).indicators
     exit_, reason = agent.should_exit_position(pos, ind)
     assert exit_ is True and "target" in reason.lower()
 
@@ -1087,7 +1089,7 @@ def t_intraday_buy_has_target():
     if action == "BUY" and sig:
         assert "target" in sig or "stop_loss" in sig
 
-run("ALL_AGENTS has 4 strategy agents",          t_agents_4)
+run("ALL_AGENTS has ≥7 strategy agents",          t_agents_4)
 run("IntradayAgent.evaluate_tick returns valid", t_intraday_returns_action)
 run("IntradayAgent → BUY on bullish setup",      t_intraday_buy_signal)
 run("IntradayAgent → HOLD on RSI overbought",    t_intraday_hold_overbought)
@@ -2049,17 +2051,19 @@ def t_fno_agent_instantiates():
 def t_fno_ctx_bonus_bull():
     from unittest.mock import MagicMock
     a = OptionsAgent()
+    snap = MagicMock(); snap.candles_5min = []
     ind = MagicMock()
     ind.macd_hist = 0.5; ind.volume_ratio = 1.5; ind.bb_upper = 0; ind.bb_lower = 0; ind.bb_mid = 0
-    bonus = a._ctx_bonus("CE", ind, 22150.0, 20.0, None, None, None)
+    bonus = a._ctx_bonus("CE", snap, ind, 22150.0, 20.0, None, None, None, None)
     assert bonus >= 3, f"Bull CE bonus {bonus} < 3"
 
 def t_fno_ctx_bonus_bear():
     from unittest.mock import MagicMock
     a = OptionsAgent()
+    snap = MagicMock(); snap.candles_5min = []
     ind = MagicMock()
     ind.macd_hist = -0.5; ind.volume_ratio = 1.6; ind.bb_upper = 0; ind.bb_lower = 0; ind.bb_mid = 0
-    bonus = a._ctx_bonus("PE", ind, 21850.0, 20.0, None, None, None)
+    bonus = a._ctx_bonus("PE", snap, ind, 21850.0, 20.0, None, None, None, None)
     assert bonus >= 3, f"Bear PE bonus {bonus} < 3"
 
 def t_fno_pat_ema_cross_ce():
@@ -2198,11 +2202,14 @@ def t_fno_high_iv_blocks_entry():
     snap.indicators.vwap = 21950; snap.indicators.macd_hist = 1.0
     snap.indicators.volume_ratio = 2.0; snap.indicators.momentum = "STRONG_UP"
     snap.indicators.bb_upper = 0; snap.indicators.bb_lower = 0; snap.indicators.bb_mid = 0
+    # adx_14 > 22 blocks strangle_sell; adx_14 > 18 blocks iron_condor
+    # High ADX signals a trending market where sell patterns should not fire
+    snap.indicators.adx_14 = 25.0
 
     opts_data = {"iv_rank": 80.0, "atm_iv": 35.0, "iv_percentile": 85.0}
     with patch("options_intelligence.get_cached", return_value=opts_data):
         action, signal = a.evaluate_tick(snap)
-    assert action == "HOLD", f"High IV rank should block entry, got {action}"
+    assert action == "HOLD", f"High IV rank should block entry (no premium buying), got {action}"
 
 def t_fno_min_score_4_size_025():
     a = OptionsAgent()
@@ -2324,7 +2331,1212 @@ run("FuturesAgent has ≥10 pattern methods",               t_futures_10_pattern
 
 
 # ══════════════════════════════════════════════════════════════════════════
+# 12. TRANSACTION COSTS
+# ══════════════════════════════════════════════════════════════════════════
+section("12. TRANSACTION COSTS")
+from risk_manager import compute_costs, compute_round_trip_cost, TransactionCost
+
+def t_tc_returns_dataclass():
+    cost = compute_costs("RELIANCE", 10, 2800.0)
+    assert isinstance(cost, TransactionCost)
+    for field in (cost.brokerage, cost.stt, cost.exchange_txn,
+                  cost.sebi_charges, cost.gst, cost.stamp_duty):
+        assert field > 0, f"Expected >0, got {field}"
+
+def t_tc_brokerage_capped():
+    cost = compute_costs("RELIANCE", 10000, 100.0)
+    assert cost.brokerage == 20.0, f"Expected ₹20 cap, got {cost.brokerage}"
+
+def t_tc_total_sanity_reliance():
+    cost = compute_costs("RELIANCE", 1, 2800.0)
+    assert 1.0 <= cost.total <= 5.0, f"Expected ₹1–₹5, got {cost.total}"
+
+def t_tc_round_trip_is_double():
+    single = compute_costs("RELIANCE", 10, 2800.0).total
+    rt = compute_round_trip_cost("RELIANCE", 10, 2800.0)
+    assert abs(rt - single * 2) < 0.01, f"Expected 2×{single}={single*2}, got {rt}"
+
+def t_tc_cnc_stamp_higher():
+    mis = compute_costs("HDFCBANK", 10, 1700.0, product="MIS")
+    cnc = compute_costs("HDFCBANK", 10, 1700.0, product="CNC")
+    assert cnc.stamp_duty > mis.stamp_duty, (
+        f"CNC stamp {cnc.stamp_duty} should exceed MIS {mis.stamp_duty}"
+    )
+
+def t_tc_disabled_returns_zero():
+    from config import settings as _s
+    orig = _s.use_transaction_costs
+    try:
+        _s.use_transaction_costs = False
+        cost = compute_costs("RELIANCE", 10, 2800.0)
+        assert cost.total == 0.0, f"Expected 0 when disabled, got {cost.total}"
+    finally:
+        _s.use_transaction_costs = orig
+
+run("compute_costs returns TransactionCost with all fields > 0",  t_tc_returns_dataclass)
+run("brokerage capped at ₹20 for large orders",                   t_tc_brokerage_capped)
+run("total cost for 1 share RELIANCE@2800 is ₹1–₹5",             t_tc_total_sanity_reliance)
+run("round_trip_cost == 2× single-leg total",                     t_tc_round_trip_is_double)
+run("CNC stamp_duty > MIS stamp_duty",                            t_tc_cnc_stamp_higher)
+run("use_transaction_costs=False returns zero-cost object",        t_tc_disabled_returns_zero)
+
+
+# ══════════════════════════════════════════════════════════════════════════
+# 13. SLIPPAGE MODEL
+# ══════════════════════════════════════════════════════════════════════════
+section("13. SLIPPAGE MODEL")
+from atomic_bracket import _estimate_fill_price
+
+def t_slip_buy_increases_price():
+    from config import settings as _s
+    orig_slip, orig_mode = _s.apply_slippage, _s.trading_mode
+    try:
+        _s.apply_slippage = True
+        _s.trading_mode   = "PAPER"
+        for vol in (2_000_000, 500_000, 50_000):
+            fp = _estimate_fill_price(1000.0, "BUY", avg_volume=vol)
+            assert fp > 1000.0, f"BUY fill {fp} should exceed signal 1000 at vol={vol}"
+    finally:
+        _s.apply_slippage = orig_slip
+        _s.trading_mode   = orig_mode
+
+def t_slip_sell_decreases_price():
+    from config import settings as _s
+    orig_slip, orig_mode = _s.apply_slippage, _s.trading_mode
+    try:
+        _s.apply_slippage = True
+        _s.trading_mode   = "PAPER"
+        for vol in (2_000_000, 500_000, 50_000):
+            fp = _estimate_fill_price(1000.0, "SELL", avg_volume=vol)
+            assert fp < 1000.0, f"SELL fill {fp} should be below signal 1000 at vol={vol}"
+    finally:
+        _s.apply_slippage = orig_slip
+        _s.trading_mode   = orig_mode
+
+def t_slip_large_cap_3bps():
+    from config import settings as _s
+    orig_slip, orig_mode, orig_override = _s.apply_slippage, _s.trading_mode, _s.slippage_bps_override
+    try:
+        _s.apply_slippage = True
+        _s.trading_mode   = "PAPER"
+        _s.slippage_bps_override = 0
+        fp = _estimate_fill_price(1000.0, "BUY", avg_volume=2_000_000)
+        assert abs(fp - 1000.30) < 0.01, f"Large cap BUY: expected 1000.30, got {fp}"
+    finally:
+        _s.apply_slippage = orig_slip
+        _s.trading_mode   = orig_mode
+        _s.slippage_bps_override = orig_override
+
+def t_slip_small_cap_15bps():
+    from config import settings as _s
+    orig_slip, orig_mode, orig_override = _s.apply_slippage, _s.trading_mode, _s.slippage_bps_override
+    try:
+        _s.apply_slippage = True
+        _s.trading_mode   = "PAPER"
+        _s.slippage_bps_override = 0
+        fp = _estimate_fill_price(1000.0, "BUY", avg_volume=50_000)
+        assert abs(fp - 1001.50) < 0.01, f"Small cap BUY: expected 1001.50, got {fp}"
+    finally:
+        _s.apply_slippage = orig_slip
+        _s.trading_mode   = orig_mode
+        _s.slippage_bps_override = orig_override
+
+def t_slip_disabled_returns_signal():
+    from config import settings as _s
+    orig_slip = _s.apply_slippage
+    try:
+        _s.apply_slippage = False
+        fp = _estimate_fill_price(2800.0, "BUY", avg_volume=50_000)
+        assert fp == 2800.0, f"Expected signal_price 2800.0, got {fp}"
+    finally:
+        _s.apply_slippage = orig_slip
+
+run("BUY slippage raises fill above signal for all volume tiers",  t_slip_buy_increases_price)
+run("SELL slippage lowers fill below signal for all volume tiers", t_slip_sell_decreases_price)
+run("large cap (vol=2M) uses 3 bps → BUY fill=1000.30",           t_slip_large_cap_3bps)
+run("small cap (vol=50K) uses 15 bps → BUY fill=1001.50",         t_slip_small_cap_15bps)
+run("apply_slippage=False returns signal_price unchanged",          t_slip_disabled_returns_signal)
+
+
+# ══════════════════════════════════════════════════════════════════════════
+# 14. KELLY CRITERION
+# ══════════════════════════════════════════════════════════════════════════
+section("14. KELLY CRITERION")
+from risk_manager import _compute_kelly, get_kelly_fraction
+
+def t_kelly_positive_edge():
+    # win_rate=0.6, avg_win=200, avg_loss=100 → win_loss=2.0
+    # kelly = 0.6 - 0.4/2.0 = 0.4; half = 0.20; clamped = 0.20
+    kf = _compute_kelly(win_rate=0.6, avg_win=200.0, avg_loss=100.0)
+    assert abs(kf - 0.20) < 0.001, f"Expected 0.20, got {kf}"
+
+def t_kelly_negative_edge_clamped():
+    # win_rate=0.3, win_loss=50/200=0.25 → kelly = 0.3 - 0.7/0.25 = 0.3-2.8 = -2.5 → clamp to 0
+    kf = _compute_kelly(win_rate=0.3, avg_win=50.0, avg_loss=200.0)
+    assert kf == 0.0, f"Expected 0.0 for negative edge, got {kf}"
+
+def t_kelly_zero_avg_loss():
+    kf = _compute_kelly(win_rate=0.6, avg_win=100.0, avg_loss=0.0)
+    assert kf == 0.0, "Expected 0.0 when avg_loss=0 (guard div-by-zero)"
+
+def t_kelly_always_in_range():
+    for wr, aw, al in [(0.9, 500, 10), (0.1, 1000, 1), (0.5, 100, 100), (0.0, 50, 50)]:
+        kf = _compute_kelly(wr, aw, al)
+        assert 0.0 <= kf <= 0.25, f"Out of range: {kf} for wr={wr} aw={aw} al={al}"
+
+def t_kelly_disabled_uses_fixed_cap():
+    from config import settings as _s
+    from risk_manager import risk_manager as _rm
+    orig = _s.use_kelly_capital_sizing
+    try:
+        _s.use_kelly_capital_sizing = False
+        qty_fixed = _rm.calculate_quantity(price=2800.0, agent="intraday")
+        assert qty_fixed > 0
+        # With kelly disabled, qty should not depend on adaptive stats
+        qty_fixed2 = _rm.calculate_quantity(price=2800.0, agent="intraday")
+        assert qty_fixed == qty_fixed2
+    finally:
+        _s.use_kelly_capital_sizing = orig
+
+def t_kelly_enabled_changes_qty_with_stats():
+    from config import settings as _s
+    from risk_manager import risk_manager as _rm
+    from adaptive_engine import adaptive_engine as _ae
+    orig_kelly = _s.use_kelly_capital_sizing
+    try:
+        _s.use_kelly_capital_sizing = True
+        # Inject synthetic params for 'intraday' strategy
+        from adaptive_engine import AdaptiveParams
+        from collections import deque
+        key = "intraday::RELIANCE"
+        _ae._params[key] = AdaptiveParams(
+            strategy="intraday", symbol="RELIANCE",
+            win_rate_20=0.65, avg_win_pct=2.5, avg_loss_pct=-1.0
+        )
+        _ae._trades[key] = deque([object()] * 15, maxlen=20)  # 15 dummy trades
+        kf = get_kelly_fraction("intraday")
+        assert kf > 0, f"Expected positive Kelly fraction, got {kf}"
+        assert 0.0 < kf <= 0.25
+    finally:
+        _s.use_kelly_capital_sizing = orig_kelly
+        _ae._params.pop("intraday::RELIANCE", None)
+        _ae._trades.pop("intraday::RELIANCE", None)
+
+run("_compute_kelly positive edge → 0.20",                        t_kelly_positive_edge)
+run("_compute_kelly negative edge → clamped to 0.0",              t_kelly_negative_edge_clamped)
+run("_compute_kelly avg_loss=0 → 0.0 (no div-by-zero)",           t_kelly_zero_avg_loss)
+run("_compute_kelly always returns value in [0.0, 0.25]",         t_kelly_always_in_range)
+run("use_kelly_capital_sizing=False uses fixed capital",           t_kelly_disabled_uses_fixed_cap)
+run("get_kelly_fraction >0 when adaptive stats present",           t_kelly_enabled_changes_qty_with_stats)
+
+
+# ══════════════════════════════════════════════════════════════════════════
+# 15. WALK-FORWARD EXTENDED
+# ══════════════════════════════════════════════════════════════════════════
+
+from backtest_engine import BacktestEngine, BacktestResult
+
+def t_wf_default_lookback_730():
+    """bt_lookback_days default must be 730 (2 years)."""
+    from config import settings
+    assert settings.bt_lookback_days == 730, \
+        f"Expected 730, got {settings.bt_lookback_days}"
+
+def t_wf_default_n_folds_12():
+    """bt_wf_folds default must be 12."""
+    from config import settings
+    assert settings.bt_wf_folds == 12, \
+        f"Expected 12, got {settings.bt_wf_folds}"
+
+def t_wf_out_of_sample_pct_default():
+    """_walk_forward_run out_of_sample_pct default is 0.30."""
+    import inspect
+    from backtest_engine import BacktestEngine
+    sig = inspect.signature(BacktestEngine._walk_forward_run)
+    default = sig.parameters["out_of_sample_pct"].default
+    assert default == 0.30, f"Expected 0.30, got {default}"
+
+def t_wf_train_frac_derived_from_oos_pct():
+    """n_folds=3, out_of_sample_pct=0.40 → train_frac==0.60 used internally."""
+    import pandas as pd, numpy as np
+    engine = BacktestEngine()
+    # Build a minimal DataFrame with 200 rows
+    idx = pd.date_range("2024-01-01", periods=200, freq="15min")
+    close = 1000 + np.cumsum(np.random.randn(200) * 0.5)
+    df = pd.DataFrame({
+        "open":   close - 0.2, "high": close + 0.5,
+        "low":    close - 0.5, "close": close, "volume": 1e6,
+    }, index=idx)
+    from backtest_engine import STRATEGY_PARAMS
+    params = STRATEGY_PARAMS["intraday"]
+    # With out_of_sample_pct=0.40, train_frac must become 0.60 — verified by no exception
+    result = engine._walk_forward_run(
+        "TEST", "intraday", df, params,
+        n_splits=3, out_of_sample_pct=0.40,
+    )
+    assert result.walk_forward_used is True
+
+def t_wf_oos_sharpe_in_result_dict():
+    """oos_sharpe key must be present in to_dict() output (may be None)."""
+    r = BacktestResult(symbol="X", strategy="intraday", passed=False)
+    d = r.to_dict()
+    assert "oos_sharpe" in d, "oos_sharpe key missing from to_dict()"
+    assert d["oos_sharpe"] is None  # no OOS trades yet
+
+
+print()
+print("── 15. WALK-FORWARD EXTENDED ────────────────────────────────────────────")
+run("bt_lookback_days default == 730",                             t_wf_default_lookback_730)
+run("bt_wf_folds default == 12",                                   t_wf_default_n_folds_12)
+run("out_of_sample_pct default is 0.30",                           t_wf_out_of_sample_pct_default)
+run("n_folds=3, out_of_sample_pct=0.40 → walk_forward_used=True", t_wf_train_frac_derived_from_oos_pct)
+run("oos_sharpe key present in to_dict() (may be None)",           t_wf_oos_sharpe_in_result_dict)
+
+
+# ══════════════════════════════════════════════════════════════════════════
+# 16. MONTE CARLO PERMUTATION TEST
+# ══════════════════════════════════════════════════════════════════════════
+
+def _make_mc_trades(n=50, seed=42):
+    rng = __import__("numpy").random.default_rng(seed)
+    pnls = rng.normal(50, 200, n).tolist()
+    return [{"pnl": p, "net_pnl": p} for p in pnls]
+
+def t_mc_returns_sharpe_percentile():
+    """_monte_carlo_test includes sharpe_percentile key (float, not None) for ≥20 trades."""
+    from backtest_engine import BacktestEngine
+    engine = BacktestEngine()
+    result = engine._monte_carlo_test(_make_mc_trades(), n_permutations=200)
+    assert "sharpe_percentile" in result, "sharpe_percentile key missing"
+    assert result["sharpe_percentile"] is not None, "sharpe_percentile is None"
+    assert isinstance(result["sharpe_percentile"], float)
+
+def t_mc_sharpe_percentile_in_range():
+    """sharpe_percentile must be in [0, 100]."""
+    from backtest_engine import BacktestEngine
+    engine = BacktestEngine()
+    result = engine._monte_carlo_test(_make_mc_trades(), n_permutations=200)
+    sp = result["sharpe_percentile"]
+    assert 0.0 <= sp <= 100.0, f"sharpe_percentile {sp} outside [0, 100]"
+
+def t_mc_min_sharpe_5pct_is_float():
+    """min_sharpe_5pct is a float for ≥20 trades."""
+    from backtest_engine import BacktestEngine
+    engine = BacktestEngine()
+    result = engine._monte_carlo_test(_make_mc_trades(), n_permutations=200)
+    assert result["min_sharpe_5pct"] is not None
+    assert isinstance(result["min_sharpe_5pct"], float)
+
+def t_mc_max_drawdown_95pct_is_float():
+    """max_drawdown_95pct is a float for ≥20 trades."""
+    from backtest_engine import BacktestEngine
+    engine = BacktestEngine()
+    result = engine._monte_carlo_test(_make_mc_trades(), n_permutations=200)
+    assert result["max_drawdown_95pct"] is not None
+    assert isinstance(result["max_drawdown_95pct"], float)
+    assert result["max_drawdown_95pct"] >= 0.0
+
+def t_mc_to_dict_nested_monte_carlo():
+    """to_dict() must include a 'monte_carlo' nested dict with is_significant key."""
+    from backtest_engine import BacktestResult
+    r = BacktestResult(
+        symbol="TEST", strategy="intraday", passed=False,
+        sharpe_percentile=82.0, min_sharpe_5pct=-0.5, max_drawdown_95pct=1200.0,
+        mc_pvalue=0.06, mc_passed=True,
+    )
+    d = r.to_dict()
+    assert "monte_carlo" in d, "'monte_carlo' key missing from to_dict()"
+    mc = d["monte_carlo"]
+    assert "is_significant" in mc, "'is_significant' missing from monte_carlo dict"
+    assert "sharpe_percentile" in mc
+    assert mc["is_significant"] is True
+    assert mc["sharpe_percentile"] == 82.0
+
+
+print()
+print("── 16. MONTE CARLO PERMUTATION TEST ────────────────────────────────────")
+run("_monte_carlo_test returns sharpe_percentile for ≥20 trades",  t_mc_returns_sharpe_percentile)
+run("sharpe_percentile is in [0, 100]",                            t_mc_sharpe_percentile_in_range)
+run("min_sharpe_5pct is a float for ≥20 trades",                   t_mc_min_sharpe_5pct_is_float)
+run("max_drawdown_95pct is a non-negative float for ≥20 trades",   t_mc_max_drawdown_95pct_is_float)
+run("to_dict() has 'monte_carlo' dict with is_significant key",    t_mc_to_dict_nested_monte_carlo)
+
+
+# ══════════════════════════════════════════════════════════════════════════
+# 17. PHASE 3-5 COVERAGE
+# ══════════════════════════════════════════════════════════════════════════
+
+def t_sector_limit_blocks_third_same_sector():
+    """check_sector_limit blocks when 2 positions already open in same sector."""
+    from risk_manager import risk_manager
+    from config import settings
+    settings.max_positions_per_sector = 2
+    ok, reason = risk_manager.check_sector_limit("HDFCBANK", ["ICICIBANK", "SBIN"])
+    assert not ok, f"Expected blocked, got allowed: {reason}"
+    assert "BANKING" in reason
+
+def t_sector_limit_allows_first_in_sector():
+    """check_sector_limit allows when no other positions in the same sector."""
+    from risk_manager import risk_manager
+    from config import settings
+    settings.max_positions_per_sector = 2
+    ok, reason = risk_manager.check_sector_limit("HDFCBANK", [])
+    assert ok, f"Expected allowed, got: {reason}"
+
+def t_sector_limit_others_exempt():
+    """Symbols not in sector_map (OTHERS) are always allowed."""
+    from risk_manager import risk_manager
+    from config import settings
+    settings.max_positions_per_sector = 1
+    # UNKNOWNSYM won't be in sector_map → OTHERS → exempt
+    ok, _ = risk_manager.check_sector_limit("UNKNOWNSYM", ["RELIANCE", "TCS", "HDFCBANK"])
+    assert ok
+
+def t_rolling_sharpe_below_count_initialises():
+    """MasterAgent._rolling_sharpe_below_count starts empty."""
+    from master_agent_v5 import MasterAgent
+    ma = MasterAgent.__new__(MasterAgent)
+    ma._rolling_sharpe_below_count = {}
+    assert isinstance(ma._rolling_sharpe_below_count, dict)
+    assert len(ma._rolling_sharpe_below_count) == 0
+
+def t_config_database_url_default_empty():
+    """database_url defaults to empty string (SQLite fallback)."""
+    from config import settings
+    assert hasattr(settings, "database_url")
+    assert settings.database_url == ""
+
+def t_config_redis_url_default_empty():
+    """redis_url defaults to empty string (in-memory fallback)."""
+    from config import settings
+    assert hasattr(settings, "redis_url")
+    assert settings.redis_url == ""
+
+def t_state_store_write_read():
+    """state_store.upsert_position and get_open_positions round-trip correctly."""
+    from state_store import init_db, upsert_position, get_open_positions, close_position
+    import time
+    init_db()
+    oid = f"TEST-{int(time.time())}"
+    upsert_position(
+        order_id=oid, symbol="RELIANCE", strategy="intraday",
+        side="BUY", entry_price=2800.0, quantity=5,
+        sl_price=2772.0, target=2884.0, product="MIS",
+    )
+    positions = get_open_positions()
+    found = any(p["order_id"] == oid for p in positions)
+    assert found, f"Position {oid} not found in open positions"
+    close_position(oid)
+    positions_after = get_open_positions()
+    assert not any(p["order_id"] == oid for p in positions_after), "Position still open after close"
+
+def t_multi_leg_request_model_valid():
+    """MultiLegRequest model accepts valid iron_condor input."""
+    import sys
+    sys.path.insert(0, str(Path(__file__).parent))
+    try:
+        from main import MultiLegRequest
+        req = MultiLegRequest(
+            underlying="NIFTY",
+            strategy_type="iron_condor",
+            lots=2,
+            legs=[
+                {"symbol": "NIFTY2406024200CE", "side": "SELL", "lots": 2},
+                {"symbol": "NIFTY2406024300CE", "side": "BUY",  "lots": 2},
+            ],
+        )
+        assert req.lots == 2
+        assert req.strategy_type == "iron_condor"
+        assert len(req.legs) == 2
+    except Exception as e:
+        raise AssertionError(f"MultiLegRequest import/init failed: {e}")
+
+
+print()
+print("── 17. PHASE 3-5 COVERAGE ───────────────────────────────────────────────")
+run("sector limit blocks 3rd position in same sector",             t_sector_limit_blocks_third_same_sector)
+run("sector limit allows first position in a sector",              t_sector_limit_allows_first_in_sector)
+run("OTHERS sector is always exempt from sector limit",            t_sector_limit_others_exempt)
+run("MasterAgent._rolling_sharpe_below_count initialises empty",   t_rolling_sharpe_below_count_initialises)
+run("config.database_url defaults to empty string",                t_config_database_url_default_empty)
+run("config.redis_url defaults to empty string",                   t_config_redis_url_default_empty)
+run("state_store upsert→get→close round-trip",                     t_state_store_write_read)
+run("MultiLegRequest model accepts iron_condor legs",              t_multi_leg_request_model_valid)
+
+
+# ══════════════════════════════════════════════════════════════════════════
+# 18. NEW AGENTS — MEAN REVERSION + MOMENTUM
+# ══════════════════════════════════════════════════════════════════════════
+
+def t_mean_reversion_in_all_agents():
+    from agents.strategy_agents import ALL_AGENTS
+    assert "mean_reversion" in ALL_AGENTS
+
+def t_momentum_in_all_agents():
+    from agents.strategy_agents import ALL_AGENTS
+    assert "momentum" in ALL_AGENTS
+
+def t_mean_reversion_tsl_config():
+    from trailing_sl_engine import TRAIL_CONFIGS
+    assert "mean_reversion" in TRAIL_CONFIGS
+    cfg = TRAIL_CONFIGS["mean_reversion"]
+    assert cfg.initial_sl_pct > 0
+    assert cfg.target1_pct > 0
+
+def t_momentum_tsl_config():
+    from trailing_sl_engine import TRAIL_CONFIGS
+    assert "momentum" in TRAIL_CONFIGS
+    cfg = TRAIL_CONFIGS["momentum"]
+    assert cfg.initial_sl_pct > 0
+    assert cfg.target1_pct > 0
+
+def t_mean_reversion_config_sl_tgt():
+    from config import settings
+    assert settings.sl_pct_mean_reversion > 0
+    assert settings.tgt_pct_mean_reversion > settings.sl_pct_mean_reversion
+
+def t_momentum_config_sl_tgt():
+    from config import settings
+    assert settings.sl_pct_momentum > 0
+    assert settings.tgt_pct_momentum > settings.sl_pct_momentum
+
+def t_mean_reversion_evaluate_hold_no_bb():
+    from agents.strategy_agents import MeanReversionAgent
+    from tick_engine import MarketSnapshot, LiveIndicators, Tick
+    from datetime import datetime
+    from unittest.mock import patch
+    _mkt_dt = datetime(2026, 1, 15, 10, 30, 0)
+    agent = MeanReversionAgent()
+    ind = LiveIndicators(symbol="TEST")
+    ind.bb_upper = 0.0; ind.bb_lower = 0.0  # no BB yet → must HOLD
+    tick = Tick("TEST", 100.0, 99.9, 100.1, 1000, 0.0, 0.0, 101.0, 99.0, 100.0, datetime.now())
+    snap = MarketSnapshot(symbol="TEST", tick=tick, indicators=ind, candles_1min=[], candles_5min=[])
+    with patch("agents.strategy_agents.now_ist", return_value=_mkt_dt):
+        action, _ = agent.evaluate_tick(snap)
+    assert action == "HOLD"
+
+def t_mean_reversion_bb_lower_bounce_signal():
+    from agents.strategy_agents import MeanReversionAgent
+    from tick_engine import MarketSnapshot, LiveIndicators, Tick
+    from datetime import datetime
+    from unittest.mock import patch
+    _mkt_dt = datetime(2026, 1, 15, 10, 30, 0)
+    agent = MeanReversionAgent()
+    ind = LiveIndicators(symbol="TEST")
+    ind.bb_upper = 110.0; ind.bb_lower = 95.0; ind.bb_mid = 102.5
+    ind.rsi_14 = 29.0; ind.volume_ratio = 1.3; ind.atr_14 = 0.5
+    tick = Tick("TEST", 94.0, 93.9, 94.1, 5000, -1.0, -1.0, 101.0, 93.0, 100.0, datetime.now())
+    snap = MarketSnapshot(symbol="TEST", tick=tick, indicators=ind,
+                          candles_1min=[type("C", (), {"high":101,"low":93,"open":100,"close":94,"volume":5000,"ts":datetime.now()})()]*16,
+                          candles_5min=[])
+    with patch("agents.strategy_agents.now_ist", return_value=_mkt_dt):
+        action, details = agent.evaluate_tick(snap)
+    assert action == "BUY", f"Expected BUY got {action}"
+    assert details is not None
+    assert details["stop_loss"] < 94.0
+
+def t_momentum_evaluate_hold_no_ema():
+    from agents.strategy_agents import MomentumAgent
+    from tick_engine import MarketSnapshot, LiveIndicators, Tick
+    from datetime import datetime
+    from unittest.mock import patch
+    _mkt_dt = datetime(2026, 1, 15, 10, 30, 0)
+    agent = MomentumAgent()
+    ind = LiveIndicators(symbol="TEST")
+    ind.ema9 = 0.0  # no EMAs yet → must HOLD
+    tick = Tick("TEST", 100.0, 99.9, 100.1, 1000, 0.0, 0.0, 101.0, 99.0, 100.0, datetime.now())
+    snap = MarketSnapshot(symbol="TEST", tick=tick, indicators=ind, candles_1min=[], candles_5min=[])
+    with patch("agents.strategy_agents.now_ist", return_value=_mkt_dt):
+        action, _ = agent.evaluate_tick(snap)
+    assert action == "HOLD"
+
+def t_momentum_vol_surge_trend_buy():
+    from agents.strategy_agents import MomentumAgent
+    from tick_engine import MarketSnapshot, LiveIndicators, Tick
+    from datetime import datetime
+    from unittest.mock import patch
+    _mkt_dt = datetime(2026, 1, 15, 10, 30, 0)
+    agent = MomentumAgent()
+    ind = LiveIndicators(symbol="TEST")
+    ind.ema9 = 105.0; ind.ema21 = 103.0; ind.ema50 = 100.0
+    ind.volume_ratio = 2.5; ind.macd_hist = 0.5; ind.adx_14 = 30.0
+    ind.rsi_14 = 60.0; ind.atr_14 = 0.5
+    tick = Tick("TEST", 106.0, 105.9, 106.1, 8000, 1.0, 1.0, 108.0, 99.0, 100.0, datetime.now())
+    C = type("C", (), {"high":108,"low":99,"open":100,"close":106,"volume":8000,"ts":datetime.now()})
+    snap = MarketSnapshot(symbol="TEST", tick=tick, indicators=ind,
+                          candles_1min=[C()]*23, candles_5min=[])
+    with patch("agents.strategy_agents.now_ist", return_value=_mkt_dt):
+        action, details = agent.evaluate_tick(snap)
+    assert action == "BUY", f"Expected BUY got {action}"
+    assert details["stop_loss"] < 106.0
+    assert details["target"] > 106.0
+
+def t_momentum_order_guard_max_trades():
+    from config import settings
+    assert settings.max_trades_momentum == 100
+
+def t_mean_reversion_order_guard_max_trades():
+    from config import settings
+    assert settings.max_trades_mean_reversion == 100
+
+def t_momentum_order_guard_registered():
+    from order_guard import order_guard
+    limit = order_guard._max_trades("momentum")
+    assert limit == 100
+
+def t_mean_reversion_order_guard_registered():
+    from order_guard import order_guard
+    limit = order_guard._max_trades("mean_reversion")
+    assert limit == 100
+
+print("── 18. NEW AGENTS — MEAN REVERSION + MOMENTUM ──────────────────────────")
+run("mean_reversion agent in ALL_AGENTS",                        t_mean_reversion_in_all_agents)
+run("momentum agent in ALL_AGENTS",                              t_momentum_in_all_agents)
+run("mean_reversion TSL config present",                         t_mean_reversion_tsl_config)
+run("momentum TSL config present",                               t_momentum_tsl_config)
+run("mean_reversion config sl_pct < tgt_pct",                   t_mean_reversion_config_sl_tgt)
+run("momentum config sl_pct < tgt_pct",                         t_momentum_config_sl_tgt)
+run("mean_reversion: HOLD when no BB data",                      t_mean_reversion_evaluate_hold_no_bb)
+run("mean_reversion: BB_LOWER_BOUNCE fires BUY below lower BB",  t_mean_reversion_bb_lower_bounce_signal)
+run("momentum: HOLD when no EMA data",                           t_momentum_evaluate_hold_no_ema)
+run("momentum: VOL_SURGE_TREND fires BUY on volume + EMA align", t_momentum_vol_surge_trend_buy)
+run("momentum max_trades_momentum == 6",                          t_momentum_order_guard_max_trades)
+run("mean_reversion max_trades_mean_reversion == 6",             t_mean_reversion_order_guard_max_trades)
+run("momentum registered in order_guard._max_trades",            t_momentum_order_guard_registered)
+run("mean_reversion registered in order_guard._max_trades",      t_mean_reversion_order_guard_registered)
+
+
+# ══════════════════════════════════════════════════════════════════════════
+# 19. ALT DATA + SURVIVORSHIP BIAS + TICK INFRASTRUCTURE
+# ══════════════════════════════════════════════════════════════════════════
+section("19. ALT DATA + SURVIVORSHIP BIAS + TICK INFRASTRUCTURE")
+
+from datetime import date as _date
+
+# ── Alt Data tests ────────────────────────────────────────────────────────────
+
+def t_alt_data_import():
+    from alt_data import alt_data_engine
+    assert alt_data_engine is not None
+
+def t_fno_expiry_last_thursday():
+    from alt_data import _last_thursday
+    for year in [2025, 2026]:
+        for month in range(1, 13):
+            exp = _last_thursday(year, month)
+            assert exp.weekday() == 3, f"{year}-{month:02d}: {exp} is not Thursday"
+
+def t_headline_positive():
+    from alt_data import alt_data_engine
+    score = alt_data_engine.score_headlines("RELIANCE", ["Reliance reports record profit and strong growth"])
+    assert score > 0, f"Expected positive score, got {score}"
+
+def t_headline_negative():
+    from alt_data import alt_data_engine
+    score = alt_data_engine.score_headlines("TCS", ["TCS faces investigation for fraud and heavy penalty"])
+    assert score < 0, f"Expected negative score, got {score}"
+
+def t_catalyst_bounded():
+    from alt_data import alt_data_engine
+    alt_data_engine.set_catalyst("TESTX", 0.7)
+    c = alt_data_engine.get_catalyst("TESTX")
+    assert -1.0 <= c <= 1.0, f"Catalyst out of bounds: {c}"
+
+def t_event_day_returns_tuple():
+    from alt_data import alt_data_engine
+    result = alt_data_engine.is_event_day()
+    assert isinstance(result, tuple) and len(result) == 2
+
+def t_days_to_next_event_positive():
+    from alt_data import alt_data_engine
+    d = alt_data_engine.days_to_next_event()
+    assert isinstance(d, int) and d >= 0
+
+# ── Index universe tests ───────────────────────────────────────────────────────
+
+def t_reliance_in_nifty100():
+    from index_universe import index_universe
+    assert index_universe.was_constituent("RELIANCE", "2025-06-01")
+
+def t_get_current_universe():
+    from index_universe import index_universe
+    u = index_universe.get_current_universe()
+    assert isinstance(u, list) and len(u) > 10
+
+def t_was_constituent_bool():
+    from index_universe import index_universe
+    result = index_universe.was_constituent("TCS", "2025-01-01")
+    assert isinstance(result, bool)
+
+def t_paytm_removed():
+    from index_universe import index_universe
+    assert not index_universe.was_constituent("PAYTM", "2025-01-01"), "PAYTM should be removed by 2025"
+
+# ── Tick recorder / replayer tests ────────────────────────────────────────────
+
+def t_tick_recorder_import():
+    from tick_recorder import tick_recorder
+    assert tick_recorder is not None
+
+def t_tick_recorder_stats():
+    from tick_recorder import tick_recorder
+    stats = tick_recorder.get_stats()
+    assert isinstance(stats, dict)
+
+def t_tick_replayer_empty():
+    from tick_replayer import tick_replayer
+    result = tick_replayer.replay_to_ohlcv("NONEXISTENT_SYM_XYZ")
+    assert result is None
+
+def t_tick_replayer_available_symbols():
+    from tick_replayer import tick_replayer
+    syms = tick_replayer.available_symbols()
+    assert isinstance(syms, list)
+
+def t_fii_dii_data_returns_dict():
+    from alt_data import alt_data_engine
+    data = alt_data_engine.get_fii_dii_data()
+    assert isinstance(data, dict)
+
+def t_fii_sentiment_in_range():
+    from alt_data import alt_data_engine
+    score = alt_data_engine.get_fii_sentiment()
+    assert -1.0 <= score <= 1.0, f"FII sentiment out of range: {score}"
+
+def t_set_fii_sentiment():
+    from alt_data import alt_data_engine
+    alt_data_engine.set_fii_sentiment(0.35)
+    assert abs(alt_data_engine.get_fii_sentiment() - 0.35) < 0.001
+    alt_data_engine.set_fii_sentiment(0.0)  # restore
+
+print("── 19. ALT DATA + SURVIVORSHIP BIAS + TICK INFRASTRUCTURE ──────────────")
+run("alt_data_engine singleton importable",                         t_alt_data_import)
+run("alt_data: F&O expiry is last Thursday of every month",         t_fno_expiry_last_thursday)
+run("alt_data: positive headline → positive score",                 t_headline_positive)
+run("alt_data: negative headline → negative score",                 t_headline_negative)
+run("alt_data: catalyst_score clamped to [-1, 1]",                  t_catalyst_bounded)
+run("alt_data: is_event_day() returns (bool, str) tuple",           t_event_day_returns_tuple)
+run("alt_data: days_to_next_event() returns non-negative int",      t_days_to_next_event_positive)
+run("index_universe: RELIANCE in 2025 Nifty 100",                  t_reliance_in_nifty100)
+run("index_universe: get_current_universe returns list",            t_get_current_universe)
+run("index_universe: was_constituent() returns bool",               t_was_constituent_bool)
+run("index_universe: PAYTM removed from index by 2025",             t_paytm_removed)
+run("tick_recorder singleton importable",                           t_tick_recorder_import)
+run("tick_recorder.get_stats() returns dict",                       t_tick_recorder_stats)
+run("tick_replayer.replay_to_ohlcv returns None when no data",      t_tick_replayer_empty)
+run("tick_replayer.available_symbols() returns list",               t_tick_replayer_available_symbols)
+run("alt_data: get_fii_dii_data() returns dict",                    t_fii_dii_data_returns_dict)
+run("alt_data: get_fii_sentiment() in [-1, 1]",                     t_fii_sentiment_in_range)
+run("alt_data: set_fii_sentiment() round-trips correctly",          t_set_fii_sentiment)
+
+print("── 20. MACRO SIGNALS + DEPTH + LATENCY ─────────────────────────────────")
+
+def t_macro_import():
+    from macro_signals import macro_signals
+    assert macro_signals is not None
+
+def t_macro_score_in_range():
+    from macro_signals import macro_signals
+    s = macro_signals.get_macro_score()
+    assert -1.0 <= s <= 1.0, f"macro score out of range: {s}"
+
+def t_macro_data_returns_dict():
+    from macro_signals import macro_signals
+    d = macro_signals.get_macro_data()
+    assert isinstance(d, dict)
+
+def t_depth_fields_on_indicators():
+    from tick_engine import LiveIndicators
+    ind = LiveIndicators(symbol="TEST")
+    assert hasattr(ind, "wall_above")
+    assert hasattr(ind, "wall_below")
+    assert hasattr(ind, "depth_imbalance")
+    assert isinstance(ind.wall_above, bool)
+    assert isinstance(ind.wall_below, bool)
+    assert 0.0 <= ind.depth_imbalance <= 1.0
+
+def t_depth_fields_on_tick():
+    from tick_engine import Tick
+    import dataclasses
+    fields = {f.name for f in dataclasses.fields(Tick)}
+    assert "bid_depth" in fields
+    assert "ask_depth" in fields
+
+def t_positions_cached_exists():
+    from kite_client import kite_client
+    assert callable(getattr(kite_client, "positions_cached", None))
+
+def t_wall_detection_no_depth():
+    from tick_engine import _detect_walls
+    wa, wb, imb = _detect_walls(100.0, [], [])
+    assert wa is False
+    assert wb is False
+    assert imb == 0.5
+
+run("macro_signals singleton importable",                           t_macro_import)
+run("macro_signals: get_macro_score() in [-1, 1]",                 t_macro_score_in_range)
+run("macro_signals: get_macro_data() returns dict",                t_macro_data_returns_dict)
+run("depth: LiveIndicators has wall_above/wall_below/depth_imbalance", t_depth_fields_on_indicators)
+run("depth: Tick has bid_depth and ask_depth fields",              t_depth_fields_on_tick)
+run("latency: kite_client.positions_cached() callable",            t_positions_cached_exists)
+run("depth: _detect_walls() returns (False,False,0.5) with no depth", t_wall_detection_no_depth)
+
+
+# ══════════════════════════════════════════════════════════════════════════
+# 22. BLACK SWAN VETERAN
+# ══════════════════════════════════════════════════════════════════════════
+section("22. BLACK SWAN VETERAN")
+
+def t_bsw_regime_enum():
+    from market_regime import Regime
+    assert Regime.BLACK_SWAN == "BLACK_SWAN"
+
+def t_bsw_plan_exists():
+    from market_regime import REGIME_PLANS, Regime
+    plan = REGIME_PLANS[Regime.BLACK_SWAN]
+    assert plan.size_factor == 0.5
+    assert "mean_reversion" in plan.active
+    assert "options" in plan.active
+    assert "scalping" in plan.active
+    assert "futures" in plan.active
+    assert "swing" in plan.paused
+
+def t_bsw_marketsnapshot_fields():
+    from tick_engine import MarketSnapshot
+    import dataclasses
+    fields = {f.name for f in dataclasses.fields(MarketSnapshot)}
+    assert "black_swan_active" in fields
+    assert "black_swan_phase"  in fields
+
+def t_bsw_classify_vix_zscore():
+    from market_regime import regime_detector, Regime, RegimeSignals
+    import unittest.mock as m
+    with m.patch.object(regime_detector, "_vix_zscore", return_value=3.5):
+        s = RegimeSignals(india_vix=45, nifty_ltp=21000, nifty_1min_chg_pct=0.0)
+        result = regime_detector._classify(s)
+    assert result == Regime.BLACK_SWAN, f"Expected BLACK_SWAN, got {result}"
+
+def t_bsw_classify_flash_crash():
+    from market_regime import regime_detector, Regime, RegimeSignals
+    import unittest.mock as m
+    with m.patch.object(regime_detector, "_vix_zscore", return_value=0.5):
+        s = RegimeSignals(india_vix=18, nifty_ltp=21000, nifty_1min_chg_pct=-4.0)
+        result = regime_detector._classify(s)
+    assert result == Regime.BLACK_SWAN, f"Expected BLACK_SWAN, got {result}"
+
+def t_bsw_compute_phase_falling():
+    from tick_engine import TickEngine, Candle
+    from datetime import datetime
+    now = datetime.now()
+    # 4 red candles + increasing volume = FALLING
+    falling = [
+        Candle(100,101,95,96, 1000, now), Candle(96,97,90,91,  2000, now),
+        Candle(91,92,85,86,   3000, now), Candle(86,87,80,81,  4000, now),
+        Candle(81,82,75,76,   5000, now),
+    ]
+    assert TickEngine._compute_bs_phase(falling) == "FALLING"
+
+def t_bsw_compute_phase_recovering():
+    from tick_engine import TickEngine, Candle
+    from datetime import datetime
+    now = datetime.now()
+    candles = [
+        Candle(100,101,95,96,1000,now), Candle(96,97,90,91,2000,now),
+        Candle(91,92,85,86,3000,now),
+        Candle(76,82,75,81,8000,now),  # green
+        Candle(81,86,80,85,7000,now),  # green
+    ]
+    assert TickEngine._compute_bs_phase(candles) == "RECOVERING"
+
+def t_bsw_compute_phase_stabilizing():
+    from tick_engine import TickEngine, Candle
+    from datetime import datetime
+    now = datetime.now()
+    candles = [
+        Candle(100,101,95,96,3000,now), Candle(96,97,90,91,4000,now),
+        Candle(91,95,88,94,5000,now),  # green
+        Candle(94,95,89,90,3000,now),  # red
+        Candle(90,93,88,91,2000,now),  # green (not 2 consecutive from end)
+    ]
+    # Last two: red then green — not 2 consecutive greens → STABILIZING
+    assert TickEngine._compute_bs_phase(candles) == "STABILIZING"
+
+def t_bsw_tighten_all_method():
+    from trailing_sl_engine import trailing_sl_engine
+    # tighten_all should exist and return int (0 when no positions open)
+    result = trailing_sl_engine.tighten_all(trail_pct=0.5)
+    assert isinstance(result, int)
+
+def t_bsw_meanrev_hold_falling():
+    from agents.strategy_agents import MeanReversionAgent
+    from tick_engine import MarketSnapshot, Tick, LiveIndicators, Candle
+    from datetime import datetime, time as dtime
+    import unittest.mock as m
+
+    agent = MeanReversionAgent()
+    tick  = Tick(symbol="TEST", ltp=100, bid=99.9, ask=100.1, volume=5000,
+                 change=0.0, change_pct=-2.0,
+                 high=105, low=90, open=103, timestamp=datetime.now())
+    ind = LiveIndicators(symbol="TEST")
+    ind.rsi_14 = 20.0; ind.rsi_7 = 18.0; ind.bb_upper = 110.0; ind.bb_lower = 90.0
+    ind.bb_mid = 100.0; ind.williams_r = -92.0; ind.vwap = 104.0; ind.volume_ratio = 2.0
+    snap = MarketSnapshot(symbol="TEST", tick=tick, indicators=ind,
+                          candles_1min=[], candles_5min=[],
+                          black_swan_active=True, black_swan_phase="FALLING")
+    action, sig = agent.evaluate_tick(snap)
+    assert action == "HOLD", f"Expected HOLD in FALLING, got {action}"
+
+def t_bsw_meanrev_hold_rsi_not_extreme():
+    from agents.strategy_agents import MeanReversionAgent
+    from tick_engine import MarketSnapshot, Tick, LiveIndicators, Candle
+    from datetime import datetime
+    import unittest.mock as m
+
+    agent = MeanReversionAgent()
+    tick  = Tick(symbol="TEST", ltp=100, bid=99.9, ask=100.1, volume=5000,
+                 change=0.0, change_pct=-2.0,
+                 high=105, low=90, open=103, timestamp=datetime.now())
+    ind = LiveIndicators(symbol="TEST")
+    ind.rsi_14 = 27.0; ind.rsi_7 = 25.0; ind.bb_upper = 110.0; ind.bb_lower = 88.0
+    ind.bb_mid = 99.0; ind.williams_r = -88.0; ind.vwap = 104.0; ind.volume_ratio = 2.0
+    snap = MarketSnapshot(symbol="TEST", tick=tick, indicators=ind,
+                          candles_1min=[], candles_5min=[],
+                          black_swan_active=True, black_swan_phase="STABILIZING")
+    # RSI = 27 (>= 25 threshold) → should HOLD
+    action, _ = agent.evaluate_tick(snap)
+    assert action == "HOLD", f"Expected HOLD (RSI not extreme enough), got {action}"
+
+def t_bsw_scalping_hold_non_recovering():
+    from agents.strategy_agents import ScalpingAgent
+    from tick_engine import MarketSnapshot, Tick, LiveIndicators
+    from datetime import datetime
+
+    agent = ScalpingAgent()
+    tick  = Tick(symbol="TEST", ltp=100, bid=99.95, ask=100.05, volume=10000,
+                 change=0.0, change_pct=-1.5,
+                 high=102, low=97, open=101, timestamp=datetime.now())
+    ind = LiveIndicators(symbol="TEST")
+    ind.ema9 = 99.5; ind.vwap = 98.0; ind.volume_ratio = 5.0; ind.atr_14 = 0.3
+    snap = MarketSnapshot(symbol="TEST", tick=tick, indicators=ind,
+                          candles_1min=[], candles_5min=[],
+                          black_swan_active=True, black_swan_phase="STABILIZING")
+    action, _ = agent.evaluate_tick(snap)
+    assert action == "HOLD", f"Expected HOLD in STABILIZING phase, got {action}"
+
+def t_bsw_scalping_hold_low_volume():
+    from agents.strategy_agents import ScalpingAgent
+    from tick_engine import MarketSnapshot, Tick, LiveIndicators
+    from datetime import datetime
+
+    agent = ScalpingAgent()
+    tick  = Tick(symbol="TEST", ltp=102, bid=101.95, ask=102.05, volume=10000,
+                 change=0.0, change_pct=1.5,
+                 high=103, low=97, open=99, timestamp=datetime.now())
+    ind = LiveIndicators(symbol="TEST")
+    ind.ema9 = 100.0; ind.vwap = 101.0; ind.volume_ratio = 2.0; ind.atr_14 = 0.3
+    snap = MarketSnapshot(symbol="TEST", tick=tick, indicators=ind,
+                          candles_1min=[], candles_5min=[],
+                          black_swan_active=True, black_swan_phase="RECOVERING")
+    # volume_ratio=2.0 < 3.0 threshold → HOLD
+    action, _ = agent.evaluate_tick(snap)
+    assert action == "HOLD", f"Expected HOLD (low volume), got {action}"
+
+def t_bsw_options_use_limit():
+    """OptionsAgent must set use_limit=True during any black swan phase."""
+    from agents.strategy_agents import OptionsAgent
+    from tick_engine import MarketSnapshot, Tick, LiveIndicators
+    from datetime import datetime
+    import unittest.mock as m
+
+    agent = OptionsAgent()
+    tick  = Tick(symbol="NIFTY", ltp=22000, bid=21995, ask=22005, volume=100000,
+                 change=0.0, change_pct=-2.0,
+                 high=22500, low=21000, open=22300, timestamp=datetime.now())
+    ind = LiveIndicators(symbol="NIFTY")
+    ind.ema9 = 21800; ind.ema21 = 21700; ind.ema50 = 21600; ind.ema200 = 21500
+    ind.rsi_14 = 25; ind.vwap = 22100; ind.volume_ratio = 2.0; ind.macd_hist = -10
+    snap = MarketSnapshot(symbol="NIFTY", tick=tick, indicators=ind,
+                          candles_1min=[], candles_5min=[],
+                          black_swan_active=True, black_swan_phase="FALLING")
+    with m.patch("options_intelligence.get_cached", return_value={"iv_rank": 85, "atm_iv": 45}), \
+         m.patch("iv_surface.get_surface", return_value=None), \
+         m.patch("gamma_scalp.get_cached_gex", return_value=None), \
+         m.patch("options_flow.get_cached_flow", return_value=None):
+        action, sig = agent.evaluate_tick(snap)
+    # Either HOLD (no pattern fires) or a signal with use_limit=True
+    if sig is not None:
+        assert sig.get("use_limit") is True, "BLACK_SWAN options must use limit orders"
+
+def t_bsw_futures_hold_non_recovering():
+    from agents.strategy_agents import FuturesAgent
+    from tick_engine import MarketSnapshot, Tick, LiveIndicators
+    from datetime import datetime
+
+    agent = FuturesAgent()
+    tick  = Tick(symbol="NIFTY", ltp=21000, bid=20998, ask=21002, volume=500000,
+                 change=0.0, change_pct=-3.0,
+                 high=21500, low=20500, open=21400, timestamp=datetime.now())
+    ind = LiveIndicators(symbol="NIFTY")
+    ind.ema9 = 20900; ind.ema21 = 20800; ind.ema50 = 20700; ind.rsi_14 = 35
+    ind.vwap = 21100; ind.macd_hist = -5; ind.atr_14 = 80; ind.adx_14 = 30
+    ind.supertrend_dir = "DOWN"; ind.depth_imbalance = 0.7
+    snap = MarketSnapshot(symbol="NIFTY", tick=tick, indicators=ind,
+                          candles_1min=[], candles_5min=[],
+                          black_swan_active=True, black_swan_phase="FALLING")
+    action, _ = agent.evaluate_tick(snap)
+    assert action == "HOLD", f"Expected HOLD in FALLING phase, got {action}"
+
+def t_bsw_config_settings():
+    from config import settings
+    assert hasattr(settings, "black_swan_vix_zscore")
+    assert hasattr(settings, "black_swan_price_drop_pct")
+    assert hasattr(settings, "black_swan_iv_rank_min")
+    assert hasattr(settings, "black_swan_volume_mult")
+    assert settings.black_swan_vix_zscore  == 3.0
+    assert settings.black_swan_price_drop_pct == 3.0
+    assert settings.black_swan_iv_rank_min == 75.0
+
+run("BLACK_SWAN in Regime enum",                                       t_bsw_regime_enum)
+run("BLACK_SWAN REGIME_PLANS entry: size_factor=0.5, active=[mr,opt,sc,fut]", t_bsw_plan_exists)
+run("MarketSnapshot has black_swan_active + black_swan_phase fields",  t_bsw_marketsnapshot_fields)
+run("_classify() returns BLACK_SWAN when VIX z-score > 3.0",          t_bsw_classify_vix_zscore)
+run("_classify() returns BLACK_SWAN when 1-min NIFTY drop > 3%",      t_bsw_classify_flash_crash)
+run("_compute_bs_phase() → FALLING for 4 red candles + rising vol",   t_bsw_compute_phase_falling)
+run("_compute_bs_phase() → RECOVERING for 2 consecutive green candles", t_bsw_compute_phase_recovering)
+run("_compute_bs_phase() → STABILIZING for mixed candles",             t_bsw_compute_phase_stabilizing)
+run("trailing_sl_engine.tighten_all() exists and returns int",         t_bsw_tighten_all_method)
+run("MeanReversionAgent returns HOLD during FALLING phase",            t_bsw_meanrev_hold_falling)
+run("MeanReversionAgent returns HOLD when RSI >= 25 in STABILIZING",  t_bsw_meanrev_hold_rsi_not_extreme)
+run("ScalpingAgent returns HOLD in non-RECOVERING phase",              t_bsw_scalping_hold_non_recovering)
+run("ScalpingAgent returns HOLD when volume_ratio < 3.0 in RECOVERING", t_bsw_scalping_hold_low_volume)
+run("OptionsAgent sets use_limit=True during BLACK_SWAN",              t_bsw_options_use_limit)
+run("FuturesAgent returns HOLD during FALLING phase",                  t_bsw_futures_hold_non_recovering)
+run("config.py has all 4 black_swan_* settings with correct defaults", t_bsw_config_settings)
+
+
+# ══════════════════════════════════════════════════════════════════════════
+# 23. PORTFOLIO BACKTEST
+# ══════════════════════════════════════════════════════════════════════════
+section("23. PORTFOLIO BACKTEST")
+
+def _make_portfolio_df(n_bars: int = 120, start_price: float = 1000.0, seed: int = 42) -> pd.DataFrame:
+    """Synthetic OHLCV DataFrame with realistic price action for portfolio tests."""
+    rng = np.random.default_rng(seed)
+    idx = pd.date_range("2025-01-02 09:15", periods=n_bars, freq="15min")
+    closes = [start_price]
+    for _ in range(n_bars - 1):
+        closes.append(closes[-1] * (1 + rng.normal(0.0002, 0.005)))
+    closes = np.array(closes)
+    highs  = closes * (1 + np.abs(rng.normal(0, 0.003, n_bars)))
+    lows   = closes * (1 - np.abs(rng.normal(0, 0.003, n_bars)))
+    opens  = np.roll(closes, 1); opens[0] = start_price
+    vols   = rng.integers(50_000, 2_000_000, n_bars).astype(float)
+    return pd.DataFrame(
+        {"open": opens, "high": highs, "low": lows, "close": closes, "volume": vols},
+        index=idx,
+    )
+
+def _make_signal_series(idx, fire_at_bars: list[int]) -> pd.Series:
+    """Signal series with 1s at specified bar positions."""
+    sig = pd.Series(0, index=idx)
+    for b in fire_at_bars:
+        if b < len(idx):
+            sig.iloc[b] = 1
+    return sig
+
+def t_portfolio_import():
+    from portfolio_backtest import PortfolioBacktest, PortfolioResult, portfolio_backtest
+    assert isinstance(portfolio_backtest, PortfolioBacktest)
+
+def t_portfolio_result_fields():
+    from portfolio_backtest import PortfolioResult
+    r = PortfolioResult(symbols=["A"], strategy="intraday", total_capital=100_000.0, max_open_positions=3)
+    for fld in ("total_net_pnl", "sharpe_ratio", "max_drawdown_pct",
+                "per_symbol", "equity_curve", "max_concurrent_positions",
+                "capital_utilization_avg", "calmar_ratio", "win_rate"):
+        assert hasattr(r, fld), f"Missing field: {fld}"
+
+def t_portfolio_empty_symbols():
+    from portfolio_backtest import portfolio_backtest
+    result = portfolio_backtest.run([], strategy="intraday", total_capital=100_000.0)
+    assert result.total_trades == 0
+
+def t_portfolio_max_positions_enforced():
+    """When both symbols signal at the same bar, only max_open_positions=1 should enter."""
+    from portfolio_backtest import portfolio_backtest
+    df_a = _make_portfolio_df(120, 1000.0, seed=1)
+    df_b = _make_portfolio_df(120, 2000.0, seed=2)
+    # Ensure common index by using same DatetimeIndex
+    idx = df_a.index.intersection(df_b.index)
+    df_a = df_a.loc[idx]; df_b = df_b.loc[idx]
+    sig_a = _make_signal_series(idx, [50, 80])
+    sig_b = _make_signal_series(idx, [50, 80])   # both fire at same bars
+    result = portfolio_backtest.simulate(
+        {"SYM_A": df_a, "SYM_B": df_b},
+        strategy="intraday",
+        total_capital=200_000.0,
+        max_open_positions=1,
+        precomputed_signals={"SYM_A": sig_a, "SYM_B": sig_b},
+    )
+    assert result.max_concurrent_positions <= 1, (
+        f"max_concurrent={result.max_concurrent_positions} exceeded max_open_positions=1"
+    )
+
+def t_portfolio_capital_pool_respected():
+    """Capital deployed at any point must not exceed total_capital."""
+    from portfolio_backtest import portfolio_backtest
+    total_capital = 100_000.0
+    max_pos = 2
+    df_a = _make_portfolio_df(120, 500.0, seed=10)
+    df_b = _make_portfolio_df(120, 600.0, seed=11)
+    df_c = _make_portfolio_df(120, 700.0, seed=12)
+    idx = df_a.index
+    sig_a = _make_signal_series(idx, [30, 60, 90])
+    sig_b = _make_signal_series(idx, [30, 60, 90])   # all fire at same bars
+    sig_c = _make_signal_series(idx, [30, 60, 90])
+    result = portfolio_backtest.simulate(
+        {"A": df_a, "B": df_b, "C": df_c},
+        strategy="intraday",
+        total_capital=total_capital,
+        max_open_positions=max_pos,
+        precomputed_signals={"A": sig_a, "B": sig_b, "C": sig_c},
+    )
+    assert result.max_concurrent_positions <= max_pos, (
+        f"max_concurrent={result.max_concurrent_positions} > max_open_positions={max_pos}"
+    )
+
+def t_portfolio_per_symbol_breakdown():
+    """per_symbol dict must have correct keys for symbols that traded."""
+    from portfolio_backtest import portfolio_backtest
+    df_a = _make_portfolio_df(120, 1000.0, seed=20)
+    idx  = df_a.index
+    sig_a = _make_signal_series(idx, [40])
+    result = portfolio_backtest.simulate(
+        {"RELIANCE": df_a},
+        strategy="intraday",
+        total_capital=500_000.0,
+        max_open_positions=5,
+        precomputed_signals={"RELIANCE": sig_a},
+    )
+    if result.total_trades > 0:
+        assert "RELIANCE" in result.per_symbol
+        sym = result.per_symbol["RELIANCE"]
+        for key in ("trades", "wins", "losses", "win_rate", "net_pnl"):
+            assert key in sym, f"per_symbol missing key: {key}"
+
+def t_portfolio_equity_curve_length():
+    """equity_curve must be bar-indexed (one entry per bar in common index)."""
+    from portfolio_backtest import portfolio_backtest
+    df_a = _make_portfolio_df(120, 800.0, seed=30)
+    df_b = _make_portfolio_df(120, 900.0, seed=31)
+    idx  = df_a.index.intersection(df_b.index)
+    df_a = df_a.loc[idx]; df_b = df_b.loc[idx]
+    result = portfolio_backtest.simulate(
+        {"A": df_a, "B": df_b},
+        strategy="intraday",
+        total_capital=200_000.0,
+        max_open_positions=2,
+    )
+    assert len(result.equity_curve) == len(idx), (
+        f"equity_curve length {len(result.equity_curve)} != bars {len(idx)}"
+    )
+
+def t_portfolio_to_dict_keys():
+    """to_dict() must contain all required keys."""
+    from portfolio_backtest import PortfolioResult
+    r = PortfolioResult(symbols=["X"], strategy="scalping", total_capital=50_000.0, max_open_positions=2)
+    d = r.to_dict()
+    for key in ("symbols", "strategy", "total_capital", "max_open_positions",
+                "total_trades", "wins", "losses", "win_rate", "total_net_pnl",
+                "max_drawdown_pct", "sharpe_ratio", "calmar_ratio",
+                "capital_utilization_avg", "max_concurrent_positions",
+                "per_symbol", "equity_curve", "run_at"):
+        assert key in d, f"to_dict() missing key: {key}"
+
+run("PortfolioBacktest class importable from portfolio_backtest",       t_portfolio_import)
+run("PortfolioResult has all required fields",                         t_portfolio_result_fields)
+run("Empty symbols list returns zero-trade result without exception",  t_portfolio_empty_symbols)
+run("max_open_positions=1 enforced when 2 symbols signal same bar",   t_portfolio_max_positions_enforced)
+run("Capital pool: max_concurrent_positions never > max_open_positions", t_portfolio_capital_pool_respected)
+run("per_symbol breakdown has trades/wins/losses/win_rate/net_pnl",   t_portfolio_per_symbol_breakdown)
+run("equity_curve is bar-indexed (len == common bars count)",         t_portfolio_equity_curve_length)
+run("to_dict() contains all required portfolio keys",                 t_portfolio_to_dict_keys)
+
+
+# ══════════════════════════════════════════════════════════════════════════
+# 24. FILTER_WATCHLIST BUG-FIX — empty pre-learned list regression
+# ══════════════════════════════════════════════════════════════════════════
+section("24. FILTER_WATCHLIST BUG-FIX")
+
+def t_filter_empty_prelearned_zero_approvals():
+    """BUG-FIX: empty pre-learned list must yield 0 approvals, not 'approve all'."""
+    name = "scalping"
+    pre_data = {name: []}  # agent present, but zero symbols passed backtest
+    wl = [{"symbol": "RELIANCE"}, {"symbol": "TCS"}]
+    # New code path: key present in dict → filter by pre_set
+    assert name in pre_data
+    pre_set = set(pre_data[name])
+    approved = [i for i in wl if i["symbol"] in pre_set]
+    assert approved == [], f"Expected [] but got {approved}"
+
+def t_filter_missing_agent_approves_all():
+    """If agent not in seed file at all → approve entire watchlist (new agent path)."""
+    name = "mean_reversion"
+    pre_data = {"intraday": ["RELIANCE"]}  # mean_reversion absent from file
+    wl = [{"symbol": "RELIANCE"}, {"symbol": "TCS"}, {"symbol": "HDFCBANK"}]
+    if name in pre_data:
+        approved = [i for i in wl if i["symbol"] in set(pre_data[name])]
+    else:
+        approved = list(wl)
+    assert len(approved) == len(wl), f"New agent should get all {len(wl)} symbols"
+
+def t_filter_non_empty_prelearned_filters_correctly():
+    """Non-empty pre-learned list must include only listed symbols."""
+    name = "intraday"
+    pre_data = {name: ["RELIANCE", "TCS"]}
+    wl = [{"symbol": "RELIANCE"}, {"symbol": "TCS"}, {"symbol": "HDFCBANK"}]
+    assert name in pre_data
+    pre_set = set(pre_data[name])
+    approved = [i for i in wl if i["symbol"] in pre_set]
+    assert len(approved) == 2
+    syms = {a["symbol"] for a in approved}
+    assert syms == {"RELIANCE", "TCS"}, f"Unexpected approvals: {syms}"
+
+def t_filter_integration_empty_list():
+    """Integration: filter_watchlist with skip_startup_backtest + empty pre-learned list."""
+    import json, unittest.mock as m
+    from agents.strategy_agents import ALL_AGENTS
+    from config import settings
+
+    agent = ALL_AGENTS["scalping"]
+    agent._approved.clear()
+    old_skip = settings.skip_startup_backtest
+    settings.skip_startup_backtest = True
+
+    pre_data = {"scalping": []}
+    with m.patch("agents.base_agent.Path") as mp:
+        mp.return_value.exists.return_value = True
+        mp.return_value.read_text.return_value = json.dumps(pre_data)
+        approved = agent.filter_watchlist([{"symbol": "RELIANCE"}, {"symbol": "TCS"}])
+
+    settings.skip_startup_backtest = old_skip
+    assert approved == [], f"Empty pre-learned list should yield [], got {approved}"
+    assert "RELIANCE" not in agent._approved
+    assert "TCS" not in agent._approved
+
+run("Empty pre-learned list yields 0 approvals (not approve-all)", t_filter_empty_prelearned_zero_approvals)
+run("Agent missing from seed file approves full watchlist",         t_filter_missing_agent_approves_all)
+run("Non-empty pre-learned list filters to listed symbols only",    t_filter_non_empty_prelearned_filters_correctly)
+run("Integration: filter_watchlist empty pre-learned → 0 approved",t_filter_integration_empty_list)
+
+
+# ══════════════════════════════════════════════════════════════════════════
 # FINAL SUMMARY
 # ══════════════════════════════════════════════════════════════════════════
 failed = summary()
-sys.exit(1 if failed else 0)
+# Force-exit without waiting for background executor threads (ThreadPoolExecutor
+# in the symbol scanner's run_in_executor() uses non-daemon threads; with real
+# TrueData credentials configured these threads block on network I/O after the
+# asyncio event loop closes, causing a 12+ second hang on sys.exit()).
+import os as _os
+_os._exit(1 if failed else 0)

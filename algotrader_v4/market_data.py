@@ -66,12 +66,14 @@ MKT_STATUS   = NSE_BASE + "/api/market-status"
 class Quote:
     __slots__ = ("symbol", "ltp", "open", "high", "low", "prev_close",
                  "change", "change_pct", "volume", "bid", "ask",
-                 "total_buy_qty", "total_sell_qty", "ts")
+                 "total_buy_qty", "total_sell_qty", "ts",
+                 "bid_depth", "ask_depth")
 
     def __init__(self, symbol: str, ltp: float, open_: float, high: float,
                  low: float, prev_close: float, change: float, change_pct: float,
                  volume: int, bid: float, ask: float,
-                 total_buy_qty: int = 0, total_sell_qty: int = 0):
+                 total_buy_qty: int = 0, total_sell_qty: int = 0,
+                 bid_depth: list = None, ask_depth: list = None):
         self.symbol        = symbol
         self.ltp           = ltp
         self.open          = open_
@@ -86,6 +88,8 @@ class Quote:
         self.total_buy_qty = total_buy_qty
         self.total_sell_qty= total_sell_qty
         self.ts            = datetime.now()
+        self.bid_depth     = bid_depth if bid_depth is not None else []
+        self.ask_depth     = ask_depth if ask_depth is not None else []
 
     def to_dict(self) -> dict:
         return {
@@ -238,12 +242,16 @@ class YFinanceClient:
             return df[cols].dropna().sort_values("date").reset_index(drop=True)
 
         from config import settings as _s
-        if _s.use_truedata_historical:
+        # Auto-enable TrueData historical when credentials are configured,
+        # even if the explicit flag is not set in .env.
+        _td_creds_ok = bool(_s.truedata_username and _s.truedata_password)
+        if _s.use_truedata_historical or _td_creds_ok:
             try:
                 from truedata_client import truedata_historical
                 lookback = {"5d": 5, "15d": 15, "30d": 30, "60d": 60, "90d": 90}.get(period, 5)
                 df = truedata_historical.historical(symbol, exchange, interval, lookback)
                 if not df.empty:
+                    logger.debug("TrueData historical: {} {} {} ({} bars)", symbol, interval, period, len(df))
                     return df
             except Exception as exc:
                 logger.debug("TrueData historical fallback to yfinance for {}: {}", symbol, exc)

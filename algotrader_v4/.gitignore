@@ -4,6 +4,9 @@
 .env.*
 !.env.example
 
+# Broker credential store — contains plain-text API keys and access tokens
+kite_accounts.json
+
 # Python
 __pycache__/
 *.py[cod]

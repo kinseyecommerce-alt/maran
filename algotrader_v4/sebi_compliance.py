@@ -14,6 +14,7 @@ SEBI Algo Trading Compliance Module — 10 regulations implemented:
 """
 from __future__ import annotations
 
+import hmac
 import json
 import uuid
 from collections import defaultdict
@@ -22,7 +23,7 @@ from datetime import datetime, date
 from enum import Enum
 from pathlib import Path
 from threading import Lock
-from typing import Optional
+from typing import Awaitable, Callable, Optional
 
 from loguru import logger
 from config import settings
@@ -32,12 +33,15 @@ _AUDIT_LOG_DIR = Path("logs")
 
 # ── Reg 1: Approved algo registry ─────────────────────────────────────────────
 APPROVED_ALGO_IDS: dict[str, str] = {
-    "intraday": "ALGO-INTRA-001",
-    "options":  "ALGO-OPT-002",
-    "futures":  "ALGO-FUT-006",
-    "swing":    "ALGO-SWING-003",
-    "scalping": "ALGO-SCALP-004",
-    "manual":   "ALGO-MANUAL-005",
+    "intraday":       "ALGO-INTRA-001",
+    "options":        "ALGO-OPT-002",
+    "futures":        "ALGO-FUT-006",
+    "swing":          "ALGO-SWING-003",
+    "scalping":       "ALGO-SCALP-004",
+    "manual":         "ALGO-MANUAL-005",
+    "mean_reversion": "ALGO-MREV-007",
+    "momentum":       "ALGO-MOM-008",
+    "pairs":          "ALGO-PAIRS-009",
 }
 
 _STRATEGY_DISCLOSURES: dict[str, dict] = {
@@ -95,6 +99,33 @@ _STRATEGY_DISCLOSURES: dict[str, dict] = {
         "risk_controls": "All standard risk checks apply",
         "parameters": {},
     },
+    "mean_reversion": {
+        "name": "Bollinger Mean Reversion",
+        "description": "Fades extremes: BB-band bounce/reject, RSI/Williams/Z-score reversion to the mean",
+        "instruments": "NSE equities (MIS)",
+        "order_types": ["MARKET"],
+        "holding_period": "Intraday — no new entries after 14:45",
+        "risk_controls": "1.2% stop-loss, 2% target, 3-min cooldown, ATR-scaled sizing",
+        "parameters": {"sl_pct": 1.2, "tgt_pct": 2.0, "cooldown_sec": 180, "z_entry": 2.0},
+    },
+    "momentum": {
+        "name": "Breakout Momentum",
+        "description": "Trades breakouts: HL/LL breaks, volume-surge trend, squeeze release, EMA alignment with ADX",
+        "instruments": "NSE equities (MIS)",
+        "order_types": ["MARKET"],
+        "holding_period": "Intraday — no new entries after 14:50",
+        "risk_controls": "1.5% stop-loss, 3% target, 3-min cooldown, VIX-scaled sizing",
+        "parameters": {"sl_pct": 1.5, "tgt_pct": 3.0, "cooldown_sec": 180, "adx_min": 22},
+    },
+    "pairs": {
+        "name": "Statistical Arbitrage Pairs",
+        "description": "Ratio Z-score mean reversion across 8 correlated pairs; long cheap leg / short expensive leg",
+        "instruments": "NSE equities (MIS)",
+        "order_types": ["MARKET"],
+        "holding_period": "Intraday — squared off by 14:30",
+        "risk_controls": "Z-score entry ±2σ, 4σ structural-break cut, regime filter, 2-min cooldown",
+        "parameters": {"z_entry": 2.0, "z_exit": 0.5, "z_cut": 4.0, "ratio_window": 50},
+    },
 }
 
 
@@ -147,11 +178,27 @@ class SEBICompliance:
         logger.info("SEBICompliance module initialised — 10 regulations active")
 
     # ── Reg 2: Kill switch ─────────────────────────────────────────────────────
+
+    # Wired by main.py: async callable() that cancels all open orders + squares off.
+    on_kill_switch: "Callable[[], Awaitable[None]] | None" = None
+
     def trigger_kill_switch(self, reason: str = "Emergency halt") -> None:
         with self._lock:
             self._state       = KillSwitchState.KILLED
             self._kill_reason = reason
         logger.critical("SEBI KILL SWITCH TRIGGERED: {}", reason)
+        # Cancel all open orders and square off positions immediately.
+        if self.on_kill_switch is not None:
+            import asyncio
+            try:
+                loop = asyncio.get_running_loop()
+                loop.create_task(self.on_kill_switch())
+            except RuntimeError:
+                # No running event loop — fire-and-forget via a new loop.
+                try:
+                    asyncio.run(self.on_kill_switch())
+                except Exception as exc:
+                    logger.error("SEBI kill-switch squareoff failed: {}", exc)
 
     def pause_trading(self, reason: str = "Manual pause") -> None:
         with self._lock:
@@ -175,7 +222,9 @@ class SEBICompliance:
 
     def reset_kill_switch(self, secret: str = "") -> tuple[bool, str]:
         """Requires KILL_SWITCH_RESET_SECRET env var when configured."""
-        if settings.kill_switch_reset_secret and secret != settings.kill_switch_reset_secret:
+        if settings.kill_switch_reset_secret and not hmac.compare_digest(
+            secret.encode(), settings.kill_switch_reset_secret.encode()
+        ):
             logger.error("SEBI: Unauthorized kill-switch reset attempt (bad secret)")
             return False, "Invalid reset secret"
         with self._lock:
@@ -366,6 +415,28 @@ class SEBICompliance:
                 "approved_today":        sum(1 for r in records if r.decision == "APPROVED"),
                 "rejected_today":        sum(1 for r in records if r.decision == "REJECTED"),
             }
+
+    def generate_daily_report(self, date_str: str | None = None) -> dict:
+        """Generate a SEBI-compliant daily activity report."""
+        import datetime
+        if date_str is None:
+            date_str = datetime.date.today().isoformat()
+        with self._lock:
+            today_records = self._audit_log.get(date_str, [])
+            today_entries = [r.__dict__ for r in today_records]
+        event_counts: dict[str, int] = {}
+        for e in today_entries:
+            etype = e.get("decision", "UNKNOWN")
+            event_counts[etype] = event_counts.get(etype, 0) + 1
+        return {
+            "report_date":       date_str,
+            "total_events":      len(today_entries),
+            "event_counts":      event_counts,
+            "kill_switch_active": self._state == KillSwitchState.KILLED,
+            "registered_algos":  list(APPROVED_ALGO_IDS.keys()),
+            "audit_entries":     today_entries[:200],
+            "generated_at":      datetime.datetime.utcnow().isoformat() + "Z",
+        }
 
     def reset_daily(self) -> None:
         with self._lock:

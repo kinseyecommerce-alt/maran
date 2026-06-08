@@ -174,3 +174,115 @@ npx @claude-flow/cli@latest doctor --fix
 ```
 
 **Agent tool** handles execution (agents, files, code, git). **MCP tools** handle coordination (swarm, memory, hooks). **CLI** is the same via Bash.
+
+---
+
+## AlgoTrader Pro v4 — Project Context
+
+### Overview
+NSE/BSE algorithmic trading system — 8 strategy agents, Zerodha Kite broker, TrueData
+market feed, Claude AI trade gate, FastAPI backend, asyncio runtime.
+Working directory: `algotrader_v4/`
+Active branch: `claude/loving-bell-0eMf7`
+Trading modes: `PAPER` (default, safe) / `LIVE` (real Zerodha orders)
+
+### Full Pipeline
+```
+TrueData WS (_on_tick) ──► tick_engine._process_tick()   [tick_engine.py:567]
+                                  │  indicators + MarketSnapshot
+                                  ▼  asyncio.Queue per agent  [tick_engine.py:593]
+                         base_agent._run_loop()           [base_agent.py:302]
+                           ├─ trailing_sl_engine.on_tick()  [base_agent.py:323]
+                           ├─ agent.evaluate_tick(snap)     [base_agent.py:327]
+                           ├─ claude_trade_gate.assess()    [base_agent.py:362]
+                           └─ _try_enter()                  [base_agent.py:409]
+                                 ├─ order_guard.can_place()
+                                 ├─ risk_manager.pre_trade_checks()
+                                 ├─ sebi_compliance.check()
+                                 ├─ kite_client.place_order(MARKET entry)  [:479]
+                                 ├─ trailing_sl_engine.register()          [:528]
+                                 └─ kite_client.place_order(SL-M)          [:539]
+```
+
+### Strategy Agents
+| Agent | Symbol | Signal Logic | File |
+|-------|--------|-------------|------|
+| intraday | RELIANCE, HDFC… | EMA9/21 + RSI + VWAP + volume | agents/intraday_agent.py |
+| scalping | TCS, INFY… | EMA9 crossover (2-tick) | agents/scalping_agent.py |
+| swing | HDFCBANK… | EMA50/200 weekly trend | agents/swing_agent.py |
+| options | NIFTY, INFY… | EMA cross → CE/PE contract | agents/options_agent.py |
+| futures | SBIN, TATASTEEL… | EMA trend + MACD accel | agents/futures_agent.py |
+
+### Key Files
+```
+algotrader_v4/
+├── main.py                  FastAPI app, all REST endpoints
+├── tick_engine.py           Market data ingestion + indicators
+├── agents/
+│   ├── base_agent.py        Shared async loop (_run_loop, _try_enter, _on_sl_hit)
+│   ├── intraday_agent.py
+│   ├── scalping_agent.py
+│   ├── swing_agent.py
+│   ├── options_agent.py
+│   └── futures_agent.py
+├── kite_client.py           Zerodha broker — LIVE + PAPER modes
+├── risk_manager.py          Position sizing, daily loss, Kelly, ATR sizing
+├── order_guard.py           Duplicate/overtrade/cooldown gate
+├── trailing_sl_engine.py    TSL + target management per strategy
+├── sebi_compliance.py       Regulatory checks
+├── claude_trade_gate.py     Claude AI veto layer
+├── master_agent_v5.py       Regime detection + agent orchestration
+├── config.py / settings.py  All tuneable parameters (Settings dataclass)
+├── market_data.py           TrueData + yfinance + CSV cache
+├── backtest_engine.py       Walk-forward + strategy comparison
+├── atomic_bracket.py        Bracket order management
+└── nse_day_simulation.py    Offline GBM simulation, all 5 agents
+```
+
+### Tests (MUST pass after every change)
+```bash
+cd algotrader_v4
+python test_full_pipeline.py    # 30/30  — all 5 agents: ingestion→order→exit
+python test_pipeline.py         # 345/345 — cross-module risk/guard/SEBI/kite/TSL + all phases
+python test_sim_orders_flow.py  # 13/13  — PAPER order/guard/risk flow
+```
+
+### Security Constraints (NEVER violate)
+- `.env` is gitignored — credentials NEVER committed
+- All secrets (KITE_API_KEY, KITE_API_SECRET, KITE_TOTP_SECRET, ANTHROPIC_API_KEY,
+  JWT_SECRET_KEY, TRUEDATA_USER/PASSWORD) live in `.env` ONLY
+- `Read(./.env)` is denied in `.claude/settings.json` — do not circumvent
+
+### Completed Roadmap (all phases done ✅)
+```
+Phase 6  — FuturesAgent TSL config + test coverage             ✅ trailing_sl_engine.py
+Phase 1A — Transaction cost engine (Zerodha: STT/GST/stamp)    ✅ risk_manager.py
+Phase 1B — ATR-proportional slippage model (PAPER mode)        ✅ atomic_bracket.py
+Phase 1C — Kelly criterion wired to adaptive stats             ✅ risk_manager.py
+Phase 2A — Walk-forward: 730 days, 12 folds, oos_sharpe        ✅ backtest_engine.py
+Phase 2B — Monte Carlo 1000x: sharpe_pct + dd_95pct            ✅ backtest_engine.py
+Phase 3  — Regime hysteresis, VIX z-score, sector limits       ✅ master_agent_v5.py / risk_manager.py
+Phase 4  — SQLite persistence with PostgreSQL/Redis fallback   ✅ state_store.py
+Phase 5  — Options chain UI, drawdown chart, trade journal,    ✅ static/dashboard.html
+           multi-leg builder, keyboard shortcuts B/K/R/1-5
+FuturesAgent Intelligence — 12 patterns, 9-factor ctx_bonus,   ✅ agents/strategy_agents.py
+  macro gate, L2 wall gate, rollover awareness
+1000-Trader Upgrade — signal_aggregator (consensus +50% qty),  ✅ signal_aggregator.py
+  PairsAgent (statarb), conviction sizing, 100+ symbol pairs      agents/strategy_agents.py
+  scanner criteria for all 8 agents (15→100 symbols/agent)        symbol_scanner.py
+Macro signals (USD/INR, crude, S&P, VIX) → risk gate           ✅ macro_signals.py
+FII/DII institutional flow → ±20% qty sizing                   ✅ alt_data.py / risk_manager.py
+L2 order book depth → wall detection per symbol                ✅ tick_engine.py
+Latency: async order placement, positions cache 2s TTL         ✅ base_agent.py / kite_client.py
+```
+
+### PAPER Mode Behaviour
+- Orders stored in `kite_client._paper_orders` as dicts
+- Tagged: `Agent-{strategy}` (entry), `Agent-{strategy}-SL` (stop), `TSL-HIT-{strategy}` (exit)
+- OptionsAgent places orders for contract symbols (e.g. `INFY2606041650CE`), not the underlying
+- TSL positions keyed by underlying symbol (`pos.symbol = snap.symbol`)
+
+### Build & Test (override generic section above)
+```bash
+cd algotrader_v4 && python test_full_pipeline.py   # primary smoke test
+```

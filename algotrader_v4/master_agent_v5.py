@@ -30,6 +30,7 @@ from adaptive_engine import adaptive_engine
 from agents.base_agent import send_telegram
 from agents.strategy_agents import ALL_AGENTS
 from bot_state import is_agent_enabled
+from portfolio_optimizer import portfolio_optimizer
 
 
 MASTER_PROMPT = """You are the MASTER TRADING INTELLIGENCE for an NSE/BSE algorithmic trading system.
@@ -50,7 +51,7 @@ Return ONLY valid JSON — no markdown, no code fences:
     "scalping":  {"action": "run|pause|reduce_size", "reason": "<specific reason>"}
   },
   "capital_allocation": {"intraday": 0-100, "options": 0-100, "futures": 0-100, "swing": 0-100, "scalping": 0-100},
-  "trade_gate_threshold": 55-85,
+  "trade_gate_threshold": 30-55,
   "risk_override": {"halt_new_trades": false, "reason": ""},
   "opportunity_alert": "<null or 1-sentence alert about a specific opportunity window>",
   "summary": "<one crisp sentence on current market state and primary edge>"
@@ -63,7 +64,7 @@ MANDATORY RULES:
 - TRENDING + ADX>25 → favour intraday + swing, scalping max 20%.
 - RANGING (ADX<18) → reduce all sizes 30%, no swing entries.
 - If adaptive_status is CAUTIOUS → reduce_size. If RETIRED → pause.
-- trade_gate_threshold: raise to 75 in ranging/volatile; lower to 60 in strong trend.
+- trade_gate_threshold: raise to 50 in ranging/volatile; lower to 30 in strong trend. NEVER set above 55 — Opus is the decision maker; trust its assessment.
 - If daily_pnl < -50% of max_daily_loss → halt_new_trades for 30 min.
 - If PCR > 1.5 → bearish pressure on calls, warn FNO agent.
 - If VIX spikes > 18 intraday → immediately reduce all size_factors 50%.
@@ -144,6 +145,8 @@ class MasterAgent:
         self._confirmed_regime: Optional[str] = None
         # Phase 3D: rolling Sharpe tracking — {strategy: [recent sharpes]}
         self._rolling_sharpe_below_count: dict[str, int] = {}
+        # Portfolio optimizer: latest allocations updated every 15 min
+        self._latest_allocations: dict[str, float] = {}
 
     # ── Lifecycle ──────────────────────────────────────────────────────────────
 
@@ -202,6 +205,8 @@ class MasterAgent:
                                  day_of_week="sun", id="weekly_backtest")
         self._scheduler.add_job(self._weekly_memory_synthesis, "cron", hour=21, minute=0,
                                  day_of_week="sun", id="weekly_memory")
+        self._scheduler.add_job(self._portfolio_optimize_job, "interval", minutes=15,
+                                 id="portfolio_optimize")
         self._scheduler.start()
         logger.info("[master_v5] started — tick-driven 1s")
         asyncio.create_task(send_telegram(
@@ -237,19 +242,70 @@ class MasterAgent:
             regime = regime_detector.current_regime
             plan   = regime_detector.current_plan
 
-        # Phase 3A: Regime hysteresis — only accept a new regime after 2 consecutive confirmations
-        self._regime_buffer.append(regime.value)
-        if len(self._regime_buffer) > 2:
-            self._regime_buffer = self._regime_buffer[-2:]
-        if len(self._regime_buffer) == 2 and self._regime_buffer[0] == self._regime_buffer[1]:
-            if self._confirmed_regime != regime.value:
-                logger.info("[master] Regime confirmed: {} → {} (2-cycle hysteresis)",
-                            self._confirmed_regime, regime.value)
+        # BLACK SWAN emergency bypass — no hysteresis, act immediately
+        if regime == Regime.BLACK_SWAN and self._confirmed_regime != Regime.BLACK_SWAN.value:
+            logger.critical("[master] BLACK SWAN DETECTED — emergency dispatch, tightening all TSL positions")
+            self._confirmed_regime = Regime.BLACK_SWAN.value
+            self._regime_buffer.clear()
+            # Step 1: tighten all existing TSL stops immediately to protect current P&L
+            try:
+                from trailing_sl_engine import trailing_sl_engine as _tsl
+                _tsl.tighten_all(trail_pct=0.5)
+            except Exception as _e:
+                logger.warning("[master] TSL tighten_all failed: {}", _e)
+            # Step 2: activate opportunity agents
+            self._apply_regime_plan(regime, plan)
+            # Step 3: broadcast to dashboard WebSocket
+            try:
+                if tick_engine.ws_broadcast:
+                    import asyncio
+                    asyncio.create_task(tick_engine.ws_broadcast({
+                        "event":      "black_swan_detected",
+                        "phase":      "FALLING",
+                        "regime":     regime.value,
+                        "reason":     plan.reasoning,
+                        "vix_zscore": round(regime_detector._vix_zscore(
+                                          regime_detector._vix_history[-1]
+                                          if regime_detector._vix_history else 0), 2),
+                    }))
+            except Exception as _e:
+                logger.warning("[master] BLACK SWAN broadcast failed: {}", _e)
+            asyncio.create_task(send_telegram(
+                "<b>⚡ BLACK SWAN DETECTED</b>\nEmergency regime dispatch. "
+                "TSL tightened. Opportunity agents active.\n"
+                f"VIX z-score: {regime_detector._vix_zscore(regime_detector._vix_history[-1] if regime_detector._vix_history else 0):.2f}"
+            ))
+
+        # Fast single-cycle recovery from BLACK_SWAN (don't hold panic mode longer than needed)
+        elif self._confirmed_regime == Regime.BLACK_SWAN.value and regime != Regime.BLACK_SWAN:
+            logger.info("[master] BLACK SWAN clearing: {} → {} (fast single-cycle recovery)",
+                        self._confirmed_regime, regime.value)
+            self._confirmed_regime = regime.value
+            self._regime_buffer.clear()
+            self._apply_regime_plan(regime, plan)
+            try:
+                if tick_engine.ws_broadcast:
+                    asyncio.create_task(tick_engine.ws_broadcast({
+                        "event":      "black_swan_cleared",
+                        "new_regime": regime.value,
+                    }))
+            except Exception:
+                pass
+
+        else:
+            # Phase 3A: Normal regime hysteresis — only accept new regime after 2 consecutive confirmations
+            self._regime_buffer.append(regime.value)
+            if len(self._regime_buffer) > 2:
+                self._regime_buffer = self._regime_buffer[-2:]
+            if len(self._regime_buffer) == 2 and self._regime_buffer[0] == self._regime_buffer[1]:
+                if self._confirmed_regime != regime.value:
+                    logger.info("[master] Regime confirmed: {} → {} (2-cycle hysteresis)",
+                                self._confirmed_regime, regime.value)
+                    self._confirmed_regime = regime.value
+                    self._apply_regime_plan(regime, plan)
+            elif self._confirmed_regime is None:
                 self._confirmed_regime = regime.value
                 self._apply_regime_plan(regime, plan)
-        elif self._confirmed_regime is None:
-            self._confirmed_regime = regime.value
-            self._apply_regime_plan(regime, plan)
 
         sigs = regime_detector.current_signals
         live = tick_engine.all_latest()
@@ -299,9 +355,9 @@ class MasterAgent:
 
         try:
             msg = self._client.messages.create(
-                model="claude-sonnet-4-6",
-                max_tokens=800,
-                system=MASTER_PROMPT,
+                model=settings.master_review_model,
+                max_tokens=1000,
+                system=[{"type": "text", "text": MASTER_PROMPT, "cache_control": {"type": "ephemeral"}}],
                 messages=[{"role": "user", "content": json.dumps(report, indent=2, default=str)}],
             )
             raw = msg.content[0].text.strip().replace("```json", "").replace("```", "").strip()
@@ -425,6 +481,52 @@ class MasterAgent:
         except Exception as exc:
             logger.error("[master] Weekly backtest failed: {}", exc)
 
+    async def _portfolio_optimize_job(self) -> None:
+        """
+        Every 15 minutes: collect pending signals from all running agents and run
+        mean-variance optimization.  Result stored on portfolio_optimizer singleton
+        for agents to query via should_trade().
+        """
+        if not self.running:
+            return
+        try:
+            signals: list[dict] = []
+            live = tick_engine.all_latest()
+            for agent_name, agent in ALL_AGENTS.items():
+                if not agent.state.running:
+                    continue
+                # Pull latest signals queued for the agent's watchlist symbols.
+                for sym_data in self._agent_watchlists.get(agent_name, []):
+                    sym = sym_data.get("symbol", sym_data) if isinstance(sym_data, dict) else sym_data
+                    snap = live.get(sym)
+                    if snap is None:
+                        continue
+                    score   = snap.get("score", 0) or snap.get("signal_score", 0)
+                    atr_pct = snap.get("atr_pct", snap.get("atr_14_pct", 1.0)) or 1.0
+                    if score <= 0:
+                        continue
+                    signals.append({
+                        "symbol":  sym,
+                        "score":   float(score),
+                        "atr_pct": float(atr_pct),
+                        "agent":   agent_name,
+                    })
+
+            intraday_capital = (
+                settings.total_capital
+                * settings.intraday_capital_pct / 100.0
+            )
+            allocs = await asyncio.to_thread(
+                portfolio_optimizer.optimize, signals, intraday_capital
+            )
+            self._latest_allocations = allocs
+            logger.debug(
+                "[master] Portfolio optimizer: {} signals → {} allocations",
+                len(signals), len(allocs),
+            )
+        except Exception as exc:
+            logger.error("[master] Portfolio optimize job failed: {}", exc)
+
     # ── Helpers ────────────────────────────────────────────────────────────────
 
     def _apply_regime_plan(self, regime: Regime, plan) -> None:
@@ -464,11 +566,21 @@ class MasterAgent:
             logger.warning("[master] Claude halted new trades: {}",
                            d.get("risk_override", {}).get("reason", ""))
 
-        # Apply dynamic trade gate threshold from master
+        # Apply dynamic trade gate threshold from master — capped at 55 so Opus always gets the final say
         threshold = d.get("trade_gate_threshold")
         if threshold and settings.use_claude_trade_gate:
-            settings.claude_gate_threshold = int(threshold)
-            logger.info("[master] Gate threshold → {}", threshold)
+            settings.claude_gate_threshold = max(20, min(int(threshold), 55))
+            logger.info("[master] Gate threshold → {}", settings.claude_gate_threshold)
+
+        # Apply regime-aware optimised config (from profit_optimizer.py)
+        try:
+            from profit_optimizer import apply_optimised_config
+            from market_regime import regime_detector
+            regime_name = regime_detector.current_regime.value if regime_detector.current_regime else None
+            if regime_name:
+                apply_optimised_config(regime=regime_name)
+        except Exception:
+            pass
 
         # Log opportunity alert if present
         alert = d.get("opportunity_alert")

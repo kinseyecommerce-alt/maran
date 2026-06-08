@@ -115,6 +115,33 @@ TRAIL_CONFIGS: dict[str, TrailConfig] = {
         mode            = SLMode.ATR_TRAIL,
         atr_multiplier  = 1.2,
     ),
+    "mean_reversion": TrailConfig(
+        initial_sl_pct  = 1.20,
+        trail_pct       = 0.40,
+        breakeven_pct   = 0.60,
+        activation_pct  = 0.80,
+        target1_pct     = 1.50,
+        target2_pct     = 2.50,
+        mode            = SLMode.ATR_TRAIL,
+        atr_multiplier  = 1.0,
+    ),
+    "momentum": TrailConfig(
+        initial_sl_pct  = 1.50,
+        trail_pct       = 0.60,
+        breakeven_pct   = 0.80,
+        activation_pct  = 1.20,
+        target1_pct     = 2.50,
+        target2_pct     = 4.00,
+        mode            = SLMode.ATR_TRAIL,
+        atr_multiplier  = 1.3,
+    ),
+    "pairs": TrailConfig(
+        initial_sl_pct  = 0.8,   trail_pct      = 0.4,
+        breakeven_pct   = 0.4,   activation_pct = 0.8,
+        target1_pct     = 1.5,   target2_pct    = 2.5,
+        mode            = SLMode.ATR_TRAIL,
+        atr_multiplier  = 1.0,
+    ),
 }
 
 
@@ -160,11 +187,6 @@ class PositionSL:
     _on_target_hit:   Optional[Callable] = field(default=None, repr=False)
     _on_sl_moved:     Optional[Callable] = field(default=None, repr=False)
     _on_partial_exit: Optional[Callable] = field(default=None, repr=False)
-
-    # Per-position callbacks (set via register(), used before module-level fallbacks)
-    _on_sl_hit:     Optional[Callable] = field(default=None, repr=False)
-    _on_target_hit: Optional[Callable] = field(default=None, repr=False)
-    _on_sl_moved:   Optional[Callable] = field(default=None, repr=False)
 
     @property
     def cfg(self) -> TrailConfig:
@@ -318,6 +340,13 @@ class TrailingSLEngine:
     async def _evaluate(
         self, pos: PositionSL, ltp: float, atr_14: float
     ) -> None:
+        # Guard: atomically check-and-set status to prevent TOCTOU double-hit.
+        # Two concurrent coroutines evaluating the same position could both pass
+        # a bare `if pos.status != ACTIVE` before either sets it to HIT.
+        with self._lock:
+            if pos.status != SLStatus.ACTIVE:
+                return
+
         cfg = pos.cfg
         old_sl = pos.current_sl
 
@@ -345,14 +374,32 @@ class TrailingSLEngine:
                  (pos.side == "SELL" and ltp >= pos.current_sl)
 
         if sl_hit:
-            pos.status = SLStatus.HIT
+            # Atomically claim ownership of the SL-hit under lock to prevent a
+            # concurrent _evaluate call from also triggering the callback.
+            with self._lock:
+                if pos.status != SLStatus.ACTIVE:
+                    return  # another coroutine already claimed this hit
+                pos.status = SLStatus.HIT
             pnl = (ltp - pos.entry_price) * pos.quantity * (1 if pos.side == "BUY" else -1)
             logger.warning(
                 "🔴 SL HIT: {} {} @ ₹{:.2f} | SL was ₹{:.2f} | P&L ₹{:.0f}",
                 pos.symbol, pos.side, ltp, pos.current_sl, pnl
             )
             if cb_sl_hit:
-                await cb_sl_hit(pos, ltp, pnl)
+                try:
+                    await cb_sl_hit(pos, ltp, pnl)
+                except Exception as exc:
+                    logger.error(
+                        "[TSL] callback error for {}: {} — position cleaned up anyway",
+                        pos.symbol, exc
+                    )
+                finally:
+                    pos.status = SLStatus.HIT  # ensure EXITED-equivalent is marked
+                    with self._lock:
+                        self._positions.pop(pos.order_id, None)
+            else:
+                with self._lock:
+                    self._positions.pop(pos.order_id, None)
             return
 
         # ── 3. Target 2 hit ────────────────────────────────────────────
@@ -364,7 +411,13 @@ class TrailingSLEngine:
                 pos.target2_hit = True
                 logger.info("🎯 TARGET 2 hit: {} @ ₹{:.2f}", pos.symbol, ltp)
                 if cb_target:
-                    await cb_target(pos, ltp, 2)
+                    try:
+                        await cb_target(pos, ltp, 2)
+                    except Exception as exc:
+                        logger.error(
+                            "[TSL] target2 callback error for {}: {} — continuing",
+                            pos.symbol, exc
+                        )
 
         # ── 4. Target 1 hit → partial scale-out + tighten trail ──────
         if not pos.target1_hit:
@@ -401,7 +454,13 @@ class TrailingSLEngine:
                     pos.symbol, ltp, pos.current_sl
                 )
                 if cb_target:
-                    await cb_target(pos, ltp, 1)
+                    try:
+                        await cb_target(pos, ltp, 1)
+                    except Exception as exc:
+                        logger.error(
+                            "[TSL] target1 callback error for {}: {} — continuing",
+                            pos.symbol, exc
+                        )
 
         # ── 5. Breakeven ───────────────────────────────────────────────
         if not pos.breakeven_hit and profit_pct >= cfg.breakeven_pct:
@@ -471,7 +530,8 @@ class TrailingSLEngine:
         cfg = pos.cfg
 
         if cfg.mode == SLMode.ATR_TRAIL and atr > 0:
-            trail_dist = atr * cfg.atr_multiplier
+            multiplier = cfg.atr_multiplier / 2 if pos.target1_hit else cfg.atr_multiplier
+            trail_dist = atr * multiplier
         else:
             # Percentage trail — tighter after T1 hit
             pct = cfg.trail_pct / 200 if pos.target1_hit else cfg.trail_pct / 100
@@ -490,6 +550,62 @@ class TrailingSLEngine:
 
     def get_position(self, order_id: str) -> Optional[PositionSL]:
         return self._positions.get(order_id)
+
+    def tighten_all(self, trail_pct: float = 0.5) -> int:
+        """Emergency TSL tightening — called on BLACK_SWAN detection.
+        Moves current_sl to trail_pct% behind best_price for all active positions.
+        Only moves SL in the favorable direction (never widens it). Returns count tightened.
+
+        SAFETY: after updating current_sl in memory, fires the on_sl_moved callback so that
+        the live Kite SL-M orders are actually modified. Without this, the in-memory tighten
+        has no effect on the real broker stop — the position remains exposed at the old SL price.
+        """
+        tightened_positions: list[tuple["PositionSL", float]] = []   # (pos, old_sl)
+        count = 0
+        with self._lock:
+            for pos in self._positions.values():
+                if pos.status != SLStatus.ACTIVE:
+                    continue
+                if pos.best_price <= 0:
+                    continue
+                if pos.side == "BUY":
+                    tighter = round(pos.best_price * (1 - trail_pct / 100), 2)
+                    if tighter > pos.current_sl:
+                        old_sl = pos.current_sl
+                        pos.current_sl = tighter
+                        count += 1
+                        tightened_positions.append((pos, old_sl))
+                else:
+                    tighter = round(pos.best_price * (1 + trail_pct / 100), 2)
+                    if tighter < pos.current_sl:
+                        old_sl = pos.current_sl
+                        pos.current_sl = tighter
+                        count += 1
+                        tightened_positions.append((pos, old_sl))
+        logger.warning("[TSL] BLACK SWAN: tightened {}/{} positions to {:.1f}% trail",
+                       count, len(self._positions), trail_pct)
+
+        # Fire on_sl_moved callback for each tightened position so downstream code
+        # (base_agent._on_sl_moved / atomic_bracket._on_tsl_sl_moved) actually modifies
+        # the SL-M order on the broker side.
+        if tightened_positions:
+            import asyncio as _asyncio
+            cb = self.on_sl_moved
+            if cb is not None:
+                try:
+                    loop = _asyncio.get_running_loop()
+                    for pos, old_sl in tightened_positions:
+                        _cb = pos._on_sl_moved or cb
+                        loop.create_task(_cb(pos, old_sl, "BLACK_SWAN_TIGHTEN"))
+                except RuntimeError:
+                    # No running event loop (called from non-async context).
+                    # Best-effort: log and let the next on_tick cycle pick up the new SL.
+                    logger.warning(
+                        "[TSL] tighten_all: no running event loop — "
+                        "SL-M broker orders NOT updated immediately. "
+                        "New SL will propagate on next tick."
+                    )
+        return count
 
     def all_positions(self) -> list[dict]:
         with self._lock:

@@ -166,7 +166,7 @@ def _orders_with_tag(symbol: str, tag: str, order_type: str | None = None):
     # OptionsAgent places orders for contract symbols (e.g. INFY2606041650CE),
     # so match by prefix so that _orders_with_tag("INFY", ...) also finds those.
     out = []
-    for o in kite_client._paper_orders:
+    for o in kite_client._paper_orders.values():
         ts = o.get("tradingsymbol", "")
         if ts != symbol and not ts.startswith(symbol):
             continue
@@ -238,10 +238,15 @@ async def stage_agents():
                 entry = None
                 for _ in range(60):                 # up to ~3s
                     await asyncio.sleep(0.05)
-                    hits = _orders_with_tag(symbol, f"Agent-{name}", "MARKET")
+                    # Accept either LIMIT (use_limit_orders=True) or MARKET entry
+                    hits = _orders_with_tag(symbol, f"Agent-{name}", "LIMIT")
+                    if not hits:
+                        hits = _orders_with_tag(symbol, f"Agent-{name}", "MARKET")
                     if hits:
                         entry = hits[0]
                         break
+                # Give _try_enter() time to complete post-gather work (TSL register)
+                await asyncio.sleep(0.15)
         finally:
             agent.stop()
 

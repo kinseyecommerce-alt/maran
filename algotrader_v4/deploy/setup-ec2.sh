@@ -75,6 +75,9 @@ if [[ ! -f "$ENV_FILE" ]]; then
     cp "$APP_DIR/.env.example" "$ENV_FILE"
     chmod 600 "$ENV_FILE"
     chown "$APP_USER":"$APP_USER" "$ENV_FILE"
+    touch "$APP_DIR/kite_accounts.json" 2>/dev/null || true
+    chmod 600 "$APP_DIR/kite_accounts.json"
+    chown "$APP_USER":"$APP_USER" "$APP_DIR/kite_accounts.json" 2>/dev/null || true
     echo ""
     echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
     echo "  ACTION REQUIRED: fill in secrets"

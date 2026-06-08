@@ -55,13 +55,18 @@ class BacktestResult:
     worst_trade: float      = 0.0
     fail_reasons: list[str] = field(default_factory=list)
     # Walk-forward OOS metrics
-    oos_win_rate: float     = 0.0
-    oos_total_pnl: float    = 0.0
-    oos_trades: int         = 0
-    walk_forward_used: bool = False
+    oos_win_rate: float          = 0.0
+    oos_total_pnl: float         = 0.0
+    oos_trades: int              = 0
+    oos_sharpe: float | None     = None
+    walk_forward_used: bool      = False
     # Monte Carlo
-    mc_pvalue: float        = 1.0
-    mc_passed: bool         = False
+    mc_pvalue: float             = 1.0
+    mc_passed: bool              = False
+    sharpe_percentile: float | None  = None   # % of permutations with Sharpe ≤ real
+    min_sharpe_5pct: float | None    = None   # 5th pct of permuted Sharpes
+    max_drawdown_95pct: float | None = None   # 95th pct of permuted max drawdowns
+    calmar_ratio: float = 0.0               # annualised_return / abs(max_drawdown_pct)
     # Raw trade log and equity curve (not serialised by default)
     trades: list[dict]      = field(default_factory=list)
     equity_curve: list[float] = field(default_factory=list)
@@ -88,8 +93,17 @@ class BacktestResult:
             "oos_win_rate":      round(self.oos_win_rate, 1),
             "oos_total_pnl":     round(self.oos_total_pnl, 0),
             "oos_trades":        self.oos_trades,
+            "oos_sharpe":        round(self.oos_sharpe, 2) if self.oos_sharpe is not None else None,
+            "calmar_ratio":      round(self.calmar_ratio, 2),
             "mc_pvalue":         round(self.mc_pvalue, 3),
             "mc_passed":         self.mc_passed,
+            "monte_carlo": {
+                "sharpe_percentile":  self.sharpe_percentile,
+                "min_sharpe_5pct":    self.min_sharpe_5pct,
+                "max_drawdown_95pct": self.max_drawdown_95pct,
+                "mc_pvalue":          round(self.mc_pvalue, 3),
+                "is_significant":     self.mc_passed,
+            },
         }
         if include_trades:
             d["trades"] = self.trades
@@ -201,6 +215,8 @@ class BacktestEngine:
         lookback_days: int | None = None,
         force: bool = False,
         walk_forward: bool = True,
+        n_folds: int | None = None,
+        out_of_sample_pct: float | None = None,
     ) -> BacktestResult:
         key = (symbol, strategy)
         if not force and key in self._cache:
@@ -218,8 +234,13 @@ class BacktestEngine:
             self._cache[key] = result
             return result
 
+        oos_pct = out_of_sample_pct if out_of_sample_pct is not None else 0.30
         if walk_forward and len(df) >= 120:
-            result = self._walk_forward_run(symbol, strategy, df, params)
+            result = self._walk_forward_run(
+                symbol, strategy, df, params,
+                n_splits=n_folds,
+                out_of_sample_pct=oos_pct,
+            )
         else:
             signals = self._generate_signals(df, strategy)
             trades  = self._simulate_trades(df, signals, params, strategy_name=strategy)
@@ -339,15 +360,18 @@ class BacktestEngine:
         df: pd.DataFrame,
         params: dict,
         n_splits: int | None = None,
-        train_frac: float = 0.70,
+        train_frac: float | None = None,
+        out_of_sample_pct: float = 0.30,
     ) -> BacktestResult:
         """
         Split data into n_splits windows (default from settings.bt_wf_folds).
         Supports anchored walk-forward (settings.bt_wf_anchored=True): expanding train window.
         IS result comes from the full dataset; OOS metrics come from OOS folds.
+        out_of_sample_pct controls the OOS fraction (default 0.30 → train_frac=0.70).
         """
         n_splits    = n_splits or getattr(settings, "bt_wf_folds", 12)
         anchored    = getattr(settings, "bt_wf_anchored", True)
+        train_frac  = train_frac if train_frac is not None else (1.0 - out_of_sample_pct)
         min_oos_t   = getattr(settings, "bt_min_oos_trades", 15)
         n           = len(df)
         # Ensure at least 2 folds with enough data
@@ -358,12 +382,14 @@ class BacktestEngine:
 
         for i in range(n_splits):
             if anchored:
-                # Anchored (expanding window): train grows from beginning each fold
-                train_end = int(n * (i + 1) / n_splits * train_frac) + window // n_splits
+                # Anchored (expanding window): each fold trains from bar 0 to fold_end * train_frac
+                fold_end  = int(n * (i + 1) / n_splits)
+                train_end = int(fold_end * train_frac)
                 oos_start = train_end
-                oos_end   = int(n * (i + 1) / n_splits)
-                if oos_end <= oos_start:
-                    oos_end = min(oos_start + window, n)
+                oos_end   = fold_end
+                # Ensure early folds have at least ~30 bars of OOS data
+                if oos_end <= oos_start or (oos_end - oos_start) < max(30, n // n_splits // 4):
+                    oos_end = min(oos_start + max(30, n // n_splits // 4), n)
             else:
                 # Rolling window
                 start     = i * window
@@ -392,6 +418,13 @@ class BacktestEngine:
             result.oos_win_rate  = len(oos_wins) / len(oos_pnls) * 100
             result.oos_total_pnl = sum(oos_pnls)
             result.oos_trades    = len(oos_pnls)
+            if len(oos_pnls) >= 2:
+                arr = np.array(oos_pnls, dtype=float)
+                std = float(arr.std())
+                if std > 0:
+                    result.oos_sharpe = round(
+                        float(arr.mean()) / std * math.sqrt(len(arr)), 2
+                    )
 
         # Gate: require minimum OOS trades
         if result.oos_trades < min_oos_t and result.oos_trades > 0:
@@ -439,50 +472,53 @@ class BacktestEngine:
         volume = df["volume"]
         signals = pd.Series(0, index=df.index)
 
+        n = len(df)
+
         if strategy == "intraday":
             ema9  = ta.trend.EMAIndicator(close, 9).ema_indicator()
             ema21 = ta.trend.EMAIndicator(close, 21).ema_indicator()
             rsi   = ta.momentum.RSIIndicator(close, 14).rsi()
             vwap  = ta.volume.VolumeWeightedAveragePrice(high, low, close, volume).volume_weighted_average_price()
-            for i in range(2, len(df)):
+            for i in range(2, n - 1):
                 vwap_cross = close.iloc[i-1] < vwap.iloc[i-1] and close.iloc[i] > vwap.iloc[i]
                 ema_bull   = ema9.iloc[i] > ema21.iloc[i]
                 rsi_ok     = 45 < rsi.iloc[i] < 65
                 if vwap_cross and ema_bull and rsi_ok:
-                    signals.iloc[i] = 1
+                    # Signal confirmed on bar i; entry fills at open of bar i+1 (no look-ahead).
+                    signals.iloc[i + 1] = 1
 
         elif strategy == "options":
             rsi    = ta.momentum.RSIIndicator(close, 14).rsi()
             atr    = ta.volatility.AverageTrueRange(high, low, close, 14).average_true_range()
             atr_ma = atr.rolling(30).mean()
-            for i in range(30, len(df)):
+            for i in range(30, n - 1):
                 iv_proxy = (atr.iloc[i] / atr_ma.iloc[i] * 50) if atr_ma.iloc[i] else 50
                 if iv_proxy < 40 and rsi.iloc[i] < 40:
-                    signals.iloc[i] = 1
+                    signals.iloc[i + 1] = 1
                 elif iv_proxy < 40 and rsi.iloc[i] > 60:
-                    signals.iloc[i] = 1
+                    signals.iloc[i + 1] = 1
 
         elif strategy == "swing":
             ema50 = ta.trend.EMAIndicator(close, 50).ema_indicator()
             ema20 = ta.trend.EMAIndicator(close, 20).ema_indicator()
             rsi   = ta.momentum.RSIIndicator(close, 14).rsi()
-            for i in range(50, len(df)):
+            for i in range(50, n - 1):
                 near   = abs(close.iloc[i] - ema50.iloc[i]) / ema50.iloc[i] < 0.015
                 ema_up = ema20.iloc[i] > ema50.iloc[i]
                 rsi_ok = 40 < rsi.iloc[i] < 60
                 if near and ema_up and rsi_ok:
-                    signals.iloc[i] = 1
+                    signals.iloc[i + 1] = 1
 
         elif strategy == "scalping":
             ema9   = ta.trend.EMAIndicator(close, 9).ema_indicator()
             rsi    = ta.momentum.RSIIndicator(close, 7).rsi()
             vol_ma = volume.rolling(10).mean()
-            for i in range(10, len(df)):
+            for i in range(10, n - 1):
                 cross = close.iloc[i-1] < ema9.iloc[i-1] and close.iloc[i] > ema9.iloc[i]
                 spike = volume.iloc[i] > vol_ma.iloc[i] * 1.5
                 mom   = 50 < rsi.iloc[i] < 70
                 if cross and spike and mom:
-                    signals.iloc[i] = 1
+                    signals.iloc[i + 1] = 1
 
         return signals
 
@@ -577,7 +613,9 @@ class BacktestEngine:
                     in_trade = False
 
             elif signals.iloc[i] == 1:
-                entry_price = df["close"].iloc[i]
+                # Fill at open[i] — earliest executable price after signal confirmed on prior bar close.
+                # Using close[i] would be look-ahead bias (bar not yet closed when signal fires).
+                entry_price = df["open"].iloc[i] if "open" in df.columns else df["close"].iloc[i]
                 # Apply entry slippage (buy at slightly higher price)
                 entry_fill  = entry_price * (1 + slip) if apply_costs else entry_price
                 entry_idx   = i
@@ -623,6 +661,16 @@ class BacktestEngine:
         gross_loss   = sum(abs(l) for l in losses) if losses else 1.0
         pf           = gross_profit / gross_loss if gross_loss > 0 else 0.0
 
+        n_trades = max(len(pnls), 1)
+        # Annualise using trade count; assume ~5 trading days per trade on average.
+        # Cap at 4× (roughly 4 years max annualisation) to prevent extreme blow-up on
+        # small samples.
+        ann_factor = min(252.0 / max(n_trades / 5, 1), 4.0)
+        ann_return = (total_pnl / max(abs(total_pnl) + 1, 1)) * ann_factor if total_pnl != 0 else 0.0
+        capital = 100_000.0  # reference capital for return calculation
+        ann_return = (total_pnl / capital) * ann_factor
+        calmar = ann_return / abs(max_dd_pct / 100) if max_dd_pct != 0 else 0.0
+
         return BacktestResult(
             symbol=symbol, strategy=strategy, passed=False,
             total_trades=len(trades), wins=len(wins), losses=len(losses),
@@ -630,6 +678,7 @@ class BacktestEngine:
             max_drawdown_pct=max_dd_pct, sharpe_ratio=sharpe, profit_factor=pf,
             best_trade=max(pnls) if pnls else 0.0,
             worst_trade=min(pnls) if pnls else 0.0,
+            calmar_ratio=round(calmar, 2),
             trades=trades,
             equity_curve=cumulative,
         )
@@ -646,6 +695,8 @@ class BacktestEngine:
             reasons.append(f"Sharpe too low ({r.sharpe_ratio:.2f} < {settings.bt_min_sharpe})")
         if r.max_drawdown_pct > settings.bt_max_drawdown_pct:
             reasons.append(f"Drawdown too high ({r.max_drawdown_pct:.1f}% > {settings.bt_max_drawdown_pct:.0f}%)")
+        if r.calmar_ratio < settings.bt_min_calmar and r.total_trades >= settings.bt_min_trades:
+            reasons.append(f"Calmar too low ({r.calmar_ratio:.2f} < {settings.bt_min_calmar:.1f})")
         if r.total_pnl <= 0:
             reasons.append(f"Negative total P&L (₹{r.total_pnl:.0f})")
         # Walk-forward OOS gate: OOS win rate must not be below 80% of IS win rate
@@ -661,14 +712,17 @@ class BacktestEngine:
                 if fr not in reasons:
                     reasons.append(fr)
 
-        # Monte Carlo test gate
-        require_mc = getattr(settings, "bt_require_mc_pass", False)
-        if require_mc and r.trades:
-            n_perms = getattr(settings, "bt_mc_permutations", 500)
+        # Always run Monte Carlo to populate stats; gate on bt_require_mc_pass
+        if r.trades:
+            n_perms = getattr(settings, "bt_mc_permutations", 1000)
             mc_result = self._monte_carlo_test(r.trades, n_perms)
-            r.mc_pvalue = mc_result["mc_pvalue"]
-            r.mc_passed = mc_result["mc_passed"]
-            if not r.mc_passed:
+            r.mc_pvalue          = mc_result["mc_pvalue"]
+            r.mc_passed          = mc_result["mc_passed"]
+            r.sharpe_percentile  = mc_result.get("sharpe_percentile")
+            r.min_sharpe_5pct    = mc_result.get("min_sharpe_5pct")
+            r.max_drawdown_95pct = mc_result.get("max_drawdown_95pct")
+            require_mc = getattr(settings, "bt_require_mc_pass", False)
+            if require_mc and not r.mc_passed:
                 reasons.append(
                     f"Monte Carlo failed (p={r.mc_pvalue:.3f} >= 0.10 threshold)"
                 )
@@ -682,17 +736,23 @@ class BacktestEngine:
     def _monte_carlo_test(
         self,
         trades: list[dict],
-        n_permutations: int = 500,
+        n_permutations: int = 1000,
     ) -> dict:
         """
         Permutation test using Calmar ratio (return / max-drawdown).
-        Max-drawdown is path-dependent — shuffling the same P&L sequence
-        changes the drawdown profile, making this a meaningful test.
         p-value = fraction of shuffled Calmar values >= real Calmar.
         Passes when p-value < 0.10 (real edge is in top 10% of random).
+        Also reports Sharpe-based stats across permutations:
+          sharpe_percentile  — % of permutations with Sharpe ≤ real Sharpe
+          min_sharpe_5pct    — 5th percentile of permuted Sharpes
+          max_drawdown_95pct — 95th percentile of permuted max drawdowns
         """
+        _no_data = {
+            "mc_pvalue": 1.0, "mc_passed": False,
+            "sharpe_percentile": None, "min_sharpe_5pct": None, "max_drawdown_95pct": None,
+        }
         if len(trades) < 20:
-            return {"mc_pvalue": 1.0, "mc_passed": False}
+            return _no_data
 
         def _calmar(pnls: np.ndarray) -> float:
             cumsum = np.cumsum(pnls)
@@ -700,15 +760,40 @@ class BacktestEngine:
             max_dd = float(np.max(peak - cumsum)) + 1e-9
             return float(pnls.sum()) / max_dd
 
-        real_pnls  = np.array([t.get("net_pnl", t["pnl"]) for t in trades])
-        real_calmar = _calmar(real_pnls)
+        def _sharpe(pnls: np.ndarray) -> float:
+            std = float(pnls.std())
+            return float(pnls.mean()) / std * math.sqrt(len(pnls)) if std > 1e-9 else 0.0
 
-        count_worse = sum(
-            1 for _ in range(n_permutations)
-            if _calmar(np.random.permutation(real_pnls)) >= real_calmar
-        )
-        pvalue = count_worse / n_permutations
-        return {"mc_pvalue": round(pvalue, 3), "mc_passed": pvalue < 0.10}
+        def _max_dd(pnls: np.ndarray) -> float:
+            cum  = np.cumsum(pnls)
+            peak = np.maximum.accumulate(cum)
+            return float(np.max(peak - cum))
+
+        real_pnls   = np.array([t.get("net_pnl", t["pnl"]) for t in trades])
+        real_calmar = _calmar(real_pnls)
+        real_sharpe = _sharpe(real_pnls)
+
+        perm_calmars:   list[float] = []
+        perm_sharpes:   list[float] = []
+        perm_drawdowns: list[float] = []
+
+        for _ in range(n_permutations):
+            p = np.random.permutation(real_pnls)
+            perm_calmars.append(_calmar(p))
+            perm_sharpes.append(_sharpe(p))
+            perm_drawdowns.append(_max_dd(p))
+
+        pvalue = sum(1 for c in perm_calmars if c >= real_calmar) / n_permutations
+
+        ps = np.array(perm_sharpes)
+        pd_arr = np.array(perm_drawdowns)
+        return {
+            "mc_pvalue":          round(pvalue, 3),
+            "mc_passed":          pvalue < 0.10,
+            "sharpe_percentile":  round(float(np.mean(ps <= real_sharpe) * 100), 1),
+            "min_sharpe_5pct":    round(float(np.percentile(ps, 5)), 2),
+            "max_drawdown_95pct": round(float(np.percentile(pd_arr, 95)), 2),
+        }
 
     # ── Stress test ────────────────────────────────────────────────────────────
 
