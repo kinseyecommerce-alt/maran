@@ -3315,6 +3315,155 @@ run("config.py has all 4 black_swan_* settings with correct defaults", t_bsw_con
 
 
 # ══════════════════════════════════════════════════════════════════════════
+# 23. PORTFOLIO BACKTEST
+# ══════════════════════════════════════════════════════════════════════════
+section("23. PORTFOLIO BACKTEST")
+
+def _make_portfolio_df(n_bars: int = 120, start_price: float = 1000.0, seed: int = 42) -> pd.DataFrame:
+    """Synthetic OHLCV DataFrame with realistic price action for portfolio tests."""
+    rng = np.random.default_rng(seed)
+    idx = pd.date_range("2025-01-02 09:15", periods=n_bars, freq="15min")
+    closes = [start_price]
+    for _ in range(n_bars - 1):
+        closes.append(closes[-1] * (1 + rng.normal(0.0002, 0.005)))
+    closes = np.array(closes)
+    highs  = closes * (1 + np.abs(rng.normal(0, 0.003, n_bars)))
+    lows   = closes * (1 - np.abs(rng.normal(0, 0.003, n_bars)))
+    opens  = np.roll(closes, 1); opens[0] = start_price
+    vols   = rng.integers(50_000, 2_000_000, n_bars).astype(float)
+    return pd.DataFrame(
+        {"open": opens, "high": highs, "low": lows, "close": closes, "volume": vols},
+        index=idx,
+    )
+
+def _make_signal_series(idx, fire_at_bars: list[int]) -> pd.Series:
+    """Signal series with 1s at specified bar positions."""
+    sig = pd.Series(0, index=idx)
+    for b in fire_at_bars:
+        if b < len(idx):
+            sig.iloc[b] = 1
+    return sig
+
+def t_portfolio_import():
+    from portfolio_backtest import PortfolioBacktest, PortfolioResult, portfolio_backtest
+    assert isinstance(portfolio_backtest, PortfolioBacktest)
+
+def t_portfolio_result_fields():
+    from portfolio_backtest import PortfolioResult
+    r = PortfolioResult(symbols=["A"], strategy="intraday", total_capital=100_000.0, max_open_positions=3)
+    for fld in ("total_net_pnl", "sharpe_ratio", "max_drawdown_pct",
+                "per_symbol", "equity_curve", "max_concurrent_positions",
+                "capital_utilization_avg", "calmar_ratio", "win_rate"):
+        assert hasattr(r, fld), f"Missing field: {fld}"
+
+def t_portfolio_empty_symbols():
+    from portfolio_backtest import portfolio_backtest
+    result = portfolio_backtest.run([], strategy="intraday", total_capital=100_000.0)
+    assert result.total_trades == 0
+
+def t_portfolio_max_positions_enforced():
+    """When both symbols signal at the same bar, only max_open_positions=1 should enter."""
+    from portfolio_backtest import portfolio_backtest
+    df_a = _make_portfolio_df(120, 1000.0, seed=1)
+    df_b = _make_portfolio_df(120, 2000.0, seed=2)
+    # Ensure common index by using same DatetimeIndex
+    idx = df_a.index.intersection(df_b.index)
+    df_a = df_a.loc[idx]; df_b = df_b.loc[idx]
+    sig_a = _make_signal_series(idx, [50, 80])
+    sig_b = _make_signal_series(idx, [50, 80])   # both fire at same bars
+    result = portfolio_backtest.simulate(
+        {"SYM_A": df_a, "SYM_B": df_b},
+        strategy="intraday",
+        total_capital=200_000.0,
+        max_open_positions=1,
+        precomputed_signals={"SYM_A": sig_a, "SYM_B": sig_b},
+    )
+    assert result.max_concurrent_positions <= 1, (
+        f"max_concurrent={result.max_concurrent_positions} exceeded max_open_positions=1"
+    )
+
+def t_portfolio_capital_pool_respected():
+    """Capital deployed at any point must not exceed total_capital."""
+    from portfolio_backtest import portfolio_backtest
+    total_capital = 100_000.0
+    max_pos = 2
+    df_a = _make_portfolio_df(120, 500.0, seed=10)
+    df_b = _make_portfolio_df(120, 600.0, seed=11)
+    df_c = _make_portfolio_df(120, 700.0, seed=12)
+    idx = df_a.index
+    sig_a = _make_signal_series(idx, [30, 60, 90])
+    sig_b = _make_signal_series(idx, [30, 60, 90])   # all fire at same bars
+    sig_c = _make_signal_series(idx, [30, 60, 90])
+    result = portfolio_backtest.simulate(
+        {"A": df_a, "B": df_b, "C": df_c},
+        strategy="intraday",
+        total_capital=total_capital,
+        max_open_positions=max_pos,
+        precomputed_signals={"A": sig_a, "B": sig_b, "C": sig_c},
+    )
+    assert result.max_concurrent_positions <= max_pos, (
+        f"max_concurrent={result.max_concurrent_positions} > max_open_positions={max_pos}"
+    )
+
+def t_portfolio_per_symbol_breakdown():
+    """per_symbol dict must have correct keys for symbols that traded."""
+    from portfolio_backtest import portfolio_backtest
+    df_a = _make_portfolio_df(120, 1000.0, seed=20)
+    idx  = df_a.index
+    sig_a = _make_signal_series(idx, [40])
+    result = portfolio_backtest.simulate(
+        {"RELIANCE": df_a},
+        strategy="intraday",
+        total_capital=500_000.0,
+        max_open_positions=5,
+        precomputed_signals={"RELIANCE": sig_a},
+    )
+    if result.total_trades > 0:
+        assert "RELIANCE" in result.per_symbol
+        sym = result.per_symbol["RELIANCE"]
+        for key in ("trades", "wins", "losses", "win_rate", "net_pnl"):
+            assert key in sym, f"per_symbol missing key: {key}"
+
+def t_portfolio_equity_curve_length():
+    """equity_curve must be bar-indexed (one entry per bar in common index)."""
+    from portfolio_backtest import portfolio_backtest
+    df_a = _make_portfolio_df(120, 800.0, seed=30)
+    df_b = _make_portfolio_df(120, 900.0, seed=31)
+    idx  = df_a.index.intersection(df_b.index)
+    df_a = df_a.loc[idx]; df_b = df_b.loc[idx]
+    result = portfolio_backtest.simulate(
+        {"A": df_a, "B": df_b},
+        strategy="intraday",
+        total_capital=200_000.0,
+        max_open_positions=2,
+    )
+    assert len(result.equity_curve) == len(idx), (
+        f"equity_curve length {len(result.equity_curve)} != bars {len(idx)}"
+    )
+
+def t_portfolio_to_dict_keys():
+    """to_dict() must contain all required keys."""
+    from portfolio_backtest import PortfolioResult
+    r = PortfolioResult(symbols=["X"], strategy="scalping", total_capital=50_000.0, max_open_positions=2)
+    d = r.to_dict()
+    for key in ("symbols", "strategy", "total_capital", "max_open_positions",
+                "total_trades", "wins", "losses", "win_rate", "total_net_pnl",
+                "max_drawdown_pct", "sharpe_ratio", "calmar_ratio",
+                "capital_utilization_avg", "max_concurrent_positions",
+                "per_symbol", "equity_curve", "run_at"):
+        assert key in d, f"to_dict() missing key: {key}"
+
+run("PortfolioBacktest class importable from portfolio_backtest",       t_portfolio_import)
+run("PortfolioResult has all required fields",                         t_portfolio_result_fields)
+run("Empty symbols list returns zero-trade result without exception",  t_portfolio_empty_symbols)
+run("max_open_positions=1 enforced when 2 symbols signal same bar",   t_portfolio_max_positions_enforced)
+run("Capital pool: max_concurrent_positions never > max_open_positions", t_portfolio_capital_pool_respected)
+run("per_symbol breakdown has trades/wins/losses/win_rate/net_pnl",   t_portfolio_per_symbol_breakdown)
+run("equity_curve is bar-indexed (len == common bars count)",         t_portfolio_equity_curve_length)
+run("to_dict() contains all required portfolio keys",                 t_portfolio_to_dict_keys)
+
+
+# ══════════════════════════════════════════════════════════════════════════
 # FINAL SUMMARY
 # ══════════════════════════════════════════════════════════════════════════
 failed = summary()

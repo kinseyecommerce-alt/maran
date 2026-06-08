@@ -32,6 +32,7 @@ import kite_accounts
 from risk_manager import risk_manager
 from order_guard import order_guard
 from backtest_engine import backtest_engine
+from portfolio_backtest import portfolio_backtest
 from tick_engine import tick_engine
 from signal_engine import signal_engine
 from agents.master_agent import master_agent
@@ -257,6 +258,13 @@ class BatchBacktestRequest(BaseModel):
 class CompareRequest(BaseModel):
     symbol: str; exchange: str = "NSE"
     lookback_days: int | None = None; walk_forward: bool = True
+
+class PortfolioBacktestRequest(BaseModel):
+    symbols: list[dict]
+    strategy: str = "intraday"
+    total_capital: float = Field(default=500_000.0, gt=0)
+    max_open_positions: int = Field(default=5, ge=1, le=50)
+    lookback_days: int | None = Field(None, ge=1, le=730)
 
 # HIGH-3: Literal types on all enum-like fields to prevent injection via order type
 class OrderRequest(BaseModel):
@@ -897,6 +905,29 @@ async def trigger_weekly_backtest():
     """Manually trigger the weekly auto-backtest across full universe."""
     asyncio.create_task(asyncio.to_thread(backtest_engine.weekly_auto_backtest))
     return {"status": "weekly backtest started", "note": "runs in background, check logs"}
+
+@app.post("/backtest/portfolio", tags=["Backtest"])
+def portfolio_bt(req: PortfolioBacktestRequest):
+    """
+    True portfolio backtest: shared capital pool, max_open_positions enforced across
+    all symbols simultaneously.  Returns unified equity curve + portfolio-level metrics.
+    Unlike /backtest/batch (each symbol gets full capital independently), this endpoint
+    simulates how the capital is actually deployed when running multiple agents together.
+    """
+    strategy = _clean_strategy(req.strategy)
+    symbols  = [
+        {"symbol": _clean_symbol(s.get("symbol", "")), "exchange": s.get("exchange", "NSE")}
+        for s in req.symbols
+        if s.get("symbol")
+    ]
+    result = portfolio_backtest.run(
+        symbols=symbols,
+        strategy=strategy,
+        total_capital=req.total_capital,
+        max_open_positions=req.max_open_positions,
+        lookback_days=req.lookback_days,
+    )
+    return result.to_dict()
 
 
 # ── Orders ────────────────────────────────────────────────────────────────────
