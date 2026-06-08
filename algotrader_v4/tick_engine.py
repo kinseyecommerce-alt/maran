@@ -192,6 +192,13 @@ class TickBuffer:
                 result.append(self._current)
             return result
 
+    def reset(self) -> None:
+        """Clear all candles — called at 09:15 IST session open so VWAP starts fresh."""
+        with self._lock:
+            self._candles.clear()
+            self._current    = None
+            self._current_ts = None
+
     def as_dataframe(self) -> pd.DataFrame:
         cs = self.candles()
         if not cs:
@@ -540,6 +547,9 @@ class TickEngine:
         # Black swan phase (updated from NIFTY 1-min candles; shared across all symbol snapshots)
         self._black_swan_phase: str = ""
 
+        # Daily session reset — VWAP is session-scoped; buffers are cleared at 09:15 IST
+        self._session_date: Optional[str] = None  # "YYYY-MM-DD" in IST
+
     # ── Setup ─────────────────────────────────────────────────────────
 
     def subscribe(self, watchlist: list[dict]) -> None:
@@ -640,6 +650,19 @@ class TickEngine:
             return
         self._last_tick_ltp[symbol] = tick.ltp
         self._last_tick_ts[symbol]  = now_mono
+
+        # VWAP is session-scoped: reset all buffers at the start of each IST trading day.
+        # This prevents yesterday's volume from contaminating today's VWAP computation.
+        tick_date = tick.timestamp.strftime("%Y-%m-%d")
+        if tick_date != self._session_date:
+            self._session_date = tick_date
+            for buf in self._bufs_1min.values():
+                buf.reset()
+            for buf in self._bufs_5min.values():
+                buf.reset()
+            self._last_tick_ltp.clear()
+            self._last_tick_ts.clear()
+            logger.info("TickEngine: daily buffer reset for IST session {}", tick_date)
 
         self._bufs_1min[symbol].push(tick.ltp, tick.volume, tick.timestamp)
         self._bufs_5min[symbol].push(tick.ltp, tick.volume, tick.timestamp)

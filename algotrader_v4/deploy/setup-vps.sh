@@ -245,13 +245,50 @@ cat > /etc/logrotate.d/algotrader <<LR
 }
 LR
 
-# ── 12. Start the service ─────────────────────────────────────────────────────
+# ── 12. Watchdog service + sudoers ───────────────────────────────────────────
+echo "▶ Installing watchdog service…"
+cat > /etc/systemd/system/algotrader-watchdog.service <<EOF
+[Unit]
+Description=AlgoTrader HA Watchdog
+After=algotrader.service
+Wants=algotrader.service
+
+[Service]
+Type=simple
+User=$APP_USER
+WorkingDirectory=$APP_DIR
+ExecStart=$VENV/bin/python $APP_DIR/deploy/watchdog.py
+Restart=always
+RestartSec=10
+StandardOutput=append:/var/log/algotrader/watchdog.log
+StandardError=append:/var/log/algotrader/watchdog.log
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+# Grant the app user permission to restart the service (needed by watchdog.py)
+SUDOERS_FILE="/etc/sudoers.d/algotrader-watchdog"
+cat > "$SUDOERS_FILE" <<EOF
+# Allow algotrader user to restart only the algotrader service (no password)
+$APP_USER ALL=(ALL) NOPASSWD: /usr/bin/systemctl restart algotrader
+$APP_USER ALL=(ALL) NOPASSWD: /usr/bin/systemctl start algotrader
+$APP_USER ALL=(ALL) NOPASSWD: /usr/bin/systemctl stop algotrader
+EOF
+chmod 440 "$SUDOERS_FILE"
+visudo -c -f "$SUDOERS_FILE" && echo "▶ Sudoers entry validated" || { echo "✗ Sudoers syntax error — removing"; rm -f "$SUDOERS_FILE"; }
+
+systemctl daemon-reload
+systemctl enable algotrader-watchdog
+
+# ── 13. Start the service ─────────────────────────────────────────────────────
 echo "▶ Starting algotrader service…"
 systemctl start algotrader
 sleep 4
 
 if systemctl is-active --quiet algotrader; then
     STATUS="RUNNING ✓"
+    systemctl start algotrader-watchdog 2>/dev/null || true
 else
     STATUS="FAILED ✗"
 fi
@@ -270,11 +307,16 @@ echo "    sudo systemctl status algotrader"
 echo "    sudo journalctl -fu algotrader"
 echo "    sudo nano $ENV_FILE   (then: sudo systemctl restart algotrader)"
 echo ""
+echo "  ⚠  SECURITY — DO THESE FIRST:"
+echo "  0. LOGIN and CHANGE the default password immediately!"
+echo "     Default: admin / admin@786  ← change via Dashboard → Settings"
+echo ""
 echo "  Next steps:"
 echo "  1. sudo nano $ENV_FILE — add KITE_API_KEY, KITE_API_SECRET, ANTHROPIC_API_KEY"
 echo "  2. Set TRADING_MODE=LIVE when ready"
 echo "  3. Register IP $VPS_PUBLIC_IP in Zerodha Console → API → Apps"
 echo "  4. sudo systemctl restart algotrader"
+echo "  5. sudo systemctl status algotrader-watchdog   (HA watchdog)"
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 
 [[ "$STATUS" == *FAILED* ]] && { echo ""; journalctl -u algotrader -n 30 --no-pager; exit 1; }

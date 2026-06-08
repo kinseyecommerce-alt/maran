@@ -2143,6 +2143,58 @@ async def on_startup():
         logger.warning("SECURITY: TRADING_MODE=LIVE but KITE_API_KEY is not set — order placement will fail.")
 
 
+@app.on_event("shutdown")
+async def on_shutdown():
+    """
+    Graceful shutdown: stop agents and tick engine cleanly so systemd SIGTERM
+    does not orphan in-flight orders.  We do NOT auto-squareoff here — positions
+    are restored on next startup from the broker.  The operator can trigger
+    squareoff explicitly via /orders/squareoff before stopping the service.
+    """
+    logger.warning("FastAPI shutdown: stopping all agents and tick engine…")
+
+    # 1. Stop all running agents gracefully
+    try:
+        from agents.strategy_agents import ALL_AGENTS
+        for name, agent in ALL_AGENTS.items():
+            try:
+                agent.stop()
+                logger.info("Shutdown: agent '{}' stopped", name)
+            except Exception as _ae:
+                logger.warning("Shutdown: error stopping agent '{}': {}", name, _ae)
+    except Exception as _e:
+        logger.warning("Shutdown: could not stop agents: {}", _e)
+
+    # 2. Stop tick engine (cancels poll loop, stops WebSocket)
+    try:
+        tick_engine.stop()
+    except Exception as _te:
+        logger.warning("Shutdown: error stopping tick engine: {}", _te)
+
+    # 3. Log any open positions so they appear in journald before process exits
+    try:
+        from trailing_sl_engine import trailing_sl_engine as _tsl
+        open_pos = list(_tsl._positions.keys())
+        if open_pos:
+            logger.critical(
+                "Shutdown: {} OPEN POSITION(S) remain at exit — will restore on next startup: {}",
+                len(open_pos), open_pos,
+            )
+        else:
+            logger.info("Shutdown: no open positions at exit")
+    except Exception as _pe:
+        logger.warning("Shutdown: could not read open positions: {}", _pe)
+
+    # 4. Stop platform scheduler
+    try:
+        from platform_scheduler import platform_scheduler
+        platform_scheduler.stop()
+    except Exception:
+        pass
+
+    logger.info("FastAPI shutdown complete")
+
+
 # ── Observability & Ops ────────────────────────────────────────────────────────
 
 @app.get("/metrics", include_in_schema=False)
