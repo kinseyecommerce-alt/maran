@@ -83,8 +83,19 @@ class KiteTicker:
 
     # ── KiteConnect callbacks (called from C thread) ──────────────────────────
 
+    # Kite WebSocket hard limit: 3000 tokens per connection.
+    # FULL mode is the heaviest — enforce the cap before subscribing.
+    _KITE_WS_TOKEN_LIMIT = 3000
+
     def _on_connect(self, ws, response) -> None:
         tokens = list(self._token_map.values())
+        if len(tokens) > self._KITE_WS_TOKEN_LIMIT:
+            logger.warning(
+                "[KiteTicker] {} tokens requested but Kite limit is {} — "
+                "truncating to first {} tokens",
+                len(tokens), self._KITE_WS_TOKEN_LIMIT, self._KITE_WS_TOKEN_LIMIT,
+            )
+            tokens = tokens[:self._KITE_WS_TOKEN_LIMIT]
         ws.subscribe(tokens)
         ws.set_mode(ws.MODE_FULL, tokens)
         self._connected = True
