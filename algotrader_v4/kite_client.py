@@ -560,18 +560,22 @@ class KiteClient:
 
     def _check_margin(self, symbol: str, quantity: int, price: float) -> None:
         """
-        Warn (not block) if estimated order value exceeds available live balance.
-        Only called in LIVE mode for BUY orders.
+        Block if estimated order value exceeds available live balance in LIVE mode.
+        A non-blocking warning previously allowed over-margin orders to reach the exchange,
+        which would be rejected by Kite causing the entry to fail mid-bracket (no SL placed).
+        Raising here lets the caller release the claim cleanly before touching the broker.
         """
         try:
             m         = self.margins()
             available = m.get("equity", {}).get("available", {}).get("live_balance", 0)
             order_val = quantity * max(price, 1)
             if order_val > available:
-                logger.warning(
-                    "[kite] Margin warning: order ₹{:,.0f} > available ₹{:,.0f} for {}",
-                    order_val, available, symbol,
+                raise InputException(
+                    f"Insufficient margin: order ₹{order_val:,.0f} > available ₹{available:,.0f} "
+                    f"for {symbol} qty={quantity}"
                 )
+        except InputException:
+            raise
         except Exception as exc:
             logger.warning("[kite] Margin check failed (non-blocking): {}", exc)
 

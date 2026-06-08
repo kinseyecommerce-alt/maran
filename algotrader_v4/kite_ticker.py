@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import asyncio
 from datetime import datetime
+from ist_clock import now_ist
 from typing import Callable, Optional
 
 from kiteconnect import KiteTicker as _KiteTicker
@@ -130,7 +131,7 @@ class KiteTicker:
                 high       = ohlc.get("high",  0.0),
                 low        = ohlc.get("low",   0.0),
                 open       = ohlc.get("open",  0.0),
-                timestamp  = datetime.now(),
+                timestamp  = now_ist(),
             )
 
             asyncio.run_coroutine_threadsafe(

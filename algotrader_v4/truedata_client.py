@@ -22,6 +22,7 @@ import pandas as pd
 from loguru import logger
 
 from config import settings
+from ist_clock import now_ist
 
 
 # ── Lazy shared TD connection ──────────────────────────────────────────────────
@@ -187,7 +188,7 @@ class TrueDataTicker:
             t = Tick(
                 symbol=sym, ltp=ltp, bid=bid, ask=ask,
                 volume=vol, change=chg, change_pct=chg_pct,
-                high=hi, low=lo, open=op, timestamp=datetime.now(),
+                high=hi, low=lo, open=op, timestamp=now_ist(),
             )
             asyncio.run_coroutine_threadsafe(self._callback(sym, t), self._loop)
         except Exception as exc:

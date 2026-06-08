@@ -103,9 +103,10 @@ async def _api_key_gate(request: Request, call_next):
         or request.url.path in ("/auth/login", "/login")
         or any(request.url.path.startswith(p) for p in _EXEMPT_PREFIXES)
     )
-    # Always enforce auth on mutating/sensitive routes when a key is configured.
-    # Without this check, empty api_key would skip auth entirely (falsy bypass).
-    if needs_auth and not is_exempt and (settings.api_key or settings.jwt_secret_key):
+    # Always enforce auth on mutating/sensitive routes.
+    # SECURITY: fail-closed — if no auth credentials are configured, block ALL
+    # mutating requests (do not allow "open by default" even in PAPER mode).
+    if needs_auth and not is_exempt:
         # Accept X-API-Key (programmatic) OR JWT Bearer (browser/UI)
         api_key = request.headers.get("X-API-Key", "")
         auth_hdr = request.headers.get("Authorization", "")
@@ -1341,11 +1342,12 @@ def patch_pattern_toggle(req: PatternToggleRequest):
 @app.websocket("/ws")
 async def ws_endpoint(ws: WebSocket):
     auth_hdr = ws.headers.get("authorization", "")
-    token = (
-        auth_hdr.removeprefix("Bearer ").strip()
-        if auth_hdr.lower().startswith("bearer ")
-        else ws.query_params.get("token", "")
-    )
+    # Prefer Authorization: Bearer header over cookie; never accept query-param tokens
+    # (query params are logged by every proxy, nginx, and browser history).
+    if auth_hdr.lower().startswith("bearer "):
+        token = auth_hdr.removeprefix("Bearer ").strip()
+    else:
+        token = ws.cookies.get("access_token", "")
     # Must accept before sending Close frames (WebSocket protocol requires it).
     await ws.accept()
     if settings.api_key or settings.jwt_secret_key:
@@ -2044,6 +2046,24 @@ async def on_startup():
         risk_manager.daily_realised_pnl = today_pnl
         logger.info("Restored today's P&L from DB: ₹{:.0f}", today_pnl)
 
+    # SAFETY: restore open_position_count from the live broker on startup.
+    # Without this, a crash/restart resets the count to 0 and the risk manager
+    # will allow new entries even when max_open_positions are already open in Kite.
+    try:
+        _pos_data = kite_client.positions()
+        _open_count = sum(
+            1 for p in _pos_data.get("net", []) if p.get("quantity", 0) != 0
+        )
+        if _open_count > 0:
+            risk_manager.open_position_count = _open_count
+            logger.warning(
+                "Startup: restored open_position_count={} from broker "
+                "(crash recovery — {} live positions found)",
+                _open_count, _open_count,
+            )
+    except Exception as _pos_exc:
+        logger.warning("Startup: could not restore open_position_count from broker — {}", _pos_exc)
+
     # Load SEBI IP whitelist from env at startup so restarts don't reset it
     if settings.sebi_whitelisted_ips:
         for ip in settings.sebi_whitelisted_ips.split(","):
@@ -2063,6 +2083,24 @@ async def on_startup():
             logger.error("SEBI kill-switch squareoff error: {}", exc)
 
     sebi_compliance.on_kill_switch = _kill_switch_squareoff
+
+    # SAFETY: periodically release PENDING claims that never advanced to CONFIRMED.
+    # This prevents a mid-placement crash (agent died between try_claim and confirm_claim)
+    # from permanently locking a symbol until daily reset.
+    async def _release_stale_claims_loop() -> None:
+        while True:
+            await asyncio.sleep(60)
+            try:
+                released = order_guard.release_stale_claims(max_age_sec=90)
+                if released:
+                    logger.warning(
+                        "OrderGuard stale-claim sweep: released {} orphaned claim(s): {}",
+                        len(released), released,
+                    )
+            except Exception as _sc_exc:
+                logger.error("Stale-claim sweep error: {}", _sc_exc)
+
+    asyncio.create_task(_release_stale_claims_loop())
 
     tick_engine.start_loop()
     atomic_bracket_engine.ws_broadcast = broadcast

@@ -554,7 +554,13 @@ class TrailingSLEngine:
     def tighten_all(self, trail_pct: float = 0.5) -> int:
         """Emergency TSL tightening — called on BLACK_SWAN detection.
         Moves current_sl to trail_pct% behind best_price for all active positions.
-        Only moves SL in the favorable direction (never widens it). Returns count tightened."""
+        Only moves SL in the favorable direction (never widens it). Returns count tightened.
+
+        SAFETY: after updating current_sl in memory, fires the on_sl_moved callback so that
+        the live Kite SL-M orders are actually modified. Without this, the in-memory tighten
+        has no effect on the real broker stop — the position remains exposed at the old SL price.
+        """
+        tightened_positions: list[tuple["PositionSL", float]] = []   # (pos, old_sl)
         count = 0
         with self._lock:
             for pos in self._positions.values():
@@ -565,15 +571,40 @@ class TrailingSLEngine:
                 if pos.side == "BUY":
                     tighter = round(pos.best_price * (1 - trail_pct / 100), 2)
                     if tighter > pos.current_sl:
+                        old_sl = pos.current_sl
                         pos.current_sl = tighter
                         count += 1
+                        tightened_positions.append((pos, old_sl))
                 else:
                     tighter = round(pos.best_price * (1 + trail_pct / 100), 2)
                     if tighter < pos.current_sl:
+                        old_sl = pos.current_sl
                         pos.current_sl = tighter
                         count += 1
+                        tightened_positions.append((pos, old_sl))
         logger.warning("[TSL] BLACK SWAN: tightened {}/{} positions to {:.1f}% trail",
                        count, len(self._positions), trail_pct)
+
+        # Fire on_sl_moved callback for each tightened position so downstream code
+        # (base_agent._on_sl_moved / atomic_bracket._on_tsl_sl_moved) actually modifies
+        # the SL-M order on the broker side.
+        if tightened_positions:
+            import asyncio as _asyncio
+            cb = self.on_sl_moved
+            if cb is not None:
+                try:
+                    loop = _asyncio.get_running_loop()
+                    for pos, old_sl in tightened_positions:
+                        _cb = pos._on_sl_moved or cb
+                        loop.create_task(_cb(pos, old_sl, "BLACK_SWAN_TIGHTEN"))
+                except RuntimeError:
+                    # No running event loop (called from non-async context).
+                    # Best-effort: log and let the next on_tick cycle pick up the new SL.
+                    logger.warning(
+                        "[TSL] tighten_all: no running event loop — "
+                        "SL-M broker orders NOT updated immediately. "
+                        "New SL will propagate on next tick."
+                    )
         return count
 
     def all_positions(self) -> list[dict]:

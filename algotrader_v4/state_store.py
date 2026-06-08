@@ -18,8 +18,11 @@ import queue as _queue
 from pathlib import Path
 from datetime import date, datetime, timedelta, timezone
 from typing import Optional
+from ist_clock import now_ist
 
-DB_PATH = Path("logs/algotrader.db")
+# Use env-configurable path so Railway/Docker can mount a persistent volume
+import os as _os
+DB_PATH = Path(_os.environ.get("DATABASE_PATH", "logs/algotrader.db"))
 
 # ── Async write queue ────────────────────────────────────────────────────────
 # All mutating DB calls (record_trade, upsert_position, close_position) put
@@ -200,7 +203,7 @@ def record_trade(
     Insert a completed trade record and update the daily P&L summary.
     Called after every position close (SL hit, target hit, manual exit).
     """
-    today = date.today().isoformat()
+    today = now_ist().date().isoformat()   # IST date, not UTC server date
     with _conn() as c:
         c.execute(
             """
@@ -237,7 +240,7 @@ def get_open_positions() -> list[dict]:
 
 def get_daily_pnl(trade_date: Optional[str] = None) -> float:
     """Return total realised P&L for the given date (defaults to today)."""
-    today = trade_date or date.today().isoformat()
+    today = trade_date or now_ist().date().isoformat()
     with _conn() as c:
         row = c.execute(
             "SELECT realised_pnl FROM daily_pnl WHERE trade_date=?",

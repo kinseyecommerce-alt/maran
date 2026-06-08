@@ -845,11 +845,33 @@ class BaseAgent(ABC):
                             quantity=qty, order_type="MARKET", product=product,
                             tag=_otag(f"Agent-{self.name}"),
                         ))
-                sl_order_id = await loop.run_in_executor(None, lambda: kite_client.place_order(
-                    tradingsymbol=trade_sym, exchange=exch, transaction_type=sl_side,
-                    quantity=qty, order_type="SL-M", product=product,
-                    trigger_price=sl, tag=_otag(f"Agent-{self.name}", "SL"),
-                ))
+                # Confirm claim now that entry is filled/confirmed — prevents the slot from
+                # staying PENDING indefinitely if SL-M placement below raises an exception.
+                order_guard.confirm_claim(sym, self.name, action, str(order_id))
+                _claim_confirmed = True
+                _sl_order_id_attempt = None
+                try:
+                    _sl_order_id_attempt = await loop.run_in_executor(None, lambda: kite_client.place_order(
+                        tradingsymbol=trade_sym, exchange=exch, transaction_type=sl_side,
+                        quantity=qty, order_type="SL-M", product=product,
+                        trigger_price=sl, tag=_otag(f"Agent-{self.name}", "SL"),
+                    ))
+                    sl_order_id = _sl_order_id_attempt
+                except Exception as _sl_exc:
+                    # SL-M failed after the LIMIT entry is filled — cancel the entry immediately.
+                    # An unprotected open position is worse than a missed trade.
+                    logger.critical(
+                        "[{}] SL-M failed after LIMIT entry {} — cancelling entry to prevent "
+                        "unprotected position. Error: {}",
+                        self.name, order_id, _sl_exc,
+                    )
+                    try:
+                        await loop.run_in_executor(None, lambda: kite_client.cancel_order(str(order_id)))
+                    except Exception as _ce:
+                        logger.error("[{}] Failed to cancel unprotected LIMIT entry {}: {}",
+                                     self.name, order_id, _ce)
+                    order_guard.release_claim(sym, self.name, action)
+                    raise RuntimeError("sl_placement_failed")
                 # H2: confirm actual fill; resize SL on partial; abort on zero fill.
                 try:
                     qty = await self._reconcile_fill_and_resize_sl(order_id, sl_order_id, qty, loop)
@@ -1033,7 +1055,13 @@ class BaseAgent(ABC):
 
     async def _check_exits_on_tick(self, snap: MarketSnapshot) -> None:
         # Symbols managed by atomic bracket are handled by TSL engine callbacks
-        # Only handle exits for positions NOT in atomic bracket
+        # Only handle exits for positions NOT in atomic bracket.
+        # SAFETY: skip when kill switch is KILLED — squareoff_all_positions() is already
+        # being called by the kill-switch callback. Placing duplicate exit orders here
+        # would race against that squareoff and create naked reverse positions.
+        from sebi_compliance import KillSwitchState as _KSS
+        if sebi_compliance._state == _KSS.KILLED:
+            return
         import time as _time
         sym = snap.symbol
         ind = snap.indicators

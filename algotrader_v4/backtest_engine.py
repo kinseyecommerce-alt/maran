@@ -613,7 +613,9 @@ class BacktestEngine:
                     in_trade = False
 
             elif signals.iloc[i] == 1:
-                entry_price = df["close"].iloc[i]
+                # Fill at open[i] — earliest executable price after signal confirmed on prior bar close.
+                # Using close[i] would be look-ahead bias (bar not yet closed when signal fires).
+                entry_price = df["open"].iloc[i] if "open" in df.columns else df["close"].iloc[i]
                 # Apply entry slippage (buy at slightly higher price)
                 entry_fill  = entry_price * (1 + slip) if apply_costs else entry_price
                 entry_idx   = i
