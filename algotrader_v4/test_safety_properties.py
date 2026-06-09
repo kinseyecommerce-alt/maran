@@ -302,9 +302,13 @@ async def p6_failed_order_no_fake_position():
             # _try_enter is called directly — candle-count guard is in _run_loop
             snap = MarketSnapshot(symbol="RELIANCE", tick=tick, indicators=ind)
 
-            # Reset claim state for RELIANCE
+            # Reset claim state for RELIANCE (zero cooldown so cleanup doesn't
+            # impose a symbol cooldown that bleeds into later tests).
+            _orig_cd = settings.post_exit_cooldown_sec
+            settings.post_exit_cooldown_sec = 0
             order_guard.release_order("RELIANCE", "intraday", "BUY", 0.0)
             order_guard.release_order("RELIANCE", "intraday", "SELL", 0.0)
+            settings.post_exit_cooldown_sec = _orig_cd
 
             await agent._try_enter(snap, "BUY", {
                 "score": 10, "pattern": "TEST", "stop_loss": 1490.0, "target": 1530.0,
@@ -587,8 +591,13 @@ async def p10_entry_fail_cancels_orphan_sl():
     snap = MarketSnapshot(symbol="RELIANCE", tick=tick, indicators=ind)
 
     original_mode = settings.trading_mode
+    original_cooldown = settings.post_exit_cooldown_sec
+    # Zero cooldown so the pre-test cleanup release_order calls don't impose a
+    # symbol cooldown that would block try_claim() inside the test body.
+    settings.post_exit_cooldown_sec = 0
     order_guard.release_order("RELIANCE", "intraday", "BUY", 0.0)
     order_guard.release_order("RELIANCE", "intraday", "SELL", 0.0)
+    settings.post_exit_cooldown_sec = original_cooldown
     try:
         settings.trading_mode = "PAPER"   # gates simple; placement is mocked regardless
         with mock.patch.object(kite_client, "place_order", side_effect=_place_side), \
@@ -607,8 +616,10 @@ async def p10_entry_fail_cancels_orphan_sl():
             assert raised, "expected entry_failed RuntimeError"
     finally:
         settings.trading_mode = original_mode
+        settings.post_exit_cooldown_sec = 0
         order_guard.release_order("RELIANCE", "intraday", "BUY", 0.0)
         order_guard.release_order("RELIANCE", "intraday", "SELL", 0.0)
+        settings.post_exit_cooldown_sec = original_cooldown
 
     assert "SL-ORPHAN-123" in cancel_calls, \
         "orphan SL-M was NOT cancelled after entry failure → naked-position risk"
@@ -661,17 +672,25 @@ async def p11_partial_fill_resizes_sl():
 
     original_mode  = settings.trading_mode
     original_limit = getattr(settings, "use_limit_orders", False)
+    original_cooldown = settings.post_exit_cooldown_sec
+    # Zero cooldown so the pre-test cleanup releases don't impose a symbol cooldown.
+    settings.post_exit_cooldown_sec = 0
     order_guard.release_order("RELIANCE", "intraday", "BUY", 0.0)
     order_guard.release_order("RELIANCE", "intraday", "SELL", 0.0)
+    settings.post_exit_cooldown_sec = original_cooldown
     try:
         settings.trading_mode = "LIVE"
         # Force MARKET path so this test is environment-independent.
         # The LIMIT-path cancel/fill race is covered by the use_limit_orders path;
         # this property tests the MARKET parallel-gather path specifically.
         settings.use_limit_orders = False
+        import agents.base_agent as _ba_mod
         # Isolate the SL-resize logic: the risk gate (P-5) and SEBI gate (P-3) are
         # covered elsewhere and would reject here purely on wall-clock market hours.
-        with mock.patch.object(kite_client, "place_order", side_effect=_place), \
+        # session_bucket is mocked to return a valid intraday session so the
+        # market-hours guard in _place_orders does not fire outside trading hours.
+        with mock.patch.object(_ba_mod, "session_bucket", return_value=("POWER_HOUR", 80)), \
+             mock.patch.object(kite_client, "place_order", side_effect=_place), \
              mock.patch.object(kite_client, "order_history", side_effect=_order_history), \
              mock.patch.object(kite_client, "modify_order", side_effect=_modify), \
              mock.patch.object(kite_client, "cancel_order", side_effect=lambda o: o), \
@@ -687,8 +706,10 @@ async def p11_partial_fill_resizes_sl():
     finally:
         settings.trading_mode = original_mode
         settings.use_limit_orders = original_limit
+        settings.post_exit_cooldown_sec = 0
         order_guard.release_order("RELIANCE", "intraday", "BUY", 0.0)
         order_guard.release_order("RELIANCE", "intraday", "SELL", 0.0)
+        settings.post_exit_cooldown_sec = original_cooldown
 
     assert final_qty == 5, f"qty should be resized to filled 5, got {final_qty}"
     assert ("SL-1", 5) in modify_calls, \
