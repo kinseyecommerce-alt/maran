@@ -17,6 +17,11 @@ from loguru import logger
 from config import settings
 from kite_client import kite_client
 
+# Imported at module level to avoid a sys.modules lookup on every tick callback.
+# tick_engine is already fully loaded before KiteTicker.start() is ever called,
+# so there is no circular-import risk here.
+from tick_engine import Tick as _Tick
+
 
 class KiteTicker:
     """
@@ -112,8 +117,6 @@ class KiteTicker:
         if not self._callback or not self._loop:
             return
 
-        from tick_engine import Tick  # local import avoids circular at module level
-
         for t in ticks:
             token = t.get("instrument_token")
             if token is None:
@@ -131,7 +134,7 @@ class KiteTicker:
             prev_close = ohlc.get("close", 0.0)
             pct_change = (abs_change / prev_close * 100.0) if prev_close else 0.0
 
-            tick = Tick(
+            tick = _Tick(
                 symbol     = sym,
                 ltp        = t.get("last_price", 0.0),
                 bid        = buys[0].get("price",  0.0) if buys  else 0.0,

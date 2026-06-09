@@ -24,6 +24,10 @@ from loguru import logger
 from config import settings
 from ist_clock import now_ist
 
+# Imported at module level — tick_engine is fully loaded before TrueDataTicker.start()
+# is ever called, so there is no circular-import risk.
+from tick_engine import Tick as _Tick
+
 
 # ── Lazy shared TD connection ──────────────────────────────────────────────────
 
@@ -166,7 +170,6 @@ class TrueDataTicker:
     def _on_tick(self, tick) -> None:
         if not self._callback or not self._loop:
             return
-        from tick_engine import Tick  # local import avoids circular at module level
         try:
             sym = _strip_exchange(
                 str(getattr(tick, "tickerid", "") or getattr(tick, "Symbol", ""))
@@ -185,7 +188,7 @@ class TrueDataTicker:
             chg     = round(ltp - pc, 2)   if pc else 0.0
             chg_pct = round(chg / pc * 100, 2) if pc else 0.0
 
-            t = Tick(
+            t = _Tick(
                 symbol=sym, ltp=ltp, bid=bid, ask=ask,
                 volume=vol, change=chg, change_pct=chg_pct,
                 high=hi, low=lo, open=op, timestamp=now_ist(),
