@@ -493,44 +493,63 @@ class BaseAgent(ABC):
                     if settings.use_claude_trade_gate:
                         from claude_trade_gate import assess as gate_assess
                         from master_agent_v5 import record_gate_decision
-                        _gate_timeout = getattr(settings, "gate_api_timeout", 8.0)
-                        try:
-                            gate = await asyncio.wait_for(
-                                gate_assess(snap, action, signal, self.name),
-                                timeout=_gate_timeout,
+                        _gate_timeout = getattr(settings, "gate_api_timeout", 12.0)
+                        _bypass_score = getattr(settings, "gate_bypass_min_score", 9)
+                        _sig_score    = signal.get("score", 0)
+
+                        # High-conviction bypass: skip the 8-20s Opus API call for the
+                        # strongest signals (score ≥ gate_bypass_min_score).
+                        if _sig_score >= _bypass_score:
+                            logger.debug(
+                                "[{}] {} gate bypass score={} ≥ {} — auto-approve",
+                                self.name, snap.symbol, _sig_score, _bypass_score,
                             )
-                            record_gate_decision(gate.enter)
-                        except asyncio.TimeoutError:
-                            logger.warning(
-                                "[{}] {} Claude gate timed out after {:.0f}s — skipping trade",
-                                self.name, snap.symbol, _gate_timeout,
-                            )
-                            continue
-                        if not gate.enter:
+                            record_gate_decision(True)
                             _activity(
-                                agent=self.name, event="GATE_VETO",
+                                agent=self.name, event="GATE_BYPASS",
+                                symbol=snap.symbol, side=action,
+                                price=snap.tick.ltp,
+                                pattern=signal.get("pattern", ""),
+                                gate_conf=100,
+                            )
+                        else:
+                            try:
+                                gate = await asyncio.wait_for(
+                                    gate_assess(snap, action, signal, self.name),
+                                    timeout=_gate_timeout,
+                                )
+                                record_gate_decision(gate.enter)
+                            except asyncio.TimeoutError:
+                                logger.warning(
+                                    "[{}] {} Claude gate timed out after {:.0f}s — skipping trade",
+                                    self.name, snap.symbol, _gate_timeout,
+                                )
+                                continue
+                            if not gate.enter:
+                                _activity(
+                                    agent=self.name, event="GATE_VETO",
+                                    symbol=snap.symbol, side=action,
+                                    price=snap.tick.ltp,
+                                    pattern=signal.get("pattern", ""),
+                                    gate_conf=gate.confidence,
+                                    gate_reason=gate.reason,
+                                )
+                                continue
+                            _activity(
+                                agent=self.name, event="GATE_APPROVE",
                                 symbol=snap.symbol, side=action,
                                 price=snap.tick.ltp,
                                 pattern=signal.get("pattern", ""),
                                 gate_conf=gate.confidence,
                                 gate_reason=gate.reason,
                             )
-                            continue
-                        _activity(
-                            agent=self.name, event="GATE_APPROVE",
-                            symbol=snap.symbol, side=action,
-                            price=snap.tick.ltp,
-                            pattern=signal.get("pattern", ""),
-                            gate_conf=gate.confidence,
-                            gate_reason=gate.reason,
-                        )
-                        # Apply Claude's SL/target/size adjustments
-                        if gate.adjusted_sl_pct:
-                            signal["stop_loss_pct"]  = gate.adjusted_sl_pct
-                        if gate.adjusted_target_pct:
-                            signal["target_pct"]     = gate.adjusted_target_pct
-                        signal["_gate_size_factor"]  = gate.size_factor
-                        signal["_gate_confidence"]   = gate.confidence
+                            # Apply Claude's SL/target/size adjustments
+                            if gate.adjusted_sl_pct:
+                                signal["stop_loss_pct"]  = gate.adjusted_sl_pct
+                            if gate.adjusted_target_pct:
+                                signal["target_pct"]     = gate.adjusted_target_pct
+                            signal["_gate_size_factor"]  = gate.size_factor
+                            signal["_gate_confidence"]   = gate.confidence
 
                     # ── Compound size factors: event elevation + correlation ──
                     _sf = signal.get("_gate_size_factor", 1.0)

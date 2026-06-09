@@ -136,8 +136,9 @@ class Settings(BaseSettings):
     master_review_model: str = "claude-opus-4-8"   # regime review model
     signal_engine_model: str = "claude-opus-4-8"   # signal generation model
     use_extended_thinking: bool = True             # Opus extended thinking on gate
-    gate_thinking_budget: int = 5000               # thinking tokens per trade assessment
-    gate_api_timeout: float = 20.0                 # seconds — allow time for extended thinking
+    gate_thinking_budget: int = 2000               # thinking tokens per trade assessment (reduced from 5000 for speed)
+    gate_api_timeout: float = 12.0                 # seconds — reduced from 20.0; 2000-token thinking fits within 12s
+    gate_bypass_min_score: int = 9                 # signals scoring ≥ this skip Claude gate (auto-approve)
     use_multi_timeframe: bool = True      # require 5m/15m alignment with entry direction
     mtf_min_alignment: int = 2            # how many of 3 TFs must agree (1, 2, or 3)
     use_kelly_sizing: bool = True         # apply Claude gate's size_factor to qty
