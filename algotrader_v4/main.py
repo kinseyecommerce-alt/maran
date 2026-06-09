@@ -2036,6 +2036,154 @@ def _install_log_redaction() -> None:
 _install_log_redaction()
 
 
+async def _reconcile_open_positions() -> None:
+    """
+    Rehydrate open positions from state_store into order_guard and
+    trailing_sl_engine after a crash or planned restart.
+
+    Without this, every restart:
+      - order_guard has no record of open positions → duplicate entries possible
+      - trailing_sl_engine has no TSL registered → zero SL protection until next entry
+      - risk_manager.open_position_count is wrong in PAPER mode
+
+    For LIVE mode we also cross-check the broker to detect positions that were
+    closed externally (manual close / SL-M fill) and log naked positions (entry
+    with no active SL-M order — requires manual intervention).
+    """
+    from state_store import get_open_positions, close_position
+    from order_guard import order_guard
+    from trailing_sl_engine import trailing_sl_engine
+
+    try:
+        db_positions = get_open_positions()
+    except Exception as exc:
+        logger.error("[Reconcile] Could not read open positions from DB: {}", exc)
+        return
+
+    if not db_positions:
+        logger.info("[Reconcile] No open positions in state_store — nothing to rehydrate")
+        # LIVE: still restore open_position_count from broker (legacy path)
+        if settings.trading_mode == "LIVE":
+            try:
+                _pos_data = kite_client.positions()
+                _open_count = sum(
+                    1 for p in _pos_data.get("net", []) if p.get("quantity", 0) != 0
+                )
+                if _open_count > 0:
+                    risk_manager.open_position_count = _open_count
+                    logger.warning(
+                        "[Reconcile] Broker reports {} open position(s) but DB is empty "
+                        "— manual trades or stale DB; count restored, no TSL wired",
+                        _open_count,
+                    )
+            except Exception as exc:
+                logger.warning("[Reconcile] Could not read broker positions: {}", exc)
+        return
+
+    logger.warning(
+        "[Reconcile] Rehydrating {} open position(s) from DB (crash/restart recovery)",
+        len(db_positions),
+    )
+
+    # LIVE: fetch broker state once so we can cross-check
+    kite_positions_by_symbol: dict[str, dict] = {}
+    kite_sl_order_tags: set[str] = set()
+    if settings.trading_mode == "LIVE":
+        try:
+            _pos_data = kite_client.positions()
+            for p in _pos_data.get("net", []):
+                if p.get("quantity", 0) != 0:
+                    kite_positions_by_symbol[p["tradingsymbol"]] = p
+            _orders = kite_client.orders() or []
+            for o in _orders:
+                if o.get("status") in ("TRIGGER PENDING", "OPEN") and o.get("order_type") == "SL-M":
+                    kite_sl_order_tags.add(o.get("tag", ""))
+        except Exception as exc:
+            logger.warning("[Reconcile] Could not read broker state: {}", exc)
+
+    rehydrated = 0
+    for pos in db_positions:
+        order_id  = pos["order_id"]
+        symbol    = pos["symbol"]
+        strategy  = pos["strategy"]
+        side      = pos["side"]
+        entry_px  = float(pos["entry_price"])
+        qty       = int(pos["quantity"])
+        sl_price  = pos.get("sl_price") or 0.0
+
+        # LIVE: if broker no longer holds this position, close it in DB
+        if settings.trading_mode == "LIVE" and symbol not in kite_positions_by_symbol:
+            logger.warning(
+                "[Reconcile] {} {} not found in broker — likely closed externally; "
+                "marking closed in DB (P&L unknown, set to 0)",
+                strategy, symbol,
+            )
+            try:
+                close_position(order_id, exit_price=entry_px, pnl=0.0, exit_reason="reconcile_not_found")
+            except Exception:
+                pass
+            continue
+
+        # Register in order_guard → prevents a new entry on this symbol/strategy
+        try:
+            order_guard.register_order(symbol, strategy, side, order_id)
+        except Exception as exc:
+            logger.error("[Reconcile] order_guard.register_order failed for {}: {}", order_id, exc)
+
+        # Register in trailing_sl_engine → SL callbacks fire on next tick
+        # Use the stored sl_price so we resume at the position's actual stop, not a
+        # freshly-computed one which could be tighter/looser than what was set.
+        try:
+            trailing_sl_engine.register(
+                symbol=symbol, strategy=strategy, side=side,
+                entry_price=entry_px, quantity=qty, order_id=order_id,
+                initial_sl=float(sl_price) if sl_price else None,
+            )
+        except Exception as exc:
+            logger.error("[Reconcile] TSL register failed for {}: {}", order_id, exc)
+
+        # In PAPER mode the broker returns empty positions; track the count manually
+        if settings.trading_mode == "PAPER":
+            risk_manager.position_opened()
+        else:
+            # LIVE: update count from actual broker qty (already fetched above)
+            risk_manager.position_opened()
+
+        # LIVE: check if a protective SL-M order exists; warn if naked
+        if settings.trading_mode == "LIVE":
+            expected_tag = f"Agent-{strategy}-SL"[:20]
+            if expected_tag not in kite_sl_order_tags:
+                logger.critical(
+                    "[Reconcile] NAKED POSITION: {} {} {} has no active SL-M order "
+                    "(tag '{}' not found in open orders). "
+                    "MANUAL INTERVENTION REQUIRED — place a protective stop immediately.",
+                    strategy, side, symbol, expected_tag,
+                )
+
+        rehydrated += 1
+        logger.info(
+            "[Reconcile] Rehydrated: {} {} {} entry=₹{:.2f} sl=₹{:.2f} order={}",
+            strategy, side, symbol, entry_px, sl_price, order_id,
+        )
+
+    logger.warning(
+        "[Reconcile] Complete: {}/{} position(s) rehydrated into order_guard + TSL engine",
+        rehydrated, len(db_positions),
+    )
+
+    # Correct LIVE open_position_count against broker (catches positions opened by manual
+    # trades that exist in Kite but not in our DB — we can't TSL those, but we must count them)
+    if settings.trading_mode == "LIVE" and kite_positions_by_symbol:
+        broker_count = len(kite_positions_by_symbol)
+        if broker_count > risk_manager.open_position_count:
+            risk_manager.open_position_count = broker_count
+            logger.warning(
+                "[Reconcile] Broker has {} position(s), DB had {} — "
+                "open_position_count corrected to {}",
+                broker_count, rehydrated, broker_count,
+            )
+
+
 @app.on_event("startup")
 async def on_startup():
     # Initialise SQLite state store
@@ -2046,23 +2194,14 @@ async def on_startup():
         risk_manager.daily_realised_pnl = today_pnl
         logger.info("Restored today's P&L from DB: ₹{:.0f}", today_pnl)
 
-    # SAFETY: restore open_position_count from the live broker on startup.
-    # Without this, a crash/restart resets the count to 0 and the risk manager
-    # will allow new entries even when max_open_positions are already open in Kite.
-    try:
-        _pos_data = kite_client.positions()
-        _open_count = sum(
-            1 for p in _pos_data.get("net", []) if p.get("quantity", 0) != 0
-        )
-        if _open_count > 0:
-            risk_manager.open_position_count = _open_count
-            logger.warning(
-                "Startup: restored open_position_count={} from broker "
-                "(crash recovery — {} live positions found)",
-                _open_count, _open_count,
-            )
-    except Exception as _pos_exc:
-        logger.warning("Startup: could not restore open_position_count from broker — {}", _pos_exc)
+    # ── Position reconciliation on restart ────────────────────────────────────
+    # Rehydrate open positions from state_store into order_guard and
+    # trailing_sl_engine so that:
+    #   • order_guard sees them → no duplicate entry placed on the same symbol
+    #   • trailing_sl_engine tracks them → SL callbacks fire on next tick
+    #   • risk_manager.open_position_count is accurate (PAPER mode)
+    # For LIVE mode, cross-check against the broker to detect naked positions.
+    await _reconcile_open_positions()
 
     # Load SEBI IP whitelist from env at startup so restarts don't reset it
     if settings.sebi_whitelisted_ips:

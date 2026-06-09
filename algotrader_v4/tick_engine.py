@@ -831,9 +831,9 @@ class TickEngine:
                 if not ws_connected:
                     if self._ws_down_since is None:
                         self._ws_down_since = time.monotonic()
-                    elif time.monotonic() - self._ws_down_since > 10.0:
+                    elif time.monotonic() - self._ws_down_since > 3.0:
                         logger.warning(
-                            "TickEngine: WebSocket disconnected for >10s — "
+                            "TickEngine: WebSocket disconnected for >3s — "
                             "falling back to REST polling for {} symbols",
                             len(self._ws_received),
                         )

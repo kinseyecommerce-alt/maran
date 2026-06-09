@@ -268,6 +268,7 @@ class TrailingSLEngine:
         quantity:    int,
         order_id:    str,
         atr:         float = 0.0,
+        initial_sl:  Optional[float] = None,
         on_sl_hit:      Optional[Callable] = None,
         on_target_hit:  Optional[Callable] = None,
         on_sl_moved:    Optional[Callable] = None,
@@ -277,13 +278,19 @@ class TrailingSLEngine:
         Register a new open position for trailing SL monitoring.
         Called immediately after order is confirmed.
 
+        initial_sl: if provided, use this price directly instead of computing from
+        the strategy config's initial_sl_pct.  Pass the stored sl_price on restart
+        so recovery registrations use the real SL rather than a freshly-calculated one.
+
         Per-position callbacks (on_sl_hit, on_target_hit, on_sl_moved) take
         priority over the module-level fallback callbacks on the engine.
         """
         cfg = TRAIL_CONFIGS.get(strategy, TRAIL_CONFIGS["intraday"])
 
-        # Initial SL
-        if side == "BUY":
+        # Initial SL — use provided value (e.g. from state_store on restart) or compute fresh
+        if initial_sl is not None:
+            init_sl = initial_sl
+        elif side == "BUY":
             init_sl = round(entry_price * (1 - cfg.initial_sl_pct / 100), 2)
         else:
             init_sl = round(entry_price * (1 + cfg.initial_sl_pct / 100), 2)
