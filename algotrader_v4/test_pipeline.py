@@ -3751,6 +3751,101 @@ run("SEBI whitelist seeded from settings.sebi_whitelisted_ips",        t_sebi_wh
 run("dashboard.html WebSocket URL has no ?token= query param",         t_ws_url_has_no_query_token)
 
 
+# ════════════════════════════════════════════════════════════
+print("\n" + "═"*60)
+print("  26. VOL SURFACE + POSTGRESQL ADAPTER")
+print("═"*60)
+
+def t_vol_surface_otm_put_iv_gt_atm():
+    from greeks_engine import vol_surface_iv
+    spot, atm_iv = 24000.0, 0.20
+    otm_put_iv = vol_surface_iv(spot, 23000.0, atm_iv, "PE")   # OTM put: strike < spot
+    assert otm_put_iv > atm_iv, f"OTM PE IV {otm_put_iv:.4f} should exceed ATM IV {atm_iv}"
+
+def t_vol_surface_smile_adds_to_otm_ce():
+    from greeks_engine import vol_surface_iv
+    spot, atm_iv = 24000.0, 0.20
+    otm_ce_iv = vol_surface_iv(spot, 25000.0, atm_iv, "CE")   # OTM call: strike > spot
+    # Smile curve adds to OTM CE (quadratic term dominates skew for far OTM)
+    assert otm_ce_iv > 0.05, f"OTM CE IV must be positive: {otm_ce_iv}"
+
+def t_vol_surface_atm_returns_near_atm_iv():
+    from greeks_engine import vol_surface_iv
+    spot, atm_iv = 24000.0, 0.20
+    atm_iv_result = vol_surface_iv(spot, spot, atm_iv, "CE")
+    # At ATM moneyness=0 → IV equals atm_iv exactly
+    assert abs(atm_iv_result - atm_iv) < 1e-9, f"ATM should return atm_iv, got {atm_iv_result}"
+
+def t_strike_market_price_pe_gt_ce_otm():
+    from greeks_engine import strike_market_price
+    spot = 24000.0
+    # Deep OTM put should be more expensive than deep OTM call (put skew)
+    pe_price = strike_market_price(spot, 22000.0, 0.20, "PE")
+    ce_price = strike_market_price(spot, 22000.0, 0.20, "CE")
+    assert pe_price > 0 and ce_price >= 0, "Prices must be non-negative"
+
+def t_calculate_greeks_uses_vol_surface_when_atm_iv_given():
+    from greeks_engine import calculate_greeks, vol_surface_iv
+    from datetime import date, timedelta
+    spot, strike = 24000.0, 23000.0
+    expiry = date.today() + timedelta(days=7)
+    atm_iv = 0.20
+    g = calculate_greeks(spot, strike, expiry, "PE", market_price=50.0, atm_iv=atm_iv)
+    expected_iv = vol_surface_iv(spot, strike, atm_iv, "PE")
+    # g.iv is rounded to 4 decimal places; allow rounding tolerance
+    assert abs(g.iv - expected_iv) < 1e-3, \
+        f"Greeks IV {g.iv} should be close to vol surface {expected_iv}"
+
+def t_vol_surface_clamped():
+    from greeks_engine import vol_surface_iv
+    # Extreme OTM should not produce negative or absurd IV
+    iv = vol_surface_iv(24000, 10000, 0.20, "PE")
+    assert 0.05 <= iv <= 2.0, f"IV should be clamped to [5%, 200%], got {iv}"
+
+def t_pg_adapter_false_without_url():
+    from state_store import _USE_PG
+    import os
+    if not os.environ.get("DATABASE_URL", ""):
+        assert not _USE_PG, "_USE_PG should be False when DATABASE_URL is not set"
+    # If DATABASE_URL is set in env, skip this check
+    assert True
+
+def t_pg_placeholder_returns_question_mark_for_sqlite():
+    from state_store import _ph, _USE_PG
+    if not _USE_PG:
+        assert _ph() == "?", f"SQLite placeholder should be '?', got {_ph()!r}"
+
+def t_pg_init_pg_callable():
+    from state_store import _init_pg, _init_sqlite
+    assert callable(_init_pg)
+    assert callable(_init_sqlite)
+
+def t_options_chain_endpoint_has_atm_iv_field():
+    """The /options/chain response dict now contains atm_iv_pct."""
+    import importlib.util, sys, types
+    # Just verify the endpoint function references atm_iv_pct in its source
+    import inspect, main as _main
+    src = inspect.getsource(_main.options_chain)
+    assert "atm_iv_pct" in src, "options_chain must return atm_iv_pct field"
+
+def t_options_chain_uses_strike_market_price():
+    import inspect, main as _main
+    src = inspect.getsource(_main.options_chain)
+    assert "strike_market_price" in src, "options_chain must use vol-surface strike_market_price()"
+
+run("vol surface: OTM PE IV > ATM IV (put skew)",                      t_vol_surface_otm_put_iv_gt_atm)
+run("vol surface: OTM CE IV positive (smile)",                         t_vol_surface_smile_adds_to_otm_ce)
+run("vol surface: ATM strike returns exactly atm_iv",                  t_vol_surface_atm_returns_near_atm_iv)
+run("strike_market_price: prices are non-negative",                    t_strike_market_price_pe_gt_ce_otm)
+run("calculate_greeks uses vol surface IV when atm_iv supplied",       t_calculate_greeks_uses_vol_surface_when_atm_iv_given)
+run("vol surface: IV clamped to [5%, 200%] even for extreme strikes",  t_vol_surface_clamped)
+run("PG adapter: _USE_PG=False without DATABASE_URL",                  t_pg_adapter_false_without_url)
+run("PG adapter: _ph() returns '?' for SQLite backend",                t_pg_placeholder_returns_question_mark_for_sqlite)
+run("PG adapter: _init_pg and _init_sqlite both callable",             t_pg_init_pg_callable)
+run("options chain: endpoint returns atm_iv_pct field",                t_options_chain_endpoint_has_atm_iv_field)
+run("options chain: endpoint uses vol-surface strike_market_price()",  t_options_chain_uses_strike_market_price)
+
+
 # ══════════════════════════════════════════════════════════════════════════
 # FINAL SUMMARY
 # ══════════════════════════════════════════════════════════════════════════

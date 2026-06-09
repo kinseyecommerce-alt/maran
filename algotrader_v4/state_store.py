@@ -86,8 +86,35 @@ def upsert_position_async(*args, **kwargs) -> None:
     _enqueue(upsert_position, *args, **kwargs)
 
 
-def _conn() -> sqlite3.Connection:
-    """Create a thread-safe SQLite connection with Row factory."""
+import os as _os_pg
+_PG_URL: str = _os_pg.environ.get("DATABASE_URL", "")
+_USE_PG: bool = bool(_PG_URL and _PG_URL.startswith("postgres"))
+
+
+def _ph() -> str:
+    """Return the SQL placeholder character for the active backend."""
+    return "%s" if _USE_PG else "?"
+
+
+def _conn():
+    """
+    Return a DB connection for the active backend.
+    • PostgreSQL when DATABASE_URL is set (psycopg2, dict-row cursor)
+    • SQLite otherwise (stdlib sqlite3, Row factory)
+    """
+    if _USE_PG:
+        try:
+            import psycopg2
+            import psycopg2.extras
+        except ImportError as _e:
+            raise RuntimeError(
+                "DATABASE_URL is set to PostgreSQL but psycopg2 is not installed. "
+                "Run: pip install psycopg2-binary"
+            ) from _e
+        c = psycopg2.connect(_PG_URL, cursor_factory=psycopg2.extras.RealDictCursor)
+        c.autocommit = False
+        return c
+
     DB_PATH.parent.mkdir(parents=True, exist_ok=True)
     c = sqlite3.connect(str(DB_PATH), check_same_thread=False)
     c.row_factory = sqlite3.Row
@@ -96,8 +123,15 @@ def _conn() -> sqlite3.Connection:
 
 def init_db() -> None:
     """Create all tables if they don't exist. Idempotent — safe to call multiple times."""
+    if _USE_PG:
+        _init_pg()
+        return
+    _init_sqlite()
+
+
+def _init_sqlite() -> None:
     with _conn() as c:
-        # Enable WAL mode: concurrent reads don't block writes, reduces "database locked" errors
+        # Enable WAL mode: concurrent reads don't block writes
         c.execute("PRAGMA journal_mode=WAL")
         c.execute("PRAGMA synchronous=NORMAL")
         c.commit()
@@ -157,10 +191,9 @@ def init_db() -> None:
             CREATE INDEX IF NOT EXISTS idx_positions_is_open   ON positions(is_open);
             CREATE INDEX IF NOT EXISTS idx_positions_symbol    ON positions(symbol, strategy);
         """)
-        # Seed schema_version row (idempotent)
         c.execute("INSERT OR IGNORE INTO schema_version (id, version) VALUES (1, 1)")
 
-        # Migrate existing DBs: add columns that are new since initial schema
+        # Migrate existing DBs: add columns added after initial schema
         existing = {row[1] for row in c.execute("PRAGMA table_info(trades)")}
         migrations: list[tuple[str, str]] = [
             ("pattern",             "TEXT DEFAULT ''"),
@@ -170,7 +203,6 @@ def init_db() -> None:
         for col, defn in migrations:
             if col not in existing:
                 c.execute(f"ALTER TABLE trades ADD COLUMN {col} {defn}")
-        # Bump schema version if any migration ran
         migrated_cols = [col for col, _ in migrations if col not in existing]
         if migrated_cols:
             c.execute(
@@ -178,10 +210,6 @@ def init_db() -> None:
                 (len(migrated_cols),),
             )
 
-        # In PAPER mode: close any stale is_open=1 positions that carry PAPER-* order IDs
-        # from previous test/simulation sessions. LIVE positions are reconciled by
-        # _reconcile_open_positions() in main.py; PAPER positions must be cleared here
-        # because the broker will never report them and the reconciler skips PAPER mode.
         from config import settings as _cfg
         if _cfg.trading_mode == "PAPER":
             result = c.execute(
@@ -193,6 +221,87 @@ def init_db() -> None:
                     "[state_store] Cleared %d stale PAPER is_open positions on startup",
                     result.rowcount,
                 )
+
+
+def _init_pg() -> None:
+    """Create tables in PostgreSQL. Uses SERIAL / CURRENT_DATE instead of SQLite-isms."""
+    stmts = [
+        """CREATE TABLE IF NOT EXISTS positions (
+            order_id    TEXT PRIMARY KEY,
+            symbol      TEXT,
+            strategy    TEXT,
+            side        TEXT,
+            entry_price DOUBLE PRECISION,
+            quantity    INTEGER,
+            sl_price    DOUBLE PRECISION,
+            target      DOUBLE PRECISION,
+            product     TEXT,
+            opened_at   TEXT,
+            is_open     INTEGER DEFAULT 1
+        )""",
+        """CREATE TABLE IF NOT EXISTS trades (
+            id                  SERIAL PRIMARY KEY,
+            symbol              TEXT,
+            strategy            TEXT,
+            side                TEXT,
+            entry_price         DOUBLE PRECISION,
+            exit_price          DOUBLE PRECISION,
+            quantity            INTEGER,
+            gross_pnl           DOUBLE PRECISION,
+            net_pnl             DOUBLE PRECISION,
+            cost                DOUBLE PRECISION,
+            exit_reason         TEXT,
+            regime              TEXT,
+            entry_time          TEXT,
+            exit_time           TEXT,
+            gate_confidence     INTEGER DEFAULT 0,
+            trade_date          TEXT DEFAULT CURRENT_DATE,
+            pattern             TEXT DEFAULT '',
+            expected_fill_price DOUBLE PRECISION DEFAULT 0,
+            actual_fill_price   DOUBLE PRECISION DEFAULT 0
+        )""",
+        """CREATE TABLE IF NOT EXISTS schema_version (
+            id         INTEGER PRIMARY KEY,
+            version    INTEGER NOT NULL DEFAULT 1,
+            updated_at TEXT DEFAULT NOW()::TEXT
+        )""",
+        """CREATE TABLE IF NOT EXISTS daily_pnl (
+            trade_date   TEXT PRIMARY KEY,
+            realised_pnl DOUBLE PRECISION DEFAULT 0,
+            trades_count INTEGER DEFAULT 0
+        )""",
+        "CREATE INDEX IF NOT EXISTS idx_trades_trade_date ON trades(trade_date)",
+        "CREATE INDEX IF NOT EXISTS idx_trades_strategy   ON trades(strategy)",
+        "CREATE INDEX IF NOT EXISTS idx_trades_exit_time  ON trades(exit_time)",
+        "CREATE INDEX IF NOT EXISTS idx_trades_symbol     ON trades(symbol)",
+        "CREATE INDEX IF NOT EXISTS idx_positions_is_open ON positions(is_open)",
+        "CREATE INDEX IF NOT EXISTS idx_positions_symbol  ON positions(symbol, strategy)",
+    ]
+    with _conn() as c:
+        cur = c.cursor()
+        for stmt in stmts:
+            cur.execute(stmt)
+        # Seed schema_version (idempotent)
+        cur.execute(
+            "INSERT INTO schema_version (id, version) VALUES (1, 1) "
+            "ON CONFLICT (id) DO NOTHING"
+        )
+        # Column migrations
+        cur.execute(
+            "SELECT column_name FROM information_schema.columns "
+            "WHERE table_name = 'trades'"
+        )
+        existing_pg = {r["column_name"] if isinstance(r, dict) else r[0]
+                       for r in cur.fetchall()}
+        pg_migrations = [
+            ("pattern",             "TEXT DEFAULT ''"),
+            ("expected_fill_price", "DOUBLE PRECISION DEFAULT 0"),
+            ("actual_fill_price",   "DOUBLE PRECISION DEFAULT 0"),
+        ]
+        for col, defn in pg_migrations:
+            if col not in existing_pg:
+                cur.execute(f"ALTER TABLE trades ADD COLUMN IF NOT EXISTS {col} {defn}")
+        c.commit()
 
 
 def upsert_position(
@@ -208,26 +317,47 @@ def upsert_position(
     pattern: str = "",
 ) -> None:
     """Insert or replace a position record (marks as open)."""
+    p = _ph()
     with _conn() as c:
-        c.execute(
-            """
-            INSERT OR REPLACE INTO positions
-              (order_id, symbol, strategy, side, entry_price, quantity,
-               sl_price, target, product, opened_at, is_open)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'), 1)
-            """,
-            (order_id, symbol, strategy, side, entry_price, quantity,
-             sl_price, target, product),
-        )
+        if _USE_PG:
+            cur = c.cursor()
+            cur.execute(
+                f"""
+                INSERT INTO positions
+                  (order_id, symbol, strategy, side, entry_price, quantity,
+                   sl_price, target, product, opened_at, is_open)
+                VALUES ({p},{p},{p},{p},{p},{p},{p},{p},{p},NOW()::TEXT,1)
+                ON CONFLICT (order_id) DO UPDATE SET
+                  entry_price=EXCLUDED.entry_price, sl_price=EXCLUDED.sl_price,
+                  target=EXCLUDED.target, is_open=1
+                """,
+                (order_id, symbol, strategy, side, entry_price, quantity,
+                 sl_price, target, product),
+            )
+            c.commit()
+        else:
+            c.execute(
+                f"""
+                INSERT OR REPLACE INTO positions
+                  (order_id, symbol, strategy, side, entry_price, quantity,
+                   sl_price, target, product, opened_at, is_open)
+                VALUES ({p},{p},{p},{p},{p},{p},{p},{p},{p},datetime('now'),1)
+                """,
+                (order_id, symbol, strategy, side, entry_price, quantity,
+                 sl_price, target, product),
+            )
 
 
 def close_position(order_id: str) -> None:
     """Mark a position as closed (is_open=0)."""
+    p = _ph()
     with _conn() as c:
-        c.execute(
-            "UPDATE positions SET is_open=0 WHERE order_id=?",
-            (order_id,),
-        )
+        if _USE_PG:
+            cur = c.cursor()
+            cur.execute(f"UPDATE positions SET is_open=0 WHERE order_id={p}", (order_id,))
+            c.commit()
+        else:
+            c.execute(f"UPDATE positions SET is_open=0 WHERE order_id={p}", (order_id,))
 
 
 def record_trade(
@@ -253,32 +383,62 @@ def record_trade(
     Called after every position close (SL hit, target hit, manual exit).
     """
     today = now_ist().date().isoformat()   # IST date, not UTC server date
+    p = _ph()
+    exit_ts = "NOW()::TEXT" if _USE_PG else "datetime('now')"
     with _conn() as c:
-        c.execute(
-            """
-            INSERT INTO trades
-              (symbol, strategy, side, entry_price, exit_price, quantity,
-               gross_pnl, net_pnl, cost, exit_reason, regime,
-               entry_time, exit_time, gate_confidence, trade_date, pattern,
-               expected_fill_price, actual_fill_price)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'), ?, ?, ?, ?, ?)
-            """,
-            (symbol, strategy, side, entry_price, exit_price, quantity,
-             gross_pnl, net_pnl, cost, exit_reason, regime,
-             entry_time, gate_confidence, today, pattern,
-             expected_fill_price, actual_fill_price),
-        )
-        # Upsert daily summary
-        c.execute(
-            """
-            INSERT INTO daily_pnl (trade_date, realised_pnl, trades_count)
-            VALUES (?, ?, 1)
-            ON CONFLICT(trade_date) DO UPDATE SET
-              realised_pnl = realised_pnl + excluded.realised_pnl,
-              trades_count = trades_count + 1
-            """,
-            (today, net_pnl),
-        )
+        if _USE_PG:
+            cur = c.cursor()
+            cur.execute(
+                f"""
+                INSERT INTO trades
+                  (symbol, strategy, side, entry_price, exit_price, quantity,
+                   gross_pnl, net_pnl, cost, exit_reason, regime,
+                   entry_time, exit_time, gate_confidence, trade_date, pattern,
+                   expected_fill_price, actual_fill_price)
+                VALUES ({p},{p},{p},{p},{p},{p},{p},{p},{p},{p},{p},{p},{exit_ts},{p},{p},{p},{p},{p})
+                """,
+                (symbol, strategy, side, entry_price, exit_price, quantity,
+                 gross_pnl, net_pnl, cost, exit_reason, regime,
+                 entry_time, gate_confidence, today, pattern,
+                 expected_fill_price, actual_fill_price),
+            )
+            cur.execute(
+                f"""
+                INSERT INTO daily_pnl (trade_date, realised_pnl, trades_count)
+                VALUES ({p},{p},1)
+                ON CONFLICT(trade_date) DO UPDATE SET
+                  realised_pnl = daily_pnl.realised_pnl + EXCLUDED.realised_pnl,
+                  trades_count = daily_pnl.trades_count + 1
+                """,
+                (today, net_pnl),
+            )
+            c.commit()
+        else:
+            c.execute(
+                f"""
+                INSERT INTO trades
+                  (symbol, strategy, side, entry_price, exit_price, quantity,
+                   gross_pnl, net_pnl, cost, exit_reason, regime,
+                   entry_time, exit_time, gate_confidence, trade_date, pattern,
+                   expected_fill_price, actual_fill_price)
+                VALUES ({p},{p},{p},{p},{p},{p},{p},{p},{p},{p},{p},{p},datetime('now'),{p},{p},{p},{p},{p})
+                """,
+                (symbol, strategy, side, entry_price, exit_price, quantity,
+                 gross_pnl, net_pnl, cost, exit_reason, regime,
+                 entry_time, gate_confidence, today, pattern,
+                 expected_fill_price, actual_fill_price),
+            )
+            # Upsert daily summary
+            c.execute(
+                f"""
+                INSERT INTO daily_pnl (trade_date, realised_pnl, trades_count)
+                VALUES ({p},{p},1)
+                ON CONFLICT(trade_date) DO UPDATE SET
+                  realised_pnl = realised_pnl + excluded.realised_pnl,
+                  trades_count = trades_count + 1
+                """,
+                (today, net_pnl),
+            )
 
 
 def get_open_positions() -> list[dict]:
@@ -294,7 +454,7 @@ def get_daily_pnl(trade_date: Optional[str] = None) -> float:
     today = trade_date or now_ist().date().isoformat()
     with _conn() as c:
         row = c.execute(
-            "SELECT realised_pnl FROM daily_pnl WHERE trade_date=?",
+            f"SELECT realised_pnl FROM daily_pnl WHERE trade_date={_ph()}",
             (today,),
         ).fetchone()
         return float(row[0]) if row else 0.0
@@ -307,7 +467,7 @@ def get_trade_history(days: int = 30) -> list[dict]:
     cutoff = (_now_ist().date() - _dt.timedelta(days=days)).isoformat()
     with _conn() as c:
         return [dict(r) for r in c.execute(
-            "SELECT * FROM trades WHERE trade_date >= ? ORDER BY id DESC",
+            f"SELECT * FROM trades WHERE trade_date >= {_ph()} ORDER BY id DESC",
             (cutoff,),
         )]
 
@@ -324,10 +484,11 @@ def get_trade_stats(
     import datetime as _dt
     cutoff = (_now_ist().date() - _dt.timedelta(days=days)).isoformat()
     with _conn() as c:
-        q      = "SELECT * FROM trades WHERE trade_date >= ?"
+        p      = _ph()
+        q      = f"SELECT * FROM trades WHERE trade_date >= {p}"
         params: list = [cutoff]
         if strategy:
-            q += " AND strategy=?"
+            q += f" AND strategy={p}"
             params.append(strategy)
         rows = [dict(r) for r in c.execute(q, params)]
 

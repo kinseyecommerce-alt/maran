@@ -36,6 +36,9 @@ matplotlib==3.10.9
 # ── Scheduling ────────────────────────────────────────────────────
 apscheduler==3.11.2
 
+# ── Database (optional PostgreSQL backend) ───────────────────────
+psycopg2-binary>=2.9.0   # only needed when DATABASE_URL=postgres://... is set
+
 # ── Utilities ────────────────────────────────────────────────────
 python-dotenv==1.0.1
 python-telegram-bot==21.3

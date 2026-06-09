@@ -1849,27 +1849,51 @@ async def options_chain(symbol: str, expiry_offset_days: int = Query(default=0))
         days_to_expiry = 7
     expiry = today + timedelta(days=days_to_expiry)
 
+    # ATM IV: try India VIX tick → scale to equity IV; fall back to 20%
+    atm_iv = 0.20
+    try:
+        vix_tick, _ = tick_engine.latest("INDIA VIX")
+        if vix_tick and vix_tick.ltp > 0:
+            atm_iv = vix_tick.ltp / 100.0  # VIX is quoted as % (e.g. 14.5 → 0.145)
+    except Exception:
+        pass
+
+    from greeks_engine import strike_market_price, vol_surface_iv
+
     chain = []
     for strike in strikes:
         row = {"strike": strike, "atm": strike == atm_strike, "expiry": str(expiry)}
         for opt_type in ("CE", "PE"):
             try:
-                # Use ATM market price estimate (5% of spot) for IV computation
-                market_price = max(1.0, spot * 0.05)
-                g = calculate_greeks(spot, strike, expiry, opt_type, market_price)
+                # Vol-surface-aware market price per strike (put skew + smile)
+                market_price = strike_market_price(
+                    spot, strike, atm_iv, opt_type, days_to_expiry=days_to_expiry
+                )
+                strike_iv = vol_surface_iv(spot, strike, atm_iv, opt_type)
+                g = calculate_greeks(spot, strike, expiry, opt_type, market_price,
+                                     atm_iv=atm_iv)
                 row[opt_type.lower()] = {
-                    "delta": round(g.delta, 4),
-                    "gamma": round(g.gamma, 6),
-                    "theta": round(g.theta, 2),
-                    "vega":  round(g.vega, 4),
-                    "iv":    round(g.iv * 100, 1),
-                    "intrinsic": round(max(0, (spot - strike) if opt_type == "CE" else (strike - spot)), 2),
+                    "delta":     round(g.delta, 4),
+                    "gamma":     round(g.gamma, 6),
+                    "theta":     round(g.theta, 2),
+                    "vega":      round(g.vega, 4),
+                    "iv":        round(strike_iv * 100, 1),   # strike-specific IV %
+                    "bs_price":  round(market_price, 2),
+                    "intrinsic": round(g.intrinsic, 2),
+                    "moneyness": g.moneyness,
                 }
             except Exception:
-                row[opt_type.lower()] = {"delta": 0, "gamma": 0, "theta": 0, "vega": 0, "iv": 0, "intrinsic": 0}
+                row[opt_type.lower()] = {
+                    "delta": 0, "gamma": 0, "theta": 0, "vega": 0,
+                    "iv": 0, "bs_price": 0, "intrinsic": 0, "moneyness": "OTM",
+                }
         chain.append(row)
 
-    return {"symbol": sym, "spot": spot, "atm_strike": atm_strike, "expiry": str(expiry), "chain": chain}
+    return {
+        "symbol": sym, "spot": spot, "atm_strike": atm_strike,
+        "expiry": str(expiry), "atm_iv_pct": round(atm_iv * 100, 1),
+        "chain": chain,
+    }
 
 
 @app.get("/backtest/stress/{symbol}/{strategy}", tags=["Backtest"])
