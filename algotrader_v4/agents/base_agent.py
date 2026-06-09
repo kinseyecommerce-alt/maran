@@ -573,6 +573,20 @@ class BaseAgent(ABC):
                         _sf = round(_sf * _corr["size_factor"], 3)
                     signal["_gate_size_factor"] = _sf
 
+                    # ── Final market-hours re-check ───────────────────────
+                    # The gate + MTF + event + correlation checks above can
+                    # collectively take 4-20 seconds. Re-validate session so
+                    # a signal that fired at 15:09:55 doesn't place an order
+                    # at 15:10:08 after the gate returns.
+                    if settings.trading_mode == "LIVE":
+                        _post_bucket, _post_extra = session_bucket()
+                        if _post_extra >= 99:
+                            logger.debug(
+                                "[{}] {} session expired during gate ({}) — order suppressed",
+                                self.name, snap.symbol, _post_bucket,
+                            )
+                            continue
+
                     await self._try_enter(snap, action, signal)
             except Exception as exc:
                 import traceback as _tb
@@ -779,6 +793,12 @@ class BaseAgent(ABC):
         trade_sym = signal.get("tradingsymbol",
                     signal.get("futures_symbol",
                     signal.get("option_symbol", sym)))
+
+        # Hard market-hours gate — second check in case this is called directly.
+        if settings.trading_mode == "LIVE":
+            _final_bucket, _final_extra = session_bucket()
+            if _final_extra >= 99:
+                raise RuntimeError(f"market_closed:{_final_bucket}")
 
         claimed, _ = order_guard.try_claim(sym, self.name, action)
         if not claimed:
