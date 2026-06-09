@@ -413,6 +413,16 @@ class BaseAgent(ABC):
             if len(snap.candles_1min) < self.min_candles_1min:
                 continue
 
+            # Drop stale snapshots — can accumulate while awaiting the Claude gate
+            # (up to 12s). A 12-second-old BUY signal evaluated now would fire on
+            # prices that no longer exist, creating phantom entries.
+            import time as _time_chk
+            _snap_age = _time_chk.monotonic() - getattr(snap.tick, "_monotonic_ts", 0)
+            if _snap_age > 5.0 and getattr(snap.tick, "_monotonic_ts", 0) > 0:
+                logger.debug("[{}] {} dropped stale snap ({:.1f}s old)",
+                             self.name, snap.symbol, _snap_age)
+                continue
+
             self.state.ticks_processed += 1
             try:
                 # Check trailing SL engine first (highest priority)
@@ -915,7 +925,9 @@ class BaseAgent(ABC):
                 try:
                     qty = await self._reconcile_fill_and_resize_sl(order_id, sl_order_id, qty, loop)
                 except RuntimeError:
-                    order_guard.release_claim(sym, self.name, action)
+                    # Claim is already CONFIRMED (pending=False) so release_claim() is a
+                    # no-op. Use release_order() to fully unlock the symbol slot.
+                    order_guard.release_order(sym, self.name, action, 0)
                     raise
             else:
                 entry_type = "LIMIT" if use_limit else "MARKET"
@@ -973,7 +985,8 @@ class BaseAgent(ABC):
                 try:
                     qty = await self._reconcile_fill_and_resize_sl(order_id, sl_order_id, qty, loop)
                 except RuntimeError:
-                    order_guard.release_claim(sym, self.name, action)
+                    # Claim already CONFIRMED — release_order() to fully unlock the slot.
+                    order_guard.release_order(sym, self.name, action, 0)
                     raise
         except RuntimeError:
             raise

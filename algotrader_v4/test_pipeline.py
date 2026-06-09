@@ -360,9 +360,17 @@ def t_og_blocks_duplicate():
 def t_og_release_frees():
     og = OrderGuard()
     og.register_order("WIPRO", "intraday", "BUY", "oid-003")
-    og.release_order("WIPRO", "intraday", "BUY", 100.0)
-    ok_, _ = og.can_place("WIPRO", "intraday", "BUY")
-    assert ok_ is True
+    # Disable post-exit cooldown so the slot is immediately available for re-entry;
+    # the cooldown itself is tested separately.
+    from config import settings as _s
+    _orig = _s.post_exit_cooldown_sec
+    _s.post_exit_cooldown_sec = 0
+    try:
+        og.release_order("WIPRO", "intraday", "BUY", 100.0)
+        ok_, _ = og.can_place("WIPRO", "intraday", "BUY")
+        assert ok_ is True
+    finally:
+        _s.post_exit_cooldown_sec = _orig
 
 def t_og_active_anywhere():
     og = OrderGuard()
@@ -1527,7 +1535,13 @@ def t_full_order_pipeline():
     assert sl_oid.startswith("PAPER-")
 
     pnl = 300.0
+    # Disable post-exit cooldown so immediate can_place succeeds in this unit test;
+    # the cooldown is tested in t_og_release_frees and integration tests.
+    from config import settings as _s
+    _orig_cds = _s.post_exit_cooldown_sec
+    _s.post_exit_cooldown_sec = 0
     og.release_order(symbol, "intraday", "BUY", pnl)
+    _s.post_exit_cooldown_sec = _orig_cds
     rm.record_trade(pnl)
     rm.position_closed()
     tsl.deregister(oid)

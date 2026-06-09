@@ -67,8 +67,11 @@ class Tick:
     low:       float
     open:      float
     timestamp: datetime
-    bid_depth: list = field(default_factory=list)  # [(price, qty), ...] top 5 bids
-    ask_depth: list = field(default_factory=list)  # [(price, qty), ...] top 5 asks
+    bid_depth: list  = field(default_factory=list)   # [(price, qty), ...] top 5 bids
+    ask_depth: list  = field(default_factory=list)   # [(price, qty), ...] top 5 asks
+    # Monotonic creation time — used by agent tick loop to drop stale snaps that
+    # accumulated in the queue while awaiting the Claude gate (up to 12s).
+    _monotonic_ts: float = field(default_factory=time.monotonic)
 
     @classmethod
     def from_quote(cls, q: Quote) -> "Tick":

@@ -85,6 +85,7 @@ class Settings(BaseSettings):
     max_trades_futures:        int = 75
     max_trades_swing:          int = 25    # position trades, low turnover
     cooldown_after_loss_sec:   int = 300
+    post_exit_cooldown_sec:    int = 5      # minimum cooldown after ANY exit (incl. winners)
 
     # Per-agent stop-loss % (intraday/scalping/futures/swing = price %; options = premium %)
     sl_pct_intraday:       float = 1.5
