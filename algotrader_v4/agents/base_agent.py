@@ -849,8 +849,11 @@ class BaseAgent(ABC):
         catalyst = 0.0
         try:
             from alt_data import alt_data_engine
-            catalyst = await loop.run_in_executor(None, lambda: alt_data_engine.get_catalyst(sym))
-        except Exception:
+            catalyst = await asyncio.wait_for(
+                loop.run_in_executor(None, lambda: alt_data_engine.get_catalyst(sym)),
+                timeout=0.2,  # 200 ms max — skip if NSE bulk-deals endpoint is slow
+            )
+        except (Exception, asyncio.TimeoutError):
             pass
         if catalyst < -0.5:
             logger.info("[{}] {} skipped — negative catalyst: {:.2f}", self.name, sym, catalyst)

@@ -2214,6 +2214,24 @@ async def _reconcile_open_positions() -> None:
             )
 
 
+async def _prewarm_gate() -> None:
+    """Send a no-op message to the Claude gate 5 s after startup to establish
+    the HTTPS connection before the first real trade arrives."""
+    await asyncio.sleep(5)
+    if not settings.use_claude_trade_gate:
+        return
+    try:
+        from claude_trade_gate import _get_client
+        await _get_client().messages.create(
+            model=settings.claude_gate_model,
+            max_tokens=1,
+            messages=[{"role": "user", "content": "ping"}],
+        )
+        logger.info("[startup] Claude gate pre-warmed ({})", settings.claude_gate_model)
+    except Exception as _e:
+        logger.debug("[startup] Gate pre-warm skipped: {}", _e)
+
+
 @app.on_event("startup")
 async def on_startup():
     # Initialise SQLite state store
@@ -2275,6 +2293,10 @@ async def on_startup():
     atomic_bracket_engine.ws_broadcast = broadcast
     logger.info("FastAPI startup: tick engine + atomic bracket engine launched")
     asyncio.create_task(symbol_scanner.run())
+
+    # Pre-warm the Claude gate connection so the first real trade doesn't pay
+    # the cold-start TCP/TLS handshake cost (~300-500 ms).
+    asyncio.create_task(_prewarm_gate())
     from platform_scheduler import platform_scheduler
     platform_scheduler.start()
 
@@ -2603,5 +2625,12 @@ async def db_cleanup(keep_days: int = Query(default=None, ge=30, le=365)):
 
 # HIGH-7: reload=False in production — auto-reload bypasses security middleware
 if __name__ == "__main__":
+    try:
+        import uvloop
+        uvloop.install()  # 2-4× faster asyncio event loop (Cython, Linux/macOS)
+        logger.info("uvloop installed as asyncio event loop")
+    except ImportError:
+        pass  # Windows or unavailable — fall back to default asyncio loop
+
     import uvicorn
     uvicorn.run("main:app", host=settings.host, port=settings.port, reload=False)

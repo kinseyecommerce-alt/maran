@@ -137,7 +137,7 @@ class KiteClient:
         self._instruments_cache: dict[str, list[dict]] = {}
         self._pos_cache: dict = {}
         self._pos_cache_ts: float = 0.0
-        self._pos_cache_ttl: float = 2.0   # 2-second TTL — fast enough for sector check
+        self._pos_cache_ttl: float = 0.5   # 0.5s TTL — keeps sector/count checks fresh for scalping agents
         self._paper_ltp: dict[str, float] = {}        # sym → last known LTP for MARKET fill price
 
     # ── Auth ───────────────────────────────────────────────────────────────

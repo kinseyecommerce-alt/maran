@@ -13,6 +13,7 @@ httpx==0.28.1
 fastapi==0.136.3
 starlette==1.1.0
 uvicorn[standard]==0.48.0
+uvloop>=0.21.0           # 2-4× faster asyncio event loop (Linux/macOS only)
 websockets==16.0
 
 # ── Security ──────────────────────────────────────────────────────
