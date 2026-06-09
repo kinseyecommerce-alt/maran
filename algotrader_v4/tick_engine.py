@@ -709,7 +709,14 @@ class TickEngine:
             ind.ask   = tick.ask
             ind.spread = round(tick.ask - tick.bid, 2)
         else:
-            ind = IndicatorCalc.compute(symbol, tick, df)
+            # Cache miss = candle closed or LTP moved significantly.
+            # Run in thread executor so the event loop stays free while pandas/numpy
+            # compute EMA/RSI/MACD/Supertrend etc. numpy releases the GIL so multiple
+            # symbol recomputes run concurrently when a candle-close burst arrives.
+            _loop = asyncio.get_running_loop()
+            ind = await _loop.run_in_executor(
+                None, IndicatorCalc.compute, symbol, tick, df
+            )
             self._ind_cache[symbol]       = ind
             self._ind_cache_count[symbol] = _n_candles
             self._ind_cache_ltp[symbol]   = tick.ltp
