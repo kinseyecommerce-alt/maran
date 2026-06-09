@@ -96,6 +96,28 @@ def _ph() -> str:
     return "%s" if _USE_PG else "?"
 
 
+def _fetchall(c, sql: str, params: tuple = ()) -> list[dict]:
+    """Execute a SELECT and return rows as dicts — works for both SQLite and psycopg2."""
+    if _USE_PG:
+        cur = c.cursor()
+        cur.execute(sql, params)
+        rows = cur.fetchall()
+        # RealDictCursor rows are already dict-like; convert to plain dicts
+        return [dict(r) for r in rows]
+    return [dict(r) for r in c.execute(sql, params)]
+
+
+def _fetchone(c, sql: str, params: tuple = ()):
+    """Execute a SELECT and return one row as dict (or None) — works for both backends."""
+    if _USE_PG:
+        cur = c.cursor()
+        cur.execute(sql, params)
+        row = cur.fetchone()
+        return dict(row) if row else None
+    row = c.execute(sql, params).fetchone()
+    return dict(row) if row else None
+
+
 def _conn():
     """
     Return a DB connection for the active backend.
@@ -444,20 +466,15 @@ def record_trade(
 def get_open_positions() -> list[dict]:
     """Return all positions currently marked as open."""
     with _conn() as c:
-        return [dict(r) for r in c.execute(
-            "SELECT * FROM positions WHERE is_open=1"
-        )]
+        return _fetchall(c, "SELECT * FROM positions WHERE is_open=1")
 
 
 def get_daily_pnl(trade_date: Optional[str] = None) -> float:
     """Return total realised P&L for the given date (defaults to today)."""
     today = trade_date or now_ist().date().isoformat()
     with _conn() as c:
-        row = c.execute(
-            f"SELECT realised_pnl FROM daily_pnl WHERE trade_date={_ph()}",
-            (today,),
-        ).fetchone()
-        return float(row[0]) if row else 0.0
+        row = _fetchone(c, f"SELECT realised_pnl FROM daily_pnl WHERE trade_date={_ph()}", (today,))
+        return float(row["realised_pnl"]) if row else 0.0
 
 
 def get_trade_history(days: int = 30) -> list[dict]:
@@ -466,10 +483,7 @@ def get_trade_history(days: int = 30) -> list[dict]:
     import datetime as _dt
     cutoff = (_now_ist().date() - _dt.timedelta(days=days)).isoformat()
     with _conn() as c:
-        return [dict(r) for r in c.execute(
-            f"SELECT * FROM trades WHERE trade_date >= {_ph()} ORDER BY id DESC",
-            (cutoff,),
-        )]
+        return _fetchall(c, f"SELECT * FROM trades WHERE trade_date >= {_ph()} ORDER BY id DESC", (cutoff,))
 
 
 def get_trade_stats(
@@ -490,7 +504,7 @@ def get_trade_stats(
         if strategy:
             q += f" AND strategy={p}"
             params.append(strategy)
-        rows = [dict(r) for r in c.execute(q, params)]
+        rows = _fetchall(c, q, tuple(params))
 
     if not rows:
         return {
@@ -523,19 +537,20 @@ def get_performance_report(
     start_date / end_date: "YYYY-MM-DD" strings (inclusive). Defaults to all trades.
     """
     with _conn() as c:
+        p      = _ph()
         q      = "SELECT * FROM trades WHERE 1=1"
         params: list = []
         if start_date:
-            q += " AND trade_date >= ?"
+            q += f" AND trade_date >= {p}"
             params.append(start_date)
         if end_date:
-            q += " AND trade_date <= ?"
+            q += f" AND trade_date <= {p}"
             params.append(end_date)
         if strategy:
-            q += " AND strategy = ?"
+            q += f" AND strategy = {p}"
             params.append(strategy)
         q += " ORDER BY trade_date ASC, id ASC"
-        rows = [dict(r) for r in c.execute(q, params)]
+        rows = _fetchall(c, q, tuple(params))
 
     if not rows:
         return {
@@ -644,7 +659,7 @@ def get_pattern_breakdown(days: int = 30) -> list[dict]:
     # Use timezone-aware UTC so comparison is consistent with SQLite datetime('now') (UTC)
     cutoff = (datetime.now(timezone.utc) - timedelta(days=days)).strftime("%Y-%m-%d %H:%M:%S")
     with _conn() as conn:
-        rows = conn.execute("""
+        rows = _fetchall(conn, f"""
             SELECT pattern,
                    COUNT(*) as total_trades,
                    SUM(CASE WHEN net_pnl > 0 THEN 1 ELSE 0 END) as wins,
@@ -653,11 +668,11 @@ def get_pattern_breakdown(days: int = 30) -> list[dict]:
                    ROUND(AVG(CASE WHEN net_pnl > 0 THEN net_pnl END), 2) as avg_win,
                    ROUND(AVG(CASE WHEN net_pnl < 0 THEN net_pnl END), 2) as avg_loss
             FROM trades
-            WHERE exit_time > ?
+            WHERE exit_time > {_ph()}
             GROUP BY pattern
             ORDER BY total_pnl DESC
-        """, (cutoff,)).fetchall()
-    return [dict(r) for r in rows]
+        """, (cutoff,))
+    return rows
 
 
 def cleanup_old_data(keep_days: int = 90) -> dict:
@@ -671,23 +686,25 @@ def cleanup_old_data(keep_days: int = 90) -> dict:
     """
     from ist_clock import now_ist as _now_ist
     cutoff = (_now_ist().date() - timedelta(days=keep_days)).isoformat()
+    p = _ph()
     with _conn() as c:
-        # 1. Remove closed positions that closed before the cutoff
-        r1 = c.execute(
-            "DELETE FROM positions WHERE is_open=0 AND opened_at < ?", (cutoff,)
-        )
-        # 2. Remove old completed trade records (archive to CSV first if desired)
-        r2 = c.execute(
-            "DELETE FROM trades WHERE trade_date < ?", (cutoff,)
-        )
-        # 3. Trim daily_pnl rows older than cutoff
-        r3 = c.execute(
-            "DELETE FROM daily_pnl WHERE trade_date < ?", (cutoff,)
-        )
+        if _USE_PG:
+            cur = c.cursor()
+            cur.execute(f"DELETE FROM positions WHERE is_open=0 AND opened_at < {p}", (cutoff,))
+            pos_del = cur.rowcount
+            cur.execute(f"DELETE FROM trades WHERE trade_date < {p}", (cutoff,))
+            trade_del = cur.rowcount
+            cur.execute(f"DELETE FROM daily_pnl WHERE trade_date < {p}", (cutoff,))
+            pnl_del = cur.rowcount
+            c.commit()
+        else:
+            pos_del   = c.execute(f"DELETE FROM positions WHERE is_open=0 AND opened_at < {p}", (cutoff,)).rowcount
+            trade_del = c.execute(f"DELETE FROM trades WHERE trade_date < {p}", (cutoff,)).rowcount
+            pnl_del   = c.execute(f"DELETE FROM daily_pnl WHERE trade_date < {p}", (cutoff,)).rowcount
         removed = {
-            "positions": r1.rowcount,
-            "trades":    r2.rowcount,
-            "daily_pnl": r3.rowcount,
+            "positions": pos_del,
+            "trades":    trade_del,
+            "daily_pnl": pnl_del,
         }
     from loguru import logger as _log
     _log.info(
