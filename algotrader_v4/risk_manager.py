@@ -10,6 +10,7 @@ import json as _json
 from dataclasses import dataclass
 from datetime import time
 from pathlib import Path
+from threading import Lock
 from loguru import logger
 
 from config import settings
@@ -216,6 +217,7 @@ _AGENT_MAX_POS: dict[str, str | None] = {
 class RiskManager:
 
     def __init__(self) -> None:
+        self._lock = Lock()
         self.daily_realised_pnl: float = 0.0
         self.open_position_count: int  = 0
         self.trades_today: int         = 0
@@ -482,9 +484,10 @@ class RiskManager:
             logger.warning("Risk manager: could not restore daily P&L from DB — {}", exc)
 
     def record_trade(self, pnl: float) -> None:
-        prev_pnl = self.daily_realised_pnl
-        self.daily_realised_pnl += pnl
-        self.trades_today += 1
+        with self._lock:
+            prev_pnl = self.daily_realised_pnl
+            self.daily_realised_pnl += pnl
+            self.trades_today += 1
         logger.info("Trade P&L ₹{:.0f} | Day total ₹{:.0f}", pnl, self.daily_realised_pnl)
         # Broadcast risk_alert when daily loss crosses 50% of max_daily_loss
         max_loss = settings.max_daily_loss or 0
@@ -504,10 +507,12 @@ class RiskManager:
                     pass
 
     def position_opened(self) -> None:
-        self.open_position_count += 1
+        with self._lock:
+            self.open_position_count += 1
 
     def position_closed(self) -> None:
-        self.open_position_count = max(0, self.open_position_count - 1)
+        with self._lock:
+            self.open_position_count = max(0, self.open_position_count - 1)
 
     def reset_daily(self) -> None:
         self.daily_realised_pnl  = 0.0

@@ -27,6 +27,7 @@ import time
 import random
 import math
 from datetime import datetime, timedelta
+from ist_clock import now_ist as _now_ist
 from typing import Optional
 
 import httpx
@@ -87,7 +88,7 @@ class Quote:
         self.ask           = ask
         self.total_buy_qty = total_buy_qty
         self.total_sell_qty= total_sell_qty
-        self.ts            = datetime.now()
+        self.ts            = _now_ist()
         self.bid_depth     = bid_depth if bid_depth is not None else []
         self.ask_depth     = ask_depth if ask_depth is not None else []
 

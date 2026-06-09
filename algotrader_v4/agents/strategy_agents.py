@@ -1614,7 +1614,7 @@ class OptionsAgent(BaseAgent):
             from alt_data import alt_data_engine
             is_exp, evt = alt_data_engine.is_event_day()
             if is_exp and "expiry" in evt.lower():
-                now_t = datetime.now().time()
+                now_t = now_ist().time()
                 if now_t >= _t(13, 30):
                     return True, "Expiry-day 13:30 forced exit (theta acceleration)"
         except Exception:
@@ -2546,11 +2546,11 @@ class ScalpingAgent(BaseAgent):
             streak = self._loss_streak.get(sym, 0) + 1
             self._loss_streak[sym] = streak
             if streak >= 3:
-                self._cooldown_until[sym] = datetime.now() + timedelta(minutes=20)
+                self._cooldown_until[sym] = now_ist() + timedelta(minutes=20)
                 from loguru import logger
                 logger.warning("[scalping] {} 3-loss streak — 20-min cooldown", sym)
             elif streak >= 2:
-                self._cooldown_until[sym] = datetime.now() + timedelta(minutes=5)
+                self._cooldown_until[sym] = now_ist() + timedelta(minutes=5)
 
     # ── Exit ──────────────────────────────────────────────────────────────────
 
@@ -2642,7 +2642,7 @@ class ScalpingAgent(BaseAgent):
                 return True, "VWAP breakout exit"
 
         # Hard auto-exit well before close (leave 15 min for TSL to close)
-        if datetime.now().time() >= time(14, 55):
+        if now_ist().time() >= time(14, 55):
             return True, "Auto square-off 2:55 PM"
 
         return False, ""

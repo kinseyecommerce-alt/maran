@@ -1002,7 +1002,8 @@ def t_scalping_loss_streak_cooldown():
     agent._record_outcome(sym, False)
     agent._record_outcome(sym, False)
     assert sym in agent._cooldown_until
-    assert agent._cooldown_until[sym] > datetime.now()
+    from ist_clock import now_ist
+    assert agent._cooldown_until[sym] > now_ist()
 
 def t_scalping_win_resets_streak():
     agent = ScalpingAgent()

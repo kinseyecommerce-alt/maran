@@ -978,7 +978,9 @@ class BaseAgent(ABC):
                     except Exception as cancel_exc:
                         logger.error("[{}] Failed to cancel unprotected entry {}: {}",
                                      self.name, order_id, cancel_exc)
-                    order_guard.release_claim(sym, self.name, action)
+                    # Claim was already confirmed (pending=False) so release_claim()
+                    # is a no-op here — use release_order() to fully unlock the slot.
+                    order_guard.release_order(sym, self.name, action, 0)
                     raise RuntimeError("sl_placement_failed")
                 # H2: both orders landed — confirm actual fill; resize SL on
                 # partial; abort on zero fill. (LIVE only; PAPER is a no-op.)
@@ -992,7 +994,18 @@ class BaseAgent(ABC):
             raise
         except Exception as exc:
             logger.warning("[{}] order placement failed: {}", self.name, exc)
-            order_guard.release_claim(sym, self.name, action)
+            # If the access token expired, halt further trading — the agent would
+            # otherwise retry on every tick, filling logs and wasting API quota.
+            if type(exc).__name__ == "TokenException":
+                risk_manager.is_trading_halted = True
+                logger.critical("[{}] Kite access token expired — halting trading. "
+                                "Re-authenticate and restart.", self.name)
+            # If the claim was already confirmed (non-pending), release_claim() is a
+            # no-op; use release_order() so the symbol lock and guard slot are freed.
+            if _claim_confirmed:
+                order_guard.release_order(sym, self.name, action, 0)
+            else:
+                order_guard.release_claim(sym, self.name, action)
             raise RuntimeError(f"placement_error: {exc}")
 
         if not _claim_confirmed:

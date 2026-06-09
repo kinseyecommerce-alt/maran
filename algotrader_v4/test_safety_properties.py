@@ -133,29 +133,37 @@ check("P-2  No duplicate orders", p2_no_duplicate_orders)
 # ─────────────────────────────────────────────────────────────────────────────
 def p3_kill_switch_works():
     """After trigger_kill_switch(), pre_order_check must reject every symbol."""
+    from risk_manager import risk_manager as _rm
+    _orig_halted = _rm.is_trading_halted
     compliance = SEBICompliance()
     # "intraday" is in APPROVED_ALGO_IDS — no registration step needed
 
-    # Baseline: should be ACTIVE
-    assert compliance._state == KillSwitchState.ACTIVE, "Expected ACTIVE state"
+    try:
+        # Baseline: should be ACTIVE
+        assert compliance._state == KillSwitchState.ACTIVE, "Expected ACTIVE state"
 
-    # Trigger the kill switch
-    compliance.trigger_kill_switch("automated safety test")
-    assert compliance._state == KillSwitchState.KILLED, "State should be KILLED"
+        # Trigger the kill switch
+        compliance.trigger_kill_switch("automated safety test")
+        assert compliance._state == KillSwitchState.KILLED, "State should be KILLED"
 
-    # Every pre_order_check must now fail
-    ok, _, reason = compliance.pre_order_check(
-        strategy="intraday", symbol="RELIANCE", exchange="NSE",
-        transaction_type="BUY", quantity=10, order_type="MARKET",
-        price_at_signal=1500.0, signal_source="test", regime="trending",
-    )
-    assert not ok, "pre_order_check allowed an order after kill switch!"
-    assert "kill" in reason.lower() or "halted" in reason.lower() or "killed" in reason.lower(), \
-        f"Kill switch rejection reason unclear: {reason}"
+        # Every pre_order_check must now fail
+        ok, _, reason = compliance.pre_order_check(
+            strategy="intraday", symbol="RELIANCE", exchange="NSE",
+            transaction_type="BUY", quantity=10, order_type="MARKET",
+            price_at_signal=1500.0, signal_source="test", regime="trending",
+        )
+        assert not ok, "pre_order_check allowed an order after kill switch!"
+        assert "kill" in reason.lower() or "halted" in reason.lower() or "killed" in reason.lower(), \
+            f"Kill switch rejection reason unclear: {reason}"
 
-    # Verify resume is blocked until reset
-    resumed, msg = compliance.resume_trading()
-    assert not resumed, "resume_trading() should fail while kill switch is active"
+        # Verify resume is blocked until reset
+        resumed, msg = compliance.resume_trading()
+        assert not resumed, "resume_trading() should fail while kill switch is active"
+    finally:
+        # Restore global risk_manager halt flag so subsequent tests are not blocked.
+        # (trigger_kill_switch now also sets risk_manager.is_trading_halted so the
+        # two subsystems are in sync — restore both after this isolation test.)
+        _rm.is_trading_halted = _orig_halted
 
 check("P-3  Kill switch blocks all new orders", p3_kill_switch_works)
 

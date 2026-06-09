@@ -312,6 +312,11 @@ class TrailingSLEngine:
     def deregister(self, order_id: str) -> None:
         with self._lock:
             pos = self._positions.pop(order_id, None)
+            if pos:
+                # Mark CANCELLED under lock so any in-flight _evaluate() call that
+                # already holds a reference will see the status change and abort
+                # before calling cb_sl_hit on an already-closed position (double-fire).
+                pos.status = SLStatus.CANCELLED
         if pos:
             logger.info("TSL deregistered: {} {}", pos.symbol, order_id)
 
