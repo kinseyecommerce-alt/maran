@@ -173,6 +173,18 @@
       padding: 14px 16px;
       border-top: 1px solid var(--sidebar-border);
     }
+    .sidebar-logout-btn {
+      margin-top: 8px;
+      width: 100%;
+      background: none;
+      border: 1px solid var(--sidebar-border);
+      color: var(--text-muted);
+      border-radius: 6px;
+      padding: 5px 0;
+      font-size: 11px;
+      cursor: pointer;
+    }
+    .sidebar-logout-btn:hover { background: var(--red); color: #fff; border-color: var(--red); }
     .mode-badge {
       display: inline-flex;
       align-items: center;
@@ -1188,6 +1200,7 @@
     <div class="sidebar-bottom">
       <div class="mode-badge paper" id="sidebar-mode-badge">PAPER</div>
       <div class="sidebar-time" id="sidebar-clock">--:--:-- IST</div>
+      <button class="sidebar-logout-btn" onclick="doLogout()" title="Sign out">&#x2715; Sign out</button>
     </div>
   </nav>
 
@@ -3854,6 +3867,11 @@ function loadRiskInputs() {
 /* ═══════════════════════════════════════════════════════════════
    ACTIONS: Kill Switch
 ═══════════════════════════════════════════════════════════════ */
+async function doLogout() {
+  try { await api('POST', '/auth/logout'); } catch (_) {}
+  window.location.href = '/login';
+}
+
 async function confirmKillSwitch() {
   const ok = await showConfirm(
     '🚨 Activate Kill Switch',
@@ -5082,8 +5100,7 @@ async function loadPerformanceReport() {
   if (end)   url += `end_date=${end}&`;
   if (strat) url += `strategy=${strat}`;
   try {
-    const r = await fetch(url, { headers: { 'X-API-Key': _apiKey } });
-    _prData = await r.json();
+    _prData = await api('GET', url);
     _renderPerformanceReport(_prData);
   } catch(e) {
     document.getElementById('pr-chips').innerHTML = `<span style="color:var(--red)">Failed to load report: ${e}</span>`;

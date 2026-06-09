@@ -141,11 +141,34 @@ def init_db() -> None:
                 realised_pnl REAL DEFAULT 0,
                 trades_count INTEGER DEFAULT 0
             );
+
+            CREATE INDEX IF NOT EXISTS idx_trades_trade_date  ON trades(trade_date);
+            CREATE INDEX IF NOT EXISTS idx_trades_strategy     ON trades(strategy);
+            CREATE INDEX IF NOT EXISTS idx_trades_exit_time    ON trades(exit_time);
+            CREATE INDEX IF NOT EXISTS idx_trades_symbol       ON trades(symbol);
+            CREATE INDEX IF NOT EXISTS idx_positions_is_open   ON positions(is_open);
+            CREATE INDEX IF NOT EXISTS idx_positions_symbol    ON positions(symbol, strategy);
         """)
         # Migrate existing DB: add pattern column if it doesn't exist yet
         existing = {row[1] for row in c.execute("PRAGMA table_info(trades)")}
         if "pattern" not in existing:
             c.execute("ALTER TABLE trades ADD COLUMN pattern TEXT DEFAULT ''")
+
+        # In PAPER mode: close any stale is_open=1 positions that carry PAPER-* order IDs
+        # from previous test/simulation sessions. LIVE positions are reconciled by
+        # _reconcile_open_positions() in main.py; PAPER positions must be cleared here
+        # because the broker will never report them and the reconciler skips PAPER mode.
+        from config import settings as _cfg
+        if _cfg.trading_mode == "PAPER":
+            result = c.execute(
+                "UPDATE positions SET is_open=0 WHERE is_open=1 AND order_id LIKE 'PAPER-%'"
+            )
+            if result.rowcount:
+                import logging as _log
+                _log.getLogger(__name__).warning(
+                    "[state_store] Cleared %d stale PAPER is_open positions on startup",
+                    result.rowcount,
+                )
 
 
 def upsert_position(
@@ -251,14 +274,13 @@ def get_daily_pnl(trade_date: Optional[str] = None) -> float:
 
 def get_trade_history(days: int = 30) -> list[dict]:
     """Return all trades from the last N days, newest first."""
+    from ist_clock import now_ist as _now_ist
+    import datetime as _dt
+    cutoff = (_now_ist().date() - _dt.timedelta(days=days)).isoformat()
     with _conn() as c:
         return [dict(r) for r in c.execute(
-            """
-            SELECT * FROM trades
-            WHERE trade_date >= date('now', ?, 'localtime')
-            ORDER BY id DESC
-            """,
-            (f"-{days} days",),
+            "SELECT * FROM trades WHERE trade_date >= ? ORDER BY id DESC",
+            (cutoff,),
         )]
 
 
@@ -270,9 +292,12 @@ def get_trade_stats(
     Return aggregated performance statistics.
     Optionally filtered by strategy.
     """
+    from ist_clock import now_ist as _now_ist
+    import datetime as _dt
+    cutoff = (_now_ist().date() - _dt.timedelta(days=days)).isoformat()
     with _conn() as c:
-        q      = "SELECT * FROM trades WHERE trade_date >= date('now', ?, 'localtime')"
-        params: list = [f"-{days} days"]
+        q      = "SELECT * FROM trades WHERE trade_date >= ?"
+        params: list = [cutoff]
         if strategy:
             q += " AND strategy=?"
             params.append(strategy)

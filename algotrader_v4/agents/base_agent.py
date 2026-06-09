@@ -175,7 +175,9 @@ def _setup_tsl_callbacks() -> None:
                 exit_price=ltp, quantity=pos.quantity,
                 gross_pnl=pnl, net_pnl=pnl - cost, cost=cost,
                 exit_reason="SL_HIT",
-                entry_time=str(getattr(pos, "opened_at", "")),
+                entry_time=__import__("datetime").datetime.utcfromtimestamp(
+                    getattr(pos, "opened_at", 0) or 0
+                ).strftime("%Y-%m-%d %H:%M:%S"),
             )
         except Exception:
             pass

@@ -87,10 +87,21 @@ _SENSITIVE_GETS = frozenset({
     "/portfolio/positions", "/portfolio/orders", "/sebi/audit-log",
     "/docs", "/redoc",
     "/gate/log", "/agents/activity", "/brackets", "/trailing-sl/status", "/metrics",
-    "/portfolio/performance-report",  # full P&L history — requires auth
-    "/config/god-mode/status",        # exposes live risk profile — requires auth
-    "/risk/status",                   # exposes daily P&L limits
-    "/settings/trading-limits",       # exposes risk config
+    "/portfolio/performance-report",   # full P&L history — requires auth
+    "/config/god-mode/status",         # exposes live risk profile — requires auth
+    "/risk/status",                    # exposes daily P&L limits
+    "/settings/trading-limits",        # exposes risk config
+    # QA-fix: additional sensitive GETs missing from original set
+    "/portfolio/trades/history",       # full trade records with P&L per trade
+    "/portfolio/trades/export",        # same data as CSV
+    "/portfolio/stats",                # net P&L + win rate
+    "/bot/status",                     # daily P&L, order IDs, risk limits, adaptive params
+    "/agents",                         # per-agent approved symbol lists
+    "/adaptive/status",                # exact SL/target/trail pct per strategy
+    "/regime/status",                  # current regime + strategy plan
+    "/regime/history",                 # historical regime transitions
+    "/regime/plans",                   # all regime strategy plans
+    "/symbols/selected",               # live per-strategy watchlists
 })
 
 @app.middleware("http")
@@ -178,7 +189,13 @@ _RATE_LIMITS = {
     "/backtest/run": 5,
     "/backtest/compare": 3,
     "/optimizer/run": 2,
-    "/auth/login": 10,   # brute-force protection: 10 login attempts / 60s per IP
+    "/auth/login": 10,        # brute-force protection: 10 login attempts / 60s per IP
+    # QA-fix: rate-limit dangerous state-mutation endpoints (defense-in-depth on top of auth)
+    "/bot/start": 5,
+    "/bot/stop": 10,
+    "/orders/squareoff": 5,
+    "/orders/multi-leg": 10,
+    "/sebi/kill-switch": 3,
 }
 
 @app.middleware("http")
@@ -2035,6 +2052,19 @@ def _install_log_redaction() -> None:
 
 _install_log_redaction()
 
+# Add file sink so logs survive across restarts (redaction patcher already applied above)
+import os as _os
+_log_dir = _os.path.join(_os.path.dirname(__file__), "logs")
+_os.makedirs(_log_dir, exist_ok=True)
+logger.add(
+    _os.path.join(_log_dir, "algotrader_{time:YYYY-MM-DD}.log"),
+    rotation="00:00",        # new file every midnight IST
+    retention="30 days",
+    compression="gz",
+    level="INFO",
+    enqueue=True,            # thread-safe non-blocking write
+)
+
 
 async def _reconcile_open_positions() -> None:
     """
@@ -2119,7 +2149,7 @@ async def _reconcile_open_positions() -> None:
                 strategy, symbol,
             )
             try:
-                close_position(order_id, exit_price=entry_px, pnl=0.0, exit_reason="reconcile_not_found")
+                close_position(order_id)
             except Exception:
                 pass
             continue
