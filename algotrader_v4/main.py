@@ -2474,19 +2474,6 @@ async def test_notification(body: dict = Body(default={"message": "AlgoTrader te
         return {"status": "error", "detail": str(e)}
 
 
-# ── State_store fill-price migration ──────────────────────────────────────────
-
-# Add expected/actual fill price columns if not already present
-try:
-    from state_store import _conn as _ss_conn
-    for _col, _def in [("expected_fill_price", "REAL DEFAULT 0"), ("actual_fill_price", "REAL DEFAULT 0")]:
-        try:
-            _ss_conn().execute(f"ALTER TABLE trades ADD COLUMN {_col} {_def}")
-        except Exception:
-            pass
-except Exception:
-    pass
-
 
 @app.post("/optimizer/run", tags=["Optimizer"])
 async def run_optimizer(

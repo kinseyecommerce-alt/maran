@@ -161,6 +161,16 @@ class SEBICompliance:
         self._pause_reason     = ""
         self._kill_reason      = ""
         self._whitelisted_ips: set[str] = set()
+        # Seed from SEBI_WHITELISTED_IPS env var so the whitelist is non-empty at startup.
+        # Empty whitelist = allow-all (development default); non-empty = strict allowlist.
+        try:
+            from config import settings as _cfg
+            for _ip in (_cfg.sebi_whitelisted_ips or "").split(","):
+                _ip = _ip.strip()
+                if _ip:
+                    self._whitelisted_ips.add(_ip)
+        except Exception:
+            pass
 
         # Reg 3: order-to-trade ratio (orders placed vs orders executed)
         self._orders_placed:   int = 0

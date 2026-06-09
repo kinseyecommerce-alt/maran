@@ -117,23 +117,31 @@ def init_db() -> None:
             );
 
             CREATE TABLE IF NOT EXISTS trades (
-                id             INTEGER PRIMARY KEY AUTOINCREMENT,
-                symbol         TEXT,
-                strategy       TEXT,
-                side           TEXT,
-                entry_price    REAL,
-                exit_price     REAL,
-                quantity       INTEGER,
-                gross_pnl      REAL,
-                net_pnl        REAL,
-                cost           REAL,
-                exit_reason    TEXT,
-                regime         TEXT,
-                entry_time     TEXT,
-                exit_time      TEXT,
-                gate_confidence INTEGER DEFAULT 0,
-                trade_date     TEXT DEFAULT (date('now','localtime')),
-                pattern        TEXT DEFAULT ''
+                id                  INTEGER PRIMARY KEY AUTOINCREMENT,
+                symbol              TEXT,
+                strategy            TEXT,
+                side                TEXT,
+                entry_price         REAL,
+                exit_price          REAL,
+                quantity            INTEGER,
+                gross_pnl           REAL,
+                net_pnl             REAL,
+                cost                REAL,
+                exit_reason         TEXT,
+                regime              TEXT,
+                entry_time          TEXT,
+                exit_time           TEXT,
+                gate_confidence     INTEGER DEFAULT 0,
+                trade_date          TEXT DEFAULT (date('now','localtime')),
+                pattern             TEXT DEFAULT '',
+                expected_fill_price REAL DEFAULT 0,
+                actual_fill_price   REAL DEFAULT 0
+            );
+
+            CREATE TABLE IF NOT EXISTS schema_version (
+                id         INTEGER PRIMARY KEY CHECK (id = 1),
+                version    INTEGER NOT NULL DEFAULT 1,
+                updated_at TEXT DEFAULT (datetime('now'))
             );
 
             CREATE TABLE IF NOT EXISTS daily_pnl (
@@ -149,10 +157,26 @@ def init_db() -> None:
             CREATE INDEX IF NOT EXISTS idx_positions_is_open   ON positions(is_open);
             CREATE INDEX IF NOT EXISTS idx_positions_symbol    ON positions(symbol, strategy);
         """)
-        # Migrate existing DB: add pattern column if it doesn't exist yet
+        # Seed schema_version row (idempotent)
+        c.execute("INSERT OR IGNORE INTO schema_version (id, version) VALUES (1, 1)")
+
+        # Migrate existing DBs: add columns that are new since initial schema
         existing = {row[1] for row in c.execute("PRAGMA table_info(trades)")}
-        if "pattern" not in existing:
-            c.execute("ALTER TABLE trades ADD COLUMN pattern TEXT DEFAULT ''")
+        migrations: list[tuple[str, str]] = [
+            ("pattern",             "TEXT DEFAULT ''"),
+            ("expected_fill_price", "REAL DEFAULT 0"),
+            ("actual_fill_price",   "REAL DEFAULT 0"),
+        ]
+        for col, defn in migrations:
+            if col not in existing:
+                c.execute(f"ALTER TABLE trades ADD COLUMN {col} {defn}")
+        # Bump schema version if any migration ran
+        migrated_cols = [col for col, _ in migrations if col not in existing]
+        if migrated_cols:
+            c.execute(
+                "UPDATE schema_version SET version = version + ?, updated_at = datetime('now') WHERE id = 1",
+                (len(migrated_cols),),
+            )
 
         # In PAPER mode: close any stale is_open=1 positions that carry PAPER-* order IDs
         # from previous test/simulation sessions. LIVE positions are reconciled by
@@ -221,6 +245,8 @@ def record_trade(
     entry_time: str = "",
     gate_confidence: int = 0,
     pattern: str = "",
+    expected_fill_price: float = 0.0,
+    actual_fill_price: float = 0.0,
 ) -> None:
     """
     Insert a completed trade record and update the daily P&L summary.
@@ -233,12 +259,14 @@ def record_trade(
             INSERT INTO trades
               (symbol, strategy, side, entry_price, exit_price, quantity,
                gross_pnl, net_pnl, cost, exit_reason, regime,
-               entry_time, exit_time, gate_confidence, trade_date, pattern)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'), ?, ?, ?)
+               entry_time, exit_time, gate_confidence, trade_date, pattern,
+               expected_fill_price, actual_fill_price)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'), ?, ?, ?, ?, ?)
             """,
             (symbol, strategy, side, entry_price, exit_price, quantity,
              gross_pnl, net_pnl, cost, exit_reason, regime,
-             entry_time, gate_confidence, today, pattern),
+             entry_time, gate_confidence, today, pattern,
+             expected_fill_price, actual_fill_price),
         )
         # Upsert daily summary
         c.execute(

@@ -3546,6 +3546,212 @@ run("Integration: filter_watchlist empty pre-learned → 0 approved",t_filter_in
 
 
 # ══════════════════════════════════════════════════════════════════════════
+# 25. QA AUDIT — DB, AUTH, RECONCILE, SCHEMA
+# ══════════════════════════════════════════════════════════════════════════
+print("\n" + "═" * 60)
+print("  25. QA AUDIT — DB, AUTH, RECONCILE, SCHEMA")
+print("═" * 60)
+
+# ── T-1: schema_version table is created by init_db ──────────────────────
+def t_schema_version_table_exists():
+    from state_store import init_db, _conn
+    init_db()   # idempotent — safe on the live test DB
+    tables = {r[0] for r in _conn().execute(
+        "SELECT name FROM sqlite_master WHERE type='table'"
+    )}
+    assert "schema_version" in tables, f"schema_version missing; tables={tables}"
+    ver = _conn().execute("SELECT version FROM schema_version WHERE id=1").fetchone()
+    assert ver is not None, "schema_version has no seed row (INSERT OR IGNORE failed)"
+    assert ver[0] >= 1, f"version must be >= 1, got {ver[0]}"
+
+# ── T-2: init_db adds expected/actual fill price columns ─────────────────
+def t_fill_price_columns_in_schema():
+    from state_store import init_db, _conn
+    init_db()
+    cols = {r[1] for r in _conn().execute("PRAGMA table_info(trades)")}
+    assert "expected_fill_price" in cols, "expected_fill_price missing from trades"
+    assert "actual_fill_price" in cols, "actual_fill_price missing from trades"
+
+# ── T-3: PAPER stale position cleanup on init_db ─────────────────────────
+def t_stale_paper_positions_cleared_on_init():
+    from state_store import init_db, upsert_position, get_open_positions, _conn
+    from config import settings as _s
+    _orig_mode = _s.trading_mode
+    _s.trading_mode = "PAPER"
+    try:
+        init_db()
+        # Insert a fake stale PAPER position
+        upsert_position(
+            order_id="PAPER-STALE-TEST", symbol="TESTPAPER", strategy="intraday",
+            side="BUY", entry_price=100.0, quantity=1, sl_price=98.0, target=103.0,
+            product="MIS", pattern="",
+        )
+        # Confirm it's open
+        open_before = [p for p in get_open_positions() if p["order_id"] == "PAPER-STALE-TEST"]
+        assert open_before, "stale position was not inserted"
+        # Re-run init_db in PAPER mode — should close it
+        init_db()
+        open_after = [p for p in get_open_positions() if p["order_id"] == "PAPER-STALE-TEST"]
+        assert not open_after, f"stale PAPER position not cleared; still {open_after}"
+    finally:
+        _s.trading_mode = _orig_mode
+
+# ── T-4: trade_date written as IST (not UTC server date) ─────────────────
+def t_trade_date_uses_ist():
+    from state_store import record_trade, _conn
+    from ist_clock import now_ist
+    import datetime as _dt
+    expected_date = now_ist().date().isoformat()
+    record_trade(
+        symbol="TESTSYM", strategy="intraday", side="BUY",
+        entry_price=100.0, exit_price=102.0, quantity=1,
+        gross_pnl=2.0, net_pnl=1.8, cost=0.2,
+        exit_reason="TEST_TRADE_DATE",
+        pattern="QA_TEST",
+    )
+    row = _conn().execute(
+        "SELECT trade_date FROM trades WHERE exit_reason='TEST_TRADE_DATE' ORDER BY id DESC LIMIT 1"
+    ).fetchone()
+    assert row is not None, "test trade not found"
+    assert row[0] == expected_date, (
+        f"trade_date={row[0]!r} but expected IST date {expected_date!r}; "
+        "check that state_store uses now_ist() not SQLite localtime"
+    )
+
+# ── T-5: get_trade_history uses IST cutoff (not SQLite localtime) ─────────
+def t_get_trade_history_ist_cutoff():
+    from state_store import get_trade_history, _conn
+    from ist_clock import now_ist
+    # Source-level check: query must not use SQLite 'localtime'
+    import inspect, state_store as _ss
+    src = inspect.getsource(_ss.get_trade_history)
+    assert "localtime" not in src, (
+        "get_trade_history still uses SQLite 'localtime' — "
+        "replace with Python now_ist().date() cutoff"
+    )
+    # Functional: a trade inserted with today's IST date must be returned
+    today = now_ist().date().isoformat()
+    with _conn() as c:
+        c.execute(
+            "INSERT INTO trades (symbol,strategy,side,entry_price,exit_price,quantity,"
+            "gross_pnl,net_pnl,cost,exit_reason,trade_date) "
+            "VALUES ('HISCHECK','intraday','BUY',100,102,1,2,1.8,0.2,'HIST_IST',?)",
+            (today,),
+        )
+    rows = get_trade_history(days=1)
+    found = [r for r in rows if r.get("exit_reason") == "HIST_IST"]
+    assert found, (
+        f"get_trade_history(days=1) did not return trade with trade_date={today!r}; "
+        "check that Python IST cutoff calculation is correct"
+    )
+
+# ── T-6: sensitive GET routes are in _SENSITIVE_GETS ─────────────────────
+def t_sensitive_gets_covers_trading_routes():
+    import main as _main
+    required = {
+        "/portfolio/trades/history",
+        "/bot/status",
+        "/adaptive/status",
+        "/agents",
+        "/regime/status",
+        "/portfolio/stats",
+        "/symbols/selected",
+    }
+    missing = required - _main._SENSITIVE_GETS
+    assert not missing, (
+        f"These sensitive routes are NOT in _SENSITIVE_GETS and will serve "
+        f"unauthenticated: {missing}"
+    )
+
+# ── T-7: record_trade accepts expected/actual fill price columns ───────────
+def t_record_trade_accepts_fill_price_columns():
+    from state_store import record_trade, _conn
+    record_trade(
+        symbol="FILLTEST", strategy="scalping", side="BUY",
+        entry_price=200.0, exit_price=201.5, quantity=5,
+        gross_pnl=7.5, net_pnl=7.0, cost=0.5,
+        exit_reason="FILL_PRICE_TEST",
+        expected_fill_price=199.8,
+        actual_fill_price=200.2,
+    )
+    row = _conn().execute(
+        "SELECT expected_fill_price, actual_fill_price FROM trades "
+        "WHERE exit_reason='FILL_PRICE_TEST' ORDER BY id DESC LIMIT 1"
+    ).fetchone()
+    assert row is not None, "fill-price test trade not found"
+    assert abs(row[0] - 199.8) < 0.01, f"expected_fill_price={row[0]}"
+    assert abs(row[1] - 200.2) < 0.01, f"actual_fill_price={row[1]}"
+
+# ── T-8: order_guard.register_order exists for reconcile rehydration ──────
+def t_order_guard_register_order_exists():
+    from order_guard import order_guard
+    assert hasattr(order_guard, "register_order"), (
+        "order_guard.register_order() missing — reconcile rehydration will fail"
+    )
+    # Functional: register then confirm it blocks a duplicate try_claim
+    order_guard.register_order("RECON_TEST", "intraday", "BUY", "PAPER-RECON-001")
+    from config import settings as _s
+    _orig = _s.post_exit_cooldown_sec
+    _s.post_exit_cooldown_sec = 0
+    try:
+        ok_claim, reason = order_guard.try_claim("RECON_TEST", "intraday", "BUY")
+        assert not ok_claim, f"register_order should block a duplicate try_claim, got: {reason}"
+    finally:
+        _s.post_exit_cooldown_sec = _orig
+        order_guard.release_claim("RECON_TEST", "intraday", "BUY")
+
+# ── T-9: TSL register accepts initial_sl kwarg ────────────────────────────
+def t_tsl_register_accepts_initial_sl():
+    from trailing_sl_engine import trailing_sl_engine
+    pos = trailing_sl_engine.register(
+        symbol="INITSL_TEST", strategy="intraday", side="BUY",
+        entry_price=500.0, quantity=10, order_id="PAPER-INITSL-001",
+        initial_sl=490.0,
+    )
+    assert abs(pos.current_sl - 490.0) < 0.01, (
+        f"initial_sl not honoured: current_sl={pos.current_sl}"
+    )
+    trailing_sl_engine.deregister("PAPER-INITSL-001")
+
+# ── T-10: sebi_compliance seeds whitelist from settings.sebi_whitelisted_ips
+def t_sebi_whitelist_seeds_from_config():
+    from config import settings as _s
+    _orig = _s.sebi_whitelisted_ips
+    _s.sebi_whitelisted_ips = "10.0.0.1,10.0.0.2"
+    try:
+        # Create a fresh SEBICompliance instance — it reads config in __init__
+        from sebi_compliance import SEBICompliance
+        sc = SEBICompliance()
+        assert sc.is_ip_allowed("10.0.0.1"), "seeded IP 10.0.0.1 should be allowed"
+        assert sc.is_ip_allowed("10.0.0.2"), "seeded IP 10.0.0.2 should be allowed"
+        assert not sc.is_ip_allowed("10.0.0.3"), "unseeded IP 10.0.0.3 should be blocked"
+    finally:
+        _s.sebi_whitelisted_ips = _orig
+
+# ── T-11: WS URL has no ?token= query param in dashboard.html ────────────
+def t_ws_url_has_no_query_token():
+    import re
+    html = Path("static/dashboard.html").read_text()
+    ws_lines = [l.strip() for l in html.splitlines() if "WebSocket(" in l]
+    for line in ws_lines:
+        assert "?token=" not in line, (
+            f"WebSocket URL still contains ?token= (leaks to proxy logs): {line!r}"
+        )
+
+run("schema_version table created by init_db",                        t_schema_version_table_exists)
+run("expected_fill_price / actual_fill_price columns in trades schema",t_fill_price_columns_in_schema)
+run("PAPER stale is_open positions cleared on init_db restart",        t_stale_paper_positions_cleared_on_init)
+run("trade_date stored as IST (not UTC server localtime)",             t_trade_date_uses_ist)
+run("get_trade_history uses Python IST cutoff, not SQLite localtime",  t_get_trade_history_ist_cutoff)
+run("_SENSITIVE_GETS covers /bot/status, /trades/history, /agents etc",t_sensitive_gets_covers_trading_routes)
+run("record_trade() accepts expected/actual fill price columns",        t_record_trade_accepts_fill_price_columns)
+run("order_guard.register_order() exists and blocks duplicate claim",   t_order_guard_register_order_exists)
+run("trailing_sl_engine.register() honours initial_sl kwarg",          t_tsl_register_accepts_initial_sl)
+run("SEBI whitelist seeded from settings.sebi_whitelisted_ips",        t_sebi_whitelist_seeds_from_config)
+run("dashboard.html WebSocket URL has no ?token= query param",         t_ws_url_has_no_query_token)
+
+
+# ══════════════════════════════════════════════════════════════════════════
 # FINAL SUMMARY
 # ══════════════════════════════════════════════════════════════════════════
 failed = summary()

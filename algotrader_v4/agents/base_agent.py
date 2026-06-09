@@ -178,6 +178,8 @@ def _setup_tsl_callbacks() -> None:
                 entry_time=__import__("datetime").datetime.utcfromtimestamp(
                     getattr(pos, "opened_at", 0) or 0
                 ).strftime("%Y-%m-%d %H:%M:%S"),
+                expected_fill_price=pos.current_sl,  # TSL level at time of hit
+                actual_fill_price=ltp,               # market price at fill
             )
         except Exception:
             pass

@@ -4516,9 +4516,10 @@ function appendPnlHistory() {
    WEBSOCKET: live LTP updates
 ═══════════════════════════════════════════════════════════════ */
 function connectWS() {
-  const token = localStorage.getItem('apiKey') || '';
-  const proto  = location.protocol === 'https:' ? 'wss' : 'ws';
-  const ws     = new WebSocket(`${proto}://${location.host}/ws?token=${encodeURIComponent(token)}`);
+  const proto = location.protocol === 'https:' ? 'wss' : 'ws';
+  // Auth via HttpOnly JWT cookie (set on login) — server reads ws.cookies.access_token.
+  // Never pass token as a query param: it appears in proxy logs and browser history.
+  const ws    = new WebSocket(`${proto}://${location.host}/ws`);
 
   // ── Abi Indicator Radar state ───────────────────────────────
   const _radarState = {};
