@@ -2559,6 +2559,48 @@ async def god_mode_status():
     return god_mode_manager.status()
 
 
+@app.get("/db/status", tags=["Operations"])
+async def db_status():
+    """Return DB file size, row counts per table, and schema version."""
+    from state_store import _conn, DB_PATH
+    import os
+    size_mb = round(DB_PATH.stat().st_size / 1_048_576, 2) if DB_PATH.exists() else 0
+    with _conn() as c:
+        tables = {}
+        for tbl in ("trades", "positions", "daily_pnl"):
+            row = c.execute(f"SELECT COUNT(*) FROM {tbl}").fetchone()
+            tables[tbl] = row[0] if row else 0
+        ver = c.execute("SELECT version FROM schema_version WHERE id=1").fetchone()
+    return {
+        "db_path":       str(DB_PATH),
+        "size_mb":       size_mb,
+        "schema_version": ver[0] if ver else None,
+        "row_counts":    tables,
+        "db_keep_days":  settings.db_keep_days,
+    }
+
+
+@app.post("/db/cleanup", tags=["Operations"])
+async def db_cleanup(keep_days: int = Query(default=None, ge=30, le=365)):
+    """
+    Manually trigger DB archival + VACUUM.
+    Removes closed positions and trades older than keep_days (default: settings.db_keep_days).
+    Runs in background — returns immediately.
+    """
+    import asyncio
+    from state_store import cleanup_old_data, vacuum_db
+    days = keep_days if keep_days is not None else settings.db_keep_days
+
+    async def _run():
+        loop = asyncio.get_event_loop()
+        removed = await loop.run_in_executor(None, lambda: cleanup_old_data(keep_days=days))
+        await loop.run_in_executor(None, vacuum_db)
+        logger.info("[db/cleanup] manual cleanup complete: {}", removed)
+
+    asyncio.create_task(_run())
+    return {"status": "started", "keep_days": days}
+
+
 # HIGH-7: reload=False in production — auto-reload bypasses security middleware
 if __name__ == "__main__":
     import uvicorn

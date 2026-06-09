@@ -2681,7 +2681,14 @@ function toast(msg, type = 'info', duration = 4000) {
   const icons = { ok: 'check-circle', error: 'x-circle', info: 'info', warn: 'alert-triangle' };
   const el = document.createElement('div');
   el.className = `toast ${type}`;
-  el.innerHTML = `<i data-lucide="${icons[type] || 'info'}" class="toast-icon"></i><span>${msg}</span>`;
+  // Use DOM construction to avoid innerHTML XSS — msg may contain server-sourced data
+  const icon = document.createElement('i');
+  icon.setAttribute('data-lucide', icons[type] || 'info');
+  icon.className = 'toast-icon';
+  const span = document.createElement('span');
+  span.textContent = msg;   // textContent: never parses HTML
+  el.appendChild(icon);
+  el.appendChild(span);
   document.getElementById('toast-container').appendChild(el);
   lucide.createIcons({ nodes: [el] });
   setTimeout(() => el.remove(), duration);
@@ -3317,13 +3324,13 @@ function renderGateLog() {
 
     return `<tr>
       <td style="color:var(--fg3)">${time}</td>
-      <td style="font-weight:600">${d.symbol || '—'}</td>
-      <td style="color:var(--fg3)">${d.strategy || '—'}</td>
-      <td>${d.signal || '—'}</td>
+      <td style="font-weight:600">${escHtml(d.symbol || '—')}</td>
+      <td style="color:var(--fg3)">${escHtml(d.strategy || '—')}</td>
+      <td>${escHtml(d.signal || '—')}</td>
       <td class="${confClass}">${conf}</td>
       <td>${decBadge}</td>
       <td style="color:var(--fg3)">${d.size_factor ? `×${d.size_factor}` : '1×'}</td>
-      <td><span class="reason-cell" title="${reason}">${reason}</span></td>
+      <td><span class="reason-cell" title="${escHtml(reason)}">${escHtml(reason)}</span></td>
     </tr>`;
   }).join('');
   lucide.createIcons({ nodes: [tbody] });
@@ -3363,7 +3370,7 @@ function renderDirectives() {
     return `<div class="directive-card">
       <div class="directive-strategy">${name.charAt(0).toUpperCase() + name.slice(1)}</div>
       <span class="directive-action ${cls}">${action.replace('_', ' ').toUpperCase()}</span>
-      <div class="directive-reason">${info.reason || ''}</div>
+      <div class="directive-reason">${escHtml(info.reason || '')}</div>
     </div>`;
   }).join('');
 
@@ -4344,17 +4351,17 @@ function renderActivityFeed(events) {
                                  ${e.gate_conf}%</span>` : '—';
     const detail = [e.pattern, e.gate_reason, e.detail].filter(Boolean).join(' · ').slice(0,80);
     return `<tr style="background:${s.bg}">
-      <td style="font-size:11px;color:var(--fg3);font-variant-numeric:tabular-nums">${e.time}</td>
-      <td><span style="font-size:11px;font-weight:600;color:${e.color};text-transform:uppercase">${e.agent}</span></td>
-      <td><span style="font-size:11px;font-weight:600;color:${s.text}">${s.label}</span></td>
-      <td style="font-weight:600">${e.symbol}</td>
+      <td style="font-size:11px;color:var(--fg3);font-variant-numeric:tabular-nums">${escHtml(e.time)}</td>
+      <td><span style="font-size:11px;font-weight:600;color:${e.color};text-transform:uppercase">${escHtml(e.agent)}</span></td>
+      <td><span style="font-size:11px;font-weight:600;color:${s.text}">${escHtml(s.label)}</span></td>
+      <td style="font-weight:600">${escHtml(e.symbol)}</td>
       <td><span style="font-size:11px;color:${e.side==='BUY'?'var(--green)':'var(--red)'}">
-            ${e.side || '—'}</span></td>
+            ${escHtml(e.side || '—')}</span></td>
       <td style="font-variant-numeric:tabular-nums">${e.price ? '₹'+e.price.toLocaleString('en-IN') : '—'}</td>
       <td>${e.qty || '—'}</td>
       <td>${pnl}</td>
       <td>${gc}</td>
-      <td style="font-size:11px;color:var(--fg3);max-width:260px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${detail}">${detail || '—'}</td>
+      <td style="font-size:11px;color:var(--fg3);max-width:260px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${escHtml(detail)}">${escHtml(detail || '—')}</td>
     </tr>`;
   }).join('');
 }
@@ -5012,7 +5019,7 @@ async function fetchOptionsChain() {
     }).join('');
   } catch(e) {
     const tbody = document.getElementById('oc-tbody');
-    if (tbody) tbody.innerHTML = `<tr><td colspan="11" class="no-data" style="color:var(--red)">Error: ${e.message}</td></tr>`;
+    if (tbody) tbody.innerHTML = `<tr><td colspan="11" class="no-data" style="color:var(--red)">Error: ${escHtml(e.message)}</td></tr>`;
     const spotEl = document.getElementById('oc-spot');
     const expEl = document.getElementById('oc-expiry');
     if (spotEl) spotEl.textContent = 'Spot: —';
@@ -5053,17 +5060,17 @@ async function fetchTradeJournal() {
       const net = t.net_pnl || 0;
       const cls = net >= 0 ? 'profit' : 'loss';
       return `<tr>
-        <td style="font-size:11px">${t.trade_date||''}</td>
-        <td><span style="color:${agentColor(t.strategy)}">${t.strategy||''}</span></td>
-        <td style="font-weight:600">${t.symbol||''}</td>
-        <td style="color:${t.side==='BUY'?'var(--green)':'var(--red)'}">${t.side||''}</td>
+        <td style="font-size:11px">${escHtml(t.trade_date||'')}</td>
+        <td><span style="color:${agentColor(t.strategy)}">${escHtml(t.strategy||'')}</span></td>
+        <td style="font-weight:600">${escHtml(t.symbol||'')}</td>
+        <td style="color:${t.side==='BUY'?'var(--green)':'var(--red)'}">${escHtml(t.side||'')}</td>
         <td>₹${(t.entry_price||0).toFixed(2)}</td>
         <td>₹${(t.exit_price||0).toFixed(2)}</td>
         <td>${t.quantity||0}</td>
         <td>₹${(t.gross_pnl||0).toFixed(0)}</td>
         <td style="color:var(--red)">₹${(t.cost||0).toFixed(0)}</td>
         <td class="${cls}" style="font-weight:600">₹${net.toFixed(0)}</td>
-        <td style="font-size:11px;color:var(--fg3)">${t.exit_reason||''}</td>
+        <td style="font-size:11px;color:var(--fg3)">${escHtml(t.exit_reason||'')}</td>
       </tr>`;
     }).join('');
   } catch(e) {

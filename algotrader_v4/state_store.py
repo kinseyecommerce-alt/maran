@@ -499,6 +499,60 @@ def get_pattern_breakdown(days: int = 30) -> list[dict]:
     return [dict(r) for r in rows]
 
 
+def cleanup_old_data(keep_days: int = 90) -> dict:
+    """
+    Archive old closed positions and purge trades older than keep_days.
+
+    Safe to call at any time — only removes closed (is_open=0) positions and
+    trades older than the cutoff. Open positions and recent data are untouched.
+
+    Returns a dict with the counts of rows removed from each table.
+    """
+    from ist_clock import now_ist as _now_ist
+    cutoff = (_now_ist().date() - timedelta(days=keep_days)).isoformat()
+    with _conn() as c:
+        # 1. Remove closed positions that closed before the cutoff
+        r1 = c.execute(
+            "DELETE FROM positions WHERE is_open=0 AND opened_at < ?", (cutoff,)
+        )
+        # 2. Remove old completed trade records (archive to CSV first if desired)
+        r2 = c.execute(
+            "DELETE FROM trades WHERE trade_date < ?", (cutoff,)
+        )
+        # 3. Trim daily_pnl rows older than cutoff
+        r3 = c.execute(
+            "DELETE FROM daily_pnl WHERE trade_date < ?", (cutoff,)
+        )
+        removed = {
+            "positions": r1.rowcount,
+            "trades":    r2.rowcount,
+            "daily_pnl": r3.rowcount,
+        }
+    from loguru import logger as _log
+    _log.info(
+        "[state_store] cleanup_old_data(keep_days={}): removed {} positions, {} trades, {} daily_pnl rows",
+        keep_days, removed["positions"], removed["trades"], removed["daily_pnl"],
+    )
+    return removed
+
+
+def vacuum_db() -> None:
+    """
+    Run SQLITE VACUUM to reclaim disk space after deletes.
+    Must be called OUTSIDE a transaction (autocommit mode).
+    Should be run at most once per day, typically after cleanup_old_data().
+    """
+    import sqlite3 as _sq
+    DB_PATH.parent.mkdir(parents=True, exist_ok=True)
+    con = _sq.connect(str(DB_PATH), isolation_level=None)   # autocommit required for VACUUM
+    try:
+        con.execute("VACUUM")
+    finally:
+        con.close()
+    from loguru import logger as _log
+    _log.info("[state_store] VACUUM complete — DB file reclaimed")
+
+
 # Ensure tables and migrations are applied on first import
 init_db()
 

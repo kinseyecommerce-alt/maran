@@ -240,6 +240,7 @@ class Settings(BaseSettings):
 
     # Runtime tuning — named constants (avoids magic numbers scattered across modules)
     db_write_queue_size:      int   = 2000   # state_store write backlog before drops
+    db_keep_days:             int   = 90    # days of trade/position history to retain (Sunday cleanup)
     adaptive_refresh_sec:     int   = 300    # how often base_agent re-reads adaptive params
     ws_max_connections:       int   = 50     # max simultaneous WebSocket clients
     order_max_retries:        int   = 3      # kite_client retry attempts on transient error
