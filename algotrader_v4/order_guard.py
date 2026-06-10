@@ -133,9 +133,13 @@ class OrderGuard:
             # Release cross-agent lock only if this agent still owns the symbol
             if self._symbol_owner.get(symbol) == f"{strategy}:{side}":
                 self._symbol_owner.pop(symbol, None)
-            # Per-symbol cooldown: 30s only after a losing trade (don't penalise winners)
-            if pnl < 0:
-                self._symbol_cooldown[symbol] = time.time() + 30
+            # Per-symbol cooldown: always apply a minimum gap after any exit so the
+            # next tick doesn't immediately re-enter on stale indicator state.
+            # Losing trades get a longer 30s cooldown to prevent whipsaw re-entries.
+            _min_sec = settings.post_exit_cooldown_sec
+            if _min_sec > 0:
+                min_cooldown = time.time() + (30 if pnl < 0 else _min_sec)
+                self._symbol_cooldown[symbol] = max(self._symbol_cooldown.get(symbol, 0), min_cooldown)
             # Per-strategy loss cooldown
             if pnl < 0 and settings.cooldown_after_loss_sec > 0:
                 self._cooldown_until[strategy] = time.time() + settings.cooldown_after_loss_sec

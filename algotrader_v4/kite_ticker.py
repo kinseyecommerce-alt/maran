@@ -17,6 +17,11 @@ from loguru import logger
 from config import settings
 from kite_client import kite_client
 
+# Imported at module level to avoid a sys.modules lookup on every tick callback.
+# tick_engine is already fully loaded before KiteTicker.start() is ever called,
+# so there is no circular-import risk here.
+from tick_engine import Tick as _Tick
+
 
 class KiteTicker:
     """
@@ -83,8 +88,19 @@ class KiteTicker:
 
     # ── KiteConnect callbacks (called from C thread) ──────────────────────────
 
+    # Kite WebSocket hard limit: 3000 tokens per connection.
+    # FULL mode is the heaviest — enforce the cap before subscribing.
+    _KITE_WS_TOKEN_LIMIT = 3000
+
     def _on_connect(self, ws, response) -> None:
         tokens = list(self._token_map.values())
+        if len(tokens) > self._KITE_WS_TOKEN_LIMIT:
+            logger.warning(
+                "[KiteTicker] {} tokens requested but Kite limit is {} — "
+                "truncating to first {} tokens",
+                len(tokens), self._KITE_WS_TOKEN_LIMIT, self._KITE_WS_TOKEN_LIMIT,
+            )
+            tokens = tokens[:self._KITE_WS_TOKEN_LIMIT]
         ws.subscribe(tokens)
         ws.set_mode(ws.MODE_FULL, tokens)
         self._connected = True
@@ -100,8 +116,6 @@ class KiteTicker:
     def _on_ticks(self, ws, ticks: list[dict]) -> None:
         if not self._callback or not self._loop:
             return
-
-        from tick_engine import Tick  # local import avoids circular at module level
 
         for t in ticks:
             token = t.get("instrument_token")
@@ -120,7 +134,7 @@ class KiteTicker:
             prev_close = ohlc.get("close", 0.0)
             pct_change = (abs_change / prev_close * 100.0) if prev_close else 0.0
 
-            tick = Tick(
+            tick = _Tick(
                 symbol     = sym,
                 ltp        = t.get("last_price", 0.0),
                 bid        = buys[0].get("price",  0.0) if buys  else 0.0,

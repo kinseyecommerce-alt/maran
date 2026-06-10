@@ -13,6 +13,7 @@ httpx==0.28.1
 fastapi==0.136.3
 starlette==1.1.0
 uvicorn[standard]==0.48.0
+uvloop>=0.21.0           # 2-4× faster asyncio event loop (Linux/macOS only)
 websockets==16.0
 
 # ── Security ──────────────────────────────────────────────────────
@@ -34,6 +35,9 @@ matplotlib==3.10.9
 
 # ── Scheduling ────────────────────────────────────────────────────
 apscheduler==3.11.2
+
+# ── Database (optional PostgreSQL backend) ───────────────────────
+psycopg2-binary>=2.9.0   # only needed when DATABASE_URL=postgres://... is set
 
 # ── Utilities ────────────────────────────────────────────────────
 python-dotenv==1.0.1

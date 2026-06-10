@@ -133,29 +133,37 @@ check("P-2  No duplicate orders", p2_no_duplicate_orders)
 # ─────────────────────────────────────────────────────────────────────────────
 def p3_kill_switch_works():
     """After trigger_kill_switch(), pre_order_check must reject every symbol."""
+    from risk_manager import risk_manager as _rm
+    _orig_halted = _rm.is_trading_halted
     compliance = SEBICompliance()
     # "intraday" is in APPROVED_ALGO_IDS — no registration step needed
 
-    # Baseline: should be ACTIVE
-    assert compliance._state == KillSwitchState.ACTIVE, "Expected ACTIVE state"
+    try:
+        # Baseline: should be ACTIVE
+        assert compliance._state == KillSwitchState.ACTIVE, "Expected ACTIVE state"
 
-    # Trigger the kill switch
-    compliance.trigger_kill_switch("automated safety test")
-    assert compliance._state == KillSwitchState.KILLED, "State should be KILLED"
+        # Trigger the kill switch
+        compliance.trigger_kill_switch("automated safety test")
+        assert compliance._state == KillSwitchState.KILLED, "State should be KILLED"
 
-    # Every pre_order_check must now fail
-    ok, _, reason = compliance.pre_order_check(
-        strategy="intraday", symbol="RELIANCE", exchange="NSE",
-        transaction_type="BUY", quantity=10, order_type="MARKET",
-        price_at_signal=1500.0, signal_source="test", regime="trending",
-    )
-    assert not ok, "pre_order_check allowed an order after kill switch!"
-    assert "kill" in reason.lower() or "halted" in reason.lower() or "killed" in reason.lower(), \
-        f"Kill switch rejection reason unclear: {reason}"
+        # Every pre_order_check must now fail
+        ok, _, reason = compliance.pre_order_check(
+            strategy="intraday", symbol="RELIANCE", exchange="NSE",
+            transaction_type="BUY", quantity=10, order_type="MARKET",
+            price_at_signal=1500.0, signal_source="test", regime="trending",
+        )
+        assert not ok, "pre_order_check allowed an order after kill switch!"
+        assert "kill" in reason.lower() or "halted" in reason.lower() or "killed" in reason.lower(), \
+            f"Kill switch rejection reason unclear: {reason}"
 
-    # Verify resume is blocked until reset
-    resumed, msg = compliance.resume_trading()
-    assert not resumed, "resume_trading() should fail while kill switch is active"
+        # Verify resume is blocked until reset
+        resumed, msg = compliance.resume_trading()
+        assert not resumed, "resume_trading() should fail while kill switch is active"
+    finally:
+        # Restore global risk_manager halt flag so subsequent tests are not blocked.
+        # (trigger_kill_switch now also sets risk_manager.is_trading_halted so the
+        # two subsystems are in sync — restore both after this isolation test.)
+        _rm.is_trading_halted = _orig_halted
 
 check("P-3  Kill switch blocks all new orders", p3_kill_switch_works)
 
@@ -302,9 +310,13 @@ async def p6_failed_order_no_fake_position():
             # _try_enter is called directly — candle-count guard is in _run_loop
             snap = MarketSnapshot(symbol="RELIANCE", tick=tick, indicators=ind)
 
-            # Reset claim state for RELIANCE
+            # Reset claim state for RELIANCE (zero cooldown so cleanup doesn't
+            # impose a symbol cooldown that bleeds into later tests).
+            _orig_cd = settings.post_exit_cooldown_sec
+            settings.post_exit_cooldown_sec = 0
             order_guard.release_order("RELIANCE", "intraday", "BUY", 0.0)
             order_guard.release_order("RELIANCE", "intraday", "SELL", 0.0)
+            settings.post_exit_cooldown_sec = _orig_cd
 
             await agent._try_enter(snap, "BUY", {
                 "score": 10, "pattern": "TEST", "stop_loss": 1490.0, "target": 1530.0,
@@ -587,8 +599,13 @@ async def p10_entry_fail_cancels_orphan_sl():
     snap = MarketSnapshot(symbol="RELIANCE", tick=tick, indicators=ind)
 
     original_mode = settings.trading_mode
+    original_cooldown = settings.post_exit_cooldown_sec
+    # Zero cooldown so the pre-test cleanup release_order calls don't impose a
+    # symbol cooldown that would block try_claim() inside the test body.
+    settings.post_exit_cooldown_sec = 0
     order_guard.release_order("RELIANCE", "intraday", "BUY", 0.0)
     order_guard.release_order("RELIANCE", "intraday", "SELL", 0.0)
+    settings.post_exit_cooldown_sec = original_cooldown
     try:
         settings.trading_mode = "PAPER"   # gates simple; placement is mocked regardless
         with mock.patch.object(kite_client, "place_order", side_effect=_place_side), \
@@ -607,8 +624,10 @@ async def p10_entry_fail_cancels_orphan_sl():
             assert raised, "expected entry_failed RuntimeError"
     finally:
         settings.trading_mode = original_mode
+        settings.post_exit_cooldown_sec = 0
         order_guard.release_order("RELIANCE", "intraday", "BUY", 0.0)
         order_guard.release_order("RELIANCE", "intraday", "SELL", 0.0)
+        settings.post_exit_cooldown_sec = original_cooldown
 
     assert "SL-ORPHAN-123" in cancel_calls, \
         "orphan SL-M was NOT cancelled after entry failure → naked-position risk"
@@ -661,17 +680,25 @@ async def p11_partial_fill_resizes_sl():
 
     original_mode  = settings.trading_mode
     original_limit = getattr(settings, "use_limit_orders", False)
+    original_cooldown = settings.post_exit_cooldown_sec
+    # Zero cooldown so the pre-test cleanup releases don't impose a symbol cooldown.
+    settings.post_exit_cooldown_sec = 0
     order_guard.release_order("RELIANCE", "intraday", "BUY", 0.0)
     order_guard.release_order("RELIANCE", "intraday", "SELL", 0.0)
+    settings.post_exit_cooldown_sec = original_cooldown
     try:
         settings.trading_mode = "LIVE"
         # Force MARKET path so this test is environment-independent.
         # The LIMIT-path cancel/fill race is covered by the use_limit_orders path;
         # this property tests the MARKET parallel-gather path specifically.
         settings.use_limit_orders = False
+        import agents.base_agent as _ba_mod
         # Isolate the SL-resize logic: the risk gate (P-5) and SEBI gate (P-3) are
         # covered elsewhere and would reject here purely on wall-clock market hours.
-        with mock.patch.object(kite_client, "place_order", side_effect=_place), \
+        # session_bucket is mocked to return a valid intraday session so the
+        # market-hours guard in _place_orders does not fire outside trading hours.
+        with mock.patch.object(_ba_mod, "session_bucket", return_value=("POWER_HOUR", 80)), \
+             mock.patch.object(kite_client, "place_order", side_effect=_place), \
              mock.patch.object(kite_client, "order_history", side_effect=_order_history), \
              mock.patch.object(kite_client, "modify_order", side_effect=_modify), \
              mock.patch.object(kite_client, "cancel_order", side_effect=lambda o: o), \
@@ -687,8 +714,10 @@ async def p11_partial_fill_resizes_sl():
     finally:
         settings.trading_mode = original_mode
         settings.use_limit_orders = original_limit
+        settings.post_exit_cooldown_sec = 0
         order_guard.release_order("RELIANCE", "intraday", "BUY", 0.0)
         order_guard.release_order("RELIANCE", "intraday", "SELL", 0.0)
+        settings.post_exit_cooldown_sec = original_cooldown
 
     assert final_qty == 5, f"qty should be resized to filled 5, got {final_qty}"
     assert ("SL-1", 5) in modify_calls, \

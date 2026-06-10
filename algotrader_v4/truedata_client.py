@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import asyncio
 import threading
+import time as _time_mod
 from datetime import datetime, timedelta
 from typing import Callable, Optional
 
@@ -23,6 +24,10 @@ from loguru import logger
 
 from config import settings
 from ist_clock import now_ist
+
+# Imported at module level — tick_engine is fully loaded before TrueDataTicker.start()
+# is ever called, so there is no circular-import risk.
+from tick_engine import Tick as _Tick
 
 
 # ── Lazy shared TD connection ──────────────────────────────────────────────────
@@ -106,6 +111,17 @@ class TrueDataTicker:
         self._loop:     Optional[asyncio.AbstractEventLoop] = None
         self._connected = False
         self._symbols:  list[str] = []
+        self._last_tick_ts: float = 0.0  # monotonic time of most recent received tick
+
+    @property
+    def is_connected(self) -> bool:
+        """True only if connected AND ticks have arrived recently (last 30s).
+        Detects silent feed death where the socket stays open but stops delivering data."""
+        if not self._connected:
+            return False
+        if self._last_tick_ts > 0 and _time_mod.monotonic() - self._last_tick_ts > 30:
+            return False
+        return True
 
     def start(self, symbols: list[str], on_tick_callback: Callable,
               loop: asyncio.AbstractEventLoop) -> None:
@@ -164,9 +180,9 @@ class TrueDataTicker:
                 time.sleep(wait)
 
     def _on_tick(self, tick) -> None:
+        self._last_tick_ts = _time_mod.monotonic()  # heartbeat — updated on every received tick
         if not self._callback or not self._loop:
             return
-        from tick_engine import Tick  # local import avoids circular at module level
         try:
             sym = _strip_exchange(
                 str(getattr(tick, "tickerid", "") or getattr(tick, "Symbol", ""))
@@ -185,7 +201,7 @@ class TrueDataTicker:
             chg     = round(ltp - pc, 2)   if pc else 0.0
             chg_pct = round(chg / pc * 100, 2) if pc else 0.0
 
-            t = Tick(
+            t = _Tick(
                 symbol=sym, ltp=ltp, bid=bid, ask=ask,
                 volume=vol, change=chg, change_pct=chg_pct,
                 high=hi, low=lo, open=op, timestamp=now_ist(),

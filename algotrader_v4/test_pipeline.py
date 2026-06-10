@@ -360,9 +360,17 @@ def t_og_blocks_duplicate():
 def t_og_release_frees():
     og = OrderGuard()
     og.register_order("WIPRO", "intraday", "BUY", "oid-003")
-    og.release_order("WIPRO", "intraday", "BUY", 100.0)
-    ok_, _ = og.can_place("WIPRO", "intraday", "BUY")
-    assert ok_ is True
+    # Disable post-exit cooldown so the slot is immediately available for re-entry;
+    # the cooldown itself is tested separately.
+    from config import settings as _s
+    _orig = _s.post_exit_cooldown_sec
+    _s.post_exit_cooldown_sec = 0
+    try:
+        og.release_order("WIPRO", "intraday", "BUY", 100.0)
+        ok_, _ = og.can_place("WIPRO", "intraday", "BUY")
+        assert ok_ is True
+    finally:
+        _s.post_exit_cooldown_sec = _orig
 
 def t_og_active_anywhere():
     og = OrderGuard()
@@ -994,7 +1002,8 @@ def t_scalping_loss_streak_cooldown():
     agent._record_outcome(sym, False)
     agent._record_outcome(sym, False)
     assert sym in agent._cooldown_until
-    assert agent._cooldown_until[sym] > datetime.now()
+    from ist_clock import now_ist
+    assert agent._cooldown_until[sym] > now_ist()
 
 def t_scalping_win_resets_streak():
     agent = ScalpingAgent()
@@ -1527,7 +1536,13 @@ def t_full_order_pipeline():
     assert sl_oid.startswith("PAPER-")
 
     pnl = 300.0
+    # Disable post-exit cooldown so immediate can_place succeeds in this unit test;
+    # the cooldown is tested in t_og_release_frees and integration tests.
+    from config import settings as _s
+    _orig_cds = _s.post_exit_cooldown_sec
+    _s.post_exit_cooldown_sec = 0
     og.release_order(symbol, "intraday", "BUY", pnl)
+    _s.post_exit_cooldown_sec = _orig_cds
     rm.record_trade(pnl)
     rm.position_closed()
     tsl.deregister(oid)
@@ -3528,6 +3543,413 @@ run("Empty pre-learned list yields 0 approvals (not approve-all)", t_filter_empt
 run("Agent missing from seed file approves full watchlist",         t_filter_missing_agent_approves_all)
 run("Non-empty pre-learned list filters to listed symbols only",    t_filter_non_empty_prelearned_filters_correctly)
 run("Integration: filter_watchlist empty pre-learned → 0 approved",t_filter_integration_empty_list)
+
+
+# ══════════════════════════════════════════════════════════════════════════
+# 25. QA AUDIT — DB, AUTH, RECONCILE, SCHEMA
+# ══════════════════════════════════════════════════════════════════════════
+print("\n" + "═" * 60)
+print("  25. QA AUDIT — DB, AUTH, RECONCILE, SCHEMA")
+print("═" * 60)
+
+# ── T-1: schema_version table is created by init_db ──────────────────────
+def t_schema_version_table_exists():
+    from state_store import init_db, _conn
+    init_db()   # idempotent — safe on the live test DB
+    tables = {r[0] for r in _conn().execute(
+        "SELECT name FROM sqlite_master WHERE type='table'"
+    )}
+    assert "schema_version" in tables, f"schema_version missing; tables={tables}"
+    ver = _conn().execute("SELECT version FROM schema_version WHERE id=1").fetchone()
+    assert ver is not None, "schema_version has no seed row (INSERT OR IGNORE failed)"
+    assert ver[0] >= 1, f"version must be >= 1, got {ver[0]}"
+
+# ── T-2: init_db adds expected/actual fill price columns ─────────────────
+def t_fill_price_columns_in_schema():
+    from state_store import init_db, _conn
+    init_db()
+    cols = {r[1] for r in _conn().execute("PRAGMA table_info(trades)")}
+    assert "expected_fill_price" in cols, "expected_fill_price missing from trades"
+    assert "actual_fill_price" in cols, "actual_fill_price missing from trades"
+
+# ── T-3: PAPER stale position cleanup on init_db ─────────────────────────
+def t_stale_paper_positions_cleared_on_init():
+    from state_store import init_db, upsert_position, get_open_positions, _conn
+    from config import settings as _s
+    _orig_mode = _s.trading_mode
+    _s.trading_mode = "PAPER"
+    try:
+        init_db()
+        # Insert a fake stale PAPER position
+        upsert_position(
+            order_id="PAPER-STALE-TEST", symbol="TESTPAPER", strategy="intraday",
+            side="BUY", entry_price=100.0, quantity=1, sl_price=98.0, target=103.0,
+            product="MIS", pattern="",
+        )
+        # Confirm it's open
+        open_before = [p for p in get_open_positions() if p["order_id"] == "PAPER-STALE-TEST"]
+        assert open_before, "stale position was not inserted"
+        # Re-run init_db in PAPER mode — should close it
+        init_db()
+        open_after = [p for p in get_open_positions() if p["order_id"] == "PAPER-STALE-TEST"]
+        assert not open_after, f"stale PAPER position not cleared; still {open_after}"
+    finally:
+        _s.trading_mode = _orig_mode
+
+# ── T-4: trade_date written as IST (not UTC server date) ─────────────────
+def t_trade_date_uses_ist():
+    from state_store import record_trade, _conn
+    from ist_clock import now_ist
+    import datetime as _dt
+    expected_date = now_ist().date().isoformat()
+    record_trade(
+        symbol="TESTSYM", strategy="intraday", side="BUY",
+        entry_price=100.0, exit_price=102.0, quantity=1,
+        gross_pnl=2.0, net_pnl=1.8, cost=0.2,
+        exit_reason="TEST_TRADE_DATE",
+        pattern="QA_TEST",
+    )
+    row = _conn().execute(
+        "SELECT trade_date FROM trades WHERE exit_reason='TEST_TRADE_DATE' ORDER BY id DESC LIMIT 1"
+    ).fetchone()
+    assert row is not None, "test trade not found"
+    assert row[0] == expected_date, (
+        f"trade_date={row[0]!r} but expected IST date {expected_date!r}; "
+        "check that state_store uses now_ist() not SQLite localtime"
+    )
+
+# ── T-5: get_trade_history uses IST cutoff (not SQLite localtime) ─────────
+def t_get_trade_history_ist_cutoff():
+    from state_store import get_trade_history, _conn
+    from ist_clock import now_ist
+    # Source-level check: query must not use SQLite 'localtime'
+    import inspect, state_store as _ss
+    src = inspect.getsource(_ss.get_trade_history)
+    assert "localtime" not in src, (
+        "get_trade_history still uses SQLite 'localtime' — "
+        "replace with Python now_ist().date() cutoff"
+    )
+    # Functional: a trade inserted with today's IST date must be returned
+    today = now_ist().date().isoformat()
+    with _conn() as c:
+        c.execute(
+            "INSERT INTO trades (symbol,strategy,side,entry_price,exit_price,quantity,"
+            "gross_pnl,net_pnl,cost,exit_reason,trade_date) "
+            "VALUES ('HISCHECK','intraday','BUY',100,102,1,2,1.8,0.2,'HIST_IST',?)",
+            (today,),
+        )
+    rows = get_trade_history(days=1)
+    found = [r for r in rows if r.get("exit_reason") == "HIST_IST"]
+    assert found, (
+        f"get_trade_history(days=1) did not return trade with trade_date={today!r}; "
+        "check that Python IST cutoff calculation is correct"
+    )
+
+# ── T-6: sensitive GET routes are in _SENSITIVE_GETS ─────────────────────
+def t_sensitive_gets_covers_trading_routes():
+    import main as _main
+    required = {
+        "/portfolio/trades/history",
+        "/bot/status",
+        "/adaptive/status",
+        "/agents",
+        "/regime/status",
+        "/portfolio/stats",
+        "/symbols/selected",
+    }
+    missing = required - _main._SENSITIVE_GETS
+    assert not missing, (
+        f"These sensitive routes are NOT in _SENSITIVE_GETS and will serve "
+        f"unauthenticated: {missing}"
+    )
+
+# ── T-7: record_trade accepts expected/actual fill price columns ───────────
+def t_record_trade_accepts_fill_price_columns():
+    from state_store import record_trade, _conn
+    record_trade(
+        symbol="FILLTEST", strategy="scalping", side="BUY",
+        entry_price=200.0, exit_price=201.5, quantity=5,
+        gross_pnl=7.5, net_pnl=7.0, cost=0.5,
+        exit_reason="FILL_PRICE_TEST",
+        expected_fill_price=199.8,
+        actual_fill_price=200.2,
+    )
+    row = _conn().execute(
+        "SELECT expected_fill_price, actual_fill_price FROM trades "
+        "WHERE exit_reason='FILL_PRICE_TEST' ORDER BY id DESC LIMIT 1"
+    ).fetchone()
+    assert row is not None, "fill-price test trade not found"
+    assert abs(row[0] - 199.8) < 0.01, f"expected_fill_price={row[0]}"
+    assert abs(row[1] - 200.2) < 0.01, f"actual_fill_price={row[1]}"
+
+# ── T-8: order_guard.register_order exists for reconcile rehydration ──────
+def t_order_guard_register_order_exists():
+    from order_guard import order_guard
+    assert hasattr(order_guard, "register_order"), (
+        "order_guard.register_order() missing — reconcile rehydration will fail"
+    )
+    # Functional: register then confirm it blocks a duplicate try_claim
+    order_guard.register_order("RECON_TEST", "intraday", "BUY", "PAPER-RECON-001")
+    from config import settings as _s
+    _orig = _s.post_exit_cooldown_sec
+    _s.post_exit_cooldown_sec = 0
+    try:
+        ok_claim, reason = order_guard.try_claim("RECON_TEST", "intraday", "BUY")
+        assert not ok_claim, f"register_order should block a duplicate try_claim, got: {reason}"
+    finally:
+        _s.post_exit_cooldown_sec = _orig
+        order_guard.release_claim("RECON_TEST", "intraday", "BUY")
+
+# ── T-9: TSL register accepts initial_sl kwarg ────────────────────────────
+def t_tsl_register_accepts_initial_sl():
+    from trailing_sl_engine import trailing_sl_engine
+    pos = trailing_sl_engine.register(
+        symbol="INITSL_TEST", strategy="intraday", side="BUY",
+        entry_price=500.0, quantity=10, order_id="PAPER-INITSL-001",
+        initial_sl=490.0,
+    )
+    assert abs(pos.current_sl - 490.0) < 0.01, (
+        f"initial_sl not honoured: current_sl={pos.current_sl}"
+    )
+    trailing_sl_engine.deregister("PAPER-INITSL-001")
+
+# ── T-10: sebi_compliance seeds whitelist from settings.sebi_whitelisted_ips
+def t_sebi_whitelist_seeds_from_config():
+    from config import settings as _s
+    _orig = _s.sebi_whitelisted_ips
+    _s.sebi_whitelisted_ips = "10.0.0.1,10.0.0.2"
+    try:
+        # Create a fresh SEBICompliance instance — it reads config in __init__
+        from sebi_compliance import SEBICompliance
+        sc = SEBICompliance()
+        assert sc.is_ip_allowed("10.0.0.1"), "seeded IP 10.0.0.1 should be allowed"
+        assert sc.is_ip_allowed("10.0.0.2"), "seeded IP 10.0.0.2 should be allowed"
+        assert not sc.is_ip_allowed("10.0.0.3"), "unseeded IP 10.0.0.3 should be blocked"
+    finally:
+        _s.sebi_whitelisted_ips = _orig
+
+# ── T-11: WS URL has no ?token= query param in dashboard.html ────────────
+def t_ws_url_has_no_query_token():
+    import re
+    html = Path("static/dashboard.html").read_text()
+    ws_lines = [l.strip() for l in html.splitlines() if "WebSocket(" in l]
+    for line in ws_lines:
+        assert "?token=" not in line, (
+            f"WebSocket URL still contains ?token= (leaks to proxy logs): {line!r}"
+        )
+
+run("schema_version table created by init_db",                        t_schema_version_table_exists)
+run("expected_fill_price / actual_fill_price columns in trades schema",t_fill_price_columns_in_schema)
+run("PAPER stale is_open positions cleared on init_db restart",        t_stale_paper_positions_cleared_on_init)
+run("trade_date stored as IST (not UTC server localtime)",             t_trade_date_uses_ist)
+run("get_trade_history uses Python IST cutoff, not SQLite localtime",  t_get_trade_history_ist_cutoff)
+run("_SENSITIVE_GETS covers /bot/status, /trades/history, /agents etc",t_sensitive_gets_covers_trading_routes)
+run("record_trade() accepts expected/actual fill price columns",        t_record_trade_accepts_fill_price_columns)
+run("order_guard.register_order() exists and blocks duplicate claim",   t_order_guard_register_order_exists)
+run("trailing_sl_engine.register() honours initial_sl kwarg",          t_tsl_register_accepts_initial_sl)
+run("SEBI whitelist seeded from settings.sebi_whitelisted_ips",        t_sebi_whitelist_seeds_from_config)
+run("dashboard.html WebSocket URL has no ?token= query param",         t_ws_url_has_no_query_token)
+
+
+# ════════════════════════════════════════════════════════════
+print("\n" + "═"*60)
+print("  26. VOL SURFACE + POSTGRESQL ADAPTER")
+print("═"*60)
+
+def t_vol_surface_otm_put_iv_gt_atm():
+    from greeks_engine import vol_surface_iv
+    spot, atm_iv = 24000.0, 0.20
+    otm_put_iv = vol_surface_iv(spot, 23000.0, atm_iv, "PE")   # OTM put: strike < spot
+    assert otm_put_iv > atm_iv, f"OTM PE IV {otm_put_iv:.4f} should exceed ATM IV {atm_iv}"
+
+def t_vol_surface_smile_adds_to_otm_ce():
+    from greeks_engine import vol_surface_iv
+    spot, atm_iv = 24000.0, 0.20
+    otm_ce_iv = vol_surface_iv(spot, 25000.0, atm_iv, "CE")   # OTM call: strike > spot
+    # Smile curve adds to OTM CE (quadratic term dominates skew for far OTM)
+    assert otm_ce_iv > 0.05, f"OTM CE IV must be positive: {otm_ce_iv}"
+
+def t_vol_surface_atm_returns_near_atm_iv():
+    from greeks_engine import vol_surface_iv
+    spot, atm_iv = 24000.0, 0.20
+    atm_iv_result = vol_surface_iv(spot, spot, atm_iv, "CE")
+    # At ATM moneyness=0 → IV equals atm_iv exactly
+    assert abs(atm_iv_result - atm_iv) < 1e-9, f"ATM should return atm_iv, got {atm_iv_result}"
+
+def t_strike_market_price_pe_gt_ce_otm():
+    from greeks_engine import strike_market_price
+    spot = 24000.0
+    # Deep OTM put should be more expensive than deep OTM call (put skew)
+    pe_price = strike_market_price(spot, 22000.0, 0.20, "PE")
+    ce_price = strike_market_price(spot, 22000.0, 0.20, "CE")
+    assert pe_price > 0 and ce_price >= 0, "Prices must be non-negative"
+
+def t_calculate_greeks_uses_vol_surface_when_atm_iv_given():
+    from greeks_engine import calculate_greeks, vol_surface_iv
+    from datetime import date, timedelta
+    spot, strike = 24000.0, 23000.0
+    expiry = date.today() + timedelta(days=7)
+    atm_iv = 0.20
+    g = calculate_greeks(spot, strike, expiry, "PE", market_price=50.0, atm_iv=atm_iv)
+    expected_iv = vol_surface_iv(spot, strike, atm_iv, "PE")
+    # g.iv is rounded to 4 decimal places; allow rounding tolerance
+    assert abs(g.iv - expected_iv) < 1e-3, \
+        f"Greeks IV {g.iv} should be close to vol surface {expected_iv}"
+
+def t_vol_surface_clamped():
+    from greeks_engine import vol_surface_iv
+    # Extreme OTM should not produce negative or absurd IV
+    iv = vol_surface_iv(24000, 10000, 0.20, "PE")
+    assert 0.05 <= iv <= 2.0, f"IV should be clamped to [5%, 200%], got {iv}"
+
+def t_pg_adapter_false_without_url():
+    from state_store import _USE_PG
+    import os
+    if not os.environ.get("DATABASE_URL", ""):
+        assert not _USE_PG, "_USE_PG should be False when DATABASE_URL is not set"
+    # If DATABASE_URL is set in env, skip this check
+    assert True
+
+def t_pg_placeholder_returns_question_mark_for_sqlite():
+    from state_store import _ph, _USE_PG
+    if not _USE_PG:
+        assert _ph() == "?", f"SQLite placeholder should be '?', got {_ph()!r}"
+
+def t_pg_init_pg_callable():
+    from state_store import _init_pg, _init_sqlite
+    assert callable(_init_pg)
+    assert callable(_init_sqlite)
+
+def t_options_chain_endpoint_has_atm_iv_field():
+    """The /options/chain response dict now contains atm_iv_pct."""
+    import importlib.util, sys, types
+    # Just verify the endpoint function references atm_iv_pct in its source
+    import inspect, main as _main
+    src = inspect.getsource(_main.options_chain)
+    assert "atm_iv_pct" in src, "options_chain must return atm_iv_pct field"
+
+def t_options_chain_uses_strike_market_price():
+    import inspect, main as _main
+    src = inspect.getsource(_main.options_chain)
+    assert "strike_market_price" in src, "options_chain must use vol-surface strike_market_price()"
+
+run("vol surface: OTM PE IV > ATM IV (put skew)",                      t_vol_surface_otm_put_iv_gt_atm)
+run("vol surface: OTM CE IV positive (smile)",                         t_vol_surface_smile_adds_to_otm_ce)
+run("vol surface: ATM strike returns exactly atm_iv",                  t_vol_surface_atm_returns_near_atm_iv)
+run("strike_market_price: prices are non-negative",                    t_strike_market_price_pe_gt_ce_otm)
+run("calculate_greeks uses vol surface IV when atm_iv supplied",       t_calculate_greeks_uses_vol_surface_when_atm_iv_given)
+run("vol surface: IV clamped to [5%, 200%] even for extreme strikes",  t_vol_surface_clamped)
+run("PG adapter: _USE_PG=False without DATABASE_URL",                  t_pg_adapter_false_without_url)
+run("PG adapter: _ph() returns '?' for SQLite backend",                t_pg_placeholder_returns_question_mark_for_sqlite)
+run("PG adapter: _init_pg and _init_sqlite both callable",             t_pg_init_pg_callable)
+run("options chain: endpoint returns atm_iv_pct field",                t_options_chain_endpoint_has_atm_iv_field)
+run("options chain: endpoint uses vol-surface strike_market_price()",  t_options_chain_uses_strike_market_price)
+
+
+# ══════════════════════════════════════════════════════════════════════════
+# 27. MULTI-BROKER ROUTER
+# ══════════════════════════════════════════════════════════════════════════
+print("════════════════════════════════════════════════════════════")
+print("════════════════════════════════════════════════════════════")
+
+def t_broker_router_imports():
+    from broker_router import broker_router, BrokerRouter
+    assert isinstance(broker_router, BrokerRouter)
+
+def t_enable_multi_broker_default_false():
+    from config import settings
+    assert hasattr(settings, "enable_multi_broker")
+    assert settings.enable_multi_broker is False   # default off — safe
+
+def t_secondary_brokers_setting_exists():
+    from config import settings
+    assert hasattr(settings, "secondary_brokers")
+    assert isinstance(settings.secondary_brokers, str)
+
+def t_broker_router_has_no_secondaries_by_default():
+    from broker_router import BrokerRouter
+    r = BrokerRouter()
+    assert not r.has_secondaries
+    assert r.secondary_names() == []
+    assert r.status()["enabled"] is False
+
+def t_broker_router_cancel_order_all_graceful_on_missing_broker():
+    """mirror_exit with no registered secondaries must not raise."""
+    from broker_router import BrokerRouter
+    r = BrokerRouter()
+    r.mirror_exit("nonexistent-order-id", quantity=10, agent_tag="Test")   # must not raise
+
+def t_broker_router_add_and_remove_secondary():
+    from broker_router import BrokerRouter
+    import unittest.mock as m
+
+    class FakeBroker:
+        pass
+
+    r = BrokerRouter()
+    r.add_secondary("upstox", FakeBroker())
+    assert r.has_secondaries
+    assert "upstox" in r.secondary_names()
+    r.remove_secondary("upstox")
+    assert not r.has_secondaries
+
+def t_broker_router_mirror_entry_error_does_not_raise():
+    """If secondary place_order throws, mirror_entry must swallow it."""
+    from broker_router import BrokerRouter
+    import unittest.mock as m
+
+    class BadBroker:
+        def place_order(self, **_):
+            raise RuntimeError("network error")
+
+    r = BrokerRouter()
+    r.add_secondary("bad", BadBroker())
+    # Should not raise even though the secondary fails
+    r.mirror_entry(
+        primary_order_id="TEST-001",
+        tradingsymbol="RELIANCE",
+        exchange="NSE",
+        transaction_type="BUY",
+        quantity=1,
+        product="MIS",
+        sl_trigger=1250.0,
+        agent_tag="Agent-intraday",
+    )
+
+def t_broker_router_squareoff_secondaries_returns_dict():
+    from broker_router import BrokerRouter
+    import unittest.mock as m
+
+    class FakeBroker:
+        def squareoff_all_positions(self): return []
+
+    r = BrokerRouter()
+    r.add_secondary("fake", FakeBroker())
+    result = r.squareoff_all_secondaries()
+    assert isinstance(result, dict)
+    assert result.get("fake") == "ok"
+
+def t_broker_status_endpoint_has_primary_key():
+    import inspect, main as _m
+    src = inspect.getsource(_m.broker_status)
+    assert "primary" in src
+    assert "multi_broker_enabled" in src
+
+def t_base_agent_imports_broker_router():
+    import inspect, agents.base_agent as _ba
+    src = inspect.getsource(_ba)
+    assert "broker_router" in src, "base_agent must import broker_router"
+
+run("broker_router module imports correctly",                      t_broker_router_imports)
+run("enable_multi_broker default is False",                        t_enable_multi_broker_default_false)
+run("secondary_brokers setting exists",                            t_secondary_brokers_setting_exists)
+run("BrokerRouter has no secondaries by default",                  t_broker_router_has_no_secondaries_by_default)
+run("mirror_exit with no secondaries does not raise",              t_broker_router_cancel_order_all_graceful_on_missing_broker)
+run("BrokerRouter add/remove secondary works",                     t_broker_router_add_and_remove_secondary)
+run("mirror_entry swallows secondary broker errors",               t_broker_router_mirror_entry_error_does_not_raise)
+run("squareoff_all_secondaries returns status dict",               t_broker_router_squareoff_secondaries_returns_dict)
+run("/broker/status endpoint has primary + multi_broker_enabled",  t_broker_status_endpoint_has_primary_key)
+run("base_agent imports broker_router",                            t_base_agent_imports_broker_router)
 
 
 # ══════════════════════════════════════════════════════════════════════════

@@ -12,6 +12,14 @@
   <meta charset="UTF-8"/>
   <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
   <title>AlgoTrader Pro — Dashboard</title>
+  <!-- PWA -->
+  <link rel="manifest" href="/static/manifest.json"/>
+  <meta name="theme-color" content="#7C3AED"/>
+  <meta name="mobile-web-app-capable" content="yes"/>
+  <meta name="apple-mobile-web-app-capable" content="yes"/>
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent"/>
+  <meta name="apple-mobile-web-app-title" content="AlgoTrader"/>
+  <link rel="apple-touch-icon" href="/static/icon-192.png"/>
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600;700&display=swap" rel="stylesheet">
   <script src="/static/chart.min.js"></script>
@@ -173,6 +181,18 @@
       padding: 14px 16px;
       border-top: 1px solid var(--sidebar-border);
     }
+    .sidebar-logout-btn {
+      margin-top: 8px;
+      width: 100%;
+      background: none;
+      border: 1px solid var(--sidebar-border);
+      color: var(--text-muted);
+      border-radius: 6px;
+      padding: 5px 0;
+      font-size: 11px;
+      cursor: pointer;
+    }
+    .sidebar-logout-btn:hover { background: var(--red); color: #fff; border-color: var(--red); }
     .mode-badge {
       display: inline-flex;
       align-items: center;
@@ -1112,6 +1132,14 @@
 </head>
 <body>
 
+<!-- ── PWA Install Banner ──────────────────────────────────── -->
+<div id="pwa-install-banner" style="display:none;align-items:center;gap:12px;padding:10px 20px;background:#7C3AED;color:#fff;font-family:Inter,sans-serif;font-size:14px;position:fixed;top:0;left:0;right:0;z-index:9999;box-shadow:0 2px 8px rgba(0,0,0,.4);">
+  <img src="/static/icon-192.png" width="28" height="28" style="border-radius:6px;" alt=""/>
+  <span style="flex:1">Install <strong>AlgoTrader Pro</strong> as an app for quick access</span>
+  <button id="pwa-install-btn" style="background:#fff;color:#7C3AED;border:none;padding:6px 14px;border-radius:6px;font-weight:600;cursor:pointer;">Install</button>
+  <button onclick="document.getElementById('pwa-install-banner').style.display='none'" style="background:transparent;color:#fff;border:none;font-size:20px;cursor:pointer;line-height:1;">×</button>
+</div>
+
 <!-- ── Confirm Dialog ──────────────────────────────────────── -->
 <div class="overlay" id="confirm-overlay">
   <div class="dialog">
@@ -1188,6 +1216,7 @@
     <div class="sidebar-bottom">
       <div class="mode-badge paper" id="sidebar-mode-badge">PAPER</div>
       <div class="sidebar-time" id="sidebar-clock">--:--:-- IST</div>
+      <button class="sidebar-logout-btn" onclick="doLogout()" title="Sign out">&#x2715; Sign out</button>
     </div>
   </nav>
 
@@ -1212,6 +1241,7 @@
           <div class="kite-dot" id="kite-status-dot"></div>
           <span id="kite-status-text">Kite</span>
         </div>
+        <div id="multi-broker-chips" style="display:none;gap:4px;align-items:center;"></div>
         <button class="notif-bell" id="notif-bell" title="Trade notifications" onclick="toggleNotifications()">
           <i data-lucide="bell"></i>
           <div class="notif-badge" id="notif-badge">0</div>
@@ -2668,7 +2698,14 @@ function toast(msg, type = 'info', duration = 4000) {
   const icons = { ok: 'check-circle', error: 'x-circle', info: 'info', warn: 'alert-triangle' };
   const el = document.createElement('div');
   el.className = `toast ${type}`;
-  el.innerHTML = `<i data-lucide="${icons[type] || 'info'}" class="toast-icon"></i><span>${msg}</span>`;
+  // Use DOM construction to avoid innerHTML XSS — msg may contain server-sourced data
+  const icon = document.createElement('i');
+  icon.setAttribute('data-lucide', icons[type] || 'info');
+  icon.className = 'toast-icon';
+  const span = document.createElement('span');
+  span.textContent = msg;   // textContent: never parses HTML
+  el.appendChild(icon);
+  el.appendChild(span);
   document.getElementById('toast-container').appendChild(el);
   lucide.createIcons({ nodes: [el] });
   setTimeout(() => el.remove(), duration);
@@ -3160,7 +3197,6 @@ function renderPositions() {
 
     const sym    = p.tradingsymbol || p.symbol || '—';
     const symEsc = escHtml(sym);
-    const mult = side === 'BUY' ? 1 : -1;
     return `<tr>
       <td style="font-weight:600">${symEsc}</td>
       <td><span class="badge badge-${side.toLowerCase()}">${escHtml(side)}</span></td>
@@ -3304,13 +3340,13 @@ function renderGateLog() {
 
     return `<tr>
       <td style="color:var(--fg3)">${time}</td>
-      <td style="font-weight:600">${d.symbol || '—'}</td>
-      <td style="color:var(--fg3)">${d.strategy || '—'}</td>
-      <td>${d.signal || '—'}</td>
+      <td style="font-weight:600">${escHtml(d.symbol || '—')}</td>
+      <td style="color:var(--fg3)">${escHtml(d.strategy || '—')}</td>
+      <td>${escHtml(d.signal || '—')}</td>
       <td class="${confClass}">${conf}</td>
       <td>${decBadge}</td>
       <td style="color:var(--fg3)">${d.size_factor ? `×${d.size_factor}` : '1×'}</td>
-      <td><span class="reason-cell" title="${reason}">${reason}</span></td>
+      <td><span class="reason-cell" title="${escHtml(reason)}">${escHtml(reason)}</span></td>
     </tr>`;
   }).join('');
   lucide.createIcons({ nodes: [tbody] });
@@ -3350,7 +3386,7 @@ function renderDirectives() {
     return `<div class="directive-card">
       <div class="directive-strategy">${name.charAt(0).toUpperCase() + name.slice(1)}</div>
       <span class="directive-action ${cls}">${action.replace('_', ' ').toUpperCase()}</span>
-      <div class="directive-reason">${info.reason || ''}</div>
+      <div class="directive-reason">${escHtml(info.reason || '')}</div>
     </div>`;
   }).join('');
 
@@ -3574,6 +3610,32 @@ function renderRegimeHistory(history) {
 /* ═══════════════════════════════════════════════════════════════
    RENDER: Kite status in topbar + settings
 ═══════════════════════════════════════════════════════════════ */
+async function fetchMultiBrokerStatus() {
+  try {
+    const d = await api('GET', '/broker/status');
+    if (!d || !d.multi_broker_enabled) return;
+    const container = document.getElementById('multi-broker-chips');
+    if (!container) return;
+    container.style.display = 'flex';
+    container.innerHTML = '';
+    for (const b of (d.secondary_brokers || [])) {
+      const chip = document.createElement('div');
+      chip.style.cssText = 'display:flex;align-items:center;gap:4px;background:var(--bg2);border-radius:6px;padding:2px 7px;font-size:11px;';
+      const dot = document.createElement('div');
+      dot.style.cssText = `width:7px;height:7px;border-radius:50%;background:${b.initialised ? '#22c55e' : '#ef4444'};`;
+      chip.appendChild(dot);
+      chip.appendChild(document.createTextNode(b.name.charAt(0).toUpperCase() + b.name.slice(1)));
+      container.appendChild(chip);
+    }
+    if (d.mirrored_positions > 0) {
+      const badge = document.createElement('span');
+      badge.style.cssText = 'font-size:10px;color:var(--fg3);';
+      badge.textContent = `(${d.mirrored_positions} mirrored)`;
+      container.appendChild(badge);
+    }
+  } catch (_) {}
+}
+
 function renderKiteStatus(data) {
   const dot   = document.getElementById('kite-status-dot');
   const txt   = document.getElementById('kite-status-text');
@@ -3854,6 +3916,11 @@ function loadRiskInputs() {
 /* ═══════════════════════════════════════════════════════════════
    ACTIONS: Kill Switch
 ═══════════════════════════════════════════════════════════════ */
+async function doLogout() {
+  try { await api('POST', '/auth/logout'); } catch (_) {}
+  window.location.href = '/login';
+}
+
 async function confirmKillSwitch() {
   const ok = await showConfirm(
     '🚨 Activate Kill Switch',
@@ -4326,17 +4393,17 @@ function renderActivityFeed(events) {
                                  ${e.gate_conf}%</span>` : '—';
     const detail = [e.pattern, e.gate_reason, e.detail].filter(Boolean).join(' · ').slice(0,80);
     return `<tr style="background:${s.bg}">
-      <td style="font-size:11px;color:var(--fg3);font-variant-numeric:tabular-nums">${e.time}</td>
-      <td><span style="font-size:11px;font-weight:600;color:${e.color};text-transform:uppercase">${e.agent}</span></td>
-      <td><span style="font-size:11px;font-weight:600;color:${s.text}">${s.label}</span></td>
-      <td style="font-weight:600">${e.symbol}</td>
+      <td style="font-size:11px;color:var(--fg3);font-variant-numeric:tabular-nums">${escHtml(e.time)}</td>
+      <td><span style="font-size:11px;font-weight:600;color:${e.color};text-transform:uppercase">${escHtml(e.agent)}</span></td>
+      <td><span style="font-size:11px;font-weight:600;color:${s.text}">${escHtml(s.label)}</span></td>
+      <td style="font-weight:600">${escHtml(e.symbol)}</td>
       <td><span style="font-size:11px;color:${e.side==='BUY'?'var(--green)':'var(--red)'}">
-            ${e.side || '—'}</span></td>
+            ${escHtml(e.side || '—')}</span></td>
       <td style="font-variant-numeric:tabular-nums">${e.price ? '₹'+e.price.toLocaleString('en-IN') : '—'}</td>
       <td>${e.qty || '—'}</td>
       <td>${pnl}</td>
       <td>${gc}</td>
-      <td style="font-size:11px;color:var(--fg3);max-width:260px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${detail}">${detail || '—'}</td>
+      <td style="font-size:11px;color:var(--fg3);max-width:260px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${escHtml(detail)}">${escHtml(detail || '—')}</td>
     </tr>`;
   }).join('');
 }
@@ -4498,9 +4565,10 @@ function appendPnlHistory() {
    WEBSOCKET: live LTP updates
 ═══════════════════════════════════════════════════════════════ */
 function connectWS() {
-  const token = localStorage.getItem('apiKey') || '';
-  const proto  = location.protocol === 'https:' ? 'wss' : 'ws';
-  const ws     = new WebSocket(`${proto}://${location.host}/ws?token=${encodeURIComponent(token)}`);
+  const proto = location.protocol === 'https:' ? 'wss' : 'ws';
+  // Auth via HttpOnly JWT cookie (set on login) — server reads ws.cookies.access_token.
+  // Never pass token as a query param: it appears in proxy logs and browser history.
+  const ws    = new WebSocket(`${proto}://${location.host}/ws`);
 
   // ── Abi Indicator Radar state ───────────────────────────────
   const _radarState = {};
@@ -4803,6 +4871,10 @@ async function init() {
   // Initial Black Swan status (in case active before page load)
   fetchBlackSwanStatus();
 
+  // Multi-broker chip display (polled every 30s; only visible when enabled)
+  fetchMultiBrokerStatus();
+  setInterval(fetchMultiBrokerStatus, 30000);
+
   // Notifications + mobile nav
   await _initNotifications();
   lucide.createIcons();
@@ -4993,7 +5065,7 @@ async function fetchOptionsChain() {
     }).join('');
   } catch(e) {
     const tbody = document.getElementById('oc-tbody');
-    if (tbody) tbody.innerHTML = `<tr><td colspan="11" class="no-data" style="color:var(--red)">Error: ${e.message}</td></tr>`;
+    if (tbody) tbody.innerHTML = `<tr><td colspan="11" class="no-data" style="color:var(--red)">Error: ${escHtml(e.message)}</td></tr>`;
     const spotEl = document.getElementById('oc-spot');
     const expEl = document.getElementById('oc-expiry');
     if (spotEl) spotEl.textContent = 'Spot: —';
@@ -5034,17 +5106,17 @@ async function fetchTradeJournal() {
       const net = t.net_pnl || 0;
       const cls = net >= 0 ? 'profit' : 'loss';
       return `<tr>
-        <td style="font-size:11px">${t.trade_date||''}</td>
-        <td><span style="color:${agentColor(t.strategy)}">${t.strategy||''}</span></td>
-        <td style="font-weight:600">${t.symbol||''}</td>
-        <td style="color:${t.side==='BUY'?'var(--green)':'var(--red)'}">${t.side||''}</td>
+        <td style="font-size:11px">${escHtml(t.trade_date||'')}</td>
+        <td><span style="color:${agentColor(t.strategy)}">${escHtml(t.strategy||'')}</span></td>
+        <td style="font-weight:600">${escHtml(t.symbol||'')}</td>
+        <td style="color:${t.side==='BUY'?'var(--green)':'var(--red)'}">${escHtml(t.side||'')}</td>
         <td>₹${(t.entry_price||0).toFixed(2)}</td>
         <td>₹${(t.exit_price||0).toFixed(2)}</td>
         <td>${t.quantity||0}</td>
         <td>₹${(t.gross_pnl||0).toFixed(0)}</td>
         <td style="color:var(--red)">₹${(t.cost||0).toFixed(0)}</td>
         <td class="${cls}" style="font-weight:600">₹${net.toFixed(0)}</td>
-        <td style="font-size:11px;color:var(--fg3)">${t.exit_reason||''}</td>
+        <td style="font-size:11px;color:var(--fg3)">${escHtml(t.exit_reason||'')}</td>
       </tr>`;
     }).join('');
   } catch(e) {
@@ -5082,8 +5154,7 @@ async function loadPerformanceReport() {
   if (end)   url += `end_date=${end}&`;
   if (strat) url += `strategy=${strat}`;
   try {
-    const r = await fetch(url, { headers: { 'X-API-Key': _apiKey } });
-    _prData = await r.json();
+    _prData = await api('GET', url);
     _renderPerformanceReport(_prData);
   } catch(e) {
     document.getElementById('pr-chips').innerHTML = `<span style="color:var(--red)">Failed to load report: ${e}</span>`;
@@ -5606,6 +5677,33 @@ document.querySelectorAll('.tab-btn').forEach(btn => {
   });
 });
 godModeRefresh();
+
+/* ── PWA: Service Worker + Install Prompt ─────────────────── */
+if ('serviceWorker' in navigator) {
+  navigator.serviceWorker.register('/static/sw.js').catch(() => {});
+}
+
+let _pwaPrompt = null;
+window.addEventListener('beforeinstallprompt', e => {
+  e.preventDefault();
+  _pwaPrompt = e;
+  const banner = document.getElementById('pwa-install-banner');
+  if (banner) banner.style.display = 'flex';
+});
+window.addEventListener('appinstalled', () => {
+  const banner = document.getElementById('pwa-install-banner');
+  if (banner) banner.style.display = 'none';
+  _pwaPrompt = null;
+});
+const installBtn = document.getElementById('pwa-install-btn');
+if (installBtn) {
+  installBtn.addEventListener('click', () => {
+    if (_pwaPrompt) {
+      _pwaPrompt.prompt();
+      _pwaPrompt.userChoice.then(() => { _pwaPrompt = null; });
+    }
+  });
+}
 
 </script>
 </body>

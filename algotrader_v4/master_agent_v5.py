@@ -207,6 +207,8 @@ class MasterAgent:
                                  day_of_week="sun", id="weekly_memory")
         self._scheduler.add_job(self._portfolio_optimize_job, "interval", minutes=15,
                                  id="portfolio_optimize")
+        self._scheduler.add_job(self._weekly_db_cleanup, "cron", hour=22, minute=30,
+                                 day_of_week="sun", id="weekly_db_cleanup")
         self._scheduler.start()
         logger.info("[master_v5] started — tick-driven 1s")
         asyncio.create_task(send_telegram(
@@ -480,6 +482,22 @@ class MasterAgent:
             await send_telegram("\n".join(lines))
         except Exception as exc:
             logger.error("[master] Weekly backtest failed: {}", exc)
+
+    async def _weekly_db_cleanup(self) -> None:
+        """Sunday 22:30 IST — archive old data and VACUUM the SQLite DB."""
+        try:
+            from state_store import cleanup_old_data, vacuum_db
+            keep = int(getattr(settings, "db_keep_days", 90))
+            removed = await asyncio.get_event_loop().run_in_executor(
+                None, lambda: cleanup_old_data(keep_days=keep)
+            )
+            await asyncio.get_event_loop().run_in_executor(None, vacuum_db)
+            logger.info(
+                "[master] Weekly DB cleanup done — removed {} positions, {} trades, {} daily_pnl rows",
+                removed["positions"], removed["trades"], removed["daily_pnl"],
+            )
+        except Exception as exc:
+            logger.error("[master] Weekly DB cleanup failed: {}", exc)
 
     async def _portfolio_optimize_job(self) -> None:
         """

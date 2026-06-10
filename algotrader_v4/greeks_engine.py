@@ -81,15 +81,23 @@ def calculate_greeks(
     option_type: Literal["CE", "PE"],
     market_price: float,
     r: float = RISK_FREE_RATE,
+    atm_iv: float | None = None,
 ) -> Greeks:
-    """Compute full Greeks for a single NSE option."""
+    """Compute full Greeks for a single NSE option.
+
+    If atm_iv is provided the vol surface model is used to derive a
+    strike-specific IV (with put-skew) instead of Newton-Raphson on market_price.
+    """
     today = datetime.now().date()
     cal_days = (expiry - today).days
     T = max(cal_days / 365.0, 0.5 / 365.0)   # min 12h
 
-    iv = implied_volatility(market_price, spot, strike, T, r, option_type)
-    if math.isnan(iv) or iv <= 0:
-        iv = 0.25
+    if atm_iv is not None and atm_iv > 0:
+        iv = vol_surface_iv(spot, strike, atm_iv, option_type)
+    else:
+        iv = implied_volatility(market_price, spot, strike, T, r, option_type)
+        if math.isnan(iv) or iv <= 0:
+            iv = 0.25
 
     d1, d2 = _d1d2(spot, strike, T, r, iv)
     sqrt_T  = math.sqrt(T)
@@ -128,6 +136,42 @@ def calculate_greeks(
         time_value=round(time_value, 2), moneyness=moneyness,
         bs_price=round(price_calc, 4),
     )
+
+
+def vol_surface_iv(
+    spot: float,
+    strike: float,
+    atm_iv: float,
+    opt_type: Literal["CE", "PE"],
+    skew_slope: float = -0.5,
+    smile_curve: float = 0.3,
+) -> float:
+    """
+    NSE-realistic vol skew model.
+    OTM puts carry a put-skew premium (negative skew_slope).
+    Both wings have a symmetric smile (smile_curve).
+
+    moneyness = (K - S) / S  (positive = OTM call / ITM put)
+    iv = atm_iv * (1 + skew_slope * m + smile_curve * m²)
+    """
+    m = (strike - spot) / spot
+    iv = atm_iv * (1.0 + skew_slope * m + smile_curve * m * m)
+    return max(0.05, min(iv, 2.0))  # clamp to [5%, 200%]
+
+
+def strike_market_price(
+    spot: float,
+    strike: float,
+    atm_iv: float,
+    opt_type: Literal["CE", "PE"],
+    days_to_expiry: int = 7,
+    r: float = RISK_FREE_RATE,
+) -> float:
+    """Compute a realistic market price for a strike using the vol surface."""
+    T = max(days_to_expiry / 365.0, 0.5 / 365.0)
+    iv = vol_surface_iv(spot, strike, atm_iv, opt_type)
+    price = bs_price(spot, strike, T, r, iv, opt_type)
+    return max(0.05, round(price, 2))
 
 
 def atm_strike(spot: float, step: int = 50) -> int:

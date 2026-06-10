@@ -16,6 +16,7 @@ from loguru import logger
 
 from config import settings
 from kite_client import kite_client
+from broker_router import broker_router
 from risk_manager import risk_manager
 from order_guard import order_guard
 from backtest_engine import backtest_engine
@@ -163,6 +164,17 @@ def _setup_tsl_callbacks() -> None:
         risk_manager.position_closed()
         trailing_sl_engine.deregister(pos.order_id)
 
+        # Mirror exit to secondary brokers (multi-broker mode)
+        if settings.enable_multi_broker and broker_router.has_secondaries:
+            try:
+                broker_router.mirror_exit(
+                    primary_order_id=str(pos.order_id),
+                    quantity=pos.quantity,
+                    agent_tag=f"TSL-HIT-{pos.strategy}",
+                )
+            except Exception:
+                pass
+
         # Persist to SQLite (Phase 3) — non-blocking async variants
         try:
             from state_store import close_position_async, record_trade_async
@@ -175,7 +187,11 @@ def _setup_tsl_callbacks() -> None:
                 exit_price=ltp, quantity=pos.quantity,
                 gross_pnl=pnl, net_pnl=pnl - cost, cost=cost,
                 exit_reason="SL_HIT",
-                entry_time=str(getattr(pos, "opened_at", "")),
+                entry_time=__import__("datetime").datetime.utcfromtimestamp(
+                    getattr(pos, "opened_at", 0) or 0
+                ).strftime("%Y-%m-%d %H:%M:%S"),
+                expected_fill_price=pos.current_sl,  # TSL level at time of hit
+                actual_fill_price=ltp,               # market price at fill
             )
         except Exception:
             pass
@@ -223,6 +239,17 @@ def _setup_tsl_callbacks() -> None:
             risk_manager.record_trade(pnl_est)
             risk_manager.position_closed()
             trailing_sl_engine.deregister(pos.order_id)
+
+            # Mirror exit to secondary brokers (multi-broker mode)
+            if settings.enable_multi_broker and broker_router.has_secondaries:
+                try:
+                    broker_router.mirror_exit(
+                        primary_order_id=str(pos.order_id),
+                        quantity=pos.quantity,
+                        agent_tag=f"TSL-T{level}-{pos.strategy}",
+                    )
+                except Exception:
+                    pass
 
     # Callbacks are now passed per-position via register() — keep module-level
     # as fallbacks for any code that still registers without per-position callbacks.
@@ -413,6 +440,16 @@ class BaseAgent(ABC):
             if len(snap.candles_1min) < self.min_candles_1min:
                 continue
 
+            # Drop stale snapshots — can accumulate while awaiting the Claude gate
+            # (up to 12s). A 12-second-old BUY signal evaluated now would fire on
+            # prices that no longer exist, creating phantom entries.
+            import time as _time_chk
+            _snap_age = _time_chk.monotonic() - getattr(snap.tick, "_monotonic_ts", 0)
+            if _snap_age > 5.0 and getattr(snap.tick, "_monotonic_ts", 0) > 0:
+                logger.debug("[{}] {} dropped stale snap ({:.1f}s old)",
+                             self.name, snap.symbol, _snap_age)
+                continue
+
             self.state.ticks_processed += 1
             try:
                 # Check trailing SL engine first (highest priority)
@@ -493,44 +530,63 @@ class BaseAgent(ABC):
                     if settings.use_claude_trade_gate:
                         from claude_trade_gate import assess as gate_assess
                         from master_agent_v5 import record_gate_decision
-                        _gate_timeout = getattr(settings, "gate_api_timeout", 8.0)
-                        try:
-                            gate = await asyncio.wait_for(
-                                gate_assess(snap, action, signal, self.name),
-                                timeout=_gate_timeout,
+                        _gate_timeout = getattr(settings, "gate_api_timeout", 12.0)
+                        _bypass_score = getattr(settings, "gate_bypass_min_score", 9)
+                        _sig_score    = signal.get("score", 0)
+
+                        # High-conviction bypass: skip the 8-20s Opus API call for the
+                        # strongest signals (score ≥ gate_bypass_min_score).
+                        if _sig_score >= _bypass_score:
+                            logger.debug(
+                                "[{}] {} gate bypass score={} ≥ {} — auto-approve",
+                                self.name, snap.symbol, _sig_score, _bypass_score,
                             )
-                            record_gate_decision(gate.enter)
-                        except asyncio.TimeoutError:
-                            logger.warning(
-                                "[{}] {} Claude gate timed out after {:.0f}s — skipping trade",
-                                self.name, snap.symbol, _gate_timeout,
-                            )
-                            continue
-                        if not gate.enter:
+                            record_gate_decision(True)
                             _activity(
-                                agent=self.name, event="GATE_VETO",
+                                agent=self.name, event="GATE_BYPASS",
+                                symbol=snap.symbol, side=action,
+                                price=snap.tick.ltp,
+                                pattern=signal.get("pattern", ""),
+                                gate_conf=100,
+                            )
+                        else:
+                            try:
+                                gate = await asyncio.wait_for(
+                                    gate_assess(snap, action, signal, self.name),
+                                    timeout=_gate_timeout,
+                                )
+                                record_gate_decision(gate.enter)
+                            except asyncio.TimeoutError:
+                                logger.warning(
+                                    "[{}] {} Claude gate timed out after {:.0f}s — skipping trade",
+                                    self.name, snap.symbol, _gate_timeout,
+                                )
+                                continue
+                            if not gate.enter:
+                                _activity(
+                                    agent=self.name, event="GATE_VETO",
+                                    symbol=snap.symbol, side=action,
+                                    price=snap.tick.ltp,
+                                    pattern=signal.get("pattern", ""),
+                                    gate_conf=gate.confidence,
+                                    gate_reason=gate.reason,
+                                )
+                                continue
+                            _activity(
+                                agent=self.name, event="GATE_APPROVE",
                                 symbol=snap.symbol, side=action,
                                 price=snap.tick.ltp,
                                 pattern=signal.get("pattern", ""),
                                 gate_conf=gate.confidence,
                                 gate_reason=gate.reason,
                             )
-                            continue
-                        _activity(
-                            agent=self.name, event="GATE_APPROVE",
-                            symbol=snap.symbol, side=action,
-                            price=snap.tick.ltp,
-                            pattern=signal.get("pattern", ""),
-                            gate_conf=gate.confidence,
-                            gate_reason=gate.reason,
-                        )
-                        # Apply Claude's SL/target/size adjustments
-                        if gate.adjusted_sl_pct:
-                            signal["stop_loss_pct"]  = gate.adjusted_sl_pct
-                        if gate.adjusted_target_pct:
-                            signal["target_pct"]     = gate.adjusted_target_pct
-                        signal["_gate_size_factor"]  = gate.size_factor
-                        signal["_gate_confidence"]   = gate.confidence
+                            # Apply Claude's SL/target/size adjustments
+                            if gate.adjusted_sl_pct:
+                                signal["stop_loss_pct"]  = gate.adjusted_sl_pct
+                            if gate.adjusted_target_pct:
+                                signal["target_pct"]     = gate.adjusted_target_pct
+                            signal["_gate_size_factor"]  = gate.size_factor
+                            signal["_gate_confidence"]   = gate.confidence
 
                     # ── Compound size factors: event elevation + correlation ──
                     _sf = signal.get("_gate_size_factor", 1.0)
@@ -553,6 +609,20 @@ class BaseAgent(ABC):
                     if _corr["size_factor"] < 1.0:
                         _sf = round(_sf * _corr["size_factor"], 3)
                     signal["_gate_size_factor"] = _sf
+
+                    # ── Final market-hours re-check ───────────────────────
+                    # The gate + MTF + event + correlation checks above can
+                    # collectively take 4-20 seconds. Re-validate session so
+                    # a signal that fired at 15:09:55 doesn't place an order
+                    # at 15:10:08 after the gate returns.
+                    if settings.trading_mode == "LIVE":
+                        _post_bucket, _post_extra = session_bucket()
+                        if _post_extra >= 99:
+                            logger.debug(
+                                "[{}] {} session expired during gate ({}) — order suppressed",
+                                self.name, snap.symbol, _post_bucket,
+                            )
+                            continue
 
                     await self._try_enter(snap, action, signal)
             except Exception as exc:
@@ -761,6 +831,12 @@ class BaseAgent(ABC):
                     signal.get("futures_symbol",
                     signal.get("option_symbol", sym)))
 
+        # Hard market-hours gate — second check in case this is called directly.
+        if settings.trading_mode == "LIVE":
+            _final_bucket, _final_extra = session_bucket()
+            if _final_extra >= 99:
+                raise RuntimeError(f"market_closed:{_final_bucket}")
+
         claimed, _ = order_guard.try_claim(sym, self.name, action)
         if not claimed:
             raise RuntimeError("claim_denied")
@@ -796,8 +872,11 @@ class BaseAgent(ABC):
         catalyst = 0.0
         try:
             from alt_data import alt_data_engine
-            catalyst = await loop.run_in_executor(None, lambda: alt_data_engine.get_catalyst(sym))
-        except Exception:
+            catalyst = await asyncio.wait_for(
+                loop.run_in_executor(None, lambda: alt_data_engine.get_catalyst(sym)),
+                timeout=0.2,  # 200 ms max — skip if NSE bulk-deals endpoint is slow
+            )
+        except (Exception, asyncio.TimeoutError):
             pass
         if catalyst < -0.5:
             logger.info("[{}] {} skipped — negative catalyst: {:.2f}", self.name, sym, catalyst)
@@ -876,7 +955,9 @@ class BaseAgent(ABC):
                 try:
                     qty = await self._reconcile_fill_and_resize_sl(order_id, sl_order_id, qty, loop)
                 except RuntimeError:
-                    order_guard.release_claim(sym, self.name, action)
+                    # Claim is already CONFIRMED (pending=False) so release_claim() is a
+                    # no-op. Use release_order() to fully unlock the symbol slot.
+                    order_guard.release_order(sym, self.name, action, 0)
                     raise
             else:
                 entry_type = "LIMIT" if use_limit else "MARKET"
@@ -927,24 +1008,52 @@ class BaseAgent(ABC):
                     except Exception as cancel_exc:
                         logger.error("[{}] Failed to cancel unprotected entry {}: {}",
                                      self.name, order_id, cancel_exc)
-                    order_guard.release_claim(sym, self.name, action)
+                    # Claim was already confirmed (pending=False) so release_claim()
+                    # is a no-op here — use release_order() to fully unlock the slot.
+                    order_guard.release_order(sym, self.name, action, 0)
                     raise RuntimeError("sl_placement_failed")
                 # H2: both orders landed — confirm actual fill; resize SL on
                 # partial; abort on zero fill. (LIVE only; PAPER is a no-op.)
                 try:
                     qty = await self._reconcile_fill_and_resize_sl(order_id, sl_order_id, qty, loop)
                 except RuntimeError:
-                    order_guard.release_claim(sym, self.name, action)
+                    # Claim already CONFIRMED — release_order() to fully unlock the slot.
+                    order_guard.release_order(sym, self.name, action, 0)
                     raise
         except RuntimeError:
             raise
         except Exception as exc:
             logger.warning("[{}] order placement failed: {}", self.name, exc)
-            order_guard.release_claim(sym, self.name, action)
+            # If the access token expired, halt further trading — the agent would
+            # otherwise retry on every tick, filling logs and wasting API quota.
+            if type(exc).__name__ == "TokenException":
+                risk_manager.is_trading_halted = True
+                logger.critical("[{}] Kite access token expired — halting trading. "
+                                "Re-authenticate and restart.", self.name)
+            # If the claim was already confirmed (non-pending), release_claim() is a
+            # no-op; use release_order() so the symbol lock and guard slot are freed.
+            if _claim_confirmed:
+                order_guard.release_order(sym, self.name, action, 0)
+            else:
+                order_guard.release_claim(sym, self.name, action)
             raise RuntimeError(f"placement_error: {exc}")
 
         if not _claim_confirmed:
             order_guard.confirm_claim(sym, self.name, action, order_id)
+
+        # Mirror to secondary broker(s) if multi-broker is enabled
+        if settings.enable_multi_broker and broker_router.has_secondaries:
+            loop.run_in_executor(None, lambda: broker_router.mirror_entry(
+                primary_order_id=str(order_id),
+                tradingsymbol=trade_sym,
+                exchange=exch,
+                transaction_type=action,
+                quantity=qty,
+                product=signal.get("product", self.product),
+                sl_trigger=signal.get("stop_loss", risk_manager.sl_price(ltp, action)),
+                agent_tag=f"Agent-{self.name}",
+            ))
+
         return order_id, sl_order_id, qty
 
     async def _register_position(

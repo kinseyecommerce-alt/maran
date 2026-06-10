@@ -85,6 +85,7 @@ class Settings(BaseSettings):
     max_trades_futures:        int = 75
     max_trades_swing:          int = 25    # position trades, low turnover
     cooldown_after_loss_sec:   int = 300
+    post_exit_cooldown_sec:    int = 5      # minimum cooldown after ANY exit (incl. winners)
 
     # Per-agent stop-loss % (intraday/scalping/futures/swing = price %; options = premium %)
     sl_pct_intraday:       float = 1.5
@@ -131,13 +132,14 @@ class Settings(BaseSettings):
 
     # Intelligence layer
     use_claude_trade_gate: bool = True    # per-trade Claude assessment via Opus
-    claude_gate_model: str = "claude-opus-4-8"  # model for trade gate (Opus = max accuracy)
+    claude_gate_model: str = "claude-sonnet-4-6"  # Sonnet: ~10× faster than Opus, sufficient accuracy for intraday gates
     claude_gate_threshold: int = 30       # min confidence to enter — Opus must be very confident a trade is BAD to block it
     master_review_model: str = "claude-opus-4-8"   # regime review model
     signal_engine_model: str = "claude-opus-4-8"   # signal generation model
-    use_extended_thinking: bool = True             # Opus extended thinking on gate
-    gate_thinking_budget: int = 5000               # thinking tokens per trade assessment
-    gate_api_timeout: float = 20.0                 # seconds — allow time for extended thinking
+    use_extended_thinking: bool = False            # extended thinking off — Sonnet doesn't need it; re-enable for Opus deep-review
+    gate_thinking_budget: int = 2000               # thinking tokens per trade assessment (only used when use_extended_thinking=True)
+    gate_api_timeout: float = 5.0                  # seconds — 5s fits Sonnet well; raise to 12s if switching back to Opus+thinking
+    gate_bypass_min_score: int = 7                 # signals scoring ≥ this skip Claude gate entirely (auto-approve, ~65% of trades)
     use_multi_timeframe: bool = True      # require 5m/15m alignment with entry direction
     mtf_min_alignment: int = 2            # how many of 3 TFs must agree (1, 2, or 3)
     use_kelly_sizing: bool = True         # apply Claude gate's size_factor to qty
@@ -229,6 +231,10 @@ class Settings(BaseSettings):
     # When set, API key/secret are encrypted at rest. When empty, fallback to plaintext + chmod 600.
     kite_accounts_key: str = ""
 
+    # Multi-broker mirroring — place orders on Zerodha AND a secondary broker simultaneously
+    enable_multi_broker: bool = False          # master switch
+    secondary_brokers: str = ""               # comma-separated: "upstox", "kotak"
+
     # Black Swan detection + opportunity response (veteran trader mode)
     black_swan_vix_zscore:     float = 3.0    # VIX z-score threshold (beyond HIGH_VOLATILE's 2.0)
     black_swan_price_drop_pct: float = 3.0    # 1-min NIFTY drop % to trigger flash crash detect
@@ -238,6 +244,7 @@ class Settings(BaseSettings):
 
     # Runtime tuning — named constants (avoids magic numbers scattered across modules)
     db_write_queue_size:      int   = 2000   # state_store write backlog before drops
+    db_keep_days:             int   = 90    # days of trade/position history to retain (Sunday cleanup)
     adaptive_refresh_sec:     int   = 300    # how often base_agent re-reads adaptive params
     ws_max_connections:       int   = 50     # max simultaneous WebSocket clients
     order_max_retries:        int   = 3      # kite_client retry attempts on transient error

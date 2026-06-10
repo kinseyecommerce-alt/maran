@@ -38,6 +38,19 @@ from market_data import (
     nse_client, yf_client, paper_sim, is_market_open,
 )
 
+# Lazy-imported once at first use; hoisted here so _process_tick() doesn't
+# repeat sys.modules dict lookups on every tick.
+try:
+    from market_regime import regime_detector as _regime_det, Regime as _Regime
+except Exception:
+    _regime_det = None  # type: ignore[assignment]
+    _Regime = None      # type: ignore[assignment]
+
+try:
+    from tick_recorder import tick_recorder as _tick_recorder
+except Exception:
+    _tick_recorder = None  # type: ignore[assignment]
+
 
 # ── Core data structures ──────────────────────────────────────────────────────
 
@@ -54,8 +67,11 @@ class Tick:
     low:       float
     open:      float
     timestamp: datetime
-    bid_depth: list = field(default_factory=list)  # [(price, qty), ...] top 5 bids
-    ask_depth: list = field(default_factory=list)  # [(price, qty), ...] top 5 asks
+    bid_depth: list  = field(default_factory=list)   # [(price, qty), ...] top 5 bids
+    ask_depth: list  = field(default_factory=list)   # [(price, qty), ...] top 5 asks
+    # Monotonic creation time — used by agent tick loop to drop stale snaps that
+    # accumulated in the queue while awaiting the Claude gate (up to 12s).
+    _monotonic_ts: float = field(default_factory=time.monotonic)
 
     @classmethod
     def from_quote(cls, q: Quote) -> "Tick":
@@ -537,6 +553,14 @@ class TickEngine:
         self._last_tick_ltp: dict[str, float] = {}
         self._last_tick_ts:  dict[str, float] = {}   # monotonic seconds
 
+        # Indicator cache — reuse computed indicators while candle count + LTP are stable.
+        # Most indicators (EMA, RSI, MACD, BB, Supertrend…) only change on new candle close.
+        # We skip the full recompute when the candle row count is identical and LTP has
+        # moved less than 0.05% since the last compute — cutting CPU by ~60× between candles.
+        self._ind_cache_count: dict[str, int]          = {}   # candle count at last compute
+        self._ind_cache_ltp:   dict[str, float]        = {}   # LTP at last compute
+        self._ind_cache:       dict[str, LiveIndicators] = {}  # cached result
+
         # KiteConnect WebSocket state
         self._kite_ticker = None
         self._is_truedata_ws: bool = False
@@ -662,13 +686,43 @@ class TickEngine:
                 buf.reset()
             self._last_tick_ltp.clear()
             self._last_tick_ts.clear()
+            self._ind_cache.clear()
+            self._ind_cache_count.clear()
+            self._ind_cache_ltp.clear()
             logger.info("TickEngine: daily buffer reset for IST session {}", tick_date)
 
         self._bufs_1min[symbol].push(tick.ltp, tick.volume, tick.timestamp)
         self._bufs_5min[symbol].push(tick.ltp, tick.volume, tick.timestamp)
 
-        df  = self._bufs_1min[symbol].as_dataframe()
-        ind = IndicatorCalc.compute(symbol, tick, df)
+        df = self._bufs_1min[symbol].as_dataframe()
+
+        # ── Indicator cache: skip full recompute if candle count unchanged and
+        # LTP moved < 0.05% since last compute.  Indicators like EMA/RSI/MACD are
+        # only meaningful at candle close; intra-candle recomputes add noise, not edge.
+        _n_candles = len(df)
+        _cached_ltp = self._ind_cache_ltp.get(symbol, 0.0)
+        _ltp_moved_pct = abs(tick.ltp - _cached_ltp) / _cached_ltp * 100 if _cached_ltp else 100.0
+        if (_n_candles == self._ind_cache_count.get(symbol, -1)
+                and _ltp_moved_pct < 0.05
+                and symbol in self._ind_cache):
+            ind = self._ind_cache[symbol]
+            # Still refresh the tick-level fields that change every tick
+            ind.ltp   = tick.ltp
+            ind.bid   = tick.bid
+            ind.ask   = tick.ask
+            ind.spread = round(tick.ask - tick.bid, 2)
+        else:
+            # Cache miss = candle closed or LTP moved significantly.
+            # Run in thread executor so the event loop stays free while pandas/numpy
+            # compute EMA/RSI/MACD/Supertrend etc. numpy releases the GIL so multiple
+            # symbol recomputes run concurrently when a candle-close burst arrives.
+            _loop = asyncio.get_running_loop()
+            ind = await _loop.run_in_executor(
+                None, IndicatorCalc.compute, symbol, tick, df
+            )
+            self._ind_cache[symbol]       = ind
+            self._ind_cache_count[symbol] = _n_candles
+            self._ind_cache_ltp[symbol]   = tick.ltp
 
         self._latest_tick[symbol] = tick
         self._latest_ind[symbol]  = ind
@@ -685,22 +739,22 @@ class TickEngine:
         )
 
         # Black swan phase — evaluated once per NIFTY tick; shared across all symbol snapshots
-        try:
-            from market_regime import regime_detector as _rd, Regime as _R
-            snap.black_swan_active = (_rd.current_regime == _R.BLACK_SWAN)
-            if snap.black_swan_active:
-                if symbol in ("NIFTY 50", "NIFTY50"):
-                    self._black_swan_phase = self._compute_bs_phase(snap.candles_1min)
-                snap.black_swan_phase = self._black_swan_phase
-        except Exception:
-            pass
+        if _regime_det is not None and _Regime is not None:
+            try:
+                snap.black_swan_active = (_regime_det.current_regime == _Regime.BLACK_SWAN)
+                if snap.black_swan_active:
+                    if symbol in ("NIFTY 50", "NIFTY50"):
+                        self._black_swan_phase = self._compute_bs_phase(snap.candles_1min)
+                    snap.black_swan_phase = self._black_swan_phase
+            except Exception:
+                pass
 
         # Record tick for later replay (no-op when recorder is disabled)
-        try:
-            from tick_recorder import tick_recorder
-            tick_recorder.record(symbol, tick)
-        except Exception:
-            pass
+        if _tick_recorder is not None:
+            try:
+                _tick_recorder.record(symbol, tick)
+            except Exception:
+                pass
 
         for name, q in self._subscribers.items():
             try:
@@ -777,9 +831,9 @@ class TickEngine:
                 if not ws_connected:
                     if self._ws_down_since is None:
                         self._ws_down_since = time.monotonic()
-                    elif time.monotonic() - self._ws_down_since > 10.0:
+                    elif time.monotonic() - self._ws_down_since > 3.0:
                         logger.warning(
-                            "TickEngine: WebSocket disconnected for >10s — "
+                            "TickEngine: WebSocket disconnected for >3s — "
                             "falling back to REST polling for {} symbols",
                             len(self._ws_received),
                         )

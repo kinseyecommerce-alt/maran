@@ -86,8 +86,57 @@ def upsert_position_async(*args, **kwargs) -> None:
     _enqueue(upsert_position, *args, **kwargs)
 
 
-def _conn() -> sqlite3.Connection:
-    """Create a thread-safe SQLite connection with Row factory."""
+import os as _os_pg
+_PG_URL: str = _os_pg.environ.get("DATABASE_URL", "")
+_USE_PG: bool = bool(_PG_URL and _PG_URL.startswith("postgres"))
+
+
+def _ph() -> str:
+    """Return the SQL placeholder character for the active backend."""
+    return "%s" if _USE_PG else "?"
+
+
+def _fetchall(c, sql: str, params: tuple = ()) -> list[dict]:
+    """Execute a SELECT and return rows as dicts — works for both SQLite and psycopg2."""
+    if _USE_PG:
+        cur = c.cursor()
+        cur.execute(sql, params)
+        rows = cur.fetchall()
+        # RealDictCursor rows are already dict-like; convert to plain dicts
+        return [dict(r) for r in rows]
+    return [dict(r) for r in c.execute(sql, params)]
+
+
+def _fetchone(c, sql: str, params: tuple = ()):
+    """Execute a SELECT and return one row as dict (or None) — works for both backends."""
+    if _USE_PG:
+        cur = c.cursor()
+        cur.execute(sql, params)
+        row = cur.fetchone()
+        return dict(row) if row else None
+    row = c.execute(sql, params).fetchone()
+    return dict(row) if row else None
+
+
+def _conn():
+    """
+    Return a DB connection for the active backend.
+    • PostgreSQL when DATABASE_URL is set (psycopg2, dict-row cursor)
+    • SQLite otherwise (stdlib sqlite3, Row factory)
+    """
+    if _USE_PG:
+        try:
+            import psycopg2
+            import psycopg2.extras
+        except ImportError as _e:
+            raise RuntimeError(
+                "DATABASE_URL is set to PostgreSQL but psycopg2 is not installed. "
+                "Run: pip install psycopg2-binary"
+            ) from _e
+        c = psycopg2.connect(_PG_URL, cursor_factory=psycopg2.extras.RealDictCursor)
+        c.autocommit = False
+        return c
+
     DB_PATH.parent.mkdir(parents=True, exist_ok=True)
     c = sqlite3.connect(str(DB_PATH), check_same_thread=False)
     c.row_factory = sqlite3.Row
@@ -96,8 +145,15 @@ def _conn() -> sqlite3.Connection:
 
 def init_db() -> None:
     """Create all tables if they don't exist. Idempotent — safe to call multiple times."""
+    if _USE_PG:
+        _init_pg()
+        return
+    _init_sqlite()
+
+
+def _init_sqlite() -> None:
     with _conn() as c:
-        # Enable WAL mode: concurrent reads don't block writes, reduces "database locked" errors
+        # Enable WAL mode: concurrent reads don't block writes
         c.execute("PRAGMA journal_mode=WAL")
         c.execute("PRAGMA synchronous=NORMAL")
         c.commit()
@@ -117,23 +173,31 @@ def init_db() -> None:
             );
 
             CREATE TABLE IF NOT EXISTS trades (
-                id             INTEGER PRIMARY KEY AUTOINCREMENT,
-                symbol         TEXT,
-                strategy       TEXT,
-                side           TEXT,
-                entry_price    REAL,
-                exit_price     REAL,
-                quantity       INTEGER,
-                gross_pnl      REAL,
-                net_pnl        REAL,
-                cost           REAL,
-                exit_reason    TEXT,
-                regime         TEXT,
-                entry_time     TEXT,
-                exit_time      TEXT,
-                gate_confidence INTEGER DEFAULT 0,
-                trade_date     TEXT DEFAULT (date('now','localtime')),
-                pattern        TEXT DEFAULT ''
+                id                  INTEGER PRIMARY KEY AUTOINCREMENT,
+                symbol              TEXT,
+                strategy            TEXT,
+                side                TEXT,
+                entry_price         REAL,
+                exit_price          REAL,
+                quantity            INTEGER,
+                gross_pnl           REAL,
+                net_pnl             REAL,
+                cost                REAL,
+                exit_reason         TEXT,
+                regime              TEXT,
+                entry_time          TEXT,
+                exit_time           TEXT,
+                gate_confidence     INTEGER DEFAULT 0,
+                trade_date          TEXT DEFAULT (date('now','localtime')),
+                pattern             TEXT DEFAULT '',
+                expected_fill_price REAL DEFAULT 0,
+                actual_fill_price   REAL DEFAULT 0
+            );
+
+            CREATE TABLE IF NOT EXISTS schema_version (
+                id         INTEGER PRIMARY KEY CHECK (id = 1),
+                version    INTEGER NOT NULL DEFAULT 1,
+                updated_at TEXT DEFAULT (datetime('now'))
             );
 
             CREATE TABLE IF NOT EXISTS daily_pnl (
@@ -141,11 +205,125 @@ def init_db() -> None:
                 realised_pnl REAL DEFAULT 0,
                 trades_count INTEGER DEFAULT 0
             );
+
+            CREATE INDEX IF NOT EXISTS idx_trades_trade_date  ON trades(trade_date);
+            CREATE INDEX IF NOT EXISTS idx_trades_strategy     ON trades(strategy);
+            CREATE INDEX IF NOT EXISTS idx_trades_exit_time    ON trades(exit_time);
+            CREATE INDEX IF NOT EXISTS idx_trades_symbol       ON trades(symbol);
+            CREATE INDEX IF NOT EXISTS idx_positions_is_open   ON positions(is_open);
+            CREATE INDEX IF NOT EXISTS idx_positions_symbol    ON positions(symbol, strategy);
         """)
-        # Migrate existing DB: add pattern column if it doesn't exist yet
+        c.execute("INSERT OR IGNORE INTO schema_version (id, version) VALUES (1, 1)")
+
+        # Migrate existing DBs: add columns added after initial schema
         existing = {row[1] for row in c.execute("PRAGMA table_info(trades)")}
-        if "pattern" not in existing:
-            c.execute("ALTER TABLE trades ADD COLUMN pattern TEXT DEFAULT ''")
+        migrations: list[tuple[str, str]] = [
+            ("pattern",             "TEXT DEFAULT ''"),
+            ("expected_fill_price", "REAL DEFAULT 0"),
+            ("actual_fill_price",   "REAL DEFAULT 0"),
+        ]
+        for col, defn in migrations:
+            if col not in existing:
+                c.execute(f"ALTER TABLE trades ADD COLUMN {col} {defn}")
+        migrated_cols = [col for col, _ in migrations if col not in existing]
+        if migrated_cols:
+            c.execute(
+                "UPDATE schema_version SET version = version + ?, updated_at = datetime('now') WHERE id = 1",
+                (len(migrated_cols),),
+            )
+
+        from config import settings as _cfg
+        if _cfg.trading_mode == "PAPER":
+            result = c.execute(
+                "UPDATE positions SET is_open=0 WHERE is_open=1 AND order_id LIKE 'PAPER-%'"
+            )
+            if result.rowcount:
+                import logging as _log
+                _log.getLogger(__name__).warning(
+                    "[state_store] Cleared %d stale PAPER is_open positions on startup",
+                    result.rowcount,
+                )
+
+
+def _init_pg() -> None:
+    """Create tables in PostgreSQL. Uses SERIAL / CURRENT_DATE instead of SQLite-isms."""
+    stmts = [
+        """CREATE TABLE IF NOT EXISTS positions (
+            order_id    TEXT PRIMARY KEY,
+            symbol      TEXT,
+            strategy    TEXT,
+            side        TEXT,
+            entry_price DOUBLE PRECISION,
+            quantity    INTEGER,
+            sl_price    DOUBLE PRECISION,
+            target      DOUBLE PRECISION,
+            product     TEXT,
+            opened_at   TEXT,
+            is_open     INTEGER DEFAULT 1
+        )""",
+        """CREATE TABLE IF NOT EXISTS trades (
+            id                  SERIAL PRIMARY KEY,
+            symbol              TEXT,
+            strategy            TEXT,
+            side                TEXT,
+            entry_price         DOUBLE PRECISION,
+            exit_price          DOUBLE PRECISION,
+            quantity            INTEGER,
+            gross_pnl           DOUBLE PRECISION,
+            net_pnl             DOUBLE PRECISION,
+            cost                DOUBLE PRECISION,
+            exit_reason         TEXT,
+            regime              TEXT,
+            entry_time          TEXT,
+            exit_time           TEXT,
+            gate_confidence     INTEGER DEFAULT 0,
+            trade_date          TEXT DEFAULT CURRENT_DATE,
+            pattern             TEXT DEFAULT '',
+            expected_fill_price DOUBLE PRECISION DEFAULT 0,
+            actual_fill_price   DOUBLE PRECISION DEFAULT 0
+        )""",
+        """CREATE TABLE IF NOT EXISTS schema_version (
+            id         INTEGER PRIMARY KEY,
+            version    INTEGER NOT NULL DEFAULT 1,
+            updated_at TEXT DEFAULT NOW()::TEXT
+        )""",
+        """CREATE TABLE IF NOT EXISTS daily_pnl (
+            trade_date   TEXT PRIMARY KEY,
+            realised_pnl DOUBLE PRECISION DEFAULT 0,
+            trades_count INTEGER DEFAULT 0
+        )""",
+        "CREATE INDEX IF NOT EXISTS idx_trades_trade_date ON trades(trade_date)",
+        "CREATE INDEX IF NOT EXISTS idx_trades_strategy   ON trades(strategy)",
+        "CREATE INDEX IF NOT EXISTS idx_trades_exit_time  ON trades(exit_time)",
+        "CREATE INDEX IF NOT EXISTS idx_trades_symbol     ON trades(symbol)",
+        "CREATE INDEX IF NOT EXISTS idx_positions_is_open ON positions(is_open)",
+        "CREATE INDEX IF NOT EXISTS idx_positions_symbol  ON positions(symbol, strategy)",
+    ]
+    with _conn() as c:
+        cur = c.cursor()
+        for stmt in stmts:
+            cur.execute(stmt)
+        # Seed schema_version (idempotent)
+        cur.execute(
+            "INSERT INTO schema_version (id, version) VALUES (1, 1) "
+            "ON CONFLICT (id) DO NOTHING"
+        )
+        # Column migrations
+        cur.execute(
+            "SELECT column_name FROM information_schema.columns "
+            "WHERE table_name = 'trades'"
+        )
+        existing_pg = {r["column_name"] if isinstance(r, dict) else r[0]
+                       for r in cur.fetchall()}
+        pg_migrations = [
+            ("pattern",             "TEXT DEFAULT ''"),
+            ("expected_fill_price", "DOUBLE PRECISION DEFAULT 0"),
+            ("actual_fill_price",   "DOUBLE PRECISION DEFAULT 0"),
+        ]
+        for col, defn in pg_migrations:
+            if col not in existing_pg:
+                cur.execute(f"ALTER TABLE trades ADD COLUMN IF NOT EXISTS {col} {defn}")
+        c.commit()
 
 
 def upsert_position(
@@ -161,26 +339,47 @@ def upsert_position(
     pattern: str = "",
 ) -> None:
     """Insert or replace a position record (marks as open)."""
+    p = _ph()
     with _conn() as c:
-        c.execute(
-            """
-            INSERT OR REPLACE INTO positions
-              (order_id, symbol, strategy, side, entry_price, quantity,
-               sl_price, target, product, opened_at, is_open)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'), 1)
-            """,
-            (order_id, symbol, strategy, side, entry_price, quantity,
-             sl_price, target, product),
-        )
+        if _USE_PG:
+            cur = c.cursor()
+            cur.execute(
+                f"""
+                INSERT INTO positions
+                  (order_id, symbol, strategy, side, entry_price, quantity,
+                   sl_price, target, product, opened_at, is_open)
+                VALUES ({p},{p},{p},{p},{p},{p},{p},{p},{p},NOW()::TEXT,1)
+                ON CONFLICT (order_id) DO UPDATE SET
+                  entry_price=EXCLUDED.entry_price, sl_price=EXCLUDED.sl_price,
+                  target=EXCLUDED.target, is_open=1
+                """,
+                (order_id, symbol, strategy, side, entry_price, quantity,
+                 sl_price, target, product),
+            )
+            c.commit()
+        else:
+            c.execute(
+                f"""
+                INSERT OR REPLACE INTO positions
+                  (order_id, symbol, strategy, side, entry_price, quantity,
+                   sl_price, target, product, opened_at, is_open)
+                VALUES ({p},{p},{p},{p},{p},{p},{p},{p},{p},datetime('now'),1)
+                """,
+                (order_id, symbol, strategy, side, entry_price, quantity,
+                 sl_price, target, product),
+            )
 
 
 def close_position(order_id: str) -> None:
     """Mark a position as closed (is_open=0)."""
+    p = _ph()
     with _conn() as c:
-        c.execute(
-            "UPDATE positions SET is_open=0 WHERE order_id=?",
-            (order_id,),
-        )
+        if _USE_PG:
+            cur = c.cursor()
+            cur.execute(f"UPDATE positions SET is_open=0 WHERE order_id={p}", (order_id,))
+            c.commit()
+        else:
+            c.execute(f"UPDATE positions SET is_open=0 WHERE order_id={p}", (order_id,))
 
 
 def record_trade(
@@ -198,68 +397,93 @@ def record_trade(
     entry_time: str = "",
     gate_confidence: int = 0,
     pattern: str = "",
+    expected_fill_price: float = 0.0,
+    actual_fill_price: float = 0.0,
 ) -> None:
     """
     Insert a completed trade record and update the daily P&L summary.
     Called after every position close (SL hit, target hit, manual exit).
     """
     today = now_ist().date().isoformat()   # IST date, not UTC server date
+    p = _ph()
+    exit_ts = "NOW()::TEXT" if _USE_PG else "datetime('now')"
     with _conn() as c:
-        c.execute(
-            """
-            INSERT INTO trades
-              (symbol, strategy, side, entry_price, exit_price, quantity,
-               gross_pnl, net_pnl, cost, exit_reason, regime,
-               entry_time, exit_time, gate_confidence, trade_date, pattern)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'), ?, ?, ?)
-            """,
-            (symbol, strategy, side, entry_price, exit_price, quantity,
-             gross_pnl, net_pnl, cost, exit_reason, regime,
-             entry_time, gate_confidence, today, pattern),
-        )
-        # Upsert daily summary
-        c.execute(
-            """
-            INSERT INTO daily_pnl (trade_date, realised_pnl, trades_count)
-            VALUES (?, ?, 1)
-            ON CONFLICT(trade_date) DO UPDATE SET
-              realised_pnl = realised_pnl + excluded.realised_pnl,
-              trades_count = trades_count + 1
-            """,
-            (today, net_pnl),
-        )
+        if _USE_PG:
+            cur = c.cursor()
+            cur.execute(
+                f"""
+                INSERT INTO trades
+                  (symbol, strategy, side, entry_price, exit_price, quantity,
+                   gross_pnl, net_pnl, cost, exit_reason, regime,
+                   entry_time, exit_time, gate_confidence, trade_date, pattern,
+                   expected_fill_price, actual_fill_price)
+                VALUES ({p},{p},{p},{p},{p},{p},{p},{p},{p},{p},{p},{p},{exit_ts},{p},{p},{p},{p},{p})
+                """,
+                (symbol, strategy, side, entry_price, exit_price, quantity,
+                 gross_pnl, net_pnl, cost, exit_reason, regime,
+                 entry_time, gate_confidence, today, pattern,
+                 expected_fill_price, actual_fill_price),
+            )
+            cur.execute(
+                f"""
+                INSERT INTO daily_pnl (trade_date, realised_pnl, trades_count)
+                VALUES ({p},{p},1)
+                ON CONFLICT(trade_date) DO UPDATE SET
+                  realised_pnl = daily_pnl.realised_pnl + EXCLUDED.realised_pnl,
+                  trades_count = daily_pnl.trades_count + 1
+                """,
+                (today, net_pnl),
+            )
+            c.commit()
+        else:
+            c.execute(
+                f"""
+                INSERT INTO trades
+                  (symbol, strategy, side, entry_price, exit_price, quantity,
+                   gross_pnl, net_pnl, cost, exit_reason, regime,
+                   entry_time, exit_time, gate_confidence, trade_date, pattern,
+                   expected_fill_price, actual_fill_price)
+                VALUES ({p},{p},{p},{p},{p},{p},{p},{p},{p},{p},{p},{p},datetime('now'),{p},{p},{p},{p},{p})
+                """,
+                (symbol, strategy, side, entry_price, exit_price, quantity,
+                 gross_pnl, net_pnl, cost, exit_reason, regime,
+                 entry_time, gate_confidence, today, pattern,
+                 expected_fill_price, actual_fill_price),
+            )
+            # Upsert daily summary
+            c.execute(
+                f"""
+                INSERT INTO daily_pnl (trade_date, realised_pnl, trades_count)
+                VALUES ({p},{p},1)
+                ON CONFLICT(trade_date) DO UPDATE SET
+                  realised_pnl = realised_pnl + excluded.realised_pnl,
+                  trades_count = trades_count + 1
+                """,
+                (today, net_pnl),
+            )
 
 
 def get_open_positions() -> list[dict]:
     """Return all positions currently marked as open."""
     with _conn() as c:
-        return [dict(r) for r in c.execute(
-            "SELECT * FROM positions WHERE is_open=1"
-        )]
+        return _fetchall(c, "SELECT * FROM positions WHERE is_open=1")
 
 
 def get_daily_pnl(trade_date: Optional[str] = None) -> float:
     """Return total realised P&L for the given date (defaults to today)."""
     today = trade_date or now_ist().date().isoformat()
     with _conn() as c:
-        row = c.execute(
-            "SELECT realised_pnl FROM daily_pnl WHERE trade_date=?",
-            (today,),
-        ).fetchone()
-        return float(row[0]) if row else 0.0
+        row = _fetchone(c, f"SELECT realised_pnl FROM daily_pnl WHERE trade_date={_ph()}", (today,))
+        return float(row["realised_pnl"]) if row else 0.0
 
 
 def get_trade_history(days: int = 30) -> list[dict]:
     """Return all trades from the last N days, newest first."""
+    from ist_clock import now_ist as _now_ist
+    import datetime as _dt
+    cutoff = (_now_ist().date() - _dt.timedelta(days=days)).isoformat()
     with _conn() as c:
-        return [dict(r) for r in c.execute(
-            """
-            SELECT * FROM trades
-            WHERE trade_date >= date('now', ?, 'localtime')
-            ORDER BY id DESC
-            """,
-            (f"-{days} days",),
-        )]
+        return _fetchall(c, f"SELECT * FROM trades WHERE trade_date >= {_ph()} ORDER BY id DESC", (cutoff,))
 
 
 def get_trade_stats(
@@ -270,13 +494,17 @@ def get_trade_stats(
     Return aggregated performance statistics.
     Optionally filtered by strategy.
     """
+    from ist_clock import now_ist as _now_ist
+    import datetime as _dt
+    cutoff = (_now_ist().date() - _dt.timedelta(days=days)).isoformat()
     with _conn() as c:
-        q      = "SELECT * FROM trades WHERE trade_date >= date('now', ?, 'localtime')"
-        params: list = [f"-{days} days"]
+        p      = _ph()
+        q      = f"SELECT * FROM trades WHERE trade_date >= {p}"
+        params: list = [cutoff]
         if strategy:
-            q += " AND strategy=?"
+            q += f" AND strategy={p}"
             params.append(strategy)
-        rows = [dict(r) for r in c.execute(q, params)]
+        rows = _fetchall(c, q, tuple(params))
 
     if not rows:
         return {
@@ -309,19 +537,20 @@ def get_performance_report(
     start_date / end_date: "YYYY-MM-DD" strings (inclusive). Defaults to all trades.
     """
     with _conn() as c:
+        p      = _ph()
         q      = "SELECT * FROM trades WHERE 1=1"
         params: list = []
         if start_date:
-            q += " AND trade_date >= ?"
+            q += f" AND trade_date >= {p}"
             params.append(start_date)
         if end_date:
-            q += " AND trade_date <= ?"
+            q += f" AND trade_date <= {p}"
             params.append(end_date)
         if strategy:
-            q += " AND strategy = ?"
+            q += f" AND strategy = {p}"
             params.append(strategy)
         q += " ORDER BY trade_date ASC, id ASC"
-        rows = [dict(r) for r in c.execute(q, params)]
+        rows = _fetchall(c, q, tuple(params))
 
     if not rows:
         return {
@@ -430,7 +659,7 @@ def get_pattern_breakdown(days: int = 30) -> list[dict]:
     # Use timezone-aware UTC so comparison is consistent with SQLite datetime('now') (UTC)
     cutoff = (datetime.now(timezone.utc) - timedelta(days=days)).strftime("%Y-%m-%d %H:%M:%S")
     with _conn() as conn:
-        rows = conn.execute("""
+        rows = _fetchall(conn, f"""
             SELECT pattern,
                    COUNT(*) as total_trades,
                    SUM(CASE WHEN net_pnl > 0 THEN 1 ELSE 0 END) as wins,
@@ -439,11 +668,67 @@ def get_pattern_breakdown(days: int = 30) -> list[dict]:
                    ROUND(AVG(CASE WHEN net_pnl > 0 THEN net_pnl END), 2) as avg_win,
                    ROUND(AVG(CASE WHEN net_pnl < 0 THEN net_pnl END), 2) as avg_loss
             FROM trades
-            WHERE exit_time > ?
+            WHERE exit_time > {_ph()}
             GROUP BY pattern
             ORDER BY total_pnl DESC
-        """, (cutoff,)).fetchall()
-    return [dict(r) for r in rows]
+        """, (cutoff,))
+    return rows
+
+
+def cleanup_old_data(keep_days: int = 90) -> dict:
+    """
+    Archive old closed positions and purge trades older than keep_days.
+
+    Safe to call at any time — only removes closed (is_open=0) positions and
+    trades older than the cutoff. Open positions and recent data are untouched.
+
+    Returns a dict with the counts of rows removed from each table.
+    """
+    from ist_clock import now_ist as _now_ist
+    cutoff = (_now_ist().date() - timedelta(days=keep_days)).isoformat()
+    p = _ph()
+    with _conn() as c:
+        if _USE_PG:
+            cur = c.cursor()
+            cur.execute(f"DELETE FROM positions WHERE is_open=0 AND opened_at < {p}", (cutoff,))
+            pos_del = cur.rowcount
+            cur.execute(f"DELETE FROM trades WHERE trade_date < {p}", (cutoff,))
+            trade_del = cur.rowcount
+            cur.execute(f"DELETE FROM daily_pnl WHERE trade_date < {p}", (cutoff,))
+            pnl_del = cur.rowcount
+            c.commit()
+        else:
+            pos_del   = c.execute(f"DELETE FROM positions WHERE is_open=0 AND opened_at < {p}", (cutoff,)).rowcount
+            trade_del = c.execute(f"DELETE FROM trades WHERE trade_date < {p}", (cutoff,)).rowcount
+            pnl_del   = c.execute(f"DELETE FROM daily_pnl WHERE trade_date < {p}", (cutoff,)).rowcount
+        removed = {
+            "positions": pos_del,
+            "trades":    trade_del,
+            "daily_pnl": pnl_del,
+        }
+    from loguru import logger as _log
+    _log.info(
+        "[state_store] cleanup_old_data(keep_days={}): removed {} positions, {} trades, {} daily_pnl rows",
+        keep_days, removed["positions"], removed["trades"], removed["daily_pnl"],
+    )
+    return removed
+
+
+def vacuum_db() -> None:
+    """
+    Run SQLITE VACUUM to reclaim disk space after deletes.
+    Must be called OUTSIDE a transaction (autocommit mode).
+    Should be run at most once per day, typically after cleanup_old_data().
+    """
+    import sqlite3 as _sq
+    DB_PATH.parent.mkdir(parents=True, exist_ok=True)
+    con = _sq.connect(str(DB_PATH), isolation_level=None)   # autocommit required for VACUUM
+    try:
+        con.execute("VACUUM")
+    finally:
+        con.close()
+    from loguru import logger as _log
+    _log.info("[state_store] VACUUM complete — DB file reclaimed")
 
 
 # Ensure tables and migrations are applied on first import

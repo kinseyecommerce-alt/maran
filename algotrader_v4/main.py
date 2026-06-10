@@ -87,10 +87,21 @@ _SENSITIVE_GETS = frozenset({
     "/portfolio/positions", "/portfolio/orders", "/sebi/audit-log",
     "/docs", "/redoc",
     "/gate/log", "/agents/activity", "/brackets", "/trailing-sl/status", "/metrics",
-    "/portfolio/performance-report",  # full P&L history — requires auth
-    "/config/god-mode/status",        # exposes live risk profile — requires auth
-    "/risk/status",                   # exposes daily P&L limits
-    "/settings/trading-limits",       # exposes risk config
+    "/portfolio/performance-report",   # full P&L history — requires auth
+    "/config/god-mode/status",         # exposes live risk profile — requires auth
+    "/risk/status",                    # exposes daily P&L limits
+    "/settings/trading-limits",        # exposes risk config
+    # QA-fix: additional sensitive GETs missing from original set
+    "/portfolio/trades/history",       # full trade records with P&L per trade
+    "/portfolio/trades/export",        # same data as CSV
+    "/portfolio/stats",                # net P&L + win rate
+    "/bot/status",                     # daily P&L, order IDs, risk limits, adaptive params
+    "/agents",                         # per-agent approved symbol lists
+    "/adaptive/status",                # exact SL/target/trail pct per strategy
+    "/regime/status",                  # current regime + strategy plan
+    "/regime/history",                 # historical regime transitions
+    "/regime/plans",                   # all regime strategy plans
+    "/symbols/selected",               # live per-strategy watchlists
 })
 
 @app.middleware("http")
@@ -178,7 +189,13 @@ _RATE_LIMITS = {
     "/backtest/run": 5,
     "/backtest/compare": 3,
     "/optimizer/run": 2,
-    "/auth/login": 10,   # brute-force protection: 10 login attempts / 60s per IP
+    "/auth/login": 10,        # brute-force protection: 10 login attempts / 60s per IP
+    # QA-fix: rate-limit dangerous state-mutation endpoints (defense-in-depth on top of auth)
+    "/bot/start": 5,
+    "/bot/stop": 10,
+    "/orders/squareoff": 5,
+    "/orders/multi-leg": 10,
+    "/sebi/kill-switch": 3,
 }
 
 @app.middleware("http")
@@ -467,6 +484,11 @@ def me(request: Request):
         user = decode_token(auth[7:])
         if user:
             return {"user": user, "auth_method": "jwt"}
+    cookie_jwt = request.cookies.get("jwt", "")
+    if cookie_jwt:
+        user = decode_token(cookie_jwt)
+        if user:
+            return {"user": user, "auth_method": "jwt_cookie"}
     if bool(settings.api_key) and hmac.compare_digest(
         request.headers.get("X-API-Key", "").encode(), settings.api_key.encode()
     ):
@@ -963,7 +985,11 @@ async def cancel(order_id: str):
 async def squareoff():
     ids = kite_client.squareoff_all_positions()
     order_guard.reset_daily()
-    return {"status": "ok", "squared_off": len(ids)}
+    secondary_results: dict = {}
+    if settings.enable_multi_broker:
+        from broker_router import broker_router
+        secondary_results = broker_router.squareoff_all_secondaries()
+    return {"status": "ok", "squared_off": len(ids), "secondary": secondary_results}
 
 
 class MultiLegRequest(BaseModel):
@@ -1065,6 +1091,48 @@ async def gen_signal(req: SignalRequest):
 
 @app.get("/risk/status", tags=["Risk"])
 def risk_st(): return risk_manager.status()
+
+
+@app.get("/broker/status", tags=["System"])
+def broker_status():
+    """Return connection status for primary (Zerodha/active broker) and all secondary brokers."""
+    from broker_router import broker_router
+    active = getattr(settings, "active_broker", "zerodha")
+    if active == "upstox":
+        from brokers.upstox_broker import UpstoxBroker
+        primary_creds = UpstoxBroker().validate_credentials()
+    elif active == "kotak":
+        from brokers.kotak_broker import KotakBroker
+        primary_creds = KotakBroker().validate_credentials()
+    else:
+        primary_creds = kite_client.validate_credentials()
+    result: dict = {
+        "active_broker":      active,
+        "credentials":        primary_creds,
+        "primary": {
+            "name":        active,
+            "initialised": primary_creds.get("initialised", False),
+            "access_token": bool(settings.kite_access_token),
+            "mode":        settings.trading_mode,
+        },
+        "multi_broker_enabled": settings.enable_multi_broker,
+        "secondary_brokers":   [],
+        "mirrored_positions":  0,
+    }
+    if settings.enable_multi_broker:
+        st = broker_router.status()
+        result["mirrored_positions"] = st["mirrored_positions"]
+        for name, _client in broker_router._secondaries:
+            try:
+                creds = _client.validate_credentials()
+            except Exception:
+                creds = {"initialised": False}
+            result["secondary_brokers"].append({
+                "name":        name,
+                "initialised": creds.get("initialised", False),
+                "access_token": creds.get("access_token", False),
+            })
+    return result
 
 
 @app.get("/black-swan/status", tags=["Risk"])
@@ -1347,7 +1415,8 @@ async def ws_endpoint(ws: WebSocket):
     if auth_hdr.lower().startswith("bearer "):
         token = auth_hdr.removeprefix("Bearer ").strip()
     else:
-        token = ws.cookies.get("access_token", "")
+        # /auth/login sets the HttpOnly cookie as "jwt"; accept legacy name too
+        token = ws.cookies.get("jwt", "") or ws.cookies.get("access_token", "")
     # Must accept before sending Close frames (WebSocket protocol requires it).
     await ws.accept()
     if settings.api_key or settings.jwt_secret_key:
@@ -1832,27 +1901,51 @@ async def options_chain(symbol: str, expiry_offset_days: int = Query(default=0))
         days_to_expiry = 7
     expiry = today + timedelta(days=days_to_expiry)
 
+    # ATM IV: try India VIX tick → scale to equity IV; fall back to 20%
+    atm_iv = 0.20
+    try:
+        vix_tick, _ = tick_engine.latest("INDIA VIX")
+        if vix_tick and vix_tick.ltp > 0:
+            atm_iv = vix_tick.ltp / 100.0  # VIX is quoted as % (e.g. 14.5 → 0.145)
+    except Exception:
+        pass
+
+    from greeks_engine import strike_market_price, vol_surface_iv
+
     chain = []
     for strike in strikes:
         row = {"strike": strike, "atm": strike == atm_strike, "expiry": str(expiry)}
         for opt_type in ("CE", "PE"):
             try:
-                # Use ATM market price estimate (5% of spot) for IV computation
-                market_price = max(1.0, spot * 0.05)
-                g = calculate_greeks(spot, strike, expiry, opt_type, market_price)
+                # Vol-surface-aware market price per strike (put skew + smile)
+                market_price = strike_market_price(
+                    spot, strike, atm_iv, opt_type, days_to_expiry=days_to_expiry
+                )
+                strike_iv = vol_surface_iv(spot, strike, atm_iv, opt_type)
+                g = calculate_greeks(spot, strike, expiry, opt_type, market_price,
+                                     atm_iv=atm_iv)
                 row[opt_type.lower()] = {
-                    "delta": round(g.delta, 4),
-                    "gamma": round(g.gamma, 6),
-                    "theta": round(g.theta, 2),
-                    "vega":  round(g.vega, 4),
-                    "iv":    round(g.iv * 100, 1),
-                    "intrinsic": round(max(0, (spot - strike) if opt_type == "CE" else (strike - spot)), 2),
+                    "delta":     round(g.delta, 4),
+                    "gamma":     round(g.gamma, 6),
+                    "theta":     round(g.theta, 2),
+                    "vega":      round(g.vega, 4),
+                    "iv":        round(strike_iv * 100, 1),   # strike-specific IV %
+                    "bs_price":  round(market_price, 2),
+                    "intrinsic": round(g.intrinsic, 2),
+                    "moneyness": g.moneyness,
                 }
             except Exception:
-                row[opt_type.lower()] = {"delta": 0, "gamma": 0, "theta": 0, "vega": 0, "iv": 0, "intrinsic": 0}
+                row[opt_type.lower()] = {
+                    "delta": 0, "gamma": 0, "theta": 0, "vega": 0,
+                    "iv": 0, "bs_price": 0, "intrinsic": 0, "moneyness": "OTM",
+                }
         chain.append(row)
 
-    return {"symbol": sym, "spot": spot, "atm_strike": atm_strike, "expiry": str(expiry), "chain": chain}
+    return {
+        "symbol": sym, "spot": spot, "atm_strike": atm_strike,
+        "expiry": str(expiry), "atm_iv_pct": round(atm_iv * 100, 1),
+        "chain": chain,
+    }
 
 
 @app.get("/backtest/stress/{symbol}/{strategy}", tags=["Backtest"])
@@ -1862,24 +1955,6 @@ def stress_test_endpoint(symbol: str, strategy: str):
     strategy = _clean_strategy(strategy)
     result = backtest_engine.stress_test(symbol, strategy)
     return result
-
-
-@app.get("/broker/status", tags=["System"])
-def broker_status():
-    """Return active broker name and credential check."""
-    active = getattr(settings, "active_broker", "zerodha")
-    if active == "upstox":
-        from brokers.upstox_broker import UpstoxBroker
-        creds = UpstoxBroker().validate_credentials()
-    elif active == "kotak":
-        from brokers.kotak_broker import KotakBroker
-        creds = KotakBroker().validate_credentials()
-    else:
-        creds = kite_client.validate_credentials()
-    return {
-        "active_broker": active,
-        "credentials":   creds,
-    }
 
 
 @app.get("/sector/map", tags=["System"])
@@ -2035,6 +2110,185 @@ def _install_log_redaction() -> None:
 
 _install_log_redaction()
 
+# Add file sink so logs survive across restarts (redaction patcher already applied above)
+import os as _os
+_log_dir = _os.path.join(_os.path.dirname(__file__), "logs")
+_os.makedirs(_log_dir, exist_ok=True)
+logger.add(
+    _os.path.join(_log_dir, "algotrader_{time:YYYY-MM-DD}.log"),
+    rotation="00:00",        # new file every midnight IST
+    retention="30 days",
+    compression="gz",
+    level="INFO",
+    enqueue=True,            # thread-safe non-blocking write
+)
+
+
+async def _reconcile_open_positions() -> None:
+    """
+    Rehydrate open positions from state_store into order_guard and
+    trailing_sl_engine after a crash or planned restart.
+
+    Without this, every restart:
+      - order_guard has no record of open positions → duplicate entries possible
+      - trailing_sl_engine has no TSL registered → zero SL protection until next entry
+      - risk_manager.open_position_count is wrong in PAPER mode
+
+    For LIVE mode we also cross-check the broker to detect positions that were
+    closed externally (manual close / SL-M fill) and log naked positions (entry
+    with no active SL-M order — requires manual intervention).
+    """
+    from state_store import get_open_positions, close_position
+    from order_guard import order_guard
+    from trailing_sl_engine import trailing_sl_engine
+
+    try:
+        db_positions = get_open_positions()
+    except Exception as exc:
+        logger.error("[Reconcile] Could not read open positions from DB: {}", exc)
+        return
+
+    if not db_positions:
+        logger.info("[Reconcile] No open positions in state_store — nothing to rehydrate")
+        # LIVE: still restore open_position_count from broker (legacy path)
+        if settings.trading_mode == "LIVE":
+            try:
+                _pos_data = kite_client.positions()
+                _open_count = sum(
+                    1 for p in _pos_data.get("net", []) if p.get("quantity", 0) != 0
+                )
+                if _open_count > 0:
+                    risk_manager.open_position_count = _open_count
+                    logger.warning(
+                        "[Reconcile] Broker reports {} open position(s) but DB is empty "
+                        "— manual trades or stale DB; count restored, no TSL wired",
+                        _open_count,
+                    )
+            except Exception as exc:
+                logger.warning("[Reconcile] Could not read broker positions: {}", exc)
+        return
+
+    logger.warning(
+        "[Reconcile] Rehydrating {} open position(s) from DB (crash/restart recovery)",
+        len(db_positions),
+    )
+
+    # LIVE: fetch broker state once so we can cross-check
+    kite_positions_by_symbol: dict[str, dict] = {}
+    kite_sl_order_tags: set[str] = set()
+    if settings.trading_mode == "LIVE":
+        try:
+            _pos_data = kite_client.positions()
+            for p in _pos_data.get("net", []):
+                if p.get("quantity", 0) != 0:
+                    kite_positions_by_symbol[p["tradingsymbol"]] = p
+            _orders = kite_client.orders() or []
+            for o in _orders:
+                if o.get("status") in ("TRIGGER PENDING", "OPEN") and o.get("order_type") == "SL-M":
+                    kite_sl_order_tags.add(o.get("tag", ""))
+        except Exception as exc:
+            logger.warning("[Reconcile] Could not read broker state: {}", exc)
+
+    rehydrated = 0
+    for pos in db_positions:
+        order_id  = pos["order_id"]
+        symbol    = pos["symbol"]
+        strategy  = pos["strategy"]
+        side      = pos["side"]
+        entry_px  = float(pos["entry_price"])
+        qty       = int(pos["quantity"])
+        sl_price  = pos.get("sl_price") or 0.0
+
+        # LIVE: if broker no longer holds this position, close it in DB
+        if settings.trading_mode == "LIVE" and symbol not in kite_positions_by_symbol:
+            logger.warning(
+                "[Reconcile] {} {} not found in broker — likely closed externally; "
+                "marking closed in DB (P&L unknown, set to 0)",
+                strategy, symbol,
+            )
+            try:
+                close_position(order_id)
+            except Exception:
+                pass
+            continue
+
+        # Register in order_guard → prevents a new entry on this symbol/strategy
+        try:
+            order_guard.register_order(symbol, strategy, side, order_id)
+        except Exception as exc:
+            logger.error("[Reconcile] order_guard.register_order failed for {}: {}", order_id, exc)
+
+        # Register in trailing_sl_engine → SL callbacks fire on next tick
+        # Use the stored sl_price so we resume at the position's actual stop, not a
+        # freshly-computed one which could be tighter/looser than what was set.
+        try:
+            trailing_sl_engine.register(
+                symbol=symbol, strategy=strategy, side=side,
+                entry_price=entry_px, quantity=qty, order_id=order_id,
+                initial_sl=float(sl_price) if sl_price else None,
+            )
+        except Exception as exc:
+            logger.error("[Reconcile] TSL register failed for {}: {}", order_id, exc)
+
+        # In PAPER mode the broker returns empty positions; track the count manually
+        if settings.trading_mode == "PAPER":
+            risk_manager.position_opened()
+        else:
+            # LIVE: update count from actual broker qty (already fetched above)
+            risk_manager.position_opened()
+
+        # LIVE: check if a protective SL-M order exists; warn if naked
+        if settings.trading_mode == "LIVE":
+            expected_tag = f"Agent-{strategy}-SL"[:20]
+            if expected_tag not in kite_sl_order_tags:
+                logger.critical(
+                    "[Reconcile] NAKED POSITION: {} {} {} has no active SL-M order "
+                    "(tag '{}' not found in open orders). "
+                    "MANUAL INTERVENTION REQUIRED — place a protective stop immediately.",
+                    strategy, side, symbol, expected_tag,
+                )
+
+        rehydrated += 1
+        logger.info(
+            "[Reconcile] Rehydrated: {} {} {} entry=₹{:.2f} sl=₹{:.2f} order={}",
+            strategy, side, symbol, entry_px, sl_price, order_id,
+        )
+
+    logger.warning(
+        "[Reconcile] Complete: {}/{} position(s) rehydrated into order_guard + TSL engine",
+        rehydrated, len(db_positions),
+    )
+
+    # Correct LIVE open_position_count against broker (catches positions opened by manual
+    # trades that exist in Kite but not in our DB — we can't TSL those, but we must count them)
+    if settings.trading_mode == "LIVE" and kite_positions_by_symbol:
+        broker_count = len(kite_positions_by_symbol)
+        if broker_count > risk_manager.open_position_count:
+            risk_manager.open_position_count = broker_count
+            logger.warning(
+                "[Reconcile] Broker has {} position(s), DB had {} — "
+                "open_position_count corrected to {}",
+                broker_count, rehydrated, broker_count,
+            )
+
+
+async def _prewarm_gate() -> None:
+    """Send a no-op message to the Claude gate 5 s after startup to establish
+    the HTTPS connection before the first real trade arrives."""
+    await asyncio.sleep(5)
+    if not settings.use_claude_trade_gate:
+        return
+    try:
+        from claude_trade_gate import _get_client
+        await _get_client().messages.create(
+            model=settings.claude_gate_model,
+            max_tokens=1,
+            messages=[{"role": "user", "content": "ping"}],
+        )
+        logger.info("[startup] Claude gate pre-warmed ({})", settings.claude_gate_model)
+    except Exception as _e:
+        logger.debug("[startup] Gate pre-warm skipped: {}", _e)
+
 
 @app.on_event("startup")
 async def on_startup():
@@ -2046,23 +2300,14 @@ async def on_startup():
         risk_manager.daily_realised_pnl = today_pnl
         logger.info("Restored today's P&L from DB: ₹{:.0f}", today_pnl)
 
-    # SAFETY: restore open_position_count from the live broker on startup.
-    # Without this, a crash/restart resets the count to 0 and the risk manager
-    # will allow new entries even when max_open_positions are already open in Kite.
-    try:
-        _pos_data = kite_client.positions()
-        _open_count = sum(
-            1 for p in _pos_data.get("net", []) if p.get("quantity", 0) != 0
-        )
-        if _open_count > 0:
-            risk_manager.open_position_count = _open_count
-            logger.warning(
-                "Startup: restored open_position_count={} from broker "
-                "(crash recovery — {} live positions found)",
-                _open_count, _open_count,
-            )
-    except Exception as _pos_exc:
-        logger.warning("Startup: could not restore open_position_count from broker — {}", _pos_exc)
+    # ── Position reconciliation on restart ────────────────────────────────────
+    # Rehydrate open positions from state_store into order_guard and
+    # trailing_sl_engine so that:
+    #   • order_guard sees them → no duplicate entry placed on the same symbol
+    #   • trailing_sl_engine tracks them → SL callbacks fire on next tick
+    #   • risk_manager.open_position_count is accurate (PAPER mode)
+    # For LIVE mode, cross-check against the broker to detect naked positions.
+    await _reconcile_open_positions()
 
     # Load SEBI IP whitelist from env at startup so restarts don't reset it
     if settings.sebi_whitelisted_ips:
@@ -2106,6 +2351,10 @@ async def on_startup():
     atomic_bracket_engine.ws_broadcast = broadcast
     logger.info("FastAPI startup: tick engine + atomic bracket engine launched")
     asyncio.create_task(symbol_scanner.run())
+
+    # Pre-warm the Claude gate connection so the first real trade doesn't pay
+    # the cold-start TCP/TLS handshake cost (~300-500 ms).
+    asyncio.create_task(_prewarm_gate())
     from platform_scheduler import platform_scheduler
     platform_scheduler.start()
 
@@ -2141,6 +2390,32 @@ async def on_startup():
             raise RuntimeError("JWT_SECRET_KEY must be at least 32 characters in LIVE mode")
     if settings.trading_mode == "LIVE" and not settings.kite_api_key:
         logger.warning("SECURITY: TRADING_MODE=LIVE but KITE_API_KEY is not set — order placement will fail.")
+
+    # ── Multi-broker secondary initialization ─────────────────────────────
+    if settings.enable_multi_broker and settings.secondary_brokers:
+        from broker_router import broker_router
+        for broker_name in [b.strip().lower() for b in settings.secondary_brokers.split(",") if b.strip()]:
+            try:
+                if broker_name == "upstox":
+                    if not settings.upstox_access_token:
+                        logger.warning("Multi-broker: upstox enabled but UPSTOX_ACCESS_TOKEN is not set")
+                        continue
+                    from brokers.upstox_broker import UpstoxBroker
+                    ub = UpstoxBroker()
+                    broker_router.add_secondary("upstox", ub)
+                    logger.info("Multi-broker: Upstox registered as secondary broker")
+                elif broker_name == "kotak":
+                    if not settings.kotak_access_token:
+                        logger.warning("Multi-broker: kotak enabled but KOTAK_ACCESS_TOKEN is not set")
+                        continue
+                    from brokers.kotak_broker import KotakBroker
+                    kb = KotakBroker()
+                    broker_router.add_secondary("kotak", kb)
+                    logger.info("Multi-broker: Kotak Neo registered as secondary broker")
+                else:
+                    logger.warning("Multi-broker: unknown broker '{}' in SECONDARY_BROKERS — skipped", broker_name)
+            except Exception as _mb_exc:
+                logger.error("Multi-broker: failed to init '{}': {}", broker_name, _mb_exc)
 
 
 @app.on_event("shutdown")
@@ -2305,19 +2580,6 @@ async def test_notification(body: dict = Body(default={"message": "AlgoTrader te
         return {"status": "error", "detail": str(e)}
 
 
-# ── State_store fill-price migration ──────────────────────────────────────────
-
-# Add expected/actual fill price columns if not already present
-try:
-    from state_store import _conn as _ss_conn
-    for _col, _def in [("expected_fill_price", "REAL DEFAULT 0"), ("actual_fill_price", "REAL DEFAULT 0")]:
-        try:
-            _ss_conn().execute(f"ALTER TABLE trades ADD COLUMN {_col} {_def}")
-        except Exception:
-            pass
-except Exception:
-    pass
-
 
 @app.post("/optimizer/run", tags=["Optimizer"])
 async def run_optimizer(
@@ -2403,7 +2665,56 @@ async def god_mode_status():
     return god_mode_manager.status()
 
 
+@app.get("/db/status", tags=["Operations"])
+async def db_status():
+    """Return DB file size, row counts per table, and schema version."""
+    from state_store import _conn, DB_PATH
+    import os
+    size_mb = round(DB_PATH.stat().st_size / 1_048_576, 2) if DB_PATH.exists() else 0
+    with _conn() as c:
+        tables = {}
+        for tbl in ("trades", "positions", "daily_pnl"):
+            row = c.execute(f"SELECT COUNT(*) FROM {tbl}").fetchone()
+            tables[tbl] = row[0] if row else 0
+        ver = c.execute("SELECT version FROM schema_version WHERE id=1").fetchone()
+    return {
+        "db_path":       str(DB_PATH),
+        "size_mb":       size_mb,
+        "schema_version": ver[0] if ver else None,
+        "row_counts":    tables,
+        "db_keep_days":  settings.db_keep_days,
+    }
+
+
+@app.post("/db/cleanup", tags=["Operations"])
+async def db_cleanup(keep_days: int = Query(default=None, ge=30, le=365)):
+    """
+    Manually trigger DB archival + VACUUM.
+    Removes closed positions and trades older than keep_days (default: settings.db_keep_days).
+    Runs in background — returns immediately.
+    """
+    import asyncio
+    from state_store import cleanup_old_data, vacuum_db
+    days = keep_days if keep_days is not None else settings.db_keep_days
+
+    async def _run():
+        loop = asyncio.get_event_loop()
+        removed = await loop.run_in_executor(None, lambda: cleanup_old_data(keep_days=days))
+        await loop.run_in_executor(None, vacuum_db)
+        logger.info("[db/cleanup] manual cleanup complete: {}", removed)
+
+    asyncio.create_task(_run())
+    return {"status": "started", "keep_days": days}
+
+
 # HIGH-7: reload=False in production — auto-reload bypasses security middleware
 if __name__ == "__main__":
+    try:
+        import uvloop
+        uvloop.install()  # 2-4× faster asyncio event loop (Cython, Linux/macOS)
+        logger.info("uvloop installed as asyncio event loop")
+    except ImportError:
+        pass  # Windows or unavailable — fall back to default asyncio loop
+
     import uvicorn
     uvicorn.run("main:app", host=settings.host, port=settings.port, reload=False)

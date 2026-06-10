@@ -161,6 +161,16 @@ class SEBICompliance:
         self._pause_reason     = ""
         self._kill_reason      = ""
         self._whitelisted_ips: set[str] = set()
+        # Seed from SEBI_WHITELISTED_IPS env var so the whitelist is non-empty at startup.
+        # Empty whitelist = allow-all (development default); non-empty = strict allowlist.
+        try:
+            from config import settings as _cfg
+            for _ip in (_cfg.sebi_whitelisted_ips or "").split(","):
+                _ip = _ip.strip()
+                if _ip:
+                    self._whitelisted_ips.add(_ip)
+        except Exception:
+            pass
 
         # Reg 3: order-to-trade ratio (orders placed vs orders executed)
         self._orders_placed:   int = 0
@@ -175,28 +185,41 @@ class SEBICompliance:
         # strategy → list of order IDs
         self._order_registry: dict[str, list[str]] = defaultdict(list)
 
+        # Wired by main.py: async callable() that cancels all open orders + squares off.
+        # Instance attribute (not class-level) so tests can isolate instances safely.
+        self.on_kill_switch: "Callable[[], Awaitable[None]] | None" = None
+
         logger.info("SEBICompliance module initialised — 10 regulations active")
 
     # ── Reg 2: Kill switch ─────────────────────────────────────────────────────
-
-    # Wired by main.py: async callable() that cancels all open orders + squares off.
-    on_kill_switch: "Callable[[], Awaitable[None]] | None" = None
 
     def trigger_kill_switch(self, reason: str = "Emergency halt") -> None:
         with self._lock:
             self._state       = KillSwitchState.KILLED
             self._kill_reason = reason
         logger.critical("SEBI KILL SWITCH TRIGGERED: {}", reason)
+        # Wire to risk manager so check_before_order() also blocks immediately.
+        try:
+            from risk_manager import risk_manager as _rm
+            _rm.is_trading_halted = True
+        except Exception:
+            pass
         # Cancel all open orders and square off positions immediately.
-        if self.on_kill_switch is not None:
+        cb = self.on_kill_switch
+        if cb is not None:
             import asyncio
             try:
                 loop = asyncio.get_running_loop()
-                loop.create_task(self.on_kill_switch())
+                task = loop.create_task(cb())
+                task.add_done_callback(
+                    lambda t: t.exception() and logger.error(
+                        "SEBI kill-switch squareoff raised: {}", t.exception()
+                    )
+                )
             except RuntimeError:
                 # No running event loop — fire-and-forget via a new loop.
                 try:
-                    asyncio.run(self.on_kill_switch())
+                    asyncio.run(cb())
                 except Exception as exc:
                     logger.error("SEBI kill-switch squareoff failed: {}", exc)
 
@@ -221,8 +244,15 @@ class SEBICompliance:
         return True, "ACTIVE"
 
     def reset_kill_switch(self, secret: str = "") -> tuple[bool, str]:
-        """Requires KILL_SWITCH_RESET_SECRET env var when configured."""
-        if settings.kill_switch_reset_secret and not hmac.compare_digest(
+        """Requires KILL_SWITCH_RESET_SECRET env var when configured.
+        In LIVE mode with no secret configured, resets are always blocked to prevent
+        accidental resumption via an unprotected endpoint."""
+        if not settings.kill_switch_reset_secret:
+            if settings.trading_mode == "LIVE":
+                logger.error("SEBI: Kill-switch reset blocked — set KILL_SWITCH_RESET_SECRET in .env")
+                return False, "Reset secret not configured; set KILL_SWITCH_RESET_SECRET in .env"
+            # PAPER mode with no secret: allow (safe for dev/test)
+        elif not hmac.compare_digest(
             secret.encode(), settings.kill_switch_reset_secret.encode()
         ):
             logger.error("SEBI: Unauthorized kill-switch reset attempt (bad secret)")
