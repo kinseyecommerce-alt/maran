@@ -484,6 +484,11 @@ def me(request: Request):
         user = decode_token(auth[7:])
         if user:
             return {"user": user, "auth_method": "jwt"}
+    cookie_jwt = request.cookies.get("jwt", "")
+    if cookie_jwt:
+        user = decode_token(cookie_jwt)
+        if user:
+            return {"user": user, "auth_method": "jwt_cookie"}
     if bool(settings.api_key) and hmac.compare_digest(
         request.headers.get("X-API-Key", "").encode(), settings.api_key.encode()
     ):
@@ -1364,7 +1369,8 @@ async def ws_endpoint(ws: WebSocket):
     if auth_hdr.lower().startswith("bearer "):
         token = auth_hdr.removeprefix("Bearer ").strip()
     else:
-        token = ws.cookies.get("access_token", "")
+        # /auth/login sets the HttpOnly cookie as "jwt"; accept legacy name too
+        token = ws.cookies.get("jwt", "") or ws.cookies.get("access_token", "")
     # Must accept before sending Close frames (WebSocket protocol requires it).
     await ws.accept()
     if settings.api_key or settings.jwt_secret_key:

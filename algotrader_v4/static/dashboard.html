@@ -3180,7 +3180,6 @@ function renderPositions() {
 
     const sym    = p.tradingsymbol || p.symbol || '—';
     const symEsc = escHtml(sym);
-    const mult = side === 'BUY' ? 1 : -1;
     return `<tr>
       <td style="font-weight:600">${symEsc}</td>
       <td><span class="badge badge-${side.toLowerCase()}">${escHtml(side)}</span></td>
