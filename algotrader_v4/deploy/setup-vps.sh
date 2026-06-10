@@ -21,7 +21,7 @@ set -euo pipefail
 DOMAIN="${1:-}"
 APP_USER="algotrader"
 APP_DIR="/opt/algotrader"
-BRANCH="main"
+BRANCH="${DEPLOY_BRANCH:-main}"          # override: DEPLOY_BRANCH=my-branch bash setup-vps.sh ...
 PYTHON="python3.11"
 REPO_URL="https://github.com/kinseyecommerce-alt/maran.git"
 
