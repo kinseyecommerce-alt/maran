@@ -1225,6 +1225,7 @@
           <div class="kite-dot" id="kite-status-dot"></div>
           <span id="kite-status-text">Kite</span>
         </div>
+        <div id="multi-broker-chips" style="display:none;gap:4px;align-items:center;"></div>
         <button class="notif-bell" id="notif-bell" title="Trade notifications" onclick="toggleNotifications()">
           <i data-lucide="bell"></i>
           <div class="notif-badge" id="notif-badge">0</div>
@@ -3593,6 +3594,32 @@ function renderRegimeHistory(history) {
 /* ═══════════════════════════════════════════════════════════════
    RENDER: Kite status in topbar + settings
 ═══════════════════════════════════════════════════════════════ */
+async function fetchMultiBrokerStatus() {
+  try {
+    const d = await api('GET', '/broker/status');
+    if (!d || !d.multi_broker_enabled) return;
+    const container = document.getElementById('multi-broker-chips');
+    if (!container) return;
+    container.style.display = 'flex';
+    container.innerHTML = '';
+    for (const b of (d.secondary_brokers || [])) {
+      const chip = document.createElement('div');
+      chip.style.cssText = 'display:flex;align-items:center;gap:4px;background:var(--bg2);border-radius:6px;padding:2px 7px;font-size:11px;';
+      const dot = document.createElement('div');
+      dot.style.cssText = `width:7px;height:7px;border-radius:50%;background:${b.initialised ? '#22c55e' : '#ef4444'};`;
+      chip.appendChild(dot);
+      chip.appendChild(document.createTextNode(b.name.charAt(0).toUpperCase() + b.name.slice(1)));
+      container.appendChild(chip);
+    }
+    if (d.mirrored_positions > 0) {
+      const badge = document.createElement('span');
+      badge.style.cssText = 'font-size:10px;color:var(--fg3);';
+      badge.textContent = `(${d.mirrored_positions} mirrored)`;
+      container.appendChild(badge);
+    }
+  } catch (_) {}
+}
+
 function renderKiteStatus(data) {
   const dot   = document.getElementById('kite-status-dot');
   const txt   = document.getElementById('kite-status-text');
@@ -4827,6 +4854,10 @@ async function init() {
 
   // Initial Black Swan status (in case active before page load)
   fetchBlackSwanStatus();
+
+  // Multi-broker chip display (polled every 30s; only visible when enabled)
+  fetchMultiBrokerStatus();
+  setInterval(fetchMultiBrokerStatus, 30000);
 
   // Notifications + mobile nav
   await _initNotifications();

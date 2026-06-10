@@ -231,6 +231,10 @@ class Settings(BaseSettings):
     # When set, API key/secret are encrypted at rest. When empty, fallback to plaintext + chmod 600.
     kite_accounts_key: str = ""
 
+    # Multi-broker mirroring — place orders on Zerodha AND a secondary broker simultaneously
+    enable_multi_broker: bool = False          # master switch
+    secondary_brokers: str = ""               # comma-separated: "upstox", "kotak"
+
     # Black Swan detection + opportunity response (veteran trader mode)
     black_swan_vix_zscore:     float = 3.0    # VIX z-score threshold (beyond HIGH_VOLATILE's 2.0)
     black_swan_price_drop_pct: float = 3.0    # 1-min NIFTY drop % to trigger flash crash detect

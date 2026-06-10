@@ -16,6 +16,7 @@ from loguru import logger
 
 from config import settings
 from kite_client import kite_client
+from broker_router import broker_router
 from risk_manager import risk_manager
 from order_guard import order_guard
 from backtest_engine import backtest_engine
@@ -163,6 +164,17 @@ def _setup_tsl_callbacks() -> None:
         risk_manager.position_closed()
         trailing_sl_engine.deregister(pos.order_id)
 
+        # Mirror exit to secondary brokers (multi-broker mode)
+        if settings.enable_multi_broker and broker_router.has_secondaries:
+            try:
+                broker_router.mirror_exit(
+                    primary_order_id=str(pos.order_id),
+                    quantity=pos.quantity,
+                    agent_tag=f"TSL-HIT-{pos.strategy}",
+                )
+            except Exception:
+                pass
+
         # Persist to SQLite (Phase 3) — non-blocking async variants
         try:
             from state_store import close_position_async, record_trade_async
@@ -227,6 +239,17 @@ def _setup_tsl_callbacks() -> None:
             risk_manager.record_trade(pnl_est)
             risk_manager.position_closed()
             trailing_sl_engine.deregister(pos.order_id)
+
+            # Mirror exit to secondary brokers (multi-broker mode)
+            if settings.enable_multi_broker and broker_router.has_secondaries:
+                try:
+                    broker_router.mirror_exit(
+                        primary_order_id=str(pos.order_id),
+                        quantity=pos.quantity,
+                        agent_tag=f"TSL-T{level}-{pos.strategy}",
+                    )
+                except Exception:
+                    pass
 
     # Callbacks are now passed per-position via register() — keep module-level
     # as fallbacks for any code that still registers without per-position callbacks.
@@ -1017,6 +1040,20 @@ class BaseAgent(ABC):
 
         if not _claim_confirmed:
             order_guard.confirm_claim(sym, self.name, action, order_id)
+
+        # Mirror to secondary broker(s) if multi-broker is enabled
+        if settings.enable_multi_broker and broker_router.has_secondaries:
+            loop.run_in_executor(None, lambda: broker_router.mirror_entry(
+                primary_order_id=str(order_id),
+                tradingsymbol=trade_sym,
+                exchange=exch,
+                transaction_type=action,
+                quantity=qty,
+                product=signal.get("product", self.product),
+                sl_trigger=signal.get("stop_loss", risk_manager.sl_price(ltp, action)),
+                agent_tag=f"Agent-{self.name}",
+            ))
+
         return order_id, sl_order_id, qty
 
     async def _register_position(

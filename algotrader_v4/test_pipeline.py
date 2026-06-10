@@ -3847,6 +3847,112 @@ run("options chain: endpoint uses vol-surface strike_market_price()",  t_options
 
 
 # ══════════════════════════════════════════════════════════════════════════
+# 27. MULTI-BROKER ROUTER
+# ══════════════════════════════════════════════════════════════════════════
+print("════════════════════════════════════════════════════════════")
+print("════════════════════════════════════════════════════════════")
+
+def t_broker_router_imports():
+    from broker_router import broker_router, BrokerRouter
+    assert isinstance(broker_router, BrokerRouter)
+
+def t_enable_multi_broker_default_false():
+    from config import settings
+    assert hasattr(settings, "enable_multi_broker")
+    assert settings.enable_multi_broker is False   # default off — safe
+
+def t_secondary_brokers_setting_exists():
+    from config import settings
+    assert hasattr(settings, "secondary_brokers")
+    assert isinstance(settings.secondary_brokers, str)
+
+def t_broker_router_has_no_secondaries_by_default():
+    from broker_router import BrokerRouter
+    r = BrokerRouter()
+    assert not r.has_secondaries
+    assert r.secondary_names() == []
+    assert r.status()["enabled"] is False
+
+def t_broker_router_cancel_order_all_graceful_on_missing_broker():
+    """mirror_exit with no registered secondaries must not raise."""
+    from broker_router import BrokerRouter
+    r = BrokerRouter()
+    r.mirror_exit("nonexistent-order-id", quantity=10, agent_tag="Test")   # must not raise
+
+def t_broker_router_add_and_remove_secondary():
+    from broker_router import BrokerRouter
+    import unittest.mock as m
+
+    class FakeBroker:
+        pass
+
+    r = BrokerRouter()
+    r.add_secondary("upstox", FakeBroker())
+    assert r.has_secondaries
+    assert "upstox" in r.secondary_names()
+    r.remove_secondary("upstox")
+    assert not r.has_secondaries
+
+def t_broker_router_mirror_entry_error_does_not_raise():
+    """If secondary place_order throws, mirror_entry must swallow it."""
+    from broker_router import BrokerRouter
+    import unittest.mock as m
+
+    class BadBroker:
+        def place_order(self, **_):
+            raise RuntimeError("network error")
+
+    r = BrokerRouter()
+    r.add_secondary("bad", BadBroker())
+    # Should not raise even though the secondary fails
+    r.mirror_entry(
+        primary_order_id="TEST-001",
+        tradingsymbol="RELIANCE",
+        exchange="NSE",
+        transaction_type="BUY",
+        quantity=1,
+        product="MIS",
+        sl_trigger=1250.0,
+        agent_tag="Agent-intraday",
+    )
+
+def t_broker_router_squareoff_secondaries_returns_dict():
+    from broker_router import BrokerRouter
+    import unittest.mock as m
+
+    class FakeBroker:
+        def squareoff_all_positions(self): return []
+
+    r = BrokerRouter()
+    r.add_secondary("fake", FakeBroker())
+    result = r.squareoff_all_secondaries()
+    assert isinstance(result, dict)
+    assert result.get("fake") == "ok"
+
+def t_broker_status_endpoint_has_primary_key():
+    import inspect, main as _m
+    src = inspect.getsource(_m.broker_status)
+    assert "primary" in src
+    assert "multi_broker_enabled" in src
+
+def t_base_agent_imports_broker_router():
+    import inspect, agents.base_agent as _ba
+    src = inspect.getsource(_ba)
+    assert "broker_router" in src, "base_agent must import broker_router"
+
+run("broker_router module imports correctly",                      t_broker_router_imports)
+run("enable_multi_broker default is False",                        t_enable_multi_broker_default_false)
+run("secondary_brokers setting exists",                            t_secondary_brokers_setting_exists)
+run("BrokerRouter has no secondaries by default",                  t_broker_router_has_no_secondaries_by_default)
+run("mirror_exit with no secondaries does not raise",              t_broker_router_cancel_order_all_graceful_on_missing_broker)
+run("BrokerRouter add/remove secondary works",                     t_broker_router_add_and_remove_secondary)
+run("mirror_entry swallows secondary broker errors",               t_broker_router_mirror_entry_error_does_not_raise)
+run("squareoff_all_secondaries returns status dict",               t_broker_router_squareoff_secondaries_returns_dict)
+run("/broker/status endpoint has primary + multi_broker_enabled",  t_broker_status_endpoint_has_primary_key)
+run("base_agent imports broker_router",                            t_base_agent_imports_broker_router)
+
+
+# ══════════════════════════════════════════════════════════════════════════
 # FINAL SUMMARY
 # ══════════════════════════════════════════════════════════════════════════
 failed = summary()

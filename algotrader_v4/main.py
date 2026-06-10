@@ -985,7 +985,11 @@ async def cancel(order_id: str):
 async def squareoff():
     ids = kite_client.squareoff_all_positions()
     order_guard.reset_daily()
-    return {"status": "ok", "squared_off": len(ids)}
+    secondary_results: dict = {}
+    if settings.enable_multi_broker:
+        from broker_router import broker_router
+        secondary_results = broker_router.squareoff_all_secondaries()
+    return {"status": "ok", "squared_off": len(ids), "secondary": secondary_results}
 
 
 class MultiLegRequest(BaseModel):
@@ -1087,6 +1091,48 @@ async def gen_signal(req: SignalRequest):
 
 @app.get("/risk/status", tags=["Risk"])
 def risk_st(): return risk_manager.status()
+
+
+@app.get("/broker/status", tags=["System"])
+def broker_status():
+    """Return connection status for primary (Zerodha/active broker) and all secondary brokers."""
+    from broker_router import broker_router
+    active = getattr(settings, "active_broker", "zerodha")
+    if active == "upstox":
+        from brokers.upstox_broker import UpstoxBroker
+        primary_creds = UpstoxBroker().validate_credentials()
+    elif active == "kotak":
+        from brokers.kotak_broker import KotakBroker
+        primary_creds = KotakBroker().validate_credentials()
+    else:
+        primary_creds = kite_client.validate_credentials()
+    result: dict = {
+        "active_broker":      active,
+        "credentials":        primary_creds,
+        "primary": {
+            "name":        active,
+            "initialised": primary_creds.get("initialised", False),
+            "access_token": bool(settings.kite_access_token),
+            "mode":        settings.trading_mode,
+        },
+        "multi_broker_enabled": settings.enable_multi_broker,
+        "secondary_brokers":   [],
+        "mirrored_positions":  0,
+    }
+    if settings.enable_multi_broker:
+        st = broker_router.status()
+        result["mirrored_positions"] = st["mirrored_positions"]
+        for name, _client in broker_router._secondaries:
+            try:
+                creds = _client.validate_credentials()
+            except Exception:
+                creds = {"initialised": False}
+            result["secondary_brokers"].append({
+                "name":        name,
+                "initialised": creds.get("initialised", False),
+                "access_token": creds.get("access_token", False),
+            })
+    return result
 
 
 @app.get("/black-swan/status", tags=["Risk"])
@@ -1911,24 +1957,6 @@ def stress_test_endpoint(symbol: str, strategy: str):
     return result
 
 
-@app.get("/broker/status", tags=["System"])
-def broker_status():
-    """Return active broker name and credential check."""
-    active = getattr(settings, "active_broker", "zerodha")
-    if active == "upstox":
-        from brokers.upstox_broker import UpstoxBroker
-        creds = UpstoxBroker().validate_credentials()
-    elif active == "kotak":
-        from brokers.kotak_broker import KotakBroker
-        creds = KotakBroker().validate_credentials()
-    else:
-        creds = kite_client.validate_credentials()
-    return {
-        "active_broker": active,
-        "credentials":   creds,
-    }
-
-
 @app.get("/sector/map", tags=["System"])
 def sector_map_endpoint():
     """Return the full sector→symbol mapping."""
@@ -2362,6 +2390,32 @@ async def on_startup():
             raise RuntimeError("JWT_SECRET_KEY must be at least 32 characters in LIVE mode")
     if settings.trading_mode == "LIVE" and not settings.kite_api_key:
         logger.warning("SECURITY: TRADING_MODE=LIVE but KITE_API_KEY is not set — order placement will fail.")
+
+    # ── Multi-broker secondary initialization ─────────────────────────────
+    if settings.enable_multi_broker and settings.secondary_brokers:
+        from broker_router import broker_router
+        for broker_name in [b.strip().lower() for b in settings.secondary_brokers.split(",") if b.strip()]:
+            try:
+                if broker_name == "upstox":
+                    if not settings.upstox_access_token:
+                        logger.warning("Multi-broker: upstox enabled but UPSTOX_ACCESS_TOKEN is not set")
+                        continue
+                    from brokers.upstox_broker import UpstoxBroker
+                    ub = UpstoxBroker()
+                    broker_router.add_secondary("upstox", ub)
+                    logger.info("Multi-broker: Upstox registered as secondary broker")
+                elif broker_name == "kotak":
+                    if not settings.kotak_access_token:
+                        logger.warning("Multi-broker: kotak enabled but KOTAK_ACCESS_TOKEN is not set")
+                        continue
+                    from brokers.kotak_broker import KotakBroker
+                    kb = KotakBroker()
+                    broker_router.add_secondary("kotak", kb)
+                    logger.info("Multi-broker: Kotak Neo registered as secondary broker")
+                else:
+                    logger.warning("Multi-broker: unknown broker '{}' in SECONDARY_BROKERS — skipped", broker_name)
+            except Exception as _mb_exc:
+                logger.error("Multi-broker: failed to init '{}': {}", broker_name, _mb_exc)
 
 
 @app.on_event("shutdown")
