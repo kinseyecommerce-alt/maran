@@ -165,9 +165,10 @@ def test_tab_navigation(page: Page, jwt: str):
         ("overview",    "Overview"),
     ]
     for tab_id, label in tabs:
-        page.locator(f"[data-tab='{tab_id}']").click()
+        # Use .nav-item to avoid matching the duplicate mobile-nav element
+        page.locator(f".nav-item[data-tab='{tab_id}']").click()
         page.wait_for_timeout(600)
-        active = page.locator(f"[data-tab='{tab_id}'].active")
+        active = page.locator(f".nav-item[data-tab='{tab_id}'].active")
         panel_visible = page.locator(f"#tab-{tab_id}").is_visible()
         if active.count() > 0 and panel_visible:
             ok(f"Tab '{label}' → nav item active + panel visible")
@@ -220,7 +221,7 @@ def test_topbar_kill_switch(page: Page, jwt: str):
 def test_botcontrol_tab(page: Page, jwt: str):
     print("\n── 4. BOT CONTROL BUTTONS ────────────────────────")
     goto_dashboard(page, jwt)
-    page.locator("[data-tab='botcontrol']").click()
+    page.locator(".nav-item[data-tab='botcontrol']").first.click()
     page.wait_for_timeout(800)
     snap(page, "04a_botcontrol_tab")
 
@@ -291,7 +292,7 @@ def test_risk_sebi_tab(page: Page, jwt: str):
     print("\n── 5. RISK & SEBI TAB BUTTONS ────────────────────")
     goto_dashboard(page, jwt)
     reset_kill_switch(page)
-    page.locator("[data-tab='risk']").click()
+    page.locator(".nav-item[data-tab='risk']").first.click()
     page.wait_for_timeout(800)
     snap(page, "05a_risk_tab")
 
@@ -348,7 +349,7 @@ def test_risk_sebi_tab(page: Page, jwt: str):
 def test_settings_tab(page: Page, jwt: str):
     print("\n── 6. SETTINGS TAB BUTTONS ───────────────────────")
     goto_dashboard(page, jwt)
-    page.locator("[data-tab='settings']").click()
+    page.locator(".nav-item[data-tab='settings']").first.click()
     page.wait_for_timeout(800)
     snap(page, "06a_settings_tab")
 
@@ -501,7 +502,7 @@ def test_confirm_dialog_cancel(page: Page, jwt: str):
 def test_agent_enable_toggles(page: Page, jwt: str):
     print("\n── 8. AGENT ENABLE / DISABLE TOGGLES ─────────────")
     goto_dashboard(page, jwt)
-    page.locator("[data-tab='settings']").click()
+    page.locator(".nav-item[data-tab='settings']").first.click()
     page.wait_for_timeout(1200)
 
     # Wait for agent-enables-list to be populated by fetchAgentEnables()
@@ -552,8 +553,22 @@ def main():
         page = ctx.new_page()
         page.set_default_timeout(15000)
 
+        # Login page test needs a separate context with no API-Key header,
+        # otherwise /auth/me returns 200 and the page redirects before #username appears.
+        login_ctx  = browser.new_context(viewport={"width": 1440, "height": 900})
+        login_page = login_ctx.new_page()
+        login_page.set_default_timeout(15000)
+
         try:
-            test_login_page(page)
+            test_login_page(login_page)
+        except Exception as exc:
+            import traceback
+            fail("UNEXPECTED CRASH (login section)", str(exc))
+            traceback.print_exc()
+        finally:
+            login_ctx.close()
+
+        try:
             test_tab_navigation(page, jwt)
             test_topbar_kill_switch(page, jwt)
             test_botcontrol_tab(page, jwt)
