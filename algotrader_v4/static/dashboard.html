@@ -12,6 +12,14 @@
   <meta charset="UTF-8"/>
   <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
   <title>AlgoTrader Pro — Dashboard</title>
+  <!-- PWA -->
+  <link rel="manifest" href="/static/manifest.json"/>
+  <meta name="theme-color" content="#7C3AED"/>
+  <meta name="mobile-web-app-capable" content="yes"/>
+  <meta name="apple-mobile-web-app-capable" content="yes"/>
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent"/>
+  <meta name="apple-mobile-web-app-title" content="AlgoTrader"/>
+  <link rel="apple-touch-icon" href="/static/icon-192.png"/>
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600;700&display=swap" rel="stylesheet">
   <script src="/static/chart.min.js"></script>
@@ -1123,6 +1131,14 @@
   </style>
 </head>
 <body>
+
+<!-- ── PWA Install Banner ──────────────────────────────────── -->
+<div id="pwa-install-banner" style="display:none;align-items:center;gap:12px;padding:10px 20px;background:#7C3AED;color:#fff;font-family:Inter,sans-serif;font-size:14px;position:fixed;top:0;left:0;right:0;z-index:9999;box-shadow:0 2px 8px rgba(0,0,0,.4);">
+  <img src="/static/icon-192.png" width="28" height="28" style="border-radius:6px;" alt=""/>
+  <span style="flex:1">Install <strong>AlgoTrader Pro</strong> as an app for quick access</span>
+  <button id="pwa-install-btn" style="background:#fff;color:#7C3AED;border:none;padding:6px 14px;border-radius:6px;font-weight:600;cursor:pointer;">Install</button>
+  <button onclick="document.getElementById('pwa-install-banner').style.display='none'" style="background:transparent;color:#fff;border:none;font-size:20px;cursor:pointer;line-height:1;">×</button>
+</div>
 
 <!-- ── Confirm Dialog ──────────────────────────────────────── -->
 <div class="overlay" id="confirm-overlay">
@@ -5661,6 +5677,33 @@ document.querySelectorAll('.tab-btn').forEach(btn => {
   });
 });
 godModeRefresh();
+
+/* ── PWA: Service Worker + Install Prompt ─────────────────── */
+if ('serviceWorker' in navigator) {
+  navigator.serviceWorker.register('/static/sw.js').catch(() => {});
+}
+
+let _pwaPrompt = null;
+window.addEventListener('beforeinstallprompt', e => {
+  e.preventDefault();
+  _pwaPrompt = e;
+  const banner = document.getElementById('pwa-install-banner');
+  if (banner) banner.style.display = 'flex';
+});
+window.addEventListener('appinstalled', () => {
+  const banner = document.getElementById('pwa-install-banner');
+  if (banner) banner.style.display = 'none';
+  _pwaPrompt = null;
+});
+const installBtn = document.getElementById('pwa-install-btn');
+if (installBtn) {
+  installBtn.addEventListener('click', () => {
+    if (_pwaPrompt) {
+      _pwaPrompt.prompt();
+      _pwaPrompt.userChoice.then(() => { _pwaPrompt = null; });
+    }
+  });
+}
 
 </script>
 </body>
