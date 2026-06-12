@@ -1130,6 +1130,13 @@ async def gen_signal(req: SignalRequest):
 def risk_st(): return risk_manager.status()
 
 
+@app.get("/reconciler/status", tags=["Risk"])
+def reconciler_status():
+    """Broker-truth reconciler: run counts, drift events, last findings."""
+    from position_reconciler import position_reconciler
+    return position_reconciler.status()
+
+
 @app.get("/broker/status", tags=["System"])
 def broker_status():
     """Return connection status for primary (Zerodha/active broker) and all secondary brokers."""
@@ -2429,6 +2436,13 @@ async def on_startup():
     atomic_bracket_engine.ws_broadcast = broadcast
     logger.info("FastAPI startup: tick engine + atomic bracket engine launched")
     asyncio.create_task(symbol_scanner.run())
+
+    # Continuous broker-truth reconciliation: detects manual exits, GTT fires
+    # and partial fills that happened outside this process, and corrects
+    # internal TSL/guard/risk state (close-only — never places entries).
+    if settings.use_position_reconciler:
+        from position_reconciler import position_reconciler
+        asyncio.create_task(position_reconciler.run_loop())
 
     # Pre-warm the Claude gate connection so the first real trade doesn't pay
     # the cold-start TCP/TLS handshake cost (~300-500 ms).

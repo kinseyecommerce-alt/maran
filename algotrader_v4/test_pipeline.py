@@ -4343,6 +4343,133 @@ run("Claude gate marks external text untrusted",     t_deep_gate_prompt_untruste
 
 
 # ══════════════════════════════════════════════════════════════════════════
+# 30. POSITION RECONCILER (broker is truth)
+# ══════════════════════════════════════════════════════════════════════════
+section("30. POSITION RECONCILER")
+
+def _recon_setup(symbol, qty, broker_qty, contract=None):
+    """Register a TSL position + _tsl_sl_orders entry, seed the paper broker
+    book with broker_qty, and return (reconciler, order_id)."""
+    from position_reconciler import PositionReconciler
+    from trailing_sl_engine import trailing_sl_engine
+    from agents.base_agent import _tsl_sl_orders, _tsl_sl_orders_lock
+    import kite_client as _kc_mod
+
+    oid = f"RECON-{symbol}"
+    trade_sym = contract or symbol
+    trailing_sl_engine.register(symbol=symbol, strategy="intraday", side="BUY",
+                                entry_price=100.0, quantity=qty, order_id=oid)
+    with _tsl_sl_orders_lock:
+        _tsl_sl_orders[oid] = {"sl_order_id": None, "product": "MIS",
+                               "exchange": "NSE", "tradingsymbol": trade_sym}
+    kc = _kc_mod.kite_client
+    with kc._paper_positions_lock:
+        kc._paper_positions[:] = [p for p in kc._paper_positions
+                                  if p.get("tradingsymbol") != trade_sym]
+        if broker_qty:
+            kc._paper_positions.append(
+                {"tradingsymbol": trade_sym, "quantity": broker_qty,
+                 "exchange": "NSE", "product": "MIS", "average_price": 100.0})
+    return PositionReconciler(), oid
+
+def _recon_teardown(oid, trade_sym):
+    from trailing_sl_engine import trailing_sl_engine
+    from agents.base_agent import _tsl_sl_orders, _tsl_sl_orders_lock
+    import kite_client as _kc_mod
+    trailing_sl_engine.deregister(oid)
+    with _tsl_sl_orders_lock:
+        _tsl_sl_orders.pop(oid, None)
+    kc = _kc_mod.kite_client
+    with kc._paper_positions_lock:
+        kc._paper_positions[:] = [p for p in kc._paper_positions
+                                  if p.get("tradingsymbol") != trade_sym]
+
+def t_recon_no_drift_no_action():
+    from trailing_sl_engine import trailing_sl_engine
+    rec, oid = _recon_setup("RCNOK", 10, broker_qty=10)
+    try:
+        findings = rec.reconcile_once()
+        mine = [f for f in findings if f.get("symbol") == "RCNOK"]
+        assert mine == [], f"no drift expected, got {mine}"
+        assert trailing_sl_engine.get_position(oid) is not None
+    finally:
+        _recon_teardown(oid, "RCNOK")
+
+def t_recon_full_external_exit():
+    from trailing_sl_engine import trailing_sl_engine
+    rec, oid = _recon_setup("RCGONE", 10, broker_qty=0)
+    try:
+        findings = rec.reconcile_once()
+        mine = [f for f in findings if f.get("symbol") == "RCGONE"]
+        assert mine and mine[0]["type"] == "FULL_EXTERNAL_EXIT", f"got {mine}"
+        assert trailing_sl_engine.get_position(oid) is None, \
+            "externally-closed position must be deregistered"
+    finally:
+        _recon_teardown(oid, "RCGONE")
+
+def t_recon_partial_external_exit():
+    from trailing_sl_engine import trailing_sl_engine
+    rec, oid = _recon_setup("RCHALF", 10, broker_qty=4)
+    try:
+        findings = rec.reconcile_once()
+        mine = [f for f in findings if f.get("symbol") == "RCHALF"]
+        assert mine and mine[0]["type"] == "PARTIAL_EXTERNAL_EXIT", f"got {mine}"
+        pos = trailing_sl_engine.get_position(oid)
+        assert pos is not None and pos.quantity_remaining == 4, \
+            f"tracked qty must shrink to broker truth, got {getattr(pos, 'quantity_remaining', None)}"
+    finally:
+        _recon_teardown(oid, "RCHALF")
+
+def t_recon_fno_contract_symbol_used():
+    # F&O: TSL keyed by underlying, broker holds the contract — diff must
+    # use the contract symbol from _tsl_sl_orders, not the underlying.
+    from trailing_sl_engine import trailing_sl_engine
+    rec, oid = _recon_setup("RCINFY", 75, broker_qty=75,
+                            contract="RCINFY26JUN1650CE")
+    try:
+        findings = rec.reconcile_once()
+        mine = [f for f in findings if "RCINFY" in str(f.get("symbol", ""))]
+        assert mine == [], f"contract held at broker → no drift, got {mine}"
+    finally:
+        _recon_teardown(oid, "RCINFY26JUN1650CE")
+
+def t_recon_never_places_orders():
+    import inspect, position_reconciler as _pr
+    src = inspect.getsource(_pr)
+    assert "place_order(" not in src, \
+        "reconciler must be close-only — it may never place an order"
+
+def t_recon_untracked_excess_not_touched():
+    from trailing_sl_engine import trailing_sl_engine
+    rec, oid = _recon_setup("RCMORE", 5, broker_qty=12)
+    try:
+        findings = rec.reconcile_once()
+        mine = [f for f in findings if f.get("symbol") == "RCMORE"]
+        assert mine and mine[0]["type"] == "UNTRACKED_EXCESS"
+        pos = trailing_sl_engine.get_position(oid)
+        assert pos is not None, "excess must only warn — position stays tracked"
+    finally:
+        _recon_teardown(oid, "RCMORE")
+
+def t_recon_settings_and_wiring():
+    from config import settings as _s
+    assert getattr(_s, "use_position_reconciler", None) is True
+    assert getattr(_s, "reconcile_interval_sec", 0) > 0
+    import inspect, main as _m
+    src = inspect.getsource(_m)
+    assert "position_reconciler.run_loop" in src, "loop must start in on_startup"
+    assert "/reconciler/status" in src
+
+run("no drift → no action",                          t_recon_no_drift_no_action)
+run("full external exit → TSL deregistered",         t_recon_full_external_exit)
+run("partial external exit → qty shrunk to broker",  t_recon_partial_external_exit)
+run("F&O diff uses contract symbol",                 t_recon_fno_contract_symbol_used)
+run("reconciler is close-only (no place_order)",     t_recon_never_places_orders)
+run("untracked excess warns but never trades",       t_recon_untracked_excess_not_touched)
+run("settings + startup wiring present",             t_recon_settings_and_wiring)
+
+
+# ══════════════════════════════════════════════════════════════════════════
 # FINAL SUMMARY
 # ══════════════════════════════════════════════════════════════════════════
 failed = summary()

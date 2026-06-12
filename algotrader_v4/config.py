@@ -66,6 +66,10 @@ class Settings(BaseSettings):
     squareoff_time: str = "15:10"
     max_indicator_age_sec: float = 5.0  # reject entries on indicators older than this
 
+    # Position reconciler — broker is truth; poll + correct internal drift
+    use_position_reconciler: bool = True
+    reconcile_interval_sec: float = Field(default=10.0, gt=0)
+
     # Backtest gate thresholds
     bt_min_win_rate: float = 55.0
     bt_min_sharpe: float = 1.0
