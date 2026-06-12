@@ -231,28 +231,31 @@ class RiskManager:
         price: float,
         transaction_type: str,
     ) -> tuple[bool, str]:
-        if self.is_trading_halted:
-            return False, "Trading halted for the day (daily loss limit hit)"
+        # Entire check sequence under lock: prevents two concurrent agents both
+        # reading stale daily_pnl / position_count and racing past the limits.
+        with self._lock:
+            if self.is_trading_halted:
+                return False, "Trading halted for the day (daily loss limit hit)"
 
-        ok, msg = self._check_market_hours()
-        if not ok:
-            return False, msg
-
-        ok, msg = self._check_daily_loss()
-        if not ok:
-            self.is_trading_halted = True
-            return False, msg
-
-        if transaction_type == "BUY":
-            ok, msg = self._check_position_count()
+            ok, msg = self._check_market_hours()
             if not ok:
                 return False, msg
 
-        ok, msg = self._check_position_size(quantity, price)
-        if not ok:
-            return False, msg
+            ok, msg = self._check_daily_loss()
+            if not ok:
+                self.is_trading_halted = True
+                return False, msg
 
-        return True, "OK"
+            if transaction_type == "BUY":
+                ok, msg = self._check_position_count()
+                if not ok:
+                    return False, msg
+
+            ok, msg = self._check_position_size(quantity, price)
+            if not ok:
+                return False, msg
+
+            return True, "OK"
 
     def _check_market_hours(self) -> tuple[bool, str]:
         from config import settings
@@ -515,10 +518,11 @@ class RiskManager:
             self.open_position_count = max(0, self.open_position_count - 1)
 
     def reset_daily(self) -> None:
-        self.daily_realised_pnl  = 0.0
-        self.open_position_count = 0
-        self.trades_today        = 0
-        self.is_trading_halted   = False
+        with self._lock:
+            self.daily_realised_pnl  = 0.0
+            self.open_position_count = 0
+            self.trades_today        = 0
+            self.is_trading_halted   = False
         logger.info("Risk manager reset for new trading day")
 
     def status(self) -> dict:

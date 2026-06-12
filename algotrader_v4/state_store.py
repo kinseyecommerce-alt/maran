@@ -206,6 +206,12 @@ def _init_sqlite() -> None:
                 trades_count INTEGER DEFAULT 0
             );
 
+            CREATE TABLE IF NOT EXISTS kv_store (
+                key        TEXT PRIMARY KEY,
+                value      TEXT,
+                updated_at TEXT DEFAULT (datetime('now'))
+            );
+
             CREATE INDEX IF NOT EXISTS idx_trades_trade_date  ON trades(trade_date);
             CREATE INDEX IF NOT EXISTS idx_trades_strategy     ON trades(strategy);
             CREATE INDEX IF NOT EXISTS idx_trades_exit_time    ON trades(exit_time);
@@ -292,6 +298,11 @@ def _init_pg() -> None:
             realised_pnl DOUBLE PRECISION DEFAULT 0,
             trades_count INTEGER DEFAULT 0
         )""",
+        """CREATE TABLE IF NOT EXISTS kv_store (
+            key        TEXT PRIMARY KEY,
+            value      TEXT,
+            updated_at TEXT DEFAULT NOW()::TEXT
+        )""",
         "CREATE INDEX IF NOT EXISTS idx_trades_trade_date ON trades(trade_date)",
         "CREATE INDEX IF NOT EXISTS idx_trades_strategy   ON trades(strategy)",
         "CREATE INDEX IF NOT EXISTS idx_trades_exit_time  ON trades(exit_time)",
@@ -368,6 +379,33 @@ def upsert_position(
                 (order_id, symbol, strategy, side, entry_price, quantity,
                  sl_price, target, product),
             )
+
+
+def set_kv(key: str, value: str) -> None:
+    """Persist a small key/value pair (kill-switch state, flags). Survives restarts."""
+    p = _ph()
+    with _conn() as c:
+        if _USE_PG:
+            cur = c.cursor()
+            cur.execute(
+                f"INSERT INTO kv_store (key, value, updated_at) VALUES ({p},{p},NOW()::TEXT) "
+                f"ON CONFLICT (key) DO UPDATE SET value=EXCLUDED.value, updated_at=NOW()::TEXT",
+                (key, value),
+            )
+            c.commit()
+        else:
+            c.execute(
+                f"INSERT OR REPLACE INTO kv_store (key, value, updated_at) "
+                f"VALUES ({p},{p},datetime('now'))",
+                (key, value),
+            )
+
+
+def get_kv(key: str, default: str = "") -> str:
+    p = _ph()
+    with _conn() as c:
+        row = _fetchone(c, f"SELECT value FROM kv_store WHERE key={p}", (key,))
+    return row["value"] if row and row.get("value") is not None else default
 
 
 def close_position(order_id: str) -> None:

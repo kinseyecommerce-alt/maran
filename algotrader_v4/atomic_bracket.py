@@ -195,10 +195,13 @@ class AtomicBracketEngine:
                     raise RuntimeError("TWAP execution produced no filled slices")
                 entry_oid = child_ids[0]
             else:
-                entry_oid = kite_client.place_order(
-                    tradingsymbol=symbol, exchange=exchange, transaction_type=side,
-                    quantity=quantity, order_type="MARKET", product=product,
-                    tag=f"BRK-{strategy}-ENTRY")
+                # run_in_executor: place_order can block 100ms-15s (HTTP + retries);
+                # a sync call here would freeze every agent's tick loop.
+                entry_oid = await asyncio.get_running_loop().run_in_executor(
+                    None, lambda: kite_client.place_order(
+                        tradingsymbol=symbol, exchange=exchange, transaction_type=side,
+                        quantity=quantity, order_type="MARKET", product=product,
+                        tag=f"BRK-{strategy}-ENTRY"))
             bracket.entry_order_id = entry_oid
         except Exception as exc:
             bracket.status = BracketStatus.FAILED
@@ -207,7 +210,9 @@ class AtomicBracketEngine:
             return None
         fill_price = await self._wait_for_fill(bracket)
         if fill_price is None:
-            try: kite_client.cancel_order(entry_oid)
+            try:
+                await asyncio.get_running_loop().run_in_executor(
+                    None, lambda: kite_client.cancel_order(entry_oid))
             except Exception: pass
             bracket.status = BracketStatus.CANCELLED
             await self._broadcast_update(bracket)
@@ -255,7 +260,8 @@ class AtomicBracketEngine:
                 if o and o["status"] == "COMPLETE":
                     return float(o.get("price") or bracket.signal_price)
             try:
-                history = kite_client.order_history(oid)
+                history = await asyncio.get_running_loop().run_in_executor(
+                    None, lambda: kite_client.order_history(oid))
                 for h in reversed(history):
                     if h.get("status") == "COMPLETE":
                         return float(h.get("average_price") or h.get("price", bracket.signal_price))
@@ -269,11 +275,12 @@ class AtomicBracketEngine:
         sl_side = "SELL" if bracket.side == "BUY" else "BUY"
         for attempt in range(1, self.SL_RETRY_MAX + 1):
             try:
-                sl_oid = kite_client.place_order(
-                    tradingsymbol=bracket.symbol, exchange=bracket.exchange,
-                    transaction_type=sl_side, quantity=bracket.quantity,
-                    order_type="SL-M", product=bracket.product,
-                    trigger_price=bracket.sl_price, tag=f"BRK-{bracket.strategy}-SL")
+                sl_oid = await asyncio.get_running_loop().run_in_executor(
+                    None, lambda: kite_client.place_order(
+                        tradingsymbol=bracket.symbol, exchange=bracket.exchange,
+                        transaction_type=sl_side, quantity=bracket.quantity,
+                        order_type="SL-M", product=bracket.product,
+                        trigger_price=bracket.sl_price, tag=f"BRK-{bracket.strategy}-SL"))
                 bracket.sl_order_id = sl_oid
                 return True
             except Exception as exc:
@@ -284,9 +291,11 @@ class AtomicBracketEngine:
     async def _emergency_reverse(self, bracket: BracketOrder) -> None:
         reverse_side = "SELL" if bracket.side == "BUY" else "BUY"
         try:
-            kite_client.place_order(tradingsymbol=bracket.symbol, exchange=bracket.exchange,
-                transaction_type=reverse_side, quantity=bracket.quantity,
-                order_type="MARKET", product=bracket.product, tag="BRK-EMERGENCY-REVERSE")
+            await asyncio.get_running_loop().run_in_executor(
+                None, lambda: kite_client.place_order(
+                    tradingsymbol=bracket.symbol, exchange=bracket.exchange,
+                    transaction_type=reverse_side, quantity=bracket.quantity,
+                    order_type="MARKET", product=bracket.product, tag="BRK-EMERGENCY-REVERSE"))
         except Exception as exc:
             logger.critical("Emergency reverse ALSO FAILED: {}", exc)
             # Alert + kill switch: unprotected position exists with no SL
@@ -324,6 +333,7 @@ class AtomicBracketEngine:
         # If COMPLETE, the exchange already closed the position — skip MARKET exit
         # to avoid a double-exit creating a reverse position.
         sl_already_filled = False
+        _loop = asyncio.get_running_loop()
         if bracket.sl_order_id:
             try:
                 if hasattr(kite_client, "_paper_orders"):
@@ -331,7 +341,8 @@ class AtomicBracketEngine:
                     if o and o["status"] == "COMPLETE":
                         sl_already_filled = True
                 if not sl_already_filled:
-                    history = kite_client.order_history(bracket.sl_order_id)
+                    history = await _loop.run_in_executor(
+                        None, lambda: kite_client.order_history(bracket.sl_order_id))
                     for h in reversed(history):
                         if h.get("status") == "COMPLETE":
                             sl_already_filled = True
@@ -339,15 +350,19 @@ class AtomicBracketEngine:
             except Exception:
                 pass
             if not sl_already_filled:
-                try: kite_client.cancel_order(bracket.sl_order_id)
+                try:
+                    await _loop.run_in_executor(
+                        None, lambda: kite_client.cancel_order(bracket.sl_order_id))
                 except Exception: pass
 
         if not sl_already_filled:
             exit_side = "SELL" if bracket.side == "BUY" else "BUY"
             try:
-                kite_client.place_order(tradingsymbol=bracket.symbol, exchange=bracket.exchange,
-                    transaction_type=exit_side, quantity=bracket.quantity,
-                    order_type="MARKET", product=bracket.product, tag="BRK-SL-EXIT")
+                await asyncio.get_running_loop().run_in_executor(
+                    None, lambda: kite_client.place_order(
+                        tradingsymbol=bracket.symbol, exchange=bracket.exchange,
+                        transaction_type=exit_side, quantity=bracket.quantity,
+                        order_type="MARKET", product=bracket.product, tag="BRK-SL-EXIT"))
             except Exception as exc:
                 logger.error("SL exit order failed: {}", exc)
         else:
@@ -372,12 +387,16 @@ class AtomicBracketEngine:
             bracket.closed_at = time.time()
             exit_side = "SELL" if bracket.side == "BUY" else "BUY"
             try:
-                kite_client.place_order(tradingsymbol=bracket.symbol, exchange=bracket.exchange,
+                _loop = asyncio.get_running_loop()
+                await _loop.run_in_executor(None, lambda: kite_client.place_order(
+                    tradingsymbol=bracket.symbol, exchange=bracket.exchange,
                     transaction_type=exit_side, quantity=bracket.quantity,
-                    order_type="MARKET", product=bracket.product, tag="BRK-TARGET-EXIT")
+                    order_type="MARKET", product=bracket.product, tag="BRK-TARGET-EXIT"))
                 if bracket.sl_order_id:
-                    try: kite_client.cancel_order(bracket.sl_order_id)
-                    except: pass
+                    try:
+                        await _loop.run_in_executor(
+                            None, lambda: kite_client.cancel_order(bracket.sl_order_id))
+                    except Exception: pass
             except Exception as exc:
                 logger.error("Target exit failed: {}", exc)
             order_guard.release_order(bracket.symbol, bracket.strategy, bracket.side, bracket.net_pnl)

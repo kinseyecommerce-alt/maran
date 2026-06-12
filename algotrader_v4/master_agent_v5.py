@@ -584,9 +584,11 @@ class MasterAgent:
             logger.warning("[master] Claude halted new trades: {}",
                            d.get("risk_override", {}).get("reason", ""))
 
-        # Apply dynamic trade gate threshold from master — capped at 55 so Opus always gets the final say
-        threshold = d.get("trade_gate_threshold")
-        if threshold and settings.use_claude_trade_gate:
+        # Apply dynamic trade gate threshold from master — capped at 55 so Opus always gets the final say.
+        # If Claude omits the key, reset to the default rather than letting a stale
+        # (possibly tightened) threshold persist across review cycles indefinitely.
+        if settings.use_claude_trade_gate:
+            threshold = d.get("trade_gate_threshold") or 30
             settings.claude_gate_threshold = max(20, min(int(threshold), 55))
             logger.info("[master] Gate threshold → {}", settings.claude_gate_threshold)
 

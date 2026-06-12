@@ -760,10 +760,17 @@ class TickEngine:
             try:
                 q.put_nowait(snap)
             except asyncio.QueueFull:
+                # Drop the OLDEST tick, keep the newest: a lagging agent should
+                # catch up on current prices, not replay a stale backlog.
+                try:
+                    q.get_nowait()
+                    q.put_nowait(snap)
+                except (asyncio.QueueEmpty, asyncio.QueueFull):
+                    pass
                 cnt = self._queue_drop_count.get(name, 0) + 1
                 self._queue_drop_count[name] = cnt
                 if cnt % 100 == 1:
-                    logger.warning("[TickEngine] Queue full for '{}': {} ticks dropped (size={})", name, cnt, q.maxsize)
+                    logger.warning("[TickEngine] Queue full for '{}': {} oldest ticks dropped (size={})", name, cnt, q.maxsize)
 
         if self.ws_broadcast:
             try:

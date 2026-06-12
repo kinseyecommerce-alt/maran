@@ -1430,6 +1430,13 @@ async def ws_endpoint(ws: WebSocket):
     if len(ws_clients) >= _MAX_WS_CONNECTIONS:
         await ws.close(code=4002, reason="Too many connections")
         return
+    # Per-IP cap: one misbehaving client must not exhaust the global pool.
+    client_ip = ws.client.host if ws.client else "0.0.0.0"
+    ip_count = sum(1 for c in ws_clients
+                   if c.client and c.client.host == client_ip)
+    if ip_count >= 5:
+        await ws.close(code=4003, reason="Too many connections from this IP")
+        return
     ws_clients.append(ws)
     try:
         while True:
@@ -2336,7 +2343,9 @@ async def on_startup():
         while True:
             await asyncio.sleep(60)
             try:
-                released = order_guard.release_stale_claims(max_age_sec=90)
+                # 300s: must exceed worst-case order latency (broker retries 1+2+4+8s
+                # + LIMIT fill timeout) or a slow fill gets double-entered by another agent.
+                released = order_guard.release_stale_claims(max_age_sec=300)
                 if released:
                     logger.warning(
                         "OrderGuard stale-claim sweep: released {} orphaned claim(s): {}",
@@ -2377,13 +2386,14 @@ async def on_startup():
         logger.warning("SECURITY: API_KEY is not set — all mutating endpoints are unprotected. Set API_KEY in .env before deploying.")
     if not settings.jwt_secret_key:
         logger.warning("SECURITY: JWT_SECRET_KEY is not set — browser login tokens cannot be issued. Set JWT_SECRET_KEY in .env before deploying.")
-    # FAIL-CLOSED: refuse to start LIVE if neither auth mechanism is configured.
-    # Without api_key AND jwt_secret_key the auth middleware is a no-op, leaving
-    # /orders/* and the kill switch fully open — unacceptable with real money.
-    if settings.trading_mode == "LIVE" and not settings.api_key and not settings.jwt_secret_key:
-        logger.critical("SECURITY: TRADING_MODE=LIVE with NO API_KEY and NO JWT_SECRET_KEY — "
-                        "all order/kill-switch endpoints would be unauthenticated. Refusing to start.")
-        raise RuntimeError("LIVE mode requires API_KEY or JWT_SECRET_KEY to be set")
+    # FAIL-CLOSED: LIVE requires BOTH auth mechanisms. With only one set, the
+    # other route (API clients vs browser sessions) is left unauthenticated —
+    # unacceptable with real money.
+    if settings.trading_mode == "LIVE" and (not settings.api_key or not settings.jwt_secret_key):
+        logger.critical("SECURITY: TRADING_MODE=LIVE requires BOTH API_KEY and JWT_SECRET_KEY "
+                        "(api_key set: {}, jwt_secret_key set: {}). Refusing to start.",
+                        bool(settings.api_key), bool(settings.jwt_secret_key))
+        raise RuntimeError("LIVE mode requires both API_KEY and JWT_SECRET_KEY to be set")
     if settings.jwt_secret_key and len(settings.jwt_secret_key) < 32:
         logger.error("SECURITY: JWT_SECRET_KEY is too short ({} chars) — minimum 32 chars required. Refusing to start in LIVE mode.", len(settings.jwt_secret_key))
         if settings.trading_mode == "LIVE":

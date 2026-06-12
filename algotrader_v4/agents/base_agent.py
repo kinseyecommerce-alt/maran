@@ -6,6 +6,7 @@ from the TickEngine queue. Strategies evaluate on every live tick.
 from __future__ import annotations
 
 import asyncio
+import time as _time_mod
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -153,9 +154,13 @@ def _setup_tsl_callbacks() -> None:
                 ))
             except Exception as _exit_exc:
                 logger.critical(
-                    "[TSL] MARKET exit FAILED for {} {} — position may be stuck open! {}",
+                    "[TSL] MARKET exit FAILED for {} {} — position stuck open, "
+                    "triggering kill switch: {}",
                     pos.symbol, pos.strategy, _exit_exc,
                 )
+                sebi_compliance.trigger_kill_switch(
+                    f"TSL exit failed for {pos.symbol} ({pos.strategy}) — "
+                    f"open position has no working stop")
         else:
             logger.info("SL-M {} already COMPLETE — skipping MARKET exit to avoid double-exit",
                         entry.get("sl_order_id") if entry else "?")
@@ -772,7 +777,18 @@ class BaseAgent(ABC):
         """Portfolio-level filters (sector, beta, optimizer, earnings) before acquiring claim.
         Returns False if the trade should be skipped.
         """
-        sym      = snap.symbol
+        sym = snap.symbol
+
+        # Reject entries computed from stale indicators (feed interruption):
+        # acting on a 30s-old EMA/RSI in a moving market is worse than skipping.
+        computed_at = getattr(snap.indicators, "computed_at", 0.0)
+        if isinstance(computed_at, (int, float)) and computed_at > 0:
+            age = _time_mod.time() - computed_at
+            if age > settings.max_indicator_age_sec:
+                logger.warning("[{}] {} indicators stale ({:.1f}s old > {}s) — skipping entry",
+                               self.name, sym, age, settings.max_indicator_age_sec)
+                return False
+
         pos_data = await loop.run_in_executor(None, kite_client.positions_cached)
         open_syms = [p["tradingsymbol"] for p in pos_data.get("net", []) if p.get("quantity", 0) != 0]
 
@@ -947,9 +963,14 @@ class BaseAgent(ABC):
                     try:
                         await loop.run_in_executor(None, lambda: kite_client.cancel_order(str(order_id)))
                     except Exception as _ce:
-                        logger.error("[{}] Failed to cancel unprotected LIMIT entry {}: {}",
-                                     self.name, order_id, _ce)
-                    order_guard.release_claim(sym, self.name, action)
+                        logger.critical("[{}] Failed to cancel unprotected LIMIT entry {} — "
+                                        "triggering kill switch: {}", self.name, order_id, _ce)
+                        sebi_compliance.trigger_kill_switch(
+                            f"Unprotected position: SL-M failed and entry {order_id} "
+                            f"cancel failed for {sym} ({self.name})")
+                    # Claim was confirmed above — release_order() fully unlocks the slot
+                    # (release_claim() would be a no-op on a confirmed claim).
+                    order_guard.release_order(sym, self.name, action, 0)
                     raise RuntimeError("sl_placement_failed")
                 # H2: confirm actual fill; resize SL on partial; abort on zero fill.
                 try:
@@ -988,8 +1009,11 @@ class BaseAgent(ABC):
                             await loop.run_in_executor(
                                 None, lambda: kite_client.cancel_order(str(sl_order_id)))
                         except Exception as orphan_exc:
-                            logger.error("[{}] FAILED to cancel orphan SL-M {} — MANUAL "
-                                         "INTERVENTION REQUIRED: {}", self.name, sl_order_id, orphan_exc)
+                            logger.critical("[{}] FAILED to cancel orphan SL-M {} — triggering "
+                                            "kill switch: {}", self.name, sl_order_id, orphan_exc)
+                            sebi_compliance.trigger_kill_switch(
+                                f"Orphan SL-M {sl_order_id} live on exchange with no position "
+                                f"for {sym} ({self.name}) — cancel failed")
                     order_guard.release_claim(sym, self.name, action)
                     logger.error("[{}] Entry order failed: {}", self.name, order_id)
                     raise RuntimeError("entry_failed")
@@ -1006,8 +1030,11 @@ class BaseAgent(ABC):
                     try:
                         await loop.run_in_executor(None, lambda: kite_client.cancel_order(str(order_id)))
                     except Exception as cancel_exc:
-                        logger.error("[{}] Failed to cancel unprotected entry {}: {}",
-                                     self.name, order_id, cancel_exc)
+                        logger.critical("[{}] Failed to cancel unprotected entry {} — "
+                                        "triggering kill switch: {}", self.name, order_id, cancel_exc)
+                        sebi_compliance.trigger_kill_switch(
+                            f"Unprotected position: SL-M failed and entry {order_id} "
+                            f"cancel failed for {sym} ({self.name})")
                     # Claim was already confirmed (pending=False) so release_claim()
                     # is a no-op here — use release_order() to fully unlock the slot.
                     order_guard.release_order(sym, self.name, action, 0)
@@ -1103,14 +1130,9 @@ class BaseAgent(ABC):
         )
 
         _setup_tsl_callbacks()
-        trailing_sl_engine.register(
-            symbol=sym, strategy=self.name, side=action,
-            entry_price=ltp, quantity=qty, order_id=order_id,
-            atr=snap.indicators.atr_14,
-            on_sl_hit=trailing_sl_engine.on_sl_hit,
-            on_target_hit=trailing_sl_engine.on_target_hit,
-            on_sl_moved=trailing_sl_engine.on_sl_moved,
-        )
+        # Populate _tsl_sl_orders BEFORE register(): once registered, a tick can
+        # fire _on_sl_hit immediately, and a missing entry there would fall back
+        # to the underlying symbol — wrong instrument for F&O exits.
         with _tsl_sl_orders_lock:
             _tsl_sl_orders[order_id] = {
                 "sl_order_id": sl_order_id,
@@ -1122,6 +1144,14 @@ class BaseAgent(ABC):
                                   signal.get("futures_symbol",
                                   signal.get("option_symbol", sym))),
             }
+        trailing_sl_engine.register(
+            symbol=sym, strategy=self.name, side=action,
+            entry_price=ltp, quantity=qty, order_id=order_id,
+            atr=snap.indicators.atr_14,
+            on_sl_hit=trailing_sl_engine.on_sl_hit,
+            on_target_hit=trailing_sl_engine.on_target_hit,
+            on_sl_moved=trailing_sl_engine.on_sl_moved,
+        )
 
         ind = snap.indicators
         await send_telegram(

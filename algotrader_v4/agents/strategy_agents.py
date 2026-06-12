@@ -151,6 +151,7 @@ class IntradayAgent(BaseAgent):
             "stop_loss_pct":     round(sl_dist  / ltp * 100, 3),
             "target_pct":        round(tgt_dist / ltp * 100, 3),
             "product":           self.product,
+            "pattern":           best_pattern,
             "_gate_size_factor": sf,
             "trigger": (
                 f"INTRA-{best_action} [{best_pattern}] score={best_score}/18 "
@@ -1759,6 +1760,7 @@ class SwingAgent(BaseAgent):
             "stop_loss_pct": round(sl_dist / ltp * 100, 3),
             "target_pct":    round(tgt_dist / ltp * 100, 3),
             "product": self.product,
+            "pattern": best_pattern,
             "_gate_size_factor": sf,
             "trigger": (
                 f"SWING-{best_action} [{best_pattern}] score={best_score}/13 "
@@ -2228,6 +2230,7 @@ class ScalpingAgent(BaseAgent):
             "stop_loss_pct":     round(sl_dist  / ltp * 100, 3),
             "target_pct":        round(tgt_dist / ltp * 100, 3),
             "product":           self.product,
+            "pattern":           pattern,
             "_gate_size_factor": sf,
             "trigger": f"{pattern} score={score}/14 sf={sf} {' '.join(reasons[:5])}",
         }

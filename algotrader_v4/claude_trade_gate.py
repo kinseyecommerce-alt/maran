@@ -283,13 +283,38 @@ def _minutes_to_squareoff() -> int:
     return _mts(settings.squareoff_time)
 
 
+# Circuit breaker: after _BREAKER_THRESHOLD consecutive API failures the gate
+# stops calling the API for _BREAKER_COOLDOWN_SEC and fails over to the reduced-
+# size fallback immediately, instead of paying the timeout on every trade.
+_BREAKER_THRESHOLD    = 5
+_BREAKER_COOLDOWN_SEC = 120.0
+_consec_failures: int   = 0
+_breaker_until:   float = 0.0
+
+
+def _record_gate_failure() -> None:
+    global _consec_failures, _breaker_until
+    _consec_failures += 1
+    if _consec_failures >= _BREAKER_THRESHOLD:
+        import time as _t
+        _breaker_until = _t.time() + _BREAKER_COOLDOWN_SEC
+        logger.error("[gate] circuit breaker OPEN — {} consecutive API failures, "
+                     "skipping gate calls for {:.0f}s", _consec_failures, _BREAKER_COOLDOWN_SEC)
+
+
 async def assess(snap, action: str, signal: dict, strategy: str) -> GateDecision:
     """
     Ask Claude to assess this trade setup.
     Always returns a GateDecision — never raises.
     """
+    global _consec_failures
     if not settings.anthropic_api_key or not settings.use_claude_trade_gate:
         return GateDecision(confidence=70, enter=True, reason="Gate disabled — rule-based approval")
+
+    import time as _t
+    if _t.time() < _breaker_until:
+        return GateDecision(confidence=60, enter=True, size_factor=0.5,
+                            reason="Gate circuit breaker open — reduced size, no AI assessment")
 
     t0 = asyncio.get_event_loop().time()
     ctx = _build_context(snap, action, signal, strategy)
@@ -299,17 +324,26 @@ async def assess(snap, action: str, signal: dict, strategy: str) -> GateDecision
         if settings.use_extended_thinking:
             extra["thinking"] = {"type": "enabled", "budget_tokens": settings.gate_thinking_budget}
 
-        resp = await asyncio.wait_for(
-            _get_client().messages.create(
-                model=settings.claude_gate_model,
-                max_tokens=settings.gate_thinking_budget + 1024,
-                system=[{"type": "text", "text": _SYSTEM_PROMPT, "cache_control": {"type": "ephemeral"}}],
-                messages=[{"role": "user", "content": json.dumps(ctx)}],
-                **extra,
-            ),
-            timeout=settings.gate_api_timeout,
-        )
+        async def _call():
+            return await asyncio.wait_for(
+                _get_client().messages.create(
+                    model=settings.claude_gate_model,
+                    max_tokens=settings.gate_thinking_budget + 1024,
+                    system=[{"type": "text", "text": _SYSTEM_PROMPT, "cache_control": {"type": "ephemeral"}}],
+                    messages=[{"role": "user", "content": json.dumps(ctx)}],
+                    **extra,
+                ),
+                timeout=settings.gate_api_timeout,
+            )
+
+        try:
+            resp = await _call()
+        except asyncio.TimeoutError:
+            # One fast retry — a single transient timeout shouldn't skip assessment
+            logger.warning("[gate] {} timeout — retrying once", snap.symbol)
+            resp = await _call()
         latency = int((asyncio.get_event_loop().time() - t0) * 1000)
+        _consec_failures = 0
 
         # FIX 4: wrap response parsing so any unexpected format falls back safely
         try:
@@ -348,9 +382,11 @@ async def assess(snap, action: str, signal: dict, strategy: str) -> GateDecision
         return decision
 
     except asyncio.TimeoutError:
-        logger.warning("[gate] {} timeout — allowing trade with reduced size", snap.symbol)
+        _record_gate_failure()
+        logger.warning("[gate] {} timeout (after retry) — allowing trade with reduced size", snap.symbol)
         return _ALLOW_ON_ERROR
     except Exception as exc:
+        _record_gate_failure()
         logger.warning("[gate] {} API error ({}) — allowing trade with reduced size", snap.symbol, exc)
         return _ALLOW_ON_ERROR
 
