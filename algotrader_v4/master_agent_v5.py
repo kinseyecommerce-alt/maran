@@ -17,7 +17,7 @@ import anthropic
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from loguru import logger
 
-from ist_clock import now_ist, minutes_to_squareoff as _mts
+from ist_clock import now_ist, is_market_open, minutes_to_squareoff as _mts
 
 from config import settings
 from kite_client import kite_client
@@ -183,6 +183,12 @@ class MasterAgent:
 
         tick_engine.subscribe(watchlist)
 
+        # /bot/stop cancels the tick engine poll loop; a subsequent /bot/start
+        # must restart it or the feed stays dead forever.
+        if not tick_engine._running:
+            tick_engine.start_loop()
+            logger.info("[master_v5] tick engine poll loop restarted")
+
         for strat in strategies:
             agent = ALL_AGENTS.get(strat)
             if not agent:
@@ -236,6 +242,12 @@ class MasterAgent:
 
     async def _master_review(self) -> None:
         if not self.running:
+            return
+        # Market-hours gate: don't burn a Claude call every 60s around the clock.
+        # PAPER mode is exempt (testing override — the GBM simulator ticks 24/7,
+        # same convention as tick_engine._poll_loop).
+        if not is_market_open() and settings.trading_mode == "LIVE":
+            logger.debug("[master] Market closed — skipping master review")
             return
         try:
             regime, plan = await regime_detector.update()
@@ -356,11 +368,18 @@ class MasterAgent:
         }
 
         try:
-            msg = self._client.messages.create(
-                model=settings.master_review_model,
-                max_tokens=1000,
-                system=[{"type": "text", "text": MASTER_PROMPT, "cache_control": {"type": "ephemeral"}}],
-                messages=[{"role": "user", "content": json.dumps(report, indent=2, default=str)}],
+            # The anthropic client is synchronous — run it in the default thread
+            # executor so the 2-10s API round-trip never freezes the event loop
+            # (this job fires every 60s; a blocked loop stalls all tick queues).
+            _report_json = json.dumps(report, indent=2, default=str)
+            msg = await asyncio.get_running_loop().run_in_executor(
+                None,
+                lambda: self._client.messages.create(
+                    model=settings.master_review_model,
+                    max_tokens=1000,
+                    system=[{"type": "text", "text": MASTER_PROMPT, "cache_control": {"type": "ephemeral"}}],
+                    messages=[{"role": "user", "content": _report_json}],
+                ),
             )
             raw = msg.content[0].text.strip().replace("```json", "").replace("```", "").strip()
             d   = json.loads(raw)
@@ -552,6 +571,9 @@ class MasterAgent:
             agent = ALL_AGENTS.get(strat)
             if agent and agent.state.running:
                 agent.stop()
+                # Drop the dead queue — otherwise the engine keeps churning a
+                # 2000-deep queue nobody consumes. Resume re-adds it below.
+                tick_engine.remove_subscriber(f"agent_{strat}")
                 logger.info("[master] Regime {} → paused {}", regime.value, strat)
 
         for strat in plan.active:
@@ -572,6 +594,7 @@ class MasterAgent:
             action = directive.get("action", "run")
             if action == "pause" and agent.state.running:
                 agent.stop()
+                tick_engine.remove_subscriber(f"agent_{strat}")
             elif action in ("run", "reduce_size") and not agent.state.running:
                 if not is_agent_enabled(strat):
                     continue

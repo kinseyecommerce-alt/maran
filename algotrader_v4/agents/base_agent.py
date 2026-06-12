@@ -81,8 +81,10 @@ def _setup_tsl_callbacks() -> None:
             except Exception as exc:
                 logger.error("[{}] _on_sl_moved: cancel_order failed for {}: {}", pos.strategy, pos.symbol, exc)
             try:
+                # Use the stored tradingsymbol (actual instrument, e.g. F&O contract)
+                # — pos.symbol is the UNDERLYING and would place the stop on the wrong instrument.
                 new_sl_oid = await _loop.run_in_executor(None, lambda: kite_client.place_order(
-                    tradingsymbol=pos.symbol,
+                    tradingsymbol=entry.get("tradingsymbol", pos.symbol),
                     exchange=entry.get("exchange", "NSE"),
                     transaction_type="SELL" if pos.side == "BUY" else "BUY",
                     quantity=pos.quantity, order_type="SL-M",
@@ -217,8 +219,11 @@ def _setup_tsl_callbacks() -> None:
             detail=f"T{level} hit entry={pos.entry_price:.2f}",
         )
         if level == 2:
+            # Do NOT pop _tsl_sl_orders until the MARKET exit is confirmed placed:
+            # if the exit fails, any fallback/retry path must still find the real
+            # instrument (F&O contract) — popping early would force the underlying.
             with _tsl_sl_orders_lock:
-                entry = _tsl_sl_orders.pop(pos.order_id, None)
+                entry = _tsl_sl_orders.get(pos.order_id)
             _loop = asyncio.get_running_loop()
             # Cancel the pending SL-M order BEFORE placing the MARKET exit.
             # If SL-M is left active and price later dips to its trigger, it would
@@ -232,14 +237,31 @@ def _setup_tsl_callbacks() -> None:
             exit_sym  = entry.get("tradingsymbol", pos.symbol) if entry else pos.symbol
             exit_exch = entry.get("exchange", "NSE") if entry else "NSE"
             exit_prod = entry.get("product", "MIS") if entry else "MIS"
-            await _loop.run_in_executor(None, lambda: kite_client.place_order(
-                tradingsymbol=exit_sym,
-                exchange=exit_exch,
-                transaction_type="SELL" if pos.side == "BUY" else "BUY",
-                quantity=pos.quantity, order_type="MARKET",
-                product=exit_prod,
-                tag=_otag(f"TSL-T{level}-{pos.strategy}"),
-            ))
+            try:
+                await _loop.run_in_executor(None, lambda: kite_client.place_order(
+                    tradingsymbol=exit_sym,
+                    exchange=exit_exch,
+                    transaction_type="SELL" if pos.side == "BUY" else "BUY",
+                    quantity=pos.quantity, order_type="MARKET",
+                    product=exit_prod,
+                    tag=_otag(f"TSL-T{level}-{pos.strategy}"),
+                ))
+            except Exception as _exit_exc:
+                # SL-M is already cancelled and target2_hit is latched (T2 never
+                # re-fires) — the position is open with NO stop. Escalate exactly
+                # like _on_sl_hit: kill switch squares everything off.
+                logger.critical(
+                    "[TSL] T2 MARKET exit FAILED for {} {} — position stuck open "
+                    "with no stop, triggering kill switch: {}",
+                    pos.symbol, pos.strategy, _exit_exc,
+                )
+                sebi_compliance.trigger_kill_switch(
+                    f"T2 exit failed for {pos.symbol} ({pos.strategy}) — "
+                    f"open position has no working stop")
+                return
+            # Exit confirmed placed — now it is safe to drop the SL-M mapping.
+            with _tsl_sl_orders_lock:
+                _tsl_sl_orders.pop(pos.order_id, None)
             order_guard.release_order(pos.symbol, pos.strategy, pos.side, pnl_est)
             risk_manager.record_trade(pnl_est)
             risk_manager.position_closed()
@@ -659,12 +681,19 @@ class BaseAgent(ABC):
         return False
 
     async def _reconcile_fill(self, order_id: str, requested_qty: int,
-                              loop: asyncio.AbstractEventLoop) -> int:
+                              loop: asyncio.AbstractEventLoop,
+                              *, none_on_error: bool = False) -> int | None:
         """LIVE: poll order status briefly for the ACTUAL filled quantity.
 
         MARKET orders reach a terminal state within a few hundred ms. If the
         status feed is unreachable we assume a FULL fill — leaving a real
         position unprotected is worse than a rare over-hedge. PAPER → full qty.
+
+        none_on_error=True flips the fail-safe for callers that must distinguish
+        "confirmed zero fill" from "reconcile failed": returns None when no
+        terminal order state could be confirmed. Used by the LIMIT-cancel race
+        check, where treating a reconcile FAILURE as "not filled" would place a
+        duplicate MARKET order (possible 2x position).
         """
         if settings.trading_mode != "LIVE":
             return requested_qty
@@ -674,6 +703,10 @@ class BaseAgent(ABC):
                 hist = await loop.run_in_executor(
                     None, lambda: kite_client.order_history(str(order_id)))
             except Exception as exc:
+                if none_on_error:
+                    logger.warning("[{}] fill reconcile: order_history({}) failed: {} "
+                                   "— fill status UNCONFIRMED", self.name, order_id, exc)
+                    return None
                 logger.warning("[{}] fill reconcile: order_history({}) failed: {} "
                                "— assuming full fill", self.name, order_id, exc)
                 return requested_qty
@@ -689,6 +722,8 @@ class BaseAgent(ABC):
                 if status in ("REJECTED", "CANCELLED"):
                     return last_filled            # 0 = nothing filled; else partial
             await asyncio.sleep(0.25)
+        if none_on_error:
+            return None                           # no terminal status — unconfirmed
         return last_filled or requested_qty       # no terminal status — best known
 
     async def _reconcile_fill_and_resize_sl(
@@ -740,6 +775,11 @@ class BaseAgent(ABC):
         else:
             qty = risk_manager.calculate_quantity(ltp, agent=self.name)
 
+        # Capital can't cover a single share — the max(1, ...) floors below
+        # must never resurrect an unaffordable trade.
+        if qty <= 0:
+            return 0
+
         if settings.use_kelly_sizing:
             qty = max(1, int(qty * risk_manager.kelly_fraction(self.name, snap.symbol)))
 
@@ -763,7 +803,12 @@ class BaseAgent(ABC):
             post  = _agg.register(self.name, snap.symbol, action, signal.get("score", 0))
             boost = pre if pre > 0 else post
             if boost > 0:
-                cap = int(settings.max_position_size // max(ltp, 1))
+                # Cap against BOTH the global per-position notional and this
+                # agent's capital bucket — otherwise a consensus boost can
+                # overrun the per-agent allocation by ~25%.
+                cap_notional = min(float(settings.max_position_size),
+                                   risk_manager.max_capital_for_agent(self.name))
+                cap = int(cap_notional // max(ltp, 1))
                 qty = min(int(qty * (1 + boost)), cap)
                 logger.info("[{}] {} CONSENSUS boost {:.0%} → qty={}", self.name, snap.symbol, boost, qty)
         except Exception:
@@ -856,31 +901,27 @@ class BaseAgent(ABC):
         claimed, _ = order_guard.try_claim(sym, self.name, action)
         if not claimed:
             raise RuntimeError("claim_denied")
-        allowed, _ = risk_manager.check_before_order(sym, qty, ltp, action)
-        if not allowed:
-            order_guard.release_claim(sym, self.name, action)
-            raise RuntimeError("risk_denied")
 
-        from market_regime import regime_detector
-        sebi_ok, _algo_id, sebi_reason = sebi_compliance.pre_order_check(
-            strategy=self.name, symbol=sym, exchange=exch,
-            transaction_type=action, quantity=qty, order_type="MARKET",
-            price_at_signal=ltp, signal_source=f"agent_{self.name}",
-            regime=regime_detector.current_regime.value,
-        )
-        if not sebi_ok:
-            logger.warning("[{}] SEBI blocked {} {}: {}", self.name, action, sym, sebi_reason)
-            order_guard.release_claim(sym, self.name, action)
-            raise RuntimeError("sebi_denied")
-
+        # ── Sizing adjustments BEFORE risk/SEBI checks ─────────────────────
+        # The macro haircut and catalyst bump must be applied first so that
+        # check_before_order(), pre_order_check() and the SEBI audit record all
+        # see the FINAL quantity actually sent to the broker.
         if action == "BUY":
             macro_score = 0.0
+            macro_stale = False
             try:
                 from macro_signals import macro_signals
+                macro_stale = getattr(macro_signals, "is_stale", lambda: False)()
                 macro_score = macro_signals.get_macro_score()
             except Exception:
                 pass
-            if macro_score < -0.5:
+            if macro_stale:
+                # Fail conservative, not open: a never-fetched/stale macro score
+                # reads as 0.0 = neutral. Haircut size instead of trusting it.
+                logger.warning("[{}] {} macro data unavailable — applying conservative sizing",
+                               self.name, sym)
+                qty = max(1, int(qty * 0.75))
+            elif macro_score < -0.5:
                 logger.info("[{}] {} BUY skipped — macro headwind: {:.2f}", self.name, sym, macro_score)
                 order_guard.release_claim(sym, self.name, action)
                 raise RuntimeError("macro_headwind")
@@ -901,6 +942,23 @@ class BaseAgent(ABC):
         if catalyst > 0.3:
             qty = min(int(qty * 1.2), int(settings.max_position_size // ltp))
             logger.debug("[{}] {} positive catalyst {:.2f} → qty bumped to {}", self.name, sym, catalyst, qty)
+
+        allowed, _ = risk_manager.check_before_order(sym, qty, ltp, action)
+        if not allowed:
+            order_guard.release_claim(sym, self.name, action)
+            raise RuntimeError("risk_denied")
+
+        from market_regime import regime_detector
+        sebi_ok, _algo_id, sebi_reason = sebi_compliance.pre_order_check(
+            strategy=self.name, symbol=sym, exchange=exch,
+            transaction_type=action, quantity=qty, order_type="MARKET",
+            price_at_signal=ltp, signal_source=f"agent_{self.name}",
+            regime=regime_detector.current_regime.value,
+        )
+        if not sebi_ok:
+            logger.warning("[{}] SEBI blocked {} {}: {}", self.name, action, sym, sebi_reason)
+            order_guard.release_claim(sym, self.name, action)
+            raise RuntimeError("sebi_denied")
 
         sl          = signal.get("stop_loss", risk_manager.sl_price(ltp, action))
         product     = signal.get("product", self.product)
@@ -924,8 +982,24 @@ class BaseAgent(ABC):
                         await loop.run_in_executor(None, lambda: kite_client.cancel_order(order_id))
                     except Exception:
                         pass  # cancel may fail if the order already completed
-                    # Re-check fill status after the cancel
-                    _post_fill = await self._reconcile_fill(order_id, 0, loop)
+                    # Re-check fill status after the cancel.
+                    # none_on_error: a reconcile FAILURE must NOT read as "not
+                    # filled" — that would place the MARKET follow-up on top of a
+                    # possibly-filled LIMIT (2x position).
+                    _post_fill = await self._reconcile_fill(order_id, 0, loop,
+                                                            none_on_error=True)
+                    if _post_fill is None:
+                        # Fill status unconfirmed — skip the MARKET follow-up and
+                        # abort the trade. Keep the PENDING claim in place so no
+                        # agent re-enters this symbol while the LIMIT's true state
+                        # is unknown (stale-claim sweeper frees it after 300s).
+                        logger.warning(
+                            "[{}] LIMIT {} cancel-race reconcile FAILED — skipping "
+                            "MARKET follow-up; MANUAL VERIFICATION needed: order may "
+                            "have filled with no SL in place ({} {})",
+                            self.name, order_id, action, sym,
+                        )
+                        raise RuntimeError("limit_fill_unconfirmed")
                     if _post_fill > 0:
                         # LIMIT order filled in the race window — use it; skip MARKET
                         qty = _post_fill
@@ -1210,6 +1284,12 @@ class BaseAgent(ABC):
         for pos in _exit_pos_data.get("net", []):
             if pos.get("tradingsymbol") != sym or pos.get("quantity", 0) == 0:
                 continue
+            # Ownership gate: in LIVE, kite.positions() also returns bracket-managed
+            # positions and the account holder's MANUAL trades. Only flatten positions
+            # this agent actually owns (order_guard records "{strategy}:{side}").
+            _owner = order_guard.owner_of(sym)
+            if not _owner or not _owner.startswith(f"{self.name}:"):
+                continue
             should, reason = self.should_exit_position(pos, ind)
             if not should:
                 continue
@@ -1234,6 +1314,10 @@ class BaseAgent(ABC):
             risk_manager.position_closed()
             self.state.pnl_today += pnl
             # TSL positions are keyed by ENTRY order_id, not exit order_id.
+            # Pop the SL-M mapping and CANCEL the live SL-M placed at entry:
+            # the MARKET exit above just flattened the position, so an orphan
+            # stop left working would later fill against a flat book and open
+            # an unwanted reverse position.
             with _tsl_sl_orders_lock:
                 _entry_oid = next(
                     (k for k, v in list(_tsl_sl_orders.items())
@@ -1241,6 +1325,23 @@ class BaseAgent(ABC):
                      and trailing_sl_engine._positions[k].symbol == sym),
                     None,
                 )
+                _sl_entry = _tsl_sl_orders.pop(_entry_oid, None) if _entry_oid else None
+            if _sl_entry and _sl_entry.get("sl_order_id"):
+                _sl_oid = _sl_entry["sl_order_id"]
+                try:
+                    await asyncio.get_running_loop().run_in_executor(
+                        None, lambda: kite_client.cancel_order(_sl_oid))
+                    logger.info("[{}] Cancelled SL-M {} after strategy exit on {}",
+                                self.name, _sl_oid, sym)
+                except Exception as _sl_cancel_exc:
+                    logger.critical(
+                        "[{}] FAILED to cancel SL-M {} after strategy exit on {} — "
+                        "orphan stop live on a flat book, triggering kill switch: {}",
+                        self.name, _sl_oid, sym, _sl_cancel_exc,
+                    )
+                    sebi_compliance.trigger_kill_switch(
+                        f"Orphan SL-M {_sl_oid} live after strategy exit "
+                        f"for {sym} ({self.name}) — cancel failed")
             trailing_sl_engine.deregister(_entry_oid if _entry_oid is not None else oid)
 
             # Persist to SQLite (Phase 3) — non-blocking async variant

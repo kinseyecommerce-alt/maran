@@ -37,6 +37,16 @@ class KiteTicker:
         self._callback: Optional[Callable] = None
         self._loop: Optional[asyncio.AbstractEventLoop] = None
         self._connected = False
+        # Kite's volume_traded is the CUMULATIVE day volume — track the last seen
+        # value per symbol and emit only the per-tick delta (TickBuffer sums volumes).
+        self._last_cum_vol: dict[str, int] = {}
+        self._vol_date = now_ist().date()
+
+    def reset_volume_baseline(self) -> None:
+        """Clear per-symbol cumulative-volume baselines (new session / reconnect).
+        The first tick after a reset emits volume=0, never the day total."""
+        self._last_cum_vol.clear()
+        self._vol_date = now_ist().date()
 
     def load_instruments(self, symbols: list[str]) -> None:
         """Fetch instrument tokens for symbols from Kite instruments API."""
@@ -104,6 +114,7 @@ class KiteTicker:
         ws.subscribe(tokens)
         ws.set_mode(ws.MODE_FULL, tokens)
         self._connected = True
+        self.reset_volume_baseline()
         logger.info("[KiteTicker] Connected — subscribed {} tokens in FULL mode", len(tokens))
 
     def _on_error(self, ws, code, reason) -> None:
@@ -116,6 +127,10 @@ class KiteTicker:
     def _on_ticks(self, ws, ticks: list[dict]) -> None:
         if not self._callback or not self._loop:
             return
+
+        # New trading session — cumulative volume restarts at the exchange
+        if now_ist().date() != self._vol_date:
+            self.reset_volume_baseline()
 
         for t in ticks:
             token = t.get("instrument_token")
@@ -130,16 +145,25 @@ class KiteTicker:
             buys  = depth.get("buy",  [{}])
             sells = depth.get("sell", [{}])
 
-            abs_change = t.get("change", 0.0)
+            # kiteconnect's tick["change"] is ALREADY a percentage:
+            # (last_price - close) * 100 / close. Derive the rupee change from it.
+            pct_change = t.get("change", 0.0)
             prev_close = ohlc.get("close", 0.0)
-            pct_change = (abs_change / prev_close * 100.0) if prev_close else 0.0
+            abs_change = (pct_change / 100.0 * prev_close) if prev_close else 0.0
+
+            # volume_traded is cumulative day volume — emit the per-tick delta.
+            # First tick after baseline reset emits 0 (unknown previous cumulative).
+            cum_vol  = int(t.get("volume_traded", 0) or 0)
+            last_vol = self._last_cum_vol.get(sym)
+            vol_delta = max(0, cum_vol - last_vol) if last_vol is not None else 0
+            self._last_cum_vol[sym] = cum_vol
 
             tick = _Tick(
                 symbol     = sym,
                 ltp        = t.get("last_price", 0.0),
                 bid        = buys[0].get("price",  0.0) if buys  else 0.0,
                 ask        = sells[0].get("price", 0.0) if sells else 0.0,
-                volume     = t.get("volume_traded", 0),
+                volume     = vol_delta,
                 change     = abs_change,
                 change_pct = pct_change,
                 high       = ohlc.get("high",  0.0),

@@ -35,6 +35,12 @@ from typing import Optional, Callable
 from loguru import logger
 
 
+# Strong references to fire-and-forget tasks spawned by tighten_all(): the event
+# loop only keeps weak refs, so without this a task can be GC'd mid-flight and
+# the broker SL-M modification silently never happens.
+_TIGHTEN_TASKS: set = set()
+
+
 # ── Types ─────────────────────────────────────────────────────────────────────
 
 class SLMode(str, Enum):
@@ -614,20 +620,27 @@ class TrailingSLEngine:
         if tightened_positions:
             import asyncio as _asyncio
             cb = self.on_sl_moved
-            if cb is not None:
-                try:
-                    loop = _asyncio.get_running_loop()
-                    for pos, old_sl in tightened_positions:
-                        _cb = pos._on_sl_moved or cb
-                        loop.create_task(_cb(pos, old_sl, "BLACK_SWAN_TIGHTEN"))
-                except RuntimeError:
-                    # No running event loop (called from non-async context).
-                    # Best-effort: log and let the next on_tick cycle pick up the new SL.
-                    logger.warning(
-                        "[TSL] tighten_all: no running event loop — "
-                        "SL-M broker orders NOT updated immediately. "
-                        "New SL will propagate on next tick."
-                    )
+            try:
+                loop = _asyncio.get_running_loop()
+            except RuntimeError:
+                # No running event loop (called from non-async context).
+                # Best-effort: log and let the next on_tick cycle pick up the new SL.
+                logger.warning(
+                    "[TSL] tighten_all: no running event loop — "
+                    "SL-M broker orders NOT updated immediately. "
+                    "New SL will propagate on next tick."
+                )
+            else:
+                # Resolve callbacks PER POSITION: bracket-only deployments never set
+                # the module-level on_sl_moved, but each bracket position carries its
+                # own _on_sl_moved — gating the whole loop on `cb` would skip them.
+                for pos, old_sl in tightened_positions:
+                    _cb = pos._on_sl_moved or cb
+                    if _cb is None:
+                        continue
+                    _task = loop.create_task(_cb(pos, old_sl, "BLACK_SWAN_TIGHTEN"))
+                    _TIGHTEN_TASKS.add(_task)
+                    _task.add_done_callback(_TIGHTEN_TASKS.discard)
         return count
 
     def all_positions(self) -> list[dict]:

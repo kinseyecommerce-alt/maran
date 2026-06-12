@@ -1,6 +1,6 @@
 import re
 from pydantic_settings import BaseSettings
-from pydantic import Field, field_validator
+from pydantic import Field, field_validator, model_validator
 from typing import Literal
 
 
@@ -57,14 +57,18 @@ class Settings(BaseSettings):
     # Trading
     trading_mode: Literal["PAPER", "LIVE"] = "PAPER"
 
-    # Risk
-    max_daily_loss: float = 5000.0
-    max_position_size: float = 50000.0
+    # Risk — money-critical fields are validated (must be sane positive values)
+    max_daily_loss: float = Field(default=5000.0, gt=0)
+    max_position_size: float = Field(default=50000.0, gt=0)
     max_open_positions: int = 5
-    stop_loss_pct: float = 1.5
+    stop_loss_pct: float = Field(default=1.5, gt=0, le=50)
     target_pct: float = 3.0
     squareoff_time: str = "15:10"
     max_indicator_age_sec: float = 5.0  # reject entries on indicators older than this
+
+    # Position reconciler — broker is truth; poll + correct internal drift
+    use_position_reconciler: bool = True
+    reconcile_interval_sec: float = Field(default=10.0, gt=0)
 
     # Backtest gate thresholds
     bt_min_win_rate: float = 55.0
@@ -190,7 +194,7 @@ class Settings(BaseSettings):
 
     # Phase 2/3: Position sizing
     use_atr_sizing: bool = True
-    risk_per_trade_pct: float = 0.5
+    risk_per_trade_pct: float = Field(default=0.5, gt=0, le=50)
     use_conviction_sizing: bool = True  # score-proportional size: low=0.5×, mid=0.75×, high=1.0×
 
     # Phase 3: Intelligence
@@ -212,11 +216,11 @@ class Settings(BaseSettings):
     use_kite_websocket: bool = True   # use KiteConnect WebSocket for ticks in LIVE mode
 
     # Daily capital allocation by trading type
-    total_capital:          float = 500000.0   # total account capital (₹)
-    intraday_capital_pct:   float = 40.0       # % for equity intraday MIS (intraday + scalping)
-    swing_capital_pct:      float = 25.0       # % for equity delivery CNC (swing)
-    options_capital_pct:    float = 25.0       # % for options premium NRML (fno)
-    futures_capital_pct:    float = 10.0       # % for futures margin NRML (reserved)
+    total_capital:          float = Field(default=500000.0, gt=0)  # total account capital (₹)
+    intraday_capital_pct:   float = Field(default=40.0, ge=0, le=100)  # % for equity intraday MIS (intraday + scalping)
+    swing_capital_pct:      float = Field(default=25.0, ge=0, le=100)  # % for equity delivery CNC (swing)
+    options_capital_pct:    float = Field(default=25.0, ge=0, le=100)  # % for options premium NRML (fno)
+    futures_capital_pct:    float = Field(default=10.0, ge=0, le=100)  # % for futures margin NRML (reserved)
 
     # Max concurrent positions per agent (capital divided per-symbol to avoid overrun)
     max_intraday_positions: int = 5
@@ -276,6 +280,18 @@ class Settings(BaseSettings):
         if v and len(v) < 32:
             raise ValueError("jwt_secret_key must be at least 32 characters for HS256 security")
         return v
+
+    @model_validator(mode="after")
+    def validate_capital_allocation(self) -> "Settings":
+        total_pct = (self.intraday_capital_pct + self.swing_capital_pct
+                     + self.options_capital_pct + self.futures_capital_pct)
+        if total_pct > 100:
+            raise ValueError(
+                f"Capital allocation percentages must sum to <= 100, got {total_pct:.1f} "
+                f"(intraday={self.intraday_capital_pct}, swing={self.swing_capital_pct}, "
+                f"options={self.options_capital_pct}, futures={self.futures_capital_pct})"
+            )
+        return self
 
     class Config:
         env_file = ".env"

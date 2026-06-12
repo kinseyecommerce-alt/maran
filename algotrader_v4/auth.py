@@ -56,7 +56,11 @@ def create_token(username: str) -> tuple[str, int]:
 def decode_token(token: str) -> Optional[str]:
     """Returns username if token valid, else None."""
     try:
-        payload = jwt.decode(token, settings.jwt_secret_key, algorithms=[ALGORITHM])
+        payload = jwt.decode(
+            token, settings.jwt_secret_key, algorithms=[ALGORITHM],
+            # Hardening: reject tokens missing exp/sub claims (python-jose options)
+            options={"require_exp": True, "require_sub": True},
+        )
         return payload.get("sub")
     except JWTError:
         return None

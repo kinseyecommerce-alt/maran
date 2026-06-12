@@ -100,12 +100,16 @@ class OrderGuard:
 
     def confirm_claim(self, symbol: str, strategy: str, side: str, order_id: str) -> None:
         """Upgrade a PENDING claim to ACTIVE after successful order placement."""
+        snapshot = None
         with self._lock:
             key = (symbol, strategy, side)
             if key in self._active and self._active[key].pending:
                 self._active[key].order_id = order_id
                 self._active[key].pending  = False
                 self._trade_count[strategy] += 1
+                snapshot = dict(self._trade_count)
+        if snapshot is not None:
+            self._persist_trade_count(snapshot)
 
     def release_claim(self, symbol: str, strategy: str, side: str) -> None:
         """Release a PENDING claim on failure (order was never placed)."""
@@ -125,6 +129,48 @@ class OrderGuard:
                                              order_id=order_id, placed_at=time.time())
             self._trade_count[strategy] += 1
             self._symbol_owner[symbol] = f"{strategy}:{side}"
+            snapshot = dict(self._trade_count)
+        self._persist_trade_count(snapshot)
+
+    @staticmethod
+    def _persist_trade_count(snapshot: dict[str, int]) -> None:
+        """Best-effort persist of trade counts — DB issues must never block orders.
+        Called OUTSIDE self._lock (a slow DB write must not stall order placement)."""
+        try:
+            import json
+            from state_store import set_kv
+            set_kv("order_guard_trade_count", json.dumps(snapshot))
+        except Exception:
+            pass
+
+    def restore_counts(self) -> None:
+        """Reload persisted per-strategy trade counts (e.g. after a restart).
+
+        Safe to call anytime: keeps the max of in-memory and persisted counts so a
+        late call can never LOWER a live count, and any error is swallowed."""
+        try:
+            import json
+            from state_store import get_kv
+            raw = get_kv("order_guard_trade_count", "")
+            if not raw:
+                return
+            data = json.loads(raw)
+            if not isinstance(data, dict):
+                return
+            with self._lock:
+                for strategy, count in data.items():
+                    try:
+                        self._trade_count[strategy] = max(
+                            self._trade_count.get(strategy, 0), int(count))
+                    except (TypeError, ValueError):
+                        continue
+        except Exception:
+            pass
+
+    def owner_of(self, symbol: str) -> str | None:
+        """Return the '{strategy}:{side}' owner of the symbol lock, or None."""
+        with self._lock:
+            return self._symbol_owner.get(symbol)
 
     def release_order(self, symbol: str, strategy: str, side: str, pnl: float = 0.0) -> None:
         with self._lock:
@@ -162,6 +208,17 @@ class OrderGuard:
             self._cooldown_until.clear()
             self._symbol_owner.clear()
             self._symbol_cooldown.clear()
+        # Keep the persisted counts in sync — otherwise restore_counts() after a
+        # post-reset restart would resurrect yesterday's totals and block trading.
+        self._persist_trade_count({})
+
+    def clear_active_only(self) -> None:
+        """Clear active orders + symbol locks but PRESERVE trade counts and
+        cooldowns. Used by squareoff / kill-switch flows: positions are flat so
+        the locks must go, but daily overtrade limits must keep counting."""
+        with self._lock:
+            self._active.clear()
+            self._symbol_owner.clear()
 
     def release_stale_claims(self, max_age_sec: int = 300) -> list[str]:
         """Release PENDING claims older than max_age_sec. Returns list of released keys.

@@ -21,8 +21,8 @@ from __future__ import annotations
 import asyncio
 import time
 from collections import deque
-from dataclasses import dataclass, field
-from datetime import datetime
+from dataclasses import dataclass, field, replace
+from datetime import datetime, timedelta
 from threading import Lock
 from typing import Callable, Optional
 
@@ -183,8 +183,12 @@ class TickBuffer:
         self._lock = Lock()
 
     def push(self, ltp: float, volume: int, ts: datetime) -> Optional[Candle]:
-        bar_ts = datetime(ts.year, ts.month, ts.day, ts.hour, ts.minute,
-                          (ts.second // self.resolution) * self.resolution)
+        # Bucket on total seconds since midnight so resolutions > 60s (e.g. 300s
+        # 5-min bars) floor across minute boundaries, not just within a minute.
+        secs = (ts.hour * 3600 + ts.minute * 60 + ts.second) \
+               // self.resolution * self.resolution
+        bar_ts = datetime(ts.year, ts.month, ts.day, tzinfo=ts.tzinfo) \
+                 + timedelta(seconds=secs)
         completed = None
         with self._lock:
             if self._current is None or bar_ts != self._current_ts:
@@ -234,27 +238,46 @@ def _wma(series, period: int):
 
 
 def _supertrend(high, low, close, period: int = 10, mult: float = 3.0):
+    """Standard Supertrend (period=10, mult=3.0).
+
+    Basic bands = hl2 ± mult·ATR. Final bands are carried forward — the upper
+    band only ratchets down in a downtrend (resets when price closes above it),
+    and symmetrically for the lower band. Direction flips when close crosses
+    the opposite final band; otherwise the previous direction carries.
+    """
     if len(close) <= period:
         return 0.0, "NEUTRAL"
     hl2   = (high + low) / 2
     atr   = ta.volatility.AverageTrueRange(high, low, close, period).average_true_range()
-    upper = hl2 + mult * atr
-    lower = hl2 - mult * atr
-    n     = len(close)
+    basic_upper = (hl2 + mult * atr).to_numpy(dtype=float)
+    basic_lower = (hl2 - mult * atr).to_numpy(dtype=float)
+    closes      = close.to_numpy(dtype=float)
+    n           = len(closes)
+    final_upper = basic_upper.copy()
+    final_lower = basic_lower.copy()
     st_val, st_dir = [0.0] * n, ["NEUTRAL"] * n
     for i in range(1, n):
-        if close.iloc[i] > upper.iloc[i]:
+        if (np.isnan(basic_upper[i]) or np.isnan(final_upper[i - 1])
+                or np.isnan(final_lower[i - 1])):
+            continue
+        # Final band carry-forward
+        if basic_upper[i] < final_upper[i - 1] or closes[i - 1] > final_upper[i - 1]:
+            final_upper[i] = basic_upper[i]
+        else:
+            final_upper[i] = final_upper[i - 1]
+        if basic_lower[i] > final_lower[i - 1] or closes[i - 1] < final_lower[i - 1]:
+            final_lower[i] = basic_lower[i]
+        else:
+            final_lower[i] = final_lower[i - 1]
+        # Direction: close crossing above final upper → UP, below final lower → DOWN
+        if closes[i] > final_upper[i]:
             st_dir[i] = "UP"
-        elif close.iloc[i] < lower.iloc[i]:
+        elif closes[i] < final_lower[i]:
             st_dir[i] = "DOWN"
         else:
             st_dir[i] = st_dir[i - 1]
-        if st_dir[i] == "UP":
-            st_val[i] = max(float(lower.iloc[i]), st_val[i - 1]) if st_val[i - 1] else float(lower.iloc[i])
-        else:
-            st_val[i] = min(float(upper.iloc[i]), st_val[i - 1]) if st_val[i - 1] else float(upper.iloc[i])
-    st = pd.Series(st_val)
-    if pd.isna(st.iloc[-1]):
+        st_val[i] = float(final_lower[i]) if st_dir[i] == "UP" else float(final_upper[i])
+    if not st_val[-1] or np.isnan(st_val[-1]):
         return 0.0, "NEUTRAL"
     return st_val[-1], st_dir[-1]
 
@@ -386,8 +409,15 @@ class IndicatorCalc:
                 ind.ema200= float(ta.trend.EMAIndicator(close, 200).ema_indicator().iloc[-1])
 
             if n >= 5:
-                ind.vwap  = float(ta.volume.VolumeWeightedAveragePrice(
-                    high, low, close, volume).volume_weighted_average_price().iloc[-1])
+                # Cumulative session VWAP — Σ(typical_price·volume)/Σ(volume) over
+                # the day's candles (buffers reset at 09:15 IST). The previous
+                # ta.volume.VolumeWeightedAveragePrice defaulted to a 14-bar
+                # rolling window, which is NOT session VWAP. Consistent with
+                # _vwap_bands() below.
+                _tp      = (high + low + close) / 3.0
+                _cum_vol = float(volume.sum())
+                ind.vwap = (float((_tp * volume).sum()) / _cum_vol
+                            if _cum_vol > 0 else float(close.iloc[-1]))
 
             if n >= 15:
                 ind.rsi_14= float(ta.momentum.RSIIndicator(close, 14).rsi().iloc[-1])
@@ -472,6 +502,13 @@ class IndicatorCalc:
 
 # ── Kite quote converter ──────────────────────────────────────────────────────
 
+# Kite REST quote() reports CUMULATIVE day volume per poll. TickBuffer sums the
+# volume of every push, so we must emit the per-poll DELTA instead. Track the
+# last cumulative value per symbol; reset daily via the _session_date mechanism
+# in _process_tick().
+_rest_last_cum_vol: dict[str, int] = {}
+
+
 def _kite_quote_to_quote(symbol: str, data: dict) -> Quote:
     ohlc  = data.get("ohlc", {})
     depth = data.get("depth", {})
@@ -480,16 +517,29 @@ def _kite_quote_to_quote(symbol: str, data: dict) -> Quote:
     ltp   = data.get("last_price", 0.0)
     bid_depth = [(b.get("price", 0.0), b.get("quantity", 0)) for b in buys[:5]]
     ask_depth = [(s.get("price", 0.0), s.get("quantity", 0)) for s in sells[:5]]
+
+    # Cumulative → delta volume. First observation of the day emits 0 (we have
+    # no baseline to diff against); max(0, …) guards against feed resets.
+    cum_vol = int(data.get("volume_traded", 0) or 0)
+    last    = _rest_last_cum_vol.get(symbol)
+    vol_delta = max(0, cum_vol - last) if last is not None else 0
+    _rest_last_cum_vol[symbol] = cum_vol
+
+    # Kite REST exposes net_change (absolute ₹ vs prev close), not a percent.
+    prev_close = ohlc.get("close", ltp)
+    net_change = data.get("net_change", data.get("change", 0.0)) or 0.0
+    change_pct = (net_change / prev_close * 100) if prev_close and prev_close > 0 else 0.0
+
     return Quote(
         symbol    = symbol,
         ltp       = ltp,
         open_     = ohlc.get("open",  ltp),
         high      = ohlc.get("high",  ltp),
         low       = ohlc.get("low",   ltp),
-        prev_close= ohlc.get("close", ltp),
-        change    = data.get("change", 0.0),
-        change_pct= data.get("change_percent", data.get("change_pct", 0.0)),
-        volume    = data.get("volume_traded", 0),
+        prev_close= prev_close,
+        change    = net_change,
+        change_pct= change_pct,
+        volume    = vol_delta,
         bid       = buys[0].get("price",  ltp) if buys  else ltp,
         ask       = sells[0].get("price", ltp) if sells else ltp,
         bid_depth = bid_depth,
@@ -565,7 +615,9 @@ class TickEngine:
         self._kite_ticker = None
         self._is_truedata_ws: bool = False
         self._use_ws: bool = False
-        self._ws_received: set[str] = set()
+        # symbol → monotonic time of last WS tick; a symbol counts as WS-covered
+        # only if its last WS tick is < 30s old (else REST fallback covers it).
+        self._ws_last_tick: dict[str, float] = {}
         self._ws_down_since: Optional[float] = None  # monotonic time when WS disconnect detected
 
         # Black swan phase (updated from NIFTY 1-min candles; shared across all symbol snapshots)
@@ -580,6 +632,11 @@ class TickEngine:
         for item in watchlist:
             sym  = item["symbol"]
             exch = item.get("exchange", "NSE")
+            if sym in self._exchange:
+                # Idempotent: bot stop → start re-subscribes the same watchlist.
+                # Don't append duplicates or wipe existing candle buffers.
+                self._exchange[sym] = exch
+                continue
             self._symbols.append(sym)
             self._exchange[sym]  = exch
             self._bufs_1min[sym] = TickBuffer(60,  maxlen=400)
@@ -689,6 +746,7 @@ class TickEngine:
             self._ind_cache.clear()
             self._ind_cache_count.clear()
             self._ind_cache_ltp.clear()
+            _rest_last_cum_vol.clear()  # REST cumulative-volume baseline resets daily
             logger.info("TickEngine: daily buffer reset for IST session {}", tick_date)
 
         self._bufs_1min[symbol].push(tick.ltp, tick.volume, tick.timestamp)
@@ -705,12 +763,21 @@ class TickEngine:
         if (_n_candles == self._ind_cache_count.get(symbol, -1)
                 and _ltp_moved_pct < 0.05
                 and symbol in self._ind_cache):
-            ind = self._ind_cache[symbol]
+            # Shallow-copy the cached indicators: never mutate the cached
+            # original (it is referenced by snapshots already queued to agents)
+            # and refresh computed_at so quiet candles don't trigger spurious
+            # stale-indicator vetoes downstream.
+            ind = replace(self._ind_cache[symbol])
+            ind.computed_at = time.time()
             # Still refresh the tick-level fields that change every tick
             ind.ltp   = tick.ltp
             ind.bid   = tick.bid
             ind.ask   = tick.ask
             ind.spread = round(tick.ask - tick.bid, 2)
+            # L2 depth fields come from the live tick, not the cached compute
+            ind.wall_above, ind.wall_below, ind.depth_imbalance = _detect_walls(
+                tick.ltp, tick.bid_depth, tick.ask_depth,
+            )
         else:
             # Cache miss = candle closed or LTP moved significantly.
             # Run in thread executor so the event loop stays free while pandas/numpy
@@ -810,7 +877,7 @@ class TickEngine:
 
     async def _ingest_kite_tick(self, symbol: str, tick: Tick) -> None:
         """Process a tick received directly from KiteConnect/TrueData WebSocket."""
-        self._ws_received.add(symbol)
+        self._ws_last_tick[symbol] = time.monotonic()
         source = "TRUEDATA_WS" if self._is_truedata_ws else "KITE_WS"
         await self._process_tick(symbol, tick, source=source)
 
@@ -829,7 +896,7 @@ class TickEngine:
                 await asyncio.sleep(30)
                 continue
 
-            # ── WS health check: fall back to REST if WS disconnected > 10s ──
+            # ── WS health check: fall back to REST if WS disconnected > 3s ──
             if self._use_ws and self._kite_ticker is not None:
                 ws_connected = getattr(self._kite_ticker, "is_connected", True)
                 # is_connected may be a property or a bool; resolve it
@@ -842,10 +909,10 @@ class TickEngine:
                         logger.warning(
                             "TickEngine: WebSocket disconnected for >3s — "
                             "falling back to REST polling for {} symbols",
-                            len(self._ws_received),
+                            len(self._ws_last_tick),
                         )
                         self._use_ws = False
-                        self._ws_received.clear()
+                        self._ws_last_tick.clear()
                         self._ws_down_since = None
                 else:
                     # WS is healthy — if we previously fell back, re-enable
@@ -878,8 +945,12 @@ class TickEngine:
 
     async def _fetch_kite_batch(self) -> None:
         """Single Kite quote() call for all non-WebSocket symbols in LIVE mode."""
+        # A symbol is WS-covered only while its WS ticks are fresh (<30s old).
+        # A single dead WS subscription must not starve the symbol forever.
+        now_mono = time.monotonic()
         pending = [s for s in self._symbols
-                   if not (self._use_ws and s in self._ws_received)]
+                   if not (self._use_ws
+                           and now_mono - self._ws_last_tick.get(s, -1e9) < 30.0)]
         if not pending:
             return
         instruments = [f"{self._exchange.get(s, 'NSE')}:{s}" for s in pending]
@@ -911,6 +982,16 @@ class TickEngine:
             tick = self._latest_tick[sym]
             ind  = self._latest_ind[sym]
             if tick and ind:
+                # ATR as % of price + a cheap bounded momentum composite for the
+                # portfolio optimizer:
+                #   score = (rsi-50)/50 + clip(ema9/ema21 - 1, ±0.02)·25
+                # clipped to [-1, 1]; 0 when indicators are missing.
+                atr_pct = (ind.atr_14 / tick.ltp * 100) if tick.ltp > 0 else 0.0
+                if ind.rsi_14 and ind.ema9 and ind.ema21:
+                    _ema_term = max(-0.02, min(0.02, ind.ema9 / ind.ema21 - 1)) * 25
+                    score = max(-1.0, min(1.0, (ind.rsi_14 - 50) / 50 + _ema_term))
+                else:
+                    score = 0.0
                 result[sym] = {
                     "ltp":        tick.ltp,
                     "bid":        tick.bid,
@@ -940,6 +1021,8 @@ class TickEngine:
                     "stoch_rsi_k":    ind.stoch_rsi_k,
                     "stoch_rsi_d":    ind.stoch_rsi_d,
                     "williams_r":     ind.williams_r,
+                    "atr_pct":        round(atr_pct, 3),
+                    "score":          round(score, 4),
                     "ts":             tick.timestamp.isoformat(),
                 }
         return result

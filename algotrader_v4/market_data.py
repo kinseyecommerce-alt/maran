@@ -314,6 +314,12 @@ class PaperTickSimulator:
     def __init__(self) -> None:
         self._prices: dict[str, float] = {}
         self._yf = YFinanceClient()
+        # Per-symbol per-session day state — fixed open/prev_close, true running high/low
+        self._day_open:   dict[str, float] = {}
+        self._day_high:   dict[str, float] = {}
+        self._day_low:    dict[str, float] = {}
+        self._prev_close: dict[str, float] = {}
+        self._session_date = None
 
     def seed(self, symbols: list[str], exchanges: dict[str, str]) -> None:
         import concurrent.futures as _cf
@@ -335,28 +341,61 @@ class PaperTickSimulator:
             for fut in done:
                 sym, price = fut.result()
                 self._prices[sym] = price
+                self._prices[sym + "__base__"] = price   # baseline for change_pct
                 logger.info("Paper seed {} @ ₹{:.2f}", sym, price)
             for fut in pending:
                 sym = futs[fut]
                 self._prices[sym] = 1000.0
+                self._prices[sym + "__base__"] = 1000.0  # baseline for change_pct
                 logger.info("Paper seed {} @ ₹1000.00 (network timeout)", sym)
                 fut.cancel()
         finally:
             pool.shutdown(wait=False)
 
     def next_tick(self, symbol: str) -> Quote:
+        today = _now_ist().date()
+        if today != self._session_date:
+            # New session — reset day state and re-base change_pct at current prices
+            self._session_date = today
+            self._day_open.clear()
+            self._day_high.clear()
+            self._day_low.clear()
+            self._prev_close.clear()
+            for k in [k for k in self._prices if k.endswith("__base__")]:
+                del self._prices[k]
+
         price = self._prices.get(symbol, 1000.0)
         shock = random.gauss(0, 0.00008)
         price = max(price * math.exp(shock), 1.0)
         self._prices[symbol] = price
-        spread   = round(price * 0.0002, 2)
-        vol_tick = random.randint(100, 2000)
-        pct      = round((price / self._prices.get(symbol + "__base__", price) - 1) * 100, 2)
+
+        # Session baseline (= prev_close): set once per symbol per session
+        base = self._prices.setdefault(symbol + "__base__", price)
+        if symbol not in self._day_open:
+            self._day_open[symbol]   = round(price, 2)   # fixed day open
+            self._day_high[symbol]   = round(price, 2)
+            self._day_low[symbol]    = round(price, 2)
+            self._prev_close[symbol] = round(base, 2)    # fixed prev_close
+        # True running day high/low
+        if price > self._day_high[symbol]:
+            self._day_high[symbol] = round(price, 2)
+        if price < self._day_low[symbol]:
+            self._day_low[symbol] = round(price, 2)
+
+        spread = round(price * 0.0002, 2)
+        # Lognormal volume with occasional bursts (~5% of ticks get 3–8x) so
+        # volume_ratio carries information instead of hovering at ≈1.
+        vol_tick = int(random.lognormvariate(6.2, 0.6)) + 1
+        if random.random() < 0.05:
+            vol_tick = int(vol_tick * random.uniform(3.0, 8.0))
+
+        prev_close = self._prev_close[symbol]
+        pct        = round((price / base - 1) * 100, 2)
         return Quote(
             symbol=symbol, ltp=round(price, 2),
-            open_=round(price * 0.998, 2), high=round(price * 1.002, 2),
-            low=round(price * 0.997, 2),   prev_close=round(price * 0.999, 2),
-            change=round(price * shock, 2), change_pct=pct,
+            open_=self._day_open[symbol], high=self._day_high[symbol],
+            low=self._day_low[symbol],    prev_close=prev_close,
+            change=round(price - prev_close, 2), change_pct=pct,
             volume=vol_tick,
             bid=round(price - spread / 2, 2),
             ask=round(price + spread / 2, 2),

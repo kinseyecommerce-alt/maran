@@ -20,9 +20,12 @@ from datetime import date, datetime, timedelta, timezone
 from typing import Optional
 from ist_clock import now_ist
 
-# Use env-configurable path so Railway/Docker can mount a persistent volume
+# Use env-configurable path so Railway/Docker can mount a persistent volume.
+# Default is anchored to this module's directory (NOT the process CWD) so a
+# restart from a different working directory still finds the same database.
 import os as _os
-DB_PATH = Path(_os.environ.get("DATABASE_PATH", "logs/algotrader.db"))
+_DEFAULT_DB_PATH = Path(__file__).resolve().parent / "logs" / "algotrader.db"
+DB_PATH = Path(_os.environ.get("DATABASE_PATH", str(_DEFAULT_DB_PATH)))
 
 # ── Async write queue ────────────────────────────────────────────────────────
 # All mutating DB calls (record_trade, upsert_position, close_position) put

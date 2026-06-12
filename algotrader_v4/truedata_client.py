@@ -112,6 +112,16 @@ class TrueDataTicker:
         self._connected = False
         self._symbols:  list[str] = []
         self._last_tick_ts: float = 0.0  # monotonic time of most recent received tick
+        # TrueData's volume field is the CUMULATIVE day volume — track the last
+        # seen value per symbol and emit only the per-tick delta (TickBuffer sums).
+        self._last_cum_vol: dict[str, int] = {}
+        self._vol_date = now_ist().date()
+
+    def reset_volume_baseline(self) -> None:
+        """Clear per-symbol cumulative-volume baselines (new session / reconnect).
+        The first tick after a reset emits volume=0, never the day total."""
+        self._last_cum_vol.clear()
+        self._vol_date = now_ist().date()
 
     @property
     def is_connected(self) -> bool:
@@ -158,6 +168,7 @@ class TrueDataTicker:
                 td.on_data = self._on_tick
                 td_syms    = [_td_symbol(s) for s in self._symbols]
                 req_ids    = td.start_live_data(td_syms)
+                self.reset_volume_baseline()
                 self._connected = True
                 consecutive_failures = 0
                 backoff = 1.0
@@ -190,8 +201,17 @@ class TrueDataTicker:
             if not sym:
                 return
 
+            # New trading session — cumulative volume restarts at the exchange
+            if now_ist().date() != self._vol_date:
+                self.reset_volume_baseline()
+
             ltp = float(getattr(tick, "ltp",       getattr(tick, "LTP",       0.0)))
-            vol = int(  getattr(tick, "volume",     getattr(tick, "Volume",    0)))
+            # TrueData volume is cumulative day volume — emit the per-tick delta.
+            # First tick after baseline reset emits 0 (unknown previous cumulative).
+            cum_vol  = int(getattr(tick, "volume",  getattr(tick, "Volume",    0)))
+            last_vol = self._last_cum_vol.get(sym)
+            vol = max(0, cum_vol - last_vol) if last_vol is not None else 0
+            self._last_cum_vol[sym] = cum_vol
             hi  = float(getattr(tick, "high",       getattr(tick, "High",      ltp)))
             lo  = float(getattr(tick, "low",        getattr(tick, "Low",       ltp)))
             op  = float(getattr(tick, "open",       getattr(tick, "Open",      ltp)))
