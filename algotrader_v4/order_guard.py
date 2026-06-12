@@ -163,8 +163,12 @@ class OrderGuard:
             self._symbol_owner.clear()
             self._symbol_cooldown.clear()
 
-    def release_stale_claims(self, max_age_sec: int = 60) -> list[str]:
-        """Release PENDING claims older than max_age_sec. Returns list of released keys."""
+    def release_stale_claims(self, max_age_sec: int = 300) -> list[str]:
+        """Release PENDING claims older than max_age_sec. Returns list of released keys.
+
+        Keep this well above worst-case order latency (broker retries + LIMIT fill
+        timeout): releasing a claim while its order is still in flight lets a second
+        agent double-enter the same symbol."""
         released = []
         with self._lock:
             now = time.time()

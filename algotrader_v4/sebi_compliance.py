@@ -155,7 +155,7 @@ class AuditRecord:
 
 class SEBICompliance:
 
-    def __init__(self) -> None:
+    def __init__(self, restore_state: bool = False) -> None:
         self._lock             = Lock()
         self._state            = KillSwitchState.ACTIVE
         self._pause_reason     = ""
@@ -189,7 +189,38 @@ class SEBICompliance:
         # Instance attribute (not class-level) so tests can isolate instances safely.
         self.on_kill_switch: "Callable[[], Awaitable[None]] | None" = None
 
+        # Restore persisted kill-switch state: a process restart must NOT silently
+        # clear an emergency halt while positions may still be open.
+        # Only the production singleton restores/persists (restore_state=True) —
+        # bare instances (tests) start clean and never touch the DB.
+        self._persist_enabled = restore_state
+        if restore_state:
+            try:
+                from state_store import get_kv
+                persisted = get_kv("kill_switch_state", "")
+                if persisted == KillSwitchState.KILLED.value:
+                    self._state       = KillSwitchState.KILLED
+                    self._kill_reason = get_kv("kill_switch_reason", "restored after restart")
+                    logger.critical("SEBI: KILL SWITCH restored from DB after restart — {}",
+                                    self._kill_reason)
+                elif persisted == KillSwitchState.PAUSED.value:
+                    self._state        = KillSwitchState.PAUSED
+                    self._pause_reason = get_kv("kill_switch_reason", "restored after restart")
+                    logger.warning("SEBI: PAUSED state restored from DB after restart")
+            except Exception as exc:
+                logger.debug("SEBI: could not restore kill-switch state (fresh DB?): {}", exc)
+
         logger.info("SEBICompliance module initialised — 10 regulations active")
+
+    def _persist_state(self, reason: str = "") -> None:
+        if not self._persist_enabled:
+            return
+        try:
+            from state_store import set_kv
+            set_kv("kill_switch_state", self._state.value)
+            set_kv("kill_switch_reason", reason)
+        except Exception as exc:
+            logger.error("SEBI: failed to persist kill-switch state: {}", exc)
 
     # ── Reg 2: Kill switch ─────────────────────────────────────────────────────
 
@@ -197,6 +228,7 @@ class SEBICompliance:
         with self._lock:
             self._state       = KillSwitchState.KILLED
             self._kill_reason = reason
+        self._persist_state(reason)
         logger.critical("SEBI KILL SWITCH TRIGGERED: {}", reason)
         # Wire to risk manager so check_before_order() also blocks immediately.
         try:
@@ -229,6 +261,7 @@ class SEBICompliance:
                 return
             self._state        = KillSwitchState.PAUSED
             self._pause_reason = reason
+        self._persist_state(reason)
         logger.warning("SEBI: Trading paused — {}", reason)
 
     def resume_trading(self) -> tuple[bool, str]:
@@ -240,6 +273,7 @@ class SEBICompliance:
                 return False, msg
             self._state        = KillSwitchState.ACTIVE
             self._pause_reason = ""
+        self._persist_state()
         logger.info("SEBI: Trading resumed")
         return True, "ACTIVE"
 
@@ -251,7 +285,9 @@ class SEBICompliance:
             if settings.trading_mode == "LIVE":
                 logger.error("SEBI: Kill-switch reset blocked — set KILL_SWITCH_RESET_SECRET in .env")
                 return False, "Reset secret not configured; set KILL_SWITCH_RESET_SECRET in .env"
-            # PAPER mode with no secret: allow (safe for dev/test)
+            # PAPER mode with no secret: allow, but make the gap visible
+            logger.warning("SEBI: Kill-switch reset WITHOUT secret (PAPER mode, "
+                           "KILL_SWITCH_RESET_SECRET not set) — configure it before LIVE")
         elif not hmac.compare_digest(
             secret.encode(), settings.kill_switch_reset_secret.encode()
         ):
@@ -260,6 +296,7 @@ class SEBICompliance:
         with self._lock:
             self._state       = KillSwitchState.ACTIVE
             self._kill_reason = ""
+        self._persist_state()
         logger.warning("SEBI: Kill switch reset — trading ACTIVE")
         return True, "ACTIVE"
 
@@ -476,4 +513,4 @@ class SEBICompliance:
         logger.info("SEBI compliance counters reset for new trading day")
 
 
-sebi_compliance = SEBICompliance()
+sebi_compliance = SEBICompliance(restore_state=True)

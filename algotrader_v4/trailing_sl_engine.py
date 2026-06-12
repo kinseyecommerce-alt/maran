@@ -188,6 +188,11 @@ class PositionSL:
     _on_sl_moved:     Optional[Callable] = field(default=None, repr=False)
     _on_partial_exit: Optional[Callable] = field(default=None, repr=False)
 
+    # Serializes _evaluate() per position: concurrent ticks from multiple agent
+    # loops would otherwise interleave SL/best_price mutations at await points.
+    _eval_lock: "asyncio.Lock" = field(default_factory=asyncio.Lock,
+                                        repr=False, compare=False)
+
     @property
     def cfg(self) -> TrailConfig:
         return TRAIL_CONFIGS.get(self.strategy, TRAIL_CONFIGS["intraday"])
@@ -350,6 +355,12 @@ class TrailingSLEngine:
             await self._evaluate(pos, ltp, atr_14)
 
     async def _evaluate(
+        self, pos: PositionSL, ltp: float, atr_14: float
+    ) -> None:
+        async with pos._eval_lock:
+            await self._evaluate_locked(pos, ltp, atr_14)
+
+    async def _evaluate_locked(
         self, pos: PositionSL, ltp: float, atr_14: float
     ) -> None:
         # Guard: atomically check-and-set status to prevent TOCTOU double-hit.

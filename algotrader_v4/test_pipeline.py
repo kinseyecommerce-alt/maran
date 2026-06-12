@@ -3953,6 +3953,166 @@ run("base_agent imports broker_router",                            t_base_agent_
 
 
 # ══════════════════════════════════════════════════════════════════════════
+# 28. AUDIT FIXES (P0/P1/P2 hardening)
+# ══════════════════════════════════════════════════════════════════════════
+section("28. AUDIT FIXES")
+
+def t_audit_check_before_order_locked():
+    import inspect
+    from risk_manager import RiskManager
+    src = inspect.getsource(RiskManager.check_before_order)
+    assert "with self._lock" in src, "check_before_order must hold the lock"
+
+def t_audit_reset_daily_locked():
+    import inspect
+    from risk_manager import RiskManager
+    src = inspect.getsource(RiskManager.reset_daily)
+    assert "with self._lock" in src, "reset_daily must hold the lock"
+
+def t_audit_tsl_orders_populated_before_register():
+    import inspect, agents.base_agent as _ba
+    src = inspect.getsource(_ba.BaseAgent._register_position)
+    assert src.index("_tsl_sl_orders[order_id]") < src.index("trailing_sl_engine.register("), \
+        "_tsl_sl_orders must be populated BEFORE trailing_sl_engine.register()"
+
+def t_audit_orphan_sl_triggers_kill_switch():
+    import inspect, agents.base_agent as _ba
+    src = inspect.getsource(_ba.BaseAgent._place_orders)
+    assert src.count("trigger_kill_switch") >= 2, \
+        "orphan SL-M / unprotected-entry cancel failures must escalate to kill switch"
+
+def t_audit_kv_store_roundtrip():
+    from state_store import set_kv, get_kv
+    set_kv("_test_audit_key", "hello")
+    assert get_kv("_test_audit_key") == "hello"
+    assert get_kv("_missing_key_xyz", "dflt") == "dflt"
+    set_kv("_test_audit_key", "")
+
+def t_audit_kill_switch_persists_and_restores():
+    from sebi_compliance import SEBICompliance, KillSwitchState
+    from state_store import get_kv
+    from config import settings as _cfg
+    inst = SEBICompliance(restore_state=True)
+    inst.trigger_kill_switch("audit-test")
+    assert get_kv("kill_switch_state") == "KILLED"
+    restored = SEBICompliance(restore_state=True)
+    assert restored._state == KillSwitchState.KILLED
+    # Reset with whatever secret is configured (or none in clean PAPER envs)
+    ok, _ = inst.reset_kill_switch(_cfg.kill_switch_reset_secret or "")
+    assert ok
+    assert get_kv("kill_switch_state") == "ACTIVE"
+
+def t_audit_bare_instance_does_not_persist():
+    from sebi_compliance import SEBICompliance
+    from state_store import get_kv
+    inst = SEBICompliance()                 # test-style bare instance
+    inst.trigger_kill_switch("must-not-persist")
+    assert get_kv("kill_switch_reason") != "must-not-persist"
+    inst.reset_kill_switch("")
+
+def t_audit_stale_claim_timeout_300():
+    import inspect
+    from order_guard import OrderGuard
+    sig = inspect.signature(OrderGuard.release_stale_claims)
+    assert sig.parameters["max_age_sec"].default == 300
+
+def t_audit_max_indicator_age_setting():
+    from config import settings
+    assert settings.max_indicator_age_sec == 5.0
+
+def t_audit_stale_indicators_block_entry():
+    import asyncio, time as _t
+    from agents.strategy_agents import ALL_AGENTS
+    agent = ALL_AGENTS["intraday"]
+    class _Ind:  computed_at = _t.time() - 60.0   # 60s old
+    class _Tick: ltp = 100.0
+    class _Snap:
+        symbol = "STALETEST"; indicators = _Ind(); tick = _Tick()
+    loop = asyncio.new_event_loop()
+    try:
+        ok = loop.run_until_complete(
+            agent._pre_claim_checks(_Snap(), "BUY", loop, {}))
+    finally:
+        loop.close()
+    assert ok is False, "60s-old indicators must block entry"
+
+def t_audit_gate_circuit_breaker_exists():
+    import claude_trade_gate as g
+    assert hasattr(g, "_record_gate_failure")
+    assert g._BREAKER_THRESHOLD == 5
+
+def t_audit_master_threshold_defaults_on_none():
+    import inspect, master_agent_v5 as _m
+    src = inspect.getsource(_m)
+    assert 'd.get("trade_gate_threshold") or 30' in src, \
+        "master must reset threshold to default when Claude omits it"
+
+def t_audit_signal_engine_handles_bad_json():
+    import inspect
+    from signal_engine import SignalEngine
+    src = inspect.getsource(SignalEngine._call_claude)
+    assert "JSONDecodeError" in src and "timeout" in src
+
+def t_audit_vix_unavailable_no_flags():
+    from market_regime import regime_detector, RegimeSignals, Regime
+    s = RegimeSignals()          # india_vix defaults to 0.0 = unavailable
+    s.nifty_ltp = 21000.0
+    regime = regime_detector._classify(s)
+    assert regime != Regime.BLACK_SWAN and regime != Regime.HIGH_VOLATILE, \
+        "VIX unavailable must not trigger VIX-based regimes"
+
+def t_audit_tick_queue_drops_oldest():
+    import inspect, tick_engine as _te
+    src = inspect.getsource(_te.TickEngine._process_tick)
+    assert "get_nowait" in src, "queue-full must drop oldest tick, not newest"
+
+def t_audit_signals_have_pattern_key():
+    import inspect
+    from agents.strategy_agents import IntradayAgent, ScalpingAgent, SwingAgent
+    for cls in (IntradayAgent, ScalpingAgent, SwingAgent):
+        src = inspect.getsource(cls.evaluate_tick)
+        assert '"pattern"' in src, f"{cls.__name__} signal dict must include pattern key"
+
+def t_audit_atomic_bracket_uses_executor():
+    import inspect, atomic_bracket as _ab
+    src = inspect.getsource(_ab)
+    assert src.count("run_in_executor") >= 6, \
+        "atomic_bracket broker calls must run in executor (not block event loop)"
+
+def t_audit_tsl_eval_lock_exists():
+    from trailing_sl_engine import PositionSL
+    import asyncio as _aio
+    pos = PositionSL(symbol="X", strategy="t", side="BUY", entry_price=100,
+                     quantity=1, order_id="T1", current_sl=99, best_price=100)
+    assert isinstance(pos._eval_lock, _aio.Lock)
+
+def t_audit_live_requires_both_secrets():
+    import inspect, main as _m
+    src = inspect.getsource(_m)
+    assert "requires BOTH API_KEY and JWT_SECRET_KEY" in src
+
+run("check_before_order holds lock (daily-loss race)",      t_audit_check_before_order_locked)
+run("reset_daily holds lock",                                t_audit_reset_daily_locked)
+run("_tsl_sl_orders populated before TSL register",          t_audit_tsl_orders_populated_before_register)
+run("orphan SL / failed cancel escalates to kill switch",    t_audit_orphan_sl_triggers_kill_switch)
+run("state_store kv roundtrip",                              t_audit_kv_store_roundtrip)
+run("kill switch persists + restores across instances",      t_audit_kill_switch_persists_and_restores)
+run("bare SEBICompliance instance does not persist",         t_audit_bare_instance_does_not_persist)
+run("stale claim timeout raised to 300s",                    t_audit_stale_claim_timeout_300)
+run("max_indicator_age_sec setting exists (5.0)",            t_audit_max_indicator_age_setting)
+run("stale indicators (60s) block entry",                    t_audit_stale_indicators_block_entry)
+run("trade gate circuit breaker wired",                      t_audit_gate_circuit_breaker_exists)
+run("master resets gate threshold when Claude omits it",     t_audit_master_threshold_defaults_on_none)
+run("signal engine catches bad JSON + has timeout",          t_audit_signal_engine_handles_bad_json)
+run("VIX unavailable does not trigger vol regimes",          t_audit_vix_unavailable_no_flags)
+run("tick queue drops oldest on overflow",                   t_audit_tick_queue_drops_oldest)
+run("Intraday/Scalping/Swing signals include pattern key",   t_audit_signals_have_pattern_key)
+run("atomic_bracket broker calls run in executor",           t_audit_atomic_bracket_uses_executor)
+run("PositionSL has per-position eval lock",                 t_audit_tsl_eval_lock_exists)
+run("LIVE mode requires both API_KEY and JWT_SECRET_KEY",    t_audit_live_requires_both_secrets)
+
+
+# ══════════════════════════════════════════════════════════════════════════
 # FINAL SUMMARY
 # ══════════════════════════════════════════════════════════════════════════
 failed = summary()

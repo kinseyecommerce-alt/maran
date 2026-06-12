@@ -64,6 +64,7 @@ class Settings(BaseSettings):
     stop_loss_pct: float = 1.5
     target_pct: float = 3.0
     squareoff_time: str = "15:10"
+    max_indicator_age_sec: float = 5.0  # reject entries on indicators older than this
 
     # Backtest gate thresholds
     bt_min_win_rate: float = 55.0

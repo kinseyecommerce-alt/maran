@@ -184,15 +184,23 @@ class SignalEngine:
         return self._call_claude(user_msg)
 
     def _call_claude(self, user_msg: str) -> dict:
-        message = self._client.messages.create(
-            model=settings.signal_engine_model,
-            max_tokens=1000,
-            system=[{"type": "text", "text": SYSTEM_PROMPT, "cache_control": {"type": "ephemeral"}}],
-            messages=[{"role": "user", "content": user_msg}],
-        )
-        raw = message.content[0].text.strip()
-        raw = raw.replace("```json", "").replace("```", "").strip()
-        return json.loads(raw)
+        try:
+            message = self._client.messages.create(
+                model=settings.signal_engine_model,
+                max_tokens=1000,
+                timeout=15.0,
+                system=[{"type": "text", "text": SYSTEM_PROMPT, "cache_control": {"type": "ephemeral"}}],
+                messages=[{"role": "user", "content": user_msg}],
+            )
+            raw = message.content[0].text.strip()
+            raw = raw.replace("```json", "").replace("```", "").strip()
+            return json.loads(raw)
+        except json.JSONDecodeError as exc:
+            logger.error("[signal_engine] Malformed JSON from Claude: {}", exc)
+            return {"signal": "HOLD", "confidence": 0, "reason": "malformed AI response"}
+        except Exception as exc:
+            logger.error("[signal_engine] Claude call failed: {}", exc)
+            return {"signal": "HOLD", "confidence": 0, "reason": f"AI call failed: {exc}"}
 
 
 signal_engine = SignalEngine()

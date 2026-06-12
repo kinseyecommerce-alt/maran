@@ -413,6 +413,11 @@ class MarketRegimeDetector:
 
         except Exception as exc:
             logger.debug("VIX collect error: {}", exc)
+        if s.india_vix == 0:
+            # Both feeds down. 0.0 means "unavailable", NOT "calm market" —
+            # _classify() must skip all VIX-based flags rather than read it as low vol.
+            logger.warning("[regime] India VIX unavailable (NSE + yfinance both failed) — "
+                           "VIX-based regime flags disabled this cycle")
 
     async def _collect_breadth(self, s: RegimeSignals) -> None:
         """
@@ -526,10 +531,16 @@ class MarketRegimeDetector:
         ad   = s.advance_decline
         slope= s.nifty_slope_30min
 
+        # vix == 0 means BOTH feeds failed (unavailable), not a calm market.
+        # A z-score of (0 - mean)/std would be strongly negative and mask real
+        # volatility — disable VIX flags entirely until the feed recovers.
+        vix_unavailable = vix <= 0
         # Phase 3B: use VIX Z-score for adaptive thresholds when enough history
-        vix_z = self._vix_zscore(vix)
+        vix_z = 0.0 if vix_unavailable else self._vix_zscore(vix)
         # Override extreme/high flags with Z-score when 20+ readings available
-        if len(self._vix_history) >= 20:
+        if vix_unavailable:
+            extreme_vix = volatile_vix = False
+        elif len(self._vix_history) >= 20:
             extreme_vix = vix_z > 2.0   # 2 std devs above recent mean
             volatile_vix = vix_z > 1.0  # 1 std dev above recent mean
         else:
@@ -539,7 +550,7 @@ class MarketRegimeDetector:
         # BLACK SWAN: 3-sigma VIX spike OR single-candle flash crash (> 3% drop)
         # Must check BEFORE HIGH_VOLATILE — BLACK_SWAN is a superset of that regime
         from config import settings as _cfg
-        _bs_vix      = vix_z > _cfg.black_swan_vix_zscore
+        _bs_vix      = (not vix_unavailable) and vix_z > _cfg.black_swan_vix_zscore
         _flash_crash = s.nifty_1min_chg_pct < -_cfg.black_swan_price_drop_pct
         if _bs_vix or _flash_crash:
             return Regime.BLACK_SWAN
