@@ -89,6 +89,9 @@ class IntradayAgent(BaseAgent):
         t   = now.time().replace(tzinfo=None)
 
         if time(14, 50) <= t:
+            # Roll prev-state forward so the first tick tomorrow morning doesn't
+            # manufacture false crosses against yesterday's 14:49 values.
+            self._update_state(sym, ind, ltp)
             return "HOLD", None
 
         self._update_orb(sym, snap, t)
@@ -702,6 +705,9 @@ class OptionsAgent(BaseAgent):
 
         # Hard stop at 14:00 — no options entries after this (theta decay too aggressive)
         if t >= time(14, 0):
+            # Roll prev-state forward so the first tick tomorrow morning doesn't
+            # manufacture false crosses against yesterday's 13:59 values.
+            self._update_state(sym, ind, ltp)
             return "HOLD", None
 
         # Cached intelligence (sync — zero latency)
@@ -846,14 +852,15 @@ class OptionsAgent(BaseAgent):
             otm_mult     = 1.0
 
         dte = self._days_to_expiry(sym)
-        strike  = self._target_delta_strike(ltp, actual_opt, atm_iv, target_delta, max(dte, 1))
+        strike  = self._target_delta_strike(ltp, actual_opt, atm_iv, target_delta, dte)
         opt_sym = self._nfo_symbol(sym, strike, actual_opt)
         lot_sz  = self.LOT_SIZES.get(sym, 1)
 
         # Approximate BS delta for the chosen strike (informational, logged)
         import math as _math
         iv_frac = max((atm_iv / 100.0) if atm_iv > 1.0 else atm_iv, 0.10)
-        entry_delta = round(abs(self._bs_delta(ltp, strike, max(dte, 1) / 365.0, 0.065, iv_frac, actual_opt)), 2)
+        # 0-DTE: floor T at half a day (0.5/365) so BS doesn't divide by zero
+        entry_delta = round(abs(self._bs_delta(ltp, strike, max(dte, 0.5) / 365.0, 0.065, iv_frac, actual_opt)), 2)
 
         self._update_state(sym, ind, ltp)
         # BLACK SWAN: always use limit orders (never market orders for options in panic)
@@ -1359,19 +1366,20 @@ class OptionsAgent(BaseAgent):
             return 0.0
 
     def _days_to_expiry(self, underlying: str = "NIFTY") -> int:
-        """Days until next weekly expiry (Thu for NIFTY, Wed for BANKNIFTY)."""
+        """Days until next weekly expiry (Thu for NIFTY, Wed for BANKNIFTY).
+        Returns 0 ON the expiry day itself (0-DTE) — callers must floor
+        time-to-expiry at a small epsilon in BS formulas, not fake the DTE."""
         from datetime import date
         today  = date.today()
         target = 2 if underlying in ("BANKNIFTY", "MIDCPNIFTY") else 3
-        days   = (target - today.weekday()) % 7
-        return days if days > 0 else 7
+        return (target - today.weekday()) % 7
 
     def _target_delta_strike(self, spot: float, opt_type: str, atm_iv: float,
                               target_delta: float = 0.40, days: int = 7) -> int:
         """Grid-search the strike with BS delta closest to target_delta."""
         step  = 100 if spot > 30000 else 50
         iv    = max((atm_iv / 100.0) if atm_iv > 1.0 else atm_iv, 0.12)
-        T     = max(days, 1) / 365.0
+        T     = max(days, 0.5) / 365.0   # 0-DTE: floor at half a day, never zero
         r     = 0.065
         rng   = max(int(spot * 0.12), 1000)
         lo    = int(round((spot - rng) / step) * step)
@@ -1459,22 +1467,69 @@ class OptionsAgent(BaseAgent):
 
     # ── NFO symbol builder ────────────────────────────────────────────────────
 
+    # Underlyings with weekly option contracts (indices only — stock options are monthly)
+    _INDEX_UNDERLYINGS = ("NIFTY", "BANKNIFTY", "FINNIFTY", "MIDCPNIFTY", "SENSEX")
+    # NSE weekly month codes: 1-9 for Jan-Sep, O/N/D for Oct/Nov/Dec
+    _WEEKLY_MONTH_CODES = "123456789OND"
+
     def _nfo_symbol(self, underlying: str, strike: int, opt_type: str) -> str:
+        """Build the NFO tradingsymbol per NSE conventions.
+        WEEKLY (indices only):  SYMBOL + YY + M + DD + strike + CE/PE  (M = 1-9/O/N/D)
+        MONTHLY (stocks always, index monthlies): SYMBOL + YY + MON + strike + CE/PE
+        """
         from datetime import date, timedelta
-        today    = date.today()
-        target   = 2 if underlying in ("BANKNIFTY", "MIDCPNIFTY") else 3
-        expiry   = today + timedelta(days=1)
+        today = date.today()
+
+        def _last_thursday(y: int, m: int) -> date:
+            last = date(y, m + 1, 1) - timedelta(days=1) if m < 12 else date(y + 1, 1, 1) - timedelta(days=1)
+            while last.weekday() != 3:
+                last -= timedelta(days=1)
+            return last
+
+        if underlying not in self._INDEX_UNDERLYINGS:
+            # Stock options have NO weekly contracts — nearest expiry is the
+            # monthly one (last Thursday); roll to next month once it has passed.
+            expiry = _last_thursday(today.year, today.month)
+            if expiry < today:
+                ny, nm = (today.year + 1, 1) if today.month == 12 else (today.year, today.month + 1)
+                expiry = _last_thursday(ny, nm)
+            return f"{underlying}{expiry.strftime('%y')}{expiry.strftime('%b').upper()}{strike}{opt_type}"
+
+        target = 2 if underlying in ("BANKNIFTY", "MIDCPNIFTY") else 3
+        expiry = today + timedelta(days=1)
         while expiry.weekday() != target:
             expiry += timedelta(days=1)
         if (expiry + timedelta(days=7)).month != expiry.month:
+            # Last weekly of the month IS the monthly contract → monthly naming
             return f"{underlying}{expiry.strftime('%y')}{expiry.strftime('%b').upper()}{strike}{opt_type}"
-        return f"{underlying}{expiry.strftime('%y%m%d')}{strike}{opt_type}"
+        m_code = self._WEEKLY_MONTH_CODES[expiry.month - 1]
+        return f"{underlying}{expiry.strftime('%y')}{m_code}{expiry.strftime('%d')}{strike}{opt_type}"
 
     # ── Option-aware _try_enter override ─────────────────────────────────────
 
+    async def _fetch_option_ltp(self, opt_sym: str, exch: str, bs_estimate: float,
+                                loop: asyncio.AbstractEventLoop) -> tuple[float, str]:
+        """Real contract premium via Kite quote (LIVE); BS estimate fallback (PAPER
+        returns no quotes). Returns (price, source) so callers can log which was used."""
+        from loguru import logger
+        from kite_client import kite_client
+        key = f"{exch}:{opt_sym}"
+        try:
+            q   = await loop.run_in_executor(None, lambda: kite_client.quote_kite([key]))
+            ltp = float((q.get(key) or {}).get("last_price", 0) or 0)
+            if ltp > 0:
+                return ltp, "live_quote"
+        except Exception as exc:
+            logger.warning("[options] quote failed for {} — falling back to BS estimate: {}",
+                           key, exc)
+        return bs_estimate, "bs_estimate"
+
     async def _try_enter(self, snap: MarketSnapshot, action: str, signal: dict) -> None:
         import math
-        from agents.base_agent import send_telegram
+        from loguru import logger
+        from agents.base_agent import (
+            send_telegram, _setup_tsl_callbacks, _tsl_sl_orders, _tsl_sl_orders_lock,
+        )
         from kite_client import kite_client
         from risk_manager import risk_manager
         from order_guard import order_guard
@@ -1490,23 +1545,37 @@ class OptionsAgent(BaseAgent):
         iv_rank    = signal.get("iv_rank", 50.0)
         atm_iv     = signal.get("atm_iv", 25.0)
         sf         = signal.pop("_gate_size_factor", 1.0)
+        loop       = asyncio.get_running_loop()
 
-        # BS-approximate ATM premium for sizing
-        S         = snap.tick.ltp
-        iv        = max((atm_iv / 100.0) if atm_iv > 1.0 else atm_iv, 0.10)
-        opt_price = max(round(S * iv * math.sqrt(7.0 / 365.0) / math.sqrt(2 * math.pi), 2), 5.0)
+        # Portfolio-level filters (stale indicators, sector, beta, optimizer, earnings)
+        if not await self._pre_claim_checks(snap, action, loop, signal):
+            return
+
+        # Underlying spot at entry — TSL is keyed by the underlying (ticks arrive
+        # for the underlying), so it must track underlying prices, NOT premium.
+        S  = snap.tick.ltp
+        iv = max((atm_iv / 100.0) if atm_iv > 1.0 else atm_iv, 0.10)
+
+        # Contract premium: real quote when available; BS-approximate ATM premium
+        # only as PAPER/error fallback. Sizing, risk, SEBI audit and SL-M triggers
+        # all use this price.
+        bs_est = max(round(S * iv * math.sqrt(7.0 / 365.0) / math.sqrt(2 * math.pi), 2), 5.0)
+        opt_price, price_src = await self._fetch_option_ltp(opt_sym, exch, bs_est, loop)
+        logger.info("[options] {} premium ₹{:.2f} ({})", opt_sym, opt_price, price_src)
 
         qty = lot_size
         if settings.use_kelly_sizing and sf < 1.0:
             qty = max(lot_size, int(lot_size * sf))
 
-        allowed, _ = order_guard.can_place(underlying, self.name, action)
-        if not allowed:
-            return
         if order_guard.is_symbol_active_anywhere(underlying):
+            return
+        # Atomic claim — reserves the slot before placing, mirroring base_agent.
+        claimed, _ = order_guard.try_claim(underlying, self.name, action)
+        if not claimed:
             return
         allowed, _ = risk_manager.check_before_order(opt_sym, qty, opt_price, action)
         if not allowed:
+            order_guard.release_claim(underlying, self.name, action)
             return
 
         sebi_ok, _aid, sebi_reason = sebi_compliance.pre_order_check(
@@ -1518,66 +1587,98 @@ class OptionsAgent(BaseAgent):
                    if regime_detector.current_regime else "UNKNOWN",
         )
         if not sebi_ok:
-            from loguru import logger
             logger.warning("[options] SEBI blocked {} {}: {}", action, opt_sym, sebi_reason)
+            order_guard.release_claim(underlying, self.name, action)
             return
 
-        loop = asyncio.get_event_loop()
-        order_id = await loop.run_in_executor(None, lambda: kite_client.place_order(
-            tradingsymbol=opt_sym, exchange=exch,
-            transaction_type=action, quantity=qty,
-            order_type="MARKET", product=self.product,
-            tag="Agent-options",
-        ))
+        try:
+            order_id = await loop.run_in_executor(None, lambda: kite_client.place_order(
+                tradingsymbol=opt_sym, exchange=exch,
+                transaction_type=action, quantity=qty,
+                order_type="MARKET", product=self.product,
+                tag="Agent-options",
+            ))
+        except Exception as exc:
+            logger.error("[options] entry order failed for {}: {}", opt_sym, exc)
+            order_guard.release_claim(underlying, self.name, action)
+            return
+        order_guard.confirm_claim(underlying, self.name, action, str(order_id))
         sebi_compliance.record_order_id(self.name, opt_sym, order_id)
-        order_guard.register_order(underlying, self.name, action, order_id)
         risk_manager.position_opened()
         self.state.trades_today  += 1
         self.state.signals_fired += 1
         self.state.last_signal    = signal
 
-        trailing_sl_engine.register(
-            symbol=underlying, strategy=self.name, side=action,
-            entry_price=opt_price, quantity=qty, order_id=order_id,
-            atr=snap.indicators.atr_14,
-        )
-
         sl_pct  = signal.get("stop_loss_pct", 30)
         tgt_pct = signal.get("target_pct", 65)
-        sl_px   = round(opt_price * (1 - sl_pct / 100), 2)
-        tgt_px  = round(opt_price * (1 + tgt_pct / 100), 2)
+        # SL trigger from the contract premium: below entry for a long option,
+        # ABOVE entry for a short (premium-selling) position.
+        if action == "BUY":
+            sl_px  = round(opt_price * (1 - sl_pct / 100), 2)
+            tgt_px = round(opt_price * (1 + tgt_pct / 100), 2)
+        else:
+            sl_px  = round(opt_price * (1 + sl_pct / 100), 2)
+            tgt_px = round(opt_price * (1 - tgt_pct / 100), 2)
 
         # SL side: BUY to close a short (SELL entry), SELL to close a long (BUY entry)
         sl_side = "BUY" if action == "SELL" else "SELL"
-        await loop.run_in_executor(None, lambda: kite_client.place_order(
-            tradingsymbol=opt_sym, exchange=exch,
-            transaction_type=sl_side, quantity=qty,
-            order_type="SL-M", product=self.product,
-            trigger_price=sl_px, tag="Agent-options-SL",
-        ))
+        try:
+            sl_order_id = await loop.run_in_executor(None, lambda: kite_client.place_order(
+                tradingsymbol=opt_sym, exchange=exch,
+                transaction_type=sl_side, quantity=qty,
+                order_type="SL-M", product=self.product,
+                trigger_price=sl_px, tag="Agent-options-SL",
+            ))
+        except Exception as sl_exc:
+            # Entry filled but SL-M failed → exit the contract immediately; an
+            # unprotected option position is worse than a missed trade.
+            logger.critical("[options] SL-M failed after entry {} — market-exiting {}: {}",
+                            order_id, opt_sym, sl_exc)
+            try:
+                await loop.run_in_executor(None, lambda: kite_client.place_order(
+                    tradingsymbol=opt_sym, exchange=exch,
+                    transaction_type=sl_side, quantity=qty,
+                    order_type="MARKET", product=self.product,
+                    tag="Agent-options-EXIT",
+                ))
+            except Exception as exit_exc:
+                logger.critical("[options] market exit FAILED for {} — triggering kill switch: {}",
+                                opt_sym, exit_exc)
+                sebi_compliance.trigger_kill_switch(
+                    f"Unprotected option position {opt_sym} ({self.name}) — "
+                    f"SL-M and market exit both failed")
+            order_guard.release_order(underlying, self.name, action, 0)
+            risk_manager.position_closed()
+            return
+
+        # Populate the TSL exit-routing registry BEFORE register(): a tick can fire
+        # _on_sl_hit immediately, and a missing entry there falls back to pos.symbol
+        # (the underlying equity, NSE/MIS) — wrong instrument for option exits.
+        _setup_tsl_callbacks()
+        with _tsl_sl_orders_lock:
+            _tsl_sl_orders[order_id] = {
+                "sl_order_id":   sl_order_id,
+                "product":       self.product,
+                "exchange":      exch,
+                "tradingsymbol": opt_sym,
+            }
+        # Keyed by the UNDERLYING with the underlying entry price (snap.ltp), so
+        # profit/SL percentages track underlying moves consistently. Registering
+        # the option premium against underlying ticks fired instant +10,000% T1/T2.
+        trailing_sl_engine.register(
+            symbol=underlying, strategy=self.name, side=action,
+            entry_price=S, quantity=qty, order_id=order_id,
+            atr=snap.indicators.atr_14,
+            on_sl_hit=trailing_sl_engine.on_sl_hit,
+            on_target_hit=trailing_sl_engine.on_target_hit,
+            on_sl_moved=trailing_sl_engine.on_sl_moved,
+        )
 
         # For ATM_STRADDLE: also place PE leg (same strike, ATM, opposite direction)
         is_straddle = signal.get("is_straddle", False)
         if is_straddle and action == "BUY":
-            pe_sym = self._nfo_symbol(underlying, strike if (strike := signal.get("strike", 0)) else
-                                       int(round(S / (100 if S > 30000 else 50)) * (100 if S > 30000 else 50)),
-                                       "PE")
-            try:
-                pe_order = await loop.run_in_executor(None, lambda: kite_client.place_order(
-                    tradingsymbol=pe_sym, exchange=exch,
-                    transaction_type="BUY", quantity=qty,
-                    order_type="MARKET", product=self.product,
-                    tag="Agent-options-straddle-pe",
-                ))
-                sl_pe = round(opt_price * (1 - sl_pct / 100), 2)
-                await loop.run_in_executor(None, lambda: kite_client.place_order(
-                    tradingsymbol=pe_sym, exchange=exch,
-                    transaction_type="SELL", quantity=qty,
-                    order_type="SL-M", product=self.product,
-                    trigger_price=sl_pe, tag="Agent-options-straddle-pe-SL",
-                ))
-            except Exception:
-                pass   # straddle PE leg failure doesn't cancel CE leg
+            await self._enter_straddle_pe_leg(snap, signal, underlying, exch, qty,
+                                              sl_pct, bs_est, loop)
 
         entry_delta = signal.get("entry_delta", "?")
         dte         = signal.get("days_to_expiry", "?")
@@ -1589,6 +1690,107 @@ class OptionsAgent(BaseAgent):
             f"δ={entry_delta} DTE={dte} sf={sf}\n"
             f"SL: ₹{sl_px:.1f} | TGT: ₹{tgt_px:.1f} | Ord: {order_id}"
         )
+
+    async def _enter_straddle_pe_leg(self, snap: MarketSnapshot, signal: dict,
+                                     underlying: str, exch: str, qty: int,
+                                     sl_pct: float, bs_est: float,
+                                     loop: asyncio.AbstractEventLoop) -> None:
+        """ATM_STRADDLE PE leg — runs the SAME full sequence as the CE leg:
+        risk check → SEBI pre_order_check → entry → SL-M → _tsl_sl_orders →
+        TSL register → position_opened. If any pre-check fails the PE leg is
+        skipped with a warning (CE leg stands alone); if the SL-M fails after
+        the entry fills, the PE leg is market-exited immediately."""
+        from loguru import logger
+        from agents.base_agent import _setup_tsl_callbacks, _tsl_sl_orders, _tsl_sl_orders_lock
+        from kite_client import kite_client
+        from risk_manager import risk_manager
+        from trailing_sl_engine import trailing_sl_engine
+        from sebi_compliance import sebi_compliance
+        from market_regime import regime_detector
+
+        S      = snap.tick.ltp
+        step   = 100 if S > 30000 else 50
+        strike = signal.get("strike", 0) or int(round(S / step) * step)
+        pe_sym = self._nfo_symbol(underlying, strike, "PE")
+
+        pe_price, pe_src = await self._fetch_option_ltp(pe_sym, exch, bs_est, loop)
+        logger.info("[options] straddle PE {} premium ₹{:.2f} ({})", pe_sym, pe_price, pe_src)
+
+        pe_ok, pe_reason = risk_manager.check_before_order(pe_sym, qty, pe_price, "BUY")
+        if not pe_ok:
+            logger.warning("[options] straddle PE {} risk-blocked ({}) — CE leg stands alone",
+                           pe_sym, pe_reason)
+            return
+        sebi_ok, _aid, sebi_reason = sebi_compliance.pre_order_check(
+            strategy=self.name, symbol=pe_sym, exchange=exch,
+            transaction_type="BUY", quantity=qty,
+            order_type="MARKET", price_at_signal=pe_price,
+            signal_source=f"agent_{self.name}",
+            regime=regime_detector.current_regime.value
+                   if regime_detector.current_regime else "UNKNOWN",
+        )
+        if not sebi_ok:
+            logger.warning("[options] SEBI blocked straddle PE {}: {} — CE leg stands alone",
+                           pe_sym, sebi_reason)
+            return
+
+        try:
+            pe_order = await loop.run_in_executor(None, lambda: kite_client.place_order(
+                tradingsymbol=pe_sym, exchange=exch,
+                transaction_type="BUY", quantity=qty,
+                order_type="MARKET", product=self.product,
+                tag="Agent-options-straddle-pe",
+            ))
+        except Exception as pe_exc:
+            logger.error("[options] straddle PE entry failed for {} — CE leg stands alone: {}",
+                         pe_sym, pe_exc)
+            return
+
+        sl_pe = round(pe_price * (1 - sl_pct / 100), 2)
+        try:
+            pe_sl_order = await loop.run_in_executor(None, lambda: kite_client.place_order(
+                tradingsymbol=pe_sym, exchange=exch,
+                transaction_type="SELL", quantity=qty,
+                order_type="SL-M", product=self.product,
+                trigger_price=sl_pe, tag="Agent-options-straddle-pe-SL",
+            ))
+        except Exception as pe_sl_exc:
+            # PE entry filled but its SL-M failed → exit the leg immediately.
+            logger.critical("[options] straddle PE SL-M failed after entry {} — "
+                            "market-exiting {}: {}", pe_order, pe_sym, pe_sl_exc)
+            try:
+                await loop.run_in_executor(None, lambda: kite_client.place_order(
+                    tradingsymbol=pe_sym, exchange=exch,
+                    transaction_type="SELL", quantity=qty,
+                    order_type="MARKET", product=self.product,
+                    tag="Agent-options-EXIT",
+                ))
+            except Exception as pe_exit_exc:
+                logger.critical("[options] straddle PE market exit FAILED for {} — "
+                                "triggering kill switch: {}", pe_sym, pe_exit_exc)
+                sebi_compliance.trigger_kill_switch(
+                    f"Unprotected straddle PE leg {pe_sym} ({self.name}) — "
+                    f"SL-M and market exit both failed")
+            return
+
+        sebi_compliance.record_order_id(self.name, pe_sym, pe_order)
+        _setup_tsl_callbacks()
+        with _tsl_sl_orders_lock:
+            _tsl_sl_orders[pe_order] = {
+                "sl_order_id":   pe_sl_order,
+                "product":       self.product,
+                "exchange":      exch,
+                "tradingsymbol": pe_sym,
+            }
+        trailing_sl_engine.register(
+            symbol=underlying, strategy=self.name, side="BUY",
+            entry_price=S, quantity=qty, order_id=pe_order,
+            atr=snap.indicators.atr_14,
+            on_sl_hit=trailing_sl_engine.on_sl_hit,
+            on_target_hit=trailing_sl_engine.on_target_hit,
+            on_sl_moved=trailing_sl_engine.on_sl_moved,
+        )
+        risk_manager.position_opened()
 
     # ── Exit conditions ───────────────────────────────────────────────────────
 
@@ -2081,6 +2283,21 @@ class ScalpingAgent(BaseAgent):
 
     # ── Entry ─────────────────────────────────────────────────────────────────
 
+    def _update_prev_state(self, sym: str, ind: LiveIndicators, ltp: float) -> None:
+        """Roll per-symbol prev-state forward. Also called from the guard
+        early-returns below so the first tick after a guard window doesn't
+        manufacture false crosses against stale (e.g. yesterday-14:39) values."""
+        self._prev_ema9[sym]          = ind.ema9
+        self._prev_ema21[sym]         = ind.ema21 or ind.ema9
+        self._prev_ltp[sym]           = ltp
+        self._prev_st_dir[sym]        = ind.supertrend_dir
+        self._prev_stochrsi_k[sym]    = ind.stoch_rsi_k
+        self._prev_hma_dir_sc[sym]    = ind.hma_dir
+        self._prev_williams_sc[sym]   = ind.williams_r
+        self._prev_squeeze_sc[sym]    = ind.squeeze_on
+        self._prev_macd_hist_sc[sym]  = ind.macd_hist
+        self._prev_rsi7_sc[sym]       = ind.rsi_7
+
     def evaluate_tick(self, snap: MarketSnapshot) -> tuple[str, Optional[dict]]:
         sym = snap.symbol
         ind = snap.indicators
@@ -2098,26 +2315,32 @@ class ScalpingAgent(BaseAgent):
 
         # ── Hard guard 1: chaotic open & wind-down — no new scalps ──────────
         if time(9, 15) <= t < time(9, 30):
+            self._update_prev_state(sym, ind, ltp)
             return "HOLD", None
         if t >= time(14, 40):
+            self._update_prev_state(sym, ind, ltp)
             return "HOLD", None
 
         # ── Hard guard 2: loss-streak cooldown ──────────────────────────────
         cd = self._cooldown_until.get(sym)
         if cd and now < cd:
+            self._update_prev_state(sym, ind, ltp)
             return "HOLD", None
 
         # ── Hard guard 3: spread (0.05% — slightly wider than before) ───────
         spread = snap.tick.ask - snap.tick.bid
         if spread > ltp * 0.0005:
+            self._update_prev_state(sym, ind, ltp)
             return "HOLD", None
 
         # ── Hard guard 4: volatility regime ─────────────────────────────────
         atr = ind.atr_14 or 0.0
         atr_ratio = atr / ltp if ltp > 0 else 0.0
         if atr_ratio > 0.005:      # too volatile — wide stops required
+            self._update_prev_state(sym, ind, ltp)
             return "HOLD", None
         if atr_ratio < 0.0002:     # dead market — no movement
+            self._update_prev_state(sym, ind, ltp)
             return "HOLD", None
 
         # ── Capture ALL prev-state BEFORE any updates (critical correctness fix) ─
@@ -2144,16 +2367,7 @@ class ScalpingAgent(BaseAgent):
         )
 
         # ── Update rolling state AFTER detection (so patterns saw old values) ─
-        self._prev_ema9[sym]          = ind.ema9
-        self._prev_ema21[sym]         = ind.ema21 or ind.ema9
-        self._prev_ltp[sym]           = ltp
-        self._prev_st_dir[sym]        = ind.supertrend_dir
-        self._prev_stochrsi_k[sym]    = ind.stoch_rsi_k
-        self._prev_hma_dir_sc[sym]    = ind.hma_dir
-        self._prev_williams_sc[sym]   = ind.williams_r
-        self._prev_squeeze_sc[sym]    = ind.squeeze_on
-        self._prev_macd_hist_sc[sym]  = ind.macd_hist
-        self._prev_rsi7_sc[sym]       = ind.rsi_7
+        self._update_prev_state(sym, ind, ltp)
 
         if action == "HOLD":
             return "HOLD", None
@@ -2708,6 +2922,8 @@ class FuturesAgent(BaseAgent):
     _cool_ts:               dict = {}
     _day_high:              dict = {}   # sym → float (rolling daily high for ATR_BREAK)
     _day_low:               dict = {}   # sym → float
+    _prev_day_high:         dict = {}   # sym → day high BEFORE current tick (ATR_BREAK)
+    _prev_day_low:          dict = {}   # sym → day low  BEFORE current tick (ATR_BREAK)
     _prev_stochrsi_k_fut:   dict = {}   # sym → float (StochRSI cross detection)
     _prev_hma_dir_fut:      dict = {}   # sym → str (HMA direction)
     _prev_ema_bull:         dict = {}   # sym → bool (EMA_TREND first-bar detection)
@@ -2737,6 +2953,9 @@ class FuturesAgent(BaseAgent):
         _rollover = self._is_rollover_period()
         cutoff = time(14, 0) if _rollover else time(14, 45)
         if not (time(9, 20) <= t <= cutoff):
+            # Roll prev-state forward so the first tick after the guard window
+            # doesn't manufacture false crosses against stale values.
+            self._update_state(sym, ind, ltp)
             return "HOLD", None
 
         self._update_orb(sym, snap, t)
@@ -2956,8 +3175,10 @@ class FuturesAgent(BaseAgent):
     def _pat_atr_break(self, sym, snap, ind, ltp, t):
         if not ind.atr_14 or ind.atr_14 <= 0:
             return "", 0, ""
-        dh = self._day_high.get(sym, ltp)
-        dl = self._day_low.get(sym, ltp)
+        # Pre-tick day range (captured in _update_day_range BEFORE the update) —
+        # comparing against the post-update range made this pattern unreachable.
+        dh = self._prev_day_high.get(sym, ltp)
+        dl = self._prev_day_low.get(sym, ltp)
         threshold = ind.atr_14 * 1.5
         if ltp > dh and (ltp - dh) > threshold and ind.volume_ratio > 1.5:
             return "LONG", 4, "ATR_BREAK"
@@ -3101,6 +3322,11 @@ class FuturesAgent(BaseAgent):
                 self._orb_low[sym]  = min(self._orb_low[sym],  c.low)
 
     def _update_day_range(self, sym: str, ltp: float) -> None:
+        # Capture the PRE-update range first: ATR_BREAK must compare the current
+        # tick against the day range EXCLUDING this tick, otherwise the updated
+        # high/low already includes ltp and `ltp > day_high` can never be true.
+        self._prev_day_high[sym] = self._day_high.get(sym, ltp)
+        self._prev_day_low[sym]  = self._day_low.get(sym, ltp)
         self._day_high[sym] = max(self._day_high.get(sym, ltp), ltp)
         self._day_low[sym]  = min(self._day_low.get(sym, ltp), ltp)
 
@@ -3439,6 +3665,14 @@ class MeanReversionAgent(BaseAgent):
         self._prev_atr_mr:      dict = {}   # rolling ATR for ATR_EXHAUSTION
         self._cool_ts:          dict = {}
 
+    def _update_state(self, sym: str, ind: LiveIndicators, ltp: float) -> None:
+        self._prev_ltp[sym]          = ltp
+        self._prev_rsi[sym]          = ind.rsi_14
+        self._prev_rsi7[sym]         = ind.rsi_7
+        self._prev_above_bb_mid[sym] = ltp > ind.bb_mid if ind.bb_mid else None
+        self._prev_stochrsi_k[sym]   = ind.stoch_rsi_k
+        self._prev_atr_mr[sym]       = ind.atr_14 or 0.0
+
     def evaluate_tick(self, snap: MarketSnapshot) -> tuple[str, Optional[dict]]:
         ind = snap.indicators
         sym = snap.symbol
@@ -3447,12 +3681,16 @@ class MeanReversionAgent(BaseAgent):
         t   = now.time().replace(tzinfo=None)
 
         if t >= time(14, 45) or time(9, 15) <= t < time(9, 25):
+            # Roll prev-state forward so the first tick after the guard window
+            # doesn't manufacture false crosses against stale values.
+            self._update_state(sym, ind, ltp)
             return "HOLD", None
         if not ind.bb_upper or ind.bb_upper <= 0 or not ind.bb_lower or ind.bb_lower <= 0:
             return "HOLD", None
 
         # BLACK SWAN veteran: FALLING phase = never catch a falling knife
         if snap.black_swan_active and snap.black_swan_phase == "FALLING":
+            self._update_state(sym, ind, ltp)
             return "HOLD", None
 
         best_score, best_action, best_pattern = -1, "", ""
@@ -3473,12 +3711,7 @@ class MeanReversionAgent(BaseAgent):
             if total > best_score:
                 best_score, best_action, best_pattern = total, action, pname
 
-        self._prev_ltp[sym]          = ltp
-        self._prev_rsi[sym]          = ind.rsi_14
-        self._prev_rsi7[sym]         = ind.rsi_7
-        self._prev_above_bb_mid[sym] = ltp > ind.bb_mid if ind.bb_mid else None
-        self._prev_stochrsi_k[sym]   = ind.stoch_rsi_k
-        self._prev_atr_mr[sym]       = ind.atr_14 or 0.0
+        self._update_state(sym, ind, ltp)
 
         if best_score < settings.min_score_mean_reversion or not best_action:
             return "HOLD", None
@@ -3801,6 +4034,12 @@ class MomentumAgent(BaseAgent):
         self._prev_macd_hist: dict = {}
         self._prev_ltp_mom:   dict = {}
 
+    def _update_state(self, sym: str, ind: LiveIndicators, ltp: float) -> None:
+        self._prev_st_dir[sym]    = ind.supertrend_dir
+        self._prev_squeeze[sym]   = ind.squeeze_on
+        self._prev_macd_hist[sym] = ind.macd_hist
+        self._prev_ltp_mom[sym]   = ltp
+
     def evaluate_tick(self, snap: MarketSnapshot) -> tuple[str, Optional[dict]]:
         ind = snap.indicators
         sym = snap.symbol
@@ -3809,6 +4048,9 @@ class MomentumAgent(BaseAgent):
         t   = now.time().replace(tzinfo=None)
 
         if t >= time(14, 50) or time(9, 15) <= t < time(9, 30):
+            # Roll prev-state forward so the first tick after the guard window
+            # doesn't manufacture false crosses against stale values.
+            self._update_state(sym, ind, ltp)
             return "HOLD", None
         if not ind.ema9:
             return "HOLD", None
@@ -3831,10 +4073,7 @@ class MomentumAgent(BaseAgent):
             if total > best_score:
                 best_score, best_action, best_pattern = total, action, pname
 
-        self._prev_st_dir[sym]    = ind.supertrend_dir
-        self._prev_squeeze[sym]   = ind.squeeze_on
-        self._prev_macd_hist[sym] = ind.macd_hist
-        self._prev_ltp_mom[sym]   = ltp
+        self._update_state(sym, ind, ltp)
 
         # VIX volatility gate: raise min_score during extreme vol, lower during calm
         _mom_vix_min = settings.min_score_momentum
@@ -4256,6 +4495,11 @@ class PairsAgent(BaseAgent):
         if sym not in self.PAIR_SYMBOLS:
             return "HOLD", None
 
+        # Keep leg prices fresh even inside guard windows — otherwise the first
+        # evaluated tick each morning computes a ratio against the OTHER leg's
+        # stale 14:30 price from the previous session.
+        self._prices[sym] = snap.tick.ltp
+
         now = now_ist()
         t   = now.time().replace(tzinfo=None)
         if not (time(9, 30) <= t <= time(14, 30)):
@@ -4271,7 +4515,6 @@ class PairsAgent(BaseAgent):
 
         ind = snap.indicators
         ltp = snap.tick.ltp
-        self._prices[sym] = ltp
 
         best_score, best_action, best_signal = -1, "HOLD", None
 

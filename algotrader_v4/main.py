@@ -169,7 +169,8 @@ async def _security_headers(request: Request, call_next):
 
 # ── HIGH-5: IP whitelist enforcement for orders and SEBI admin ──────────────────
 _IP_GUARDED_PREFIXES = ("/orders/", "/sebi/kill-switch", "/sebi/resume",
-                         "/sebi/reset-kill-switch", "/sebi/pause")
+                         "/sebi/reset-kill-switch", "/sebi/pause",
+                         "/sebi/whitelist-ip")  # whitelist mutation itself must be IP-gated
 
 @app.middleware("http")
 async def _ip_whitelist_gate(request: Request, call_next):
@@ -525,7 +526,7 @@ def kite_callback(request_token: str = "", action: str = "", status: str = ""):
         if active:
             kite_accounts.update_access_token(active["name"], token)
         settings.kite_access_token = token
-        return HTMLResponse(f"""
+        return HTMLResponse("""
         <html><head><title>Kite Connected</title>
         <meta http-equiv='refresh' content='2;url=/dashboard'>
         </head>
@@ -534,20 +535,21 @@ def kite_callback(request_token: str = "", action: str = "", status: str = ""):
           <div style="text-align:center">
             <div style="font-size:3rem">✅</div>
             <h2 style="color:#3fb950">Kite Connected!</h2>
-            <p style="color:#8b949e">Token: {token[:8]}… — Redirecting to dashboard…</p>
+            <p style="color:#8b949e">Redirecting to dashboard…</p>
           </div>
         </body></html>
         """)
     except Exception as e:
+        # Detail goes to server logs only — never render exception text into HTML (XSS)
         logger.error("Kite callback error: {}", e)
         return HTMLResponse(
             "<html><head><meta http-equiv='refresh' content='3;url=/dashboard'></head>"
-            f"<body style='font-family:sans-serif;background:#0d1117;color:#e6edf3;"
-            f"display:flex;align-items:center;justify-content:center;height:100vh'>"
-            f"<div style='text-align:center'><div style='font-size:2.5rem'>❌</div>"
-            f"<h2 style='color:#f85149'>Token exchange failed.</h2>"
-            f"<p style='color:#8b949e'>{e}</p>"
-            f"<p style='color:#8b949e'>Redirecting to dashboard…</p></div></body></html>",
+            "<body style='font-family:sans-serif;background:#0d1117;color:#e6edf3;"
+            "display:flex;align-items:center;justify-content:center;height:100vh'>"
+            "<div style='text-align:center'><div style='font-size:2.5rem'>❌</div>"
+            "<h2 style='color:#f85149'>Token exchange failed.</h2>"
+            "<p style='color:#8b949e'>Token exchange failed — check server logs.</p>"
+            "<p style='color:#8b949e'>Redirecting to dashboard…</p></div></body></html>",
             status_code=500,
         )
 
@@ -574,7 +576,7 @@ def login_url(): return {"login_url": kite_client.login_url()}
 @app.post("/auth/token", tags=["Auth"])
 def set_token(req: TokenRequest):
     t = kite_client.set_access_token(req.request_token, req.access_token)
-    return {"status": "ok", "access_token": t[:6] + "…"}
+    return {"status": "ok", "token_set": bool(t)}
 
 @app.get("/auth/upstox/status", tags=["Auth"])
 def upstox_status():
@@ -619,7 +621,7 @@ async def upstox_callback(code: str = Query(...)):
         broker = UpstoxBroker()
         token = broker.set_access_token(request_token=code)
         settings.upstox_access_token = token
-        return HTMLResponse(f"""
+        return HTMLResponse("""
         <html><head><title>Upstox Connected</title>
         <meta http-equiv='refresh' content='2;url=/dashboard'>
         </head>
@@ -628,20 +630,21 @@ async def upstox_callback(code: str = Query(...)):
           <div style="text-align:center">
             <div style="font-size:3rem">✅</div>
             <h2 style="color:#3fb950">Upstox Connected!</h2>
-            <p style="color:#8b949e">Token: {token[:8]}… — Redirecting to dashboard…</p>
+            <p style="color:#8b949e">Redirecting to dashboard…</p>
           </div>
         </body></html>
         """)
     except Exception as e:
+        # Detail goes to server logs only — never render exception text into HTML (XSS)
         logger.error("Upstox callback error: {}", e)
         return HTMLResponse(
             "<html><head><meta http-equiv='refresh' content='3;url=/dashboard'></head>"
-            f"<body style='font-family:sans-serif;background:#0d1117;color:#e6edf3;"
-            f"display:flex;align-items:center;justify-content:center;height:100vh'>"
-            f"<div style='text-align:center'><div style='font-size:2.5rem'>❌</div>"
-            f"<h2 style='color:#f85149'>Token exchange failed.</h2>"
-            f"<p style='color:#8b949e'>{e}</p>"
-            f"<p style='color:#8b949e'>Redirecting to dashboard…</p></div></body></html>",
+            "<body style='font-family:sans-serif;background:#0d1117;color:#e6edf3;"
+            "display:flex;align-items:center;justify-content:center;height:100vh'>"
+            "<div style='text-align:center'><div style='font-size:2.5rem'>❌</div>"
+            "<h2 style='color:#f85149'>Token exchange failed.</h2>"
+            "<p style='color:#8b949e'>Token exchange failed — check server logs.</p>"
+            "<p style='color:#8b949e'>Redirecting to dashboard…</p></div></body></html>",
             status_code=500,
         )
 
@@ -652,7 +655,7 @@ async def upstox_set_token(req: TokenRequest):
     if not req.access_token:
         raise HTTPException(400, "access_token is required")
     settings.upstox_access_token = req.access_token
-    return {"status": "ok", "token_preview": req.access_token[:6] + "…"}
+    return {"status": "ok", "token_set": True}
 
 
 # ── Kotak Neo Auth ────────────────────────────────────────────────────────────
@@ -670,8 +673,8 @@ def kotak_status():
     return {
         "connected":       bool(settings.kotak_access_token and settings.kotak_sid),
         "consumer_key_set": bool(settings.kotak_consumer_key),
-        "token_preview":   settings.kotak_access_token[:8] + "…" if settings.kotak_access_token else "",
-        "sid_preview":     settings.kotak_sid[:8] + "…" if settings.kotak_sid else "",
+        "token_set":       bool(settings.kotak_access_token),
+        "sid_set":         bool(settings.kotak_sid),
         "broker":          "kotak",
     }
 
@@ -702,10 +705,10 @@ def kotak_verify_otp(req: KotakOTPRequest):
     broker = KotakBroker()
     token  = broker.session_2fa(req.otp)
     return {
-        "status":        "connected",
-        "token_preview": token[:8] + "…" if token else "",
-        "sid_preview":   settings.kotak_sid[:8] + "…" if settings.kotak_sid else "",
-        "broker":        "kotak",
+        "status":    "connected",
+        "token_set": bool(token),
+        "sid_set":   bool(settings.kotak_sid),
+        "broker":    "kotak",
     }
 
 @app.post("/auth/kotak/token", tags=["Auth"])
@@ -715,7 +718,7 @@ def kotak_set_token(req: KotakTokenRequest):
         raise HTTPException(400, "access_token is required")
     settings.kotak_access_token = req.access_token
     settings.kotak_sid          = req.sid
-    return {"status": "ok", "token_preview": req.access_token[:6] + "…"}
+    return {"status": "ok", "token_set": True}
 
 
 @app.post("/auth/kite/refresh", tags=["Auth"])
@@ -730,7 +733,7 @@ async def kite_token_refresh():
     try:
         from kite_auto_login import refresh_kite_token_async
         token = await refresh_kite_token_async()
-        return {"status": "ok", "access_token": token[:8] + "…", "message": "Kite token refreshed"}
+        return {"status": "ok", "token_set": bool(token), "message": "Kite token refreshed"}
     except Exception as e:
         logger.error("Kite auto-login failed: {}", e)
         raise HTTPException(500, f"Auto-login failed: {e}")
@@ -954,17 +957,46 @@ def portfolio_bt(req: PortfolioBacktestRequest):
 
 
 # ── Orders ────────────────────────────────────────────────────────────────────
+
+def _resolve_order_price(symbol: str, exchange: str, price: float | None) -> float:
+    """Resolve the price used for risk/SEBI notional checks.
+
+    LIMIT/SL orders carry their own price. MARKET orders (price 0/None) must be
+    priced from live market data — checking notional as quantity×1 would let
+    arbitrarily large orders sail past size and SEBI caps. Resolution order:
+    tick engine latest cache → broker quote. If no price can be resolved the
+    order is REJECTED (fail-closed).
+    """
+    if price and price > 0:
+        return float(price)
+    tick, _ind = tick_engine.latest(symbol)
+    ltp = float(getattr(tick, "ltp", 0) or 0) if tick else 0.0
+    if ltp > 0:
+        return ltp
+    try:
+        key = f"{exchange}:{symbol}"
+        q = kite_client.quote_kite([key])
+        ltp = float((q.get(key) or {}).get("last_price") or 0)
+        if ltp > 0:
+            return ltp
+    except Exception as exc:
+        logger.warning("LTP resolution via broker quote failed for {}: {}", symbol, exc)
+    raise HTTPException(422, "cannot price MARKET order — no market data")
+
+
 @app.post("/orders/place", tags=["Orders"])
 async def place_order(req: OrderRequest):
     req.symbol = _clean_symbol(req.symbol)
     ok, reason = order_guard.can_place(req.symbol, "manual", req.transaction_type)
     if not ok: raise HTTPException(400, f"Guard: {reason}")
-    ok, reason = risk_manager.check_before_order(req.symbol, req.quantity, req.price or 1, req.transaction_type)
+    # P0 fix: MARKET orders must be checked against a real price, never ₹1
+    check_price = _resolve_order_price(req.symbol, req.exchange, req.price)
+    ok, reason = risk_manager.check_before_order(req.symbol, req.quantity, check_price, req.transaction_type)
     if not ok: raise HTTPException(400, f"Risk: {reason}")
     sebi_ok, algo_id, sebi_reason = sebi_compliance.pre_order_check(
         strategy="manual", symbol=req.symbol, exchange=req.exchange,
         transaction_type=req.transaction_type, quantity=req.quantity,
-        order_type=req.order_type, price_at_signal=req.price or 0,
+        order_type=req.order_type, price_at_signal=check_price,
         signal_source="manual_api", regime=regime_detector.current_regime.value)
     if not sebi_ok: raise HTTPException(403, f"SEBI compliance: {sebi_reason}")
     oid = kite_client.place_order(
@@ -974,6 +1006,9 @@ async def place_order(req: OrderRequest):
         price=req.price, trigger_price=req.trigger_price, tag=algo_id)
     sebi_compliance.record_order_id("manual", req.symbol, oid)
     order_guard.register_order(req.symbol, "manual", req.transaction_type, oid)
+    # Manual positions must count against max_open_positions like agent entries do
+    if req.transaction_type == "BUY":
+        risk_manager.position_opened()
     await broadcast({"event": "order_placed", "order_id": oid, "symbol": req.symbol})
     return {"status": "ok", "order_id": oid}
 
@@ -984,7 +1019,9 @@ async def cancel(order_id: str):
 @app.post("/orders/squareoff", tags=["Orders"])
 async def squareoff():
     ids = kite_client.squareoff_all_positions()
-    order_guard.reset_daily()
+    # Clear only active orders/claims — keep daily trade counts and cooldowns
+    # intact so a squareoff cannot be used to reset overtrade limits.
+    order_guard.clear_active_only()
     secondary_results: dict = {}
     if settings.enable_multi_broker:
         from broker_router import broker_router
@@ -1759,6 +1796,9 @@ async def n8n_inbound(request: Request):
         return {"status": "started", "report": report}
 
     elif action == "place_order":
+        # NOTE: strategy "n8n" is intentionally NOT in APPROVED_ALGO_IDS, so
+        # pre_order_check below rejects these orders (fails safe). Enabling n8n
+        # order placement requires registering a SEBI algo ID for it first.
         try:
             req = OrderRequest(**p)
         except Exception as exc:
@@ -1767,15 +1807,17 @@ async def n8n_inbound(request: Request):
         ok, reason = order_guard.can_place(req.symbol, "n8n", req.transaction_type)
         if not ok:
             raise HTTPException(400, f"Guard blocked: {reason}")
+        # P0 fix: MARKET orders must be checked against a real price, never ₹1
+        check_price = _resolve_order_price(req.symbol, req.exchange, req.price)
         ok, reason = risk_manager.check_before_order(
-            req.symbol, req.quantity, req.price or 1.0, req.transaction_type
+            req.symbol, req.quantity, check_price, req.transaction_type
         )
         if not ok:
             raise HTTPException(400, f"Risk blocked: {reason}")
         sebi_ok, algo_id, sebi_reason = sebi_compliance.pre_order_check(
             strategy="n8n", symbol=req.symbol, exchange=req.exchange,
             transaction_type=req.transaction_type, quantity=req.quantity,
-            order_type=req.order_type, price_at_signal=req.price or 0.0,
+            order_type=req.order_type, price_at_signal=check_price,
             signal_source="n8n_webhook",
             regime=regime_detector.current_regime.value if regime_detector.current_regime else "unknown",
         )
@@ -1789,6 +1831,9 @@ async def n8n_inbound(request: Request):
         )
         sebi_compliance.record_order_id("n8n", req.symbol, oid)
         order_guard.register_order(req.symbol, "n8n", req.transaction_type, oid)
+        # Webhook positions must count against max_open_positions like agent entries
+        if req.transaction_type == "BUY":
+            risk_manager.position_opened()
         await broadcast({"event": "order_placed", "order_id": oid, "symbol": req.symbol})
         return {"status": "ok", "order_id": oid}
 
@@ -1992,12 +2037,21 @@ def alt_data_refresh(symbols: list[str] = Body(default=[])):
                      args=(symbols,), daemon=True).start()
     return {"status": "refresh triggered", "symbols": symbols}
 
+_HEADLINE_CTRL_RE = re.compile(r"[\x00-\x1f\x7f]")
+
 @app.post("/alt-data/headlines", tags=["Alt Data"])
 def alt_data_score_headlines(
     symbol: str = Body(...),
     headlines: list[str] = Body(...),
 ):
     """Score a list of news headlines for a symbol and update its catalyst score."""
+    # Input validation: this free text can reach the Claude gate prompt —
+    # bound count/length and strip control characters before accepting it.
+    if len(headlines) > 50:
+        raise HTTPException(422, "Too many headlines (max 50)")
+    if any(len(h) > 300 for h in headlines):
+        raise HTTPException(422, "Headline too long (max 300 characters each)")
+    headlines = [_HEADLINE_CTRL_RE.sub("", h) for h in headlines]
     from alt_data import alt_data_engine
     score = alt_data_engine.score_headlines(symbol, headlines)
     return {"symbol": symbol, "sentiment_score": score,
@@ -2302,6 +2356,10 @@ async def on_startup():
     # Initialise SQLite state store
     from state_store import init_db, get_daily_pnl
     init_db()
+    # Restore persisted kill-switch state AFTER the DB is guaranteed to exist
+    # (a restart must never silently clear an emergency halt). Also re-halts
+    # risk_manager when KILLED was restored.
+    sebi_compliance.restore_state_from_db()
     today_pnl = get_daily_pnl()
     if today_pnl != 0:
         risk_manager.daily_realised_pnl = today_pnl
@@ -2324,11 +2382,22 @@ async def on_startup():
                 sebi_compliance.add_whitelisted_ip(ip)
         logger.info("SEBI: loaded {} whitelisted IP(s) from env", len(sebi_compliance._whitelisted_ips))
 
+    # LIVE mode with an empty whitelist means is_ip_allowed() returns True for
+    # every IP — the order/kill-switch IP gate is effectively inactive.
+    if settings.trading_mode == "LIVE" and not sebi_compliance._whitelisted_ips:
+        logger.critical(
+            "SECURITY: TRADING_MODE=LIVE with an EMPTY SEBI IP whitelist — the IP gate "
+            "on /orders/* and /sebi/* is INACTIVE (all IPs allowed). Set "
+            "SEBI_WHITELISTED_IPS in .env before trading real money."
+        )
+
     # Wire kill-switch → immediate squareoff of all open positions.
     async def _kill_switch_squareoff() -> None:
         try:
             ids = kite_client.squareoff_all_positions()
-            order_guard.reset_daily()
+            # Clear only active orders/claims — preserve trade counts/cooldowns
+            # so a kill-switch cycle cannot wipe overtrade counters.
+            order_guard.clear_active_only()
             logger.critical("SEBI kill-switch squareoff: {} position(s) closed", len(ids))
             await broadcast({"event": "kill_switch", "squared_off": len(ids)})
         except Exception as exc:

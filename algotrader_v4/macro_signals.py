@@ -63,6 +63,13 @@ class MacroSignals:
         self._score: float            = 0.0
         self._last_refresh: float     = 0.0
         self._refresh_interval: float = 300.0  # 5 minutes
+        # Single-flight guard — only one background refresh thread at a time
+        # (refresh() does 4 sequential yfinance downloads; without this, every
+        # caller during a stale window spawned its own thread).
+        self._refreshing              = threading.Event()
+        # Monotonic time of the last refresh that fetched at least one REAL
+        # value. Failure-fallback defaults no longer masquerade as fresh data.
+        self._last_success_ts: float  = 0.0
 
     def get_macro_score(self) -> float:
         """Return [-1, 1] macro sentiment. 0.0 if no data yet."""
@@ -106,6 +113,8 @@ class MacroSignals:
         except Exception as exc:
             logger.debug("Macro: VIX (^VIX) fetch failed — {}", exc)
 
+        fetched_any = any(v is not None for v in (usdinr, crude, sp_last, us_vix))
+
         with self._lock:
             prev = self._data
             usdinr  = usdinr  if usdinr  is not None else prev.get("usdinr",   84.0)
@@ -140,23 +149,46 @@ class MacroSignals:
             }
             self._data         = data
             self._score        = score
+            # _last_refresh throttles re-fetch attempts (success or not);
+            # _last_success_ts only advances when real data actually arrived.
             self._last_refresh = time.monotonic()
+            if fetched_any:
+                self._last_success_ts = time.monotonic()
 
         return {k: v for k, v in data.items() if not k.startswith("_")}
 
+    def is_stale(self, max_age_sec: float = 1800.0) -> bool:
+        """True when macro data has never been fetched successfully, or the
+        last successful fetch is older than *max_age_sec* seconds."""
+        with self._lock:
+            if self._last_success_ts <= 0.0:
+                return True
+            return (time.monotonic() - self._last_success_ts) > max_age_sec
+
     def _auto_refresh_if_stale(self) -> None:
-        """Trigger a background refresh if data is stale (non-blocking)."""
+        """Trigger a background refresh if data is stale (non-blocking).
+        Single-flight: only one refresh thread may run at a time."""
         with self._lock:
             stale = (time.monotonic() - self._last_refresh) >= self._refresh_interval
-        if stale:
-            threading.Thread(target=self._refresh_safe, daemon=True, name="macro-refresh").start()
+            if not stale or self._refreshing.is_set():
+                return
+            self._refreshing.set()  # claimed under the lock — no thread storm
+        threading.Thread(target=self._refresh_safe, daemon=True, name="macro-refresh").start()
 
     def _refresh_safe(self) -> None:
         try:
             self.refresh()
         except Exception as exc:
             logger.debug("Macro: background refresh error — {}", exc)
+        finally:
+            self._refreshing.clear()
 
 
 # Module-level singleton
 macro_signals = MacroSignals()
+
+
+def is_stale(max_age_sec: float = 1800.0) -> bool:
+    """Module-level convenience — True when the singleton's macro data has
+    never been fetched or is older than *max_age_sec* seconds."""
+    return macro_signals.is_stale(max_age_sec)

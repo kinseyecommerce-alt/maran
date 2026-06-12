@@ -163,9 +163,18 @@ def t_qty_zero_raises():
 
 def t_fno_qty_snapped():
     kc = KiteClient()
-    # NIFTY lot=75; 80 → ceil(80/75)*75 = 150
+    # NIFTY lot=75; 80 → snap DOWN to 75 (never inflate past risk-approved qty)
     snapped = kc._validated_quantity("NIFTY", "NFO", "NRML", 80)
-    assert snapped == 150, f"Expected 150, got {snapped}"
+    assert snapped == 75, f"Expected 75, got {snapped}"
+
+def t_fno_qty_below_lot_rejected():
+    kc = KiteClient()
+    # qty below one lot must be rejected, not inflated to a full lot
+    try:
+        kc._validated_quantity("NIFTY", "NFO", "NRML", 10)
+        raise AssertionError("Should have raised InputException")
+    except InputException:
+        pass
 
 def t_valid_qty_unchanged():
     kc = KiteClient()
@@ -197,14 +206,25 @@ def t_order_history():
 
 def t_cancel_order():
     kc = KiteClient()
-    oid = kc.place_order("SBIN", "NSE", "BUY", 1)
+    # Resting LIMIT (no known LTP → rests OPEN) can be cancelled
+    oid = kc.place_order("SBIN", "NSE", "BUY", 1, order_type="LIMIT", price=100.0)
     kc.cancel_order(oid)
     o = kc._paper_orders.get(oid)
     assert o and o["status"] == "CANCELLED"
 
+def t_cancel_complete_raises():
+    kc = KiteClient()
+    # MARKET fills instantly in PAPER; cancelling it must raise (Kite parity)
+    oid = kc.place_order("SBIN", "NSE", "BUY", 1)
+    try:
+        kc.cancel_order(oid)
+        raise AssertionError("Should have raised InputException")
+    except InputException:
+        pass
+
 def t_modify_order():
     kc = KiteClient()
-    oid = kc.place_order("AXISBANK", "NSE", "BUY", 1, price=900.0)
+    oid = kc.place_order("AXISBANK", "NSE", "BUY", 1, order_type="LIMIT", price=900.0)
     kc.modify_order(oid, price=910.0)
     o = kc._paper_orders.get(oid)
     assert o and o["price"] == 910.0
@@ -220,13 +240,15 @@ run("paper positions() has 'net' key",           t_paper_positions_net)
 run("BUY updates position quantity",             t_buy_updates_position)
 run("BUY then SELL nets to qty=0",               t_buy_sell_nets_zero)
 run("qty=0 raises InputException",               t_qty_zero_raises)
-run("FNO qty snapped to lot multiple",           t_fno_qty_snapped)
+run("FNO qty snapped DOWN to lot multiple",      t_fno_qty_snapped)
+run("FNO qty below one lot rejected",            t_fno_qty_below_lot_rejected)
 run("valid MIS qty unchanged",                   t_valid_qty_unchanged)
 run("squareoff_all zeros all positions",         t_squareoff_all)
 run("paper margins() has 'equity' key",          t_margins_equity)
 run("paper historical_data returns []",          t_hist_paper_empty)
 run("order_history() finds by order_id",         t_order_history)
 run("cancel_order() sets CANCELLED",             t_cancel_order)
+run("cancel on COMPLETE order raises",           t_cancel_complete_raises)
 run("modify_order() updates price",              t_modify_order)
 
 
@@ -4110,6 +4132,214 @@ run("Intraday/Scalping/Swing signals include pattern key",   t_audit_signals_hav
 run("atomic_bracket broker calls run in executor",           t_audit_atomic_bracket_uses_executor)
 run("PositionSL has per-position eval lock",                 t_audit_tsl_eval_lock_exists)
 run("LIVE mode requires both API_KEY and JWT_SECRET_KEY",    t_audit_live_requires_both_secrets)
+
+
+# ══════════════════════════════════════════════════════════════════════════
+# 29. DEEP AUDIT FIXES (Fable 5 second-pass: order lifecycle, data, security)
+# ══════════════════════════════════════════════════════════════════════════
+section("29. DEEP AUDIT FIXES")
+
+def t_deep_exit_cancels_slm():
+    import inspect
+    from agents.base_agent import BaseAgent
+    src = inspect.getsource(BaseAgent._check_exits_on_tick)
+    assert "cancel_order" in src and "_tsl_sl_orders_lock" in src, \
+        "strategy exit must cancel the resting SL-M and pop _tsl_sl_orders"
+
+def t_deep_t2_exit_guarded():
+    # _on_target_hit is a closure inside _setup_tsl_callbacks
+    import inspect
+    import agents.base_agent as _ba
+    src = inspect.getsource(_ba._setup_tsl_callbacks)
+    t2_part = src.split("async def _on_target_hit")[1]
+    assert "trigger_kill_switch" in t2_part, \
+        "T2 exit failure must escalate to kill switch"
+
+def t_deep_sl_replacement_uses_contract():
+    import inspect
+    import agents.base_agent as _ba
+    src = inspect.getsource(_ba._setup_tsl_callbacks)
+    moved_part = src.split("async def _on_target_hit")[0]
+    assert 'entry.get("tradingsymbol"' in moved_part, \
+        "SL-M replacement must use the contract symbol, not the underlying"
+
+def t_deep_reconcile_uses_since_ts():
+    import inspect
+    from kite_client import KiteClient
+    src = inspect.getsource(KiteClient._reconcile_recent_order)
+    assert "since_ts" in src and "order_timestamp" in src, \
+        "LIVE reconcile must filter candidates by the placement time window"
+
+def t_deep_manual_order_price_resolved():
+    import inspect, main as _m
+    src = inspect.getsource(_m)
+    assert "_resolve_order_price" in src
+    assert "req.price or 1" not in src, \
+        "manual orders must never be risk-checked at price=1"
+
+def t_deep_master_review_nonblocking():
+    import inspect, master_agent_v5 as _ma
+    src = inspect.getsource(_ma.MasterAgent._master_review)
+    assert "run_in_executor" in src, "Claude call must not block the event loop"
+    assert "is_market_open" in src, "master review must gate on market hours"
+
+def t_deep_ws_volume_delta():
+    import inspect, kite_ticker as _kt
+    src = inspect.getsource(_kt)
+    assert "_last_cum_vol" in src, \
+        "WS feed must emit per-tick volume deltas, not cumulative day volume"
+
+def t_deep_options_tsl_orders_populated():
+    import inspect
+    from agents.strategy_agents import OptionsAgent
+    src = inspect.getsource(OptionsAgent._try_enter)
+    assert "_tsl_sl_orders" in src and "try_claim" in src, \
+        "OptionsAgent must populate _tsl_sl_orders and use atomic claims"
+
+def t_deep_straddle_pe_leg_checked():
+    import inspect
+    from agents.strategy_agents import OptionsAgent
+    src = inspect.getsource(OptionsAgent._enter_straddle_pe_leg)
+    assert "check_before_order" in src and "pre_order_check" in src, \
+        "straddle PE leg must run full risk + SEBI checks"
+
+def t_deep_supertrend_alive():
+    # Standard Supertrend must flip to UP on a sustained rally (the old
+    # implementation could never leave NEUTRAL).
+    import inspect, tick_engine as _te
+    src = inspect.getsource(_te)
+    assert "final_upper" in src or "final_ub" in src or "carried" in src.lower(), \
+        "Supertrend must use carried-forward final bands"
+
+def t_deep_5min_bucketing():
+    from tick_engine import TickBuffer
+    from datetime import datetime as _dt
+    buf = TickBuffer(resolution_sec=300)
+    buf.push(100.0, 10, _dt(2026, 6, 12, 10, 1, 0))
+    buf.push(101.0, 10, _dt(2026, 6, 12, 10, 3, 0))   # same 10:00-10:05 bucket
+    closed = buf.push(102.0, 10, _dt(2026, 6, 12, 10, 6, 0))  # new bucket → closes prior
+    assert closed is not None and closed.high == 101.0, \
+        "10:01 and 10:03 must land in the same 5-min bar"
+
+def t_deep_session_vwap():
+    import inspect, tick_engine as _te
+    src = inspect.getsource(_te)
+    # ind.vwap must be cumulative session VWAP, not ta's 14-bar rolling default
+    # (the class name may survive in explanatory comments — check for calls)
+    assert "VolumeWeightedAveragePrice(" not in src, \
+        "ind.vwap must be session-cumulative, not 14-bar rolling"
+
+def t_deep_walkforward_oos_gate():
+    import inspect, backtest_engine as _bt
+    src = inspect.getsource(_bt)
+    assert "Insufficient OOS trades" in src, \
+        "zero OOS trades must FAIL the gate, not skip it"
+
+def t_deep_weekly_backtest_forces_refresh():
+    import inspect, backtest_engine as _bt
+    src = inspect.getsource(_bt.BacktestEngine.weekly_auto_backtest)
+    assert "force=True" in src, "weekly backtest must bypass the result cache"
+
+def t_deep_subscribe_idempotent():
+    from tick_engine import tick_engine as _eng
+    wl = [{"symbol": "DEEPTEST", "exchange": "NSE"}]
+    before = list(_eng._symbols).count("DEEPTEST")
+    _eng.subscribe(wl)
+    _eng.subscribe(wl)
+    assert list(_eng._symbols).count("DEEPTEST") == before + 1, \
+        "subscribe() must dedup symbols"
+
+def t_deep_owner_of_accessor():
+    from order_guard import OrderGuard
+    og = OrderGuard()
+    ok, _ = og.try_claim("OWNTEST", "intraday", "BUY")
+    assert ok
+    owner = og.owner_of("OWNTEST")
+    assert owner is not None and owner.startswith("intraday"), f"owner_of returned {owner}"
+    og.release_claim("OWNTEST", "intraday", "BUY")
+
+def t_deep_clear_active_preserves_counts():
+    from order_guard import OrderGuard
+    og = OrderGuard()
+    ok, _ = og.try_claim("CNTTEST", "scalping", "BUY")
+    assert ok
+    og.confirm_claim("CNTTEST", "scalping", "BUY", "OID-CNT-1")
+    count_before = dict(og._trade_count)
+    og.clear_active_only()
+    assert og.owner_of("CNTTEST") is None, "active claims must be cleared"
+    assert og._trade_count == count_before, "trade counters must survive squareoff"
+
+def t_deep_qty_zero_when_unaffordable():
+    from risk_manager import RiskManager
+    rm = RiskManager()
+    qty = rm.calculate_quantity(10_000_000.0, agent="intraday")  # ₹1cr/share
+    assert qty == 0, f"unaffordable price must yield qty=0, got {qty}"
+
+def t_deep_compute_qty_zero_guard():
+    import inspect
+    from agents.base_agent import BaseAgent
+    src = inspect.getsource(BaseAgent._compute_qty)
+    assert "return 0" in src, \
+        "_compute_qty must not resurrect qty=0 via max(1, ...) floors"
+
+def t_deep_settings_validation():
+    from config import Settings
+    try:
+        Settings(_env_file=None, max_daily_loss=-5.0)
+        raise AssertionError("negative max_daily_loss must be rejected")
+    except Exception as e:
+        assert "max_daily_loss" in str(e)
+
+def t_deep_sebi_hard_cap():
+    import inspect, sebi_compliance as _sc
+    src = inspect.getsource(_sc)
+    assert "_SEBI_MAX_ORDER_VALUE" in src and "1_000_000" in src, \
+        "SEBI 10L per-order cap must be an independent hard constant"
+
+def t_deep_macro_is_stale():
+    import macro_signals as _ms
+    assert callable(getattr(_ms, "is_stale", None))
+    assert isinstance(_ms.is_stale(), bool)
+
+def t_deep_paper_limit_rests_and_fills():
+    kc = KiteClient()
+    kc._paper_ltp["LIMTEST"] = 105.0
+    oid = kc.place_order("LIMTEST", "NSE", "BUY", 1, order_type="LIMIT", price=100.0)
+    o = kc._paper_orders[oid]
+    assert o["status"] == "OPEN", f"non-marketable LIMIT must rest OPEN, got {o['status']}"
+    kc.check_paper_triggers("LIMTEST", 99.5)   # LTP crosses below limit → fill
+    assert o["status"] == "COMPLETE" and o["average_price"] == 100.0
+
+def t_deep_gate_prompt_untrusted_note():
+    import inspect, claude_trade_gate as _cg
+    src = inspect.getsource(_cg)
+    assert "UNTRUSTED" in src, \
+        "gate prompt must mark external free-text fields as untrusted data"
+
+run("strategy exit cancels resting SL-M",            t_deep_exit_cancels_slm)
+run("T2 exit failure escalates to kill switch",      t_deep_t2_exit_guarded)
+run("SL replacement uses contract symbol",           t_deep_sl_replacement_uses_contract)
+run("LIVE reconcile honors time window",             t_deep_reconcile_uses_since_ts)
+run("manual MARKET orders priced before checks",     t_deep_manual_order_price_resolved)
+run("master review non-blocking + market-hours gate", t_deep_master_review_nonblocking)
+run("WS feed emits volume deltas",                   t_deep_ws_volume_delta)
+run("OptionsAgent populates _tsl_sl_orders + claims", t_deep_options_tsl_orders_populated)
+run("straddle PE leg runs risk + SEBI checks",       t_deep_straddle_pe_leg_checked)
+run("Supertrend uses carried final bands",           t_deep_supertrend_alive)
+run("5-min buffer buckets minutes correctly",        t_deep_5min_bucketing)
+run("ind.vwap is session VWAP (not 14-bar)",         t_deep_session_vwap)
+run("zero OOS trades fails walk-forward gate",       t_deep_walkforward_oos_gate)
+run("weekly backtest bypasses cache",                t_deep_weekly_backtest_forces_refresh)
+run("tick_engine.subscribe is idempotent",           t_deep_subscribe_idempotent)
+run("order_guard.owner_of accessor works",           t_deep_owner_of_accessor)
+run("clear_active_only preserves trade counters",    t_deep_clear_active_preserves_counts)
+run("unaffordable price yields qty=0",               t_deep_qty_zero_when_unaffordable)
+run("_compute_qty cannot resurrect qty=0",           t_deep_compute_qty_zero_guard)
+run("Settings rejects negative max_daily_loss",      t_deep_settings_validation)
+run("SEBI 10L cap is an independent hard constant",  t_deep_sebi_hard_cap)
+run("macro_signals.is_stale() available",            t_deep_macro_is_stale)
+run("paper LIMIT rests OPEN and fills on cross",     t_deep_paper_limit_rests_and_fills)
+run("Claude gate marks external text untrusted",     t_deep_gate_prompt_untrusted_note)
 
 
 # ══════════════════════════════════════════════════════════════════════════

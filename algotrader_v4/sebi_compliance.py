@@ -129,6 +129,11 @@ _STRATEGY_DISCLOSURES: dict[str, dict] = {
 }
 
 
+# Reg 4: SEBI guideline hard cap — ₹10 lakh per order. A config value must
+# never be able to RAISE this limit (it may only tighten via max_position_size).
+_SEBI_MAX_ORDER_VALUE = 1_000_000.0
+
+
 class KillSwitchState(Enum):
     ACTIVE  = "ACTIVE"
     PAUSED  = "PAUSED"
@@ -193,24 +198,58 @@ class SEBICompliance:
         # clear an emergency halt while positions may still be open.
         # Only the production singleton restores/persists (restore_state=True) —
         # bare instances (tests) start clean and never touch the DB.
+        # The restore here only runs when the DB already exists (working-directory
+        # independent — see state_store.DB_PATH); on a fresh deployment the DB is
+        # created by init_db() and main.py's on_startup calls
+        # restore_state_from_db() explicitly afterwards.
         self._persist_enabled = restore_state
-        if restore_state:
-            try:
-                from state_store import get_kv
-                persisted = get_kv("kill_switch_state", "")
-                if persisted == KillSwitchState.KILLED.value:
-                    self._state       = KillSwitchState.KILLED
-                    self._kill_reason = get_kv("kill_switch_reason", "restored after restart")
-                    logger.critical("SEBI: KILL SWITCH restored from DB after restart — {}",
-                                    self._kill_reason)
-                elif persisted == KillSwitchState.PAUSED.value:
-                    self._state        = KillSwitchState.PAUSED
-                    self._pause_reason = get_kv("kill_switch_reason", "restored after restart")
-                    logger.warning("SEBI: PAUSED state restored from DB after restart")
-            except Exception as exc:
-                logger.debug("SEBI: could not restore kill-switch state (fresh DB?): {}", exc)
+        if restore_state and self._db_exists():
+            self.restore_state_from_db()
 
         logger.info("SEBICompliance module initialised — 10 regulations active")
+
+    @staticmethod
+    def _db_exists() -> bool:
+        """True when the persistence backend is already initialised."""
+        try:
+            import state_store as _ss
+            if getattr(_ss, "_USE_PG", False):
+                return True            # PostgreSQL: assume reachable, restore handles errors
+            return _ss.DB_PATH.exists()
+        except Exception:
+            return False
+
+    def restore_state_from_db(self) -> None:
+        """Restore persisted kill-switch state from the DB.
+
+        Called from __init__ when restore_state=True and the DB already exists,
+        and explicitly from main.py's on_startup AFTER init_db(). Idempotent.
+        When KILLED is restored, the risk manager is also halted (mirrors
+        trigger_kill_switch) so check_before_order() blocks immediately.
+        """
+        try:
+            from state_store import get_kv
+            persisted = get_kv("kill_switch_state", "")
+            if persisted == KillSwitchState.KILLED.value:
+                with self._lock:
+                    self._state       = KillSwitchState.KILLED
+                    self._kill_reason = get_kv("kill_switch_reason", "restored after restart")
+                logger.critical("SEBI: KILL SWITCH restored from DB after restart — {}",
+                                self._kill_reason)
+                # Mirror trigger_kill_switch: halt the risk manager too, so the
+                # restored halt blocks orders even before any SEBI check runs.
+                try:
+                    from risk_manager import risk_manager as _rm
+                    _rm.is_trading_halted = True
+                except Exception:
+                    pass
+            elif persisted == KillSwitchState.PAUSED.value:
+                with self._lock:
+                    self._state        = KillSwitchState.PAUSED
+                    self._pause_reason = get_kv("kill_switch_reason", "restored after restart")
+                logger.warning("SEBI: PAUSED state restored from DB after restart")
+        except Exception as exc:
+            logger.error("SEBI: could not restore kill-switch state from DB: {}", exc)
 
     def _persist_state(self, reason: str = "") -> None:
         if not self._persist_enabled:
@@ -354,12 +393,21 @@ class SEBICompliance:
                                    signal_source, regime, "REJECTED", reason, algo_id)
                 return False, algo_id, reason
 
-            # Reg 4: max order value (₹10 lakh per order as SEBI guideline)
-            max_order_value = max(settings.max_position_size, 1_000_000.0)
-            order_value     = quantity * max(price_at_signal, 1.0)
-            if order_value > max_order_value:
-                reason = (f"Order value ₹{order_value:,.0f} exceeds SEBI limit "
-                          f"₹{max_order_value:,.0f}")
+            # Reg 4: max order value — BOTH limits enforced independently:
+            #   • SEBI guideline hard cap: ₹10 lakh per order (NOT raisable via config)
+            #   • configured max_position_size, when smaller
+            order_value = quantity * max(price_at_signal, 1.0)
+            if order_value > _SEBI_MAX_ORDER_VALUE:
+                reason = (f"Order value ₹{order_value:,.0f} exceeds SEBI per-order limit "
+                          f"₹{_SEBI_MAX_ORDER_VALUE:,.0f}")
+                self._record_audit(strategy, symbol, exchange, transaction_type,
+                                   quantity, order_type, price_at_signal,
+                                   signal_source, regime, "REJECTED", reason, algo_id)
+                return False, algo_id, reason
+            config_cap = max(settings.max_position_size, 1.0)
+            if order_value > config_cap:
+                reason = (f"Order value ₹{order_value:,.0f} exceeds configured "
+                          f"max_position_size ₹{config_cap:,.0f}")
                 self._record_audit(strategy, symbol, exchange, transaction_type,
                                    quantity, order_type, price_at_signal,
                                    signal_source, regime, "REJECTED", reason, algo_id)

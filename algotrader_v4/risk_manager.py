@@ -335,7 +335,16 @@ class RiskManager:
             sl_amount = price * (settings.stop_loss_pct / 100)
             cap = min(cap, (cap * risk_pct / 100) / sl_amount * price)
         qty = int(cap // price)
+        if qty <= 0:
+            # Capital cannot cover even 1 share — skip the trade rather than
+            # silently buying 1 share beyond the allocated capital.
+            logger.warning(
+                "[RiskManager] calculate_quantity: capital ₹{:.0f} cannot afford 1 share "
+                "of price ₹{:.2f} ({}) — qty=0", cap, price, agent or "unknown"
+            )
+            return 0
         # Halve position size on F&O expiry / RBI MPC days (higher volatility)
+        # NOTE: floors of 1 below are safe — pre-scaling qty is guaranteed >= 1 here.
         try:
             from alt_data import alt_data_engine
             if alt_data_engine.is_high_risk_day():
@@ -355,6 +364,11 @@ class RiskManager:
                 qty = max(1, int(qty * 0.85))
         except Exception:
             pass
+        # Re-validate after scaling: an up-scaled qty must never exceed the
+        # allocated capital (clamp back down to what cap can actually cover).
+        max_affordable = int(cap // price)
+        if qty > max_affordable:
+            qty = max_affordable
         return max(qty, 1)
 
     def sl_price(self, entry: float, side: str) -> float:
@@ -379,10 +393,20 @@ class RiskManager:
         SL distance  = max(ATR-implied SL, 0.3% of price)
         Quantity     = risk_amount / sl_distance, capped at max_qty.
         """
+        if not price or price <= 0:
+            logger.warning("[RiskManager] calculate_quantity_atr: invalid price={}", price)
+            return 0
         cap = (
             capital
             or (self.max_capital_for_agent(agent) if agent else settings.max_position_size)
         )
+        if int(cap // price) <= 0:
+            # Capital cannot cover even 1 share — skip rather than force qty=1
+            logger.warning(
+                "[RiskManager] calculate_quantity_atr: capital ₹{:.0f} cannot afford 1 share "
+                "of price ₹{:.2f} ({}) — qty=0", cap, price, agent or "unknown"
+            )
+            return 0
         rpt        = risk_per_trade_pct or getattr(settings, "risk_per_trade_pct", 0.5)
         risk_amount = cap * (rpt / 100)
 
@@ -396,8 +420,12 @@ class RiskManager:
 
         sl_dist = max(price * sl_pct, price * 0.003)
         qty = int(risk_amount / sl_dist) if sl_dist > 0 else 1
-        max_qty = int(settings.max_position_size // price) if price > 0 else 1
-        return max(1, min(qty, max_qty))
+        max_qty = int(settings.max_position_size // price)
+        if max_qty <= 0:
+            # max_position_size cannot cover even 1 share — skip the trade
+            return 0
+        # Cap to max_position_size AND to the actual affordable capital
+        return max(1, min(qty, max_qty, int(cap // price)))
 
     def kelly_fraction(self, strategy: str, symbol: str = "") -> float:
         """

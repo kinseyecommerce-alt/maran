@@ -305,34 +305,44 @@ class SymbolScanner:
             return self._selected
 
         self._scanning = True
-        strats = strategies or list(CRITERIA.keys())
+        try:
+            requested = strategies or list(CRITERIA.keys())
+            # Validate up front: an unknown strategy must not raise (a raised
+            # KeyError would previously leave _scanning stuck True forever).
+            unknown = [s for s in requested if s not in CRITERIA]
+            if unknown:
+                logger.warning("Scanner: skipping unknown strategies: {}", unknown)
+            strats = [s for s in requested if s in CRITERIA]
 
-        logger.info("Symbol scanner started for strategies: {}", strats)
+            logger.info("Symbol scanner started for strategies: {}", strats)
 
-        # Build unique symbol list to fetch
-        all_syms: set[str] = set()
-        for s in strats:
-            all_syms.update(CRITERIA[s].universe)
+            # Build unique symbol list to fetch
+            all_syms: set[str] = set()
+            for s in strats:
+                all_syms.update(CRITERIA[s].universe)
 
-        # Fetch and score all symbols
-        scores = await self._score_all(list(all_syms))
+            # Fetch and score all symbols
+            scores = await self._score_all(list(all_syms))
 
-        # Select per strategy
-        for strat in strats:
-            crit = CRITERIA[strat]
-            selected, all_scores = self._select_for_strategy(strat, crit, scores)
-            self._selected[strat] = selected
-            self._scores[strat]   = all_scores
+            # Select per strategy
+            for strat in strats:
+                crit = CRITERIA[strat]
+                selected, all_scores = self._select_for_strategy(strat, crit, scores)
+                self._selected[strat] = selected
+                self._scores[strat]   = all_scores
 
-            logger.info(
-                "Scanner [{}]: selected {}/{} symbols → {}",
-                strat, len(selected), len(crit.universe),
-                [s["symbol"] for s in selected]
-            )
+                logger.info(
+                    "Scanner [{}]: selected {}/{} symbols → {}",
+                    strat, len(selected), len(crit.universe),
+                    [s["symbol"] for s in selected]
+                )
 
-        self._last_scan = datetime.now()
-        self._scanning  = False
-        return self._selected
+            self._last_scan = datetime.now()
+            return self._selected
+        finally:
+            # Always release the flag — an exception here must not block all
+            # future scans.
+            self._scanning = False
 
     def get_selected(self, strategy: Optional[str] = None) -> dict:
         if strategy:

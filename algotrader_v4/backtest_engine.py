@@ -262,12 +262,14 @@ class BacktestEngine:
         symbols: list[dict],
         strategy: str,
         walk_forward: bool = True,
+        force: bool = False,
     ) -> dict[str, BacktestResult]:
         results = {}
         for item in symbols:
             sym  = item["symbol"]
             exch = item.get("exchange", "NSE")
-            results[sym] = self.run(sym, exch, strategy, walk_forward=walk_forward)
+            results[sym] = self.run(sym, exch, strategy,
+                                    walk_forward=walk_forward, force=force)
         return results
 
     def compare_strategies(
@@ -322,7 +324,9 @@ class BacktestEngine:
         syms = universe or [{"symbol": s, "exchange": "NSE"} for s in FULL_UNIVERSE]
         summary: dict[str, dict] = {}
         for strat in ALL_STRATEGIES:
-            res = self.run_batch(syms, strat, walk_forward=True)
+            # force=True: the weekly refresh must re-run on fresh data, never
+            # serve last week's cached results.
+            res = self.run_batch(syms, strat, walk_forward=True, force=True)
             passed = [s for s, r in res.items() if r.passed]
             failed = [s for s, r in res.items() if not r.passed]
             summary[strat] = {
@@ -364,41 +368,29 @@ class BacktestEngine:
         out_of_sample_pct: float = 0.30,
     ) -> BacktestResult:
         """
-        Split data into n_splits windows (default from settings.bt_wf_folds).
-        Supports anchored walk-forward (settings.bt_wf_anchored=True): expanding train window.
+        Anchored walk-forward with DISJOINT out-of-sample windows.
+        Fold i: OOS = [n*i/k, n*(i+1)/k); train = everything before the OOS
+        start (expanding window). Fold 0 is skipped — it has no training data.
+        Disjoint OOS folds guarantee no trade is counted twice, so oos_sharpe /
+        oos_trades are not inflated by overlapping windows.
         IS result comes from the full dataset; OOS metrics come from OOS folds.
-        out_of_sample_pct controls the OOS fraction (default 0.30 → train_frac=0.70).
+        (train_frac / out_of_sample_pct are retained for API compatibility but
+        no longer shape the folds.)
         """
         n_splits    = n_splits or getattr(settings, "bt_wf_folds", 12)
-        anchored    = getattr(settings, "bt_wf_anchored", True)
-        train_frac  = train_frac if train_frac is not None else (1.0 - out_of_sample_pct)
         min_oos_t   = getattr(settings, "bt_min_oos_trades", 15)
         n           = len(df)
         # Ensure at least 2 folds with enough data
         n_splits    = max(2, min(n_splits, n // 20))
-        window      = n // n_splits
 
         oos_trades_all: list[dict] = []
 
         for i in range(n_splits):
-            if anchored:
-                # Anchored (expanding window): each fold trains from bar 0 to fold_end * train_frac
-                fold_end  = int(n * (i + 1) / n_splits)
-                train_end = int(fold_end * train_frac)
-                oos_start = train_end
-                oos_end   = fold_end
-                # Ensure early folds have at least ~30 bars of OOS data
-                if oos_end <= oos_start or (oos_end - oos_start) < max(30, n // n_splits // 4):
-                    oos_end = min(oos_start + max(30, n // n_splits // 4), n)
-            else:
-                # Rolling window
-                start     = i * window
-                end       = start + window if i < n_splits - 1 else n
-                fold      = df.iloc[start:end]
-                split_idx = int(len(fold) * train_frac)
-                oos_start = start + split_idx
-                oos_end   = end
-
+            oos_start = int(n * i / n_splits)
+            oos_end   = int(n * (i + 1) / n_splits)
+            if oos_start <= 0:
+                # Fold 0: train window [0, oos_start) would be empty — skip.
+                continue
             oos_df = df.iloc[oos_start:oos_end]
             if len(oos_df) < 20:
                 continue
@@ -426,8 +418,9 @@ class BacktestEngine:
                         float(arr.mean()) / std * math.sqrt(len(arr)), 2
                     )
 
-        # Gate: require minimum OOS trades
-        if result.oos_trades < min_oos_t and result.oos_trades > 0:
+        # Gate: require minimum OOS trades. oos_trades == 0 is a FAIL, not a
+        # skip — a symbol must never pass on in-sample performance alone.
+        if result.oos_trades < min_oos_t:
             result.fail_reasons.append(
                 f"Insufficient OOS trades ({result.oos_trades} < {min_oos_t})"
             )

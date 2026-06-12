@@ -25,12 +25,12 @@ Kite Connect API limits enforced here
 """
 from __future__ import annotations
 
-import math
 import time
 import uuid
 from datetime import datetime, timedelta
 from threading import Lock
 from typing import Optional
+from zoneinfo import ZoneInfo
 
 from kiteconnect import KiteConnect
 from kiteconnect.exceptions import (
@@ -50,6 +50,14 @@ _KITE_HIST_MIN_DAYS   = 60      # max days per minute-candle request
 _KITE_HIST_DAY_DAYS   = 2_000   # max days per day-candle request
 _RETRY_MAX            = 4
 _RETRY_BASE_SEC       = 1.0     # doubles each attempt: 1 2 4 8
+
+# Kite order timestamps are IST wall-clock ("YYYY-MM-DD HH:MM:SS" or naive datetime)
+_IST = ZoneInfo("Asia/Kolkata")
+
+# Paper-order lifecycle
+_PAPER_TERMINAL_STATUSES = ("COMPLETE", "CANCELLED", "REJECTED")
+_PAPER_PRUNE_AGE_SEC     = 30 * 60   # drop terminal paper orders older than 30 min
+_PAPER_TERMINAL_MAX      = 2_000     # hard cap on retained terminal paper orders
 
 
 # ── F&O lot sizes (NSE — as of 2025, update after each expiry revision) ────
@@ -331,7 +339,7 @@ class KiteClient:
                                      trigger_price, tag)
         # Pre-flight margin check for BUY entries
         if transaction_type == "BUY" and order_type in ("MARKET", "LIMIT"):
-            self._check_margin(tradingsymbol, quantity, price)
+            self._check_margin(tradingsymbol, exchange, quantity, price)
 
         # CRIT: order placement is NOT blind-retried. A NetworkException can be
         # raised AFTER the order reached the exchange; a naive retry would place a
@@ -409,24 +417,40 @@ class KiteClient:
     ) -> tuple[Optional[str], bool]:
         """Look for a recently-placed order matching these params.
 
-        Returns (order_id_or_None, book_fetch_succeeded). A non-rejected,
-        non-cancelled order matching symbol/side/qty/tag is treated as ours.
+        Returns (order_id_or_None, book_fetch_succeeded). Only an order matching
+        symbol/side/qty/tag with status OPEN / TRIGGER PENDING / COMPLETE AND an
+        order_timestamp >= since_ts is treated as ours. Without the time filter a
+        network error at entry could match an unrelated COMPLETE order from earlier
+        in the day and report a phantom fill.
         """
         try:
             book = self.kite.orders()          # direct call — avoid retry recursion
         except Exception as exc:
             logger.error("LIVE reconcile: order book fetch failed: {}", exc)
             return None, False
+        cutoff = datetime.fromtimestamp(since_ts, tz=_IST)
         for o in book:
             try:
-                if (o.get("tradingsymbol") == tradingsymbol
-                        and o.get("transaction_type") == transaction_type
-                        and int(o.get("quantity", 0)) == int(quantity)
-                        and (not tag or o.get("tag") == tag)
-                        and str(o.get("status", "")).upper() not in ("REJECTED", "CANCELLED")):
+                if (o.get("tradingsymbol") != tradingsymbol
+                        or o.get("transaction_type") != transaction_type
+                        or int(o.get("quantity", 0)) != int(quantity)
+                        or (tag and o.get("tag") != tag)):
+                    continue
+                if str(o.get("status", "")).upper() not in (
+                        "OPEN", "TRIGGER PENDING", "COMPLETE"):
+                    continue
+                # Kite returns order_timestamp as IST datetime or "YYYY-MM-DD HH:MM:SS"
+                ots = o.get("order_timestamp")
+                if isinstance(ots, str):
+                    ots = datetime.strptime(ots, "%Y-%m-%d %H:%M:%S")
+                if not isinstance(ots, datetime):
+                    continue   # cannot verify recency — do NOT claim this order
+                ots = ots.replace(tzinfo=_IST) if ots.tzinfo is None else ots.astimezone(_IST)
+                if ots >= cutoff:
                     return str(o.get("order_id")), True
             except (TypeError, ValueError):
                 continue
+        # No candidate inside the time window — treat as not placed
         return None, True
 
     def modify_order(
@@ -437,6 +461,12 @@ class KiteClient:
             with self._paper_orders_lock:
                 o = self._paper_orders.get(order_id)
                 if o:
+                    # Mirror Kite: terminal orders cannot be modified — surfacing
+                    # the same failure here keeps PAPER from hiding LIVE bugs.
+                    if o["status"] in _PAPER_TERMINAL_STATUSES:
+                        raise InputException(
+                            f"Order cannot be modified as it is already {o['status']}"
+                        )
                     if price:         o["price"]         = price
                     if quantity:      o["quantity"]       = quantity
                     if trigger_price: o["trigger_price"]  = trigger_price
@@ -455,6 +485,12 @@ class KiteClient:
             with self._paper_orders_lock:
                 o = self._paper_orders.get(order_id)
                 if o:
+                    # Mirror Kite: a COMPLETE/CANCELLED/REJECTED order cannot be
+                    # cancelled. Silently flipping COMPLETE → CANCELLED hid LIVE bugs.
+                    if o["status"] in _PAPER_TERMINAL_STATUSES:
+                        raise InputException(
+                            f"Order cannot be cancelled as it is already {o['status']}"
+                        )
                     o["status"] = "CANCELLED"
             return order_id
         return _with_retry(
@@ -542,7 +578,9 @@ class KiteClient:
     ) -> int:
         """
         Enforce quantity > 0.
-        For F&O products (NRML) snap to the nearest lot-size multiple.
+        For F&O products (NRML) snap DOWN to the nearest lot-size multiple —
+        never UP, which would inflate a size the risk manager already approved.
+        Rejects (raises InputException) when the approved quantity is below one lot.
         """
         if quantity <= 0:
             raise InputException(f"Invalid quantity {quantity} for {symbol}")
@@ -550,25 +588,52 @@ class KiteClient:
         if product == "NRML" or exchange in ("NFO", "BFO", "CDS", "MCX"):
             lot = _FON_LOT_SIZES.get(symbol)
             if lot and quantity % lot != 0:
-                snapped = max(lot, math.ceil(quantity / lot) * lot)
+                snapped = (quantity // lot) * lot
+                if snapped <= 0:
+                    raise InputException(
+                        f"Quantity {quantity} for {symbol} is below lot size {lot} "
+                        f"— order rejected (will not inflate to a full lot)"
+                    )
                 logger.warning(
-                    "[kite] {} qty={} not a multiple of lot {}  → snapped to {}",
+                    "[kite] {} qty={} not a multiple of lot {}  → snapped DOWN to {}",
                     symbol, quantity, lot, snapped,
                 )
                 return snapped
         return quantity
 
-    def _check_margin(self, symbol: str, quantity: int, price: float) -> None:
+    def _check_margin(self, symbol: str, exchange: str, quantity: int, price: float) -> None:
         """
         Block if estimated order value exceeds available live balance in LIVE mode.
         A non-blocking warning previously allowed over-margin orders to reach the exchange,
         which would be rejected by Kite causing the entry to fail mid-bracket (no SL placed).
         Raising here lets the caller release the claim cleanly before touching the broker.
+
+        MARKET orders arrive with price=0.0 — a reference LTP is resolved so the
+        check is meaningful (previously order_val collapsed to `quantity` rupees).
         """
         try:
+            ref_price = price
+            if ref_price <= 0:
+                if settings.trading_mode == "PAPER":
+                    ref_price = self._paper_ltp.get(symbol, 0.0)
+                else:
+                    try:
+                        key   = f"{exchange}:{symbol}"
+                        quote = self.kite.ltp([key])
+                        ref_price = float(quote.get(key, {}).get("last_price", 0.0))
+                    except Exception as exc:
+                        logger.warning(
+                            "[kite] Margin check: LTP lookup failed for {} — "
+                            "skipping check: {}", symbol, exc)
+                        return
+                if ref_price <= 0:
+                    logger.warning(
+                        "[kite] Margin check: no reference price for {} — skipping check",
+                        symbol)
+                    return
             m         = self.margins()
             available = m.get("equity", {}).get("available", {}).get("live_balance", 0)
-            order_val = quantity * max(price, 1)
+            order_val = quantity * ref_price
             if order_val > available:
                 raise InputException(
                     f"Insufficient margin: order ₹{order_val:,.0f} > available ₹{available:,.0f} "
@@ -589,6 +654,18 @@ class KiteClient:
         # SL / SL-M orders stay pending until trigger_price is crossed
         if order_type in ("SL", "SL-M"):
             status = "TRIGGER PENDING"
+        elif order_type == "LIMIT":
+            # Marketable LIMIT (LTP already at/through the limit) fills immediately;
+            # otherwise it rests OPEN and fills in check_paper_triggers when the
+            # paper LTP crosses the limit price. Unknown LTP → rest OPEN.
+            ltp = self._paper_ltp.get(tradingsymbol, 0.0)
+            if ltp > 0 and (
+                (transaction_type == "BUY"  and ltp <= price) or
+                (transaction_type == "SELL" and ltp >= price)
+            ):
+                status = "COMPLETE"
+            else:
+                status = "OPEN"
         else:
             status = "COMPLETE"
 
@@ -614,9 +691,11 @@ class KiteClient:
             "status":           status,
             "tag":              tag,
             "placed_at":        datetime.now().isoformat(),
+            "placed_ts":        time.time(),   # epoch — used for terminal-order pruning
         }
         with self._paper_orders_lock:
             self._paper_orders[order_id] = record
+            self._prune_paper_orders_locked()
         # Only update position for immediately filled orders
         if status == "COMPLETE":
             self._update_paper_position(record)
@@ -624,6 +703,29 @@ class KiteClient:
                     transaction_type, tradingsymbol, order_type,
                     quantity, price, order_id)
         return order_id
+
+    def _prune_paper_orders_locked(self) -> None:
+        """Drop stale terminal paper orders. Caller MUST hold _paper_orders_lock.
+
+        Terminal (COMPLETE/CANCELLED/REJECTED) orders accumulate all day in PAPER
+        mode — prune anything older than 30 minutes, and cap retained terminal
+        orders at _PAPER_TERMINAL_MAX regardless of age (most recent kept).
+        """
+        now = time.time()
+        terminal = [
+            (oid, o) for oid, o in self._paper_orders.items()
+            if o.get("status") in _PAPER_TERMINAL_STATUSES
+        ]
+        keep: list[tuple[str, dict]] = []
+        for oid, o in terminal:
+            if now - o.get("placed_ts", now) > _PAPER_PRUNE_AGE_SEC:
+                del self._paper_orders[oid]
+            else:
+                keep.append((oid, o))
+        if len(keep) > _PAPER_TERMINAL_MAX:
+            keep.sort(key=lambda kv: kv[1].get("placed_ts", 0.0))
+            for oid, _ in keep[: len(keep) - _PAPER_TERMINAL_MAX]:
+                del self._paper_orders[oid]
 
     def _update_paper_position(self, order: dict) -> None:
         sym       = order["tradingsymbol"]
@@ -663,9 +765,12 @@ class KiteClient:
 
     def check_paper_triggers(self, symbol: str, ltp: float) -> None:
         """
-        Check pending SL/SL-M paper orders for *symbol*.
-        If ltp crosses the trigger_price, mark the order COMPLETE
-        and update the paper position.
+        Check pending paper orders for *symbol*:
+          • SL / SL-M (TRIGGER PENDING) — fill at ltp once trigger_price is crossed.
+          • LIMIT (OPEN)               — fill at the limit price once ltp crosses it
+                                         (BUY: ltp <= limit; SELL: ltp >= limit).
+        Status flips use compare-and-set under _paper_orders_lock so a concurrent
+        executor-thread cancel_order cannot race a fill (cancel-then-fill or both).
         """
         if ltp <= 0:
             return
@@ -674,23 +779,50 @@ class KiteClient:
         for order in orders_snapshot:
             if order["tradingsymbol"] != symbol:
                 continue
-            if order["status"] != "TRIGGER PENDING":
-                continue
-            tp = order.get("trigger_price", 0.0)
-            if tp <= 0:
-                continue
-            triggered = False
-            if order["transaction_type"] == "SELL" and ltp <= tp:
-                triggered = True
-            elif order["transaction_type"] == "BUY" and ltp >= tp:
-                triggered = True
-            if triggered:
-                order["status"] = "COMPLETE"
-                order["price"] = ltp  # filled at market after trigger
+            snap_status = order["status"]
+
+            if snap_status == "TRIGGER PENDING":
+                tp = order.get("trigger_price", 0.0)
+                if tp <= 0:
+                    continue
+                triggered = (
+                    (order["transaction_type"] == "SELL" and ltp <= tp) or
+                    (order["transaction_type"] == "BUY"  and ltp >= tp)
+                )
+                if not triggered:
+                    continue
+                # CAS: only fill if still TRIGGER PENDING (not cancelled meanwhile)
+                with self._paper_orders_lock:
+                    if order["status"] != "TRIGGER PENDING":
+                        continue
+                    order["status"] = "COMPLETE"
+                    order["price"]  = ltp  # filled at market after trigger
                 self._update_paper_position(order)
                 logger.info("[PAPER] Trigger hit — {} {} {} qty={} trigger=₹{} fill=₹{}",
                             order["transaction_type"], symbol,
                             order["order_type"], order["quantity"], tp, ltp)
+
+            elif snap_status == "OPEN" and order["order_type"] == "LIMIT":
+                limit_px = order.get("price", 0.0)
+                if limit_px <= 0:
+                    continue
+                crossed = (
+                    (order["transaction_type"] == "BUY"  and ltp <= limit_px) or
+                    (order["transaction_type"] == "SELL" and ltp >= limit_px)
+                )
+                if not crossed:
+                    continue
+                # CAS: only fill if still OPEN (not cancelled/modified meanwhile)
+                with self._paper_orders_lock:
+                    if order["status"] != "OPEN":
+                        continue
+                    order["status"]        = "COMPLETE"
+                    order["price"]         = limit_px   # LIMIT fills at limit price
+                    order["average_price"] = limit_px
+                self._update_paper_position(order)
+                logger.info("[PAPER] LIMIT fill — {} {} qty={} limit=₹{} ltp=₹{}",
+                            order["transaction_type"], symbol,
+                            order["quantity"], limit_px, ltp)
 
     def update_paper_pnl(self, symbol: str, ltp: float) -> None:
         """
