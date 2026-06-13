@@ -70,6 +70,28 @@ class Settings(BaseSettings):
     use_position_reconciler: bool = True
     reconcile_interval_sec: float = Field(default=10.0, gt=0)
 
+    # Pattern decay monitor — auto-mute a pattern whose live edge goes negative
+    use_pattern_monitor: bool = True
+    pattern_window: int = Field(default=20, gt=1)        # rolling trades per pattern
+    pattern_min_trades: int = Field(default=12, gt=1)    # min sample before muting
+    pattern_disable_sharpe: float = 0.0                  # mute when rolling Sharpe < this AND mean < 0
+
+    # L2 fill-quality gate — size/skip on thin order books (LIVE only; needs depth)
+    use_l2_fill_gate: bool = False                       # opt-in: needs L2 depth feed
+    l2_min_fill_prob: float = Field(default=0.5, ge=0, le=1)   # min fraction of qty the book must absorb
+    l2_max_slippage_bps: float = Field(default=25.0, gt=0)     # max acceptable VWAP slippage
+    l2_shrink_to_book: bool = True                        # shrink qty to fillable size instead of skipping
+
+    # Disclosed-quantity (iceberg-lite) — hide large equity orders from the book
+    use_disclosed_qty: bool = False                      # opt-in
+    disclosed_qty_value_threshold: float = Field(default=500_000.0, gt=0)  # only for orders above this notional
+    disclosed_qty_pct: float = Field(default=0.20, gt=0, le=1)             # disclose this fraction (NSE floor 10%)
+
+    # Latency guard — pause new entries briefly after a slow order placement
+    use_latency_guard: bool = False                      # opt-in
+    max_order_latency_ms: float = Field(default=1500.0, gt=0)
+    latency_cooldown_sec: float = Field(default=30.0, gt=0)
+
     # Backtest gate thresholds
     bt_min_win_rate: float = 55.0
     bt_min_sharpe: float = 1.0

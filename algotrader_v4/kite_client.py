@@ -319,24 +319,27 @@ class KiteClient:
 
     def place_order(
         self,
-        tradingsymbol:    str,
-        exchange:         str,
-        transaction_type: str,
-        quantity:         int,
-        order_type:       str   = "MARKET",
-        product:          str   = "MIS",
-        price:            float = 0.0,
-        trigger_price:    float = 0.0,
-        validity:         str   = "DAY",
-        tag:              str   = "AlgoTraderPro",
+        tradingsymbol:      str,
+        exchange:           str,
+        transaction_type:   str,
+        quantity:           int,
+        order_type:         str   = "MARKET",
+        product:            str   = "MIS",
+        price:              float = 0.0,
+        trigger_price:      float = 0.0,
+        validity:           str   = "DAY",
+        tag:                str   = "AlgoTraderPro",
+        disclosed_quantity: int   = 0,
     ) -> str:
         tag      = tag.replace("\n", " ").replace("\r", " ")[:_KITE_ORDER_TAG_MAX]
         quantity = self._validated_quantity(tradingsymbol, exchange, product, quantity)
+        disclosed_quantity = self._resolve_disclosed_qty(
+            exchange, order_type, quantity, price, disclosed_quantity)
 
         if settings.trading_mode == "PAPER":
             return self._paper_place(tradingsymbol, exchange, transaction_type,
                                      quantity, order_type, product, price,
-                                     trigger_price, tag)
+                                     trigger_price, tag, disclosed_quantity)
         # Pre-flight margin check for BUY entries
         if transaction_type == "BUY" and order_type in ("MARKET", "LIMIT"):
             self._check_margin(tradingsymbol, exchange, quantity, price)
@@ -348,11 +351,37 @@ class KiteClient:
         return self._place_live_reconcile(
             tradingsymbol, exchange, transaction_type, quantity,
             order_type, product, price, trigger_price, validity, tag,
+            disclosed_quantity,
         )
+
+    @staticmethod
+    def _resolve_disclosed_qty(
+        exchange: str, order_type: str, quantity: int,
+        price: float, disclosed_quantity: int,
+    ) -> int:
+        """Auto-compute disclosed quantity for large equity orders to reduce
+        market impact (iceberg-lite). An explicit caller value wins. NSE rule:
+        disclosed must be >= 10% of order qty; only meaningful for equity
+        LIMIT/MARKET legs, never for SL/SL-M protective orders."""
+        if disclosed_quantity > 0:
+            return min(disclosed_quantity, quantity)
+        if not getattr(settings, "use_disclosed_qty", False):
+            return 0
+        if exchange not in ("NSE", "BSE") or order_type not in ("MARKET", "LIMIT"):
+            return 0
+        ref = price if price and price > 0 else 0.0
+        notional = quantity * ref
+        if ref <= 0 or notional < float(getattr(settings, "disclosed_qty_value_threshold", 5e5)):
+            return 0
+        pct = float(getattr(settings, "disclosed_qty_pct", 0.20))
+        # NSE floor: disclosed must be at least 10% of order quantity.
+        disclosed = max(int(quantity * pct), int(quantity * 0.10) + 1)
+        return min(disclosed, quantity) if disclosed < quantity else 0
 
     def _place_live_reconcile(
         self, tradingsymbol, exchange, transaction_type, quantity,
         order_type, product, price, trigger_price, validity, tag,
+        disclosed_quantity=0,
     ) -> str:
         """Place a LIVE order with network-failure reconciliation.
 
@@ -381,6 +410,7 @@ class KiteClient:
                     trigger_price=trigger_price or None,
                     validity=validity,
                     tag=tag,
+                    disclosed_quantity=disclosed_quantity or None,
                 )
                 logger.info("LIVE order | {} {} {} qty={} @ {} | id={}",
                             transaction_type, tradingsymbol, order_type,
@@ -649,6 +679,7 @@ class KiteClient:
     def _paper_place(
         self, tradingsymbol, exchange, transaction_type,
         quantity, order_type, product, price, trigger_price, tag,
+        disclosed_quantity=0,
     ) -> str:
         order_id = f"PAPER-{uuid.uuid4().hex[:8].upper()}"
         # SL / SL-M orders stay pending until trigger_price is crossed
@@ -688,6 +719,7 @@ class KiteClient:
             "price":            fill_price,
             "average_price":    fill_price,
             "trigger_price":    trigger_price,
+            "disclosed_quantity": disclosed_quantity,
             "status":           status,
             "tag":              tag,
             "placed_at":        datetime.now().isoformat(),

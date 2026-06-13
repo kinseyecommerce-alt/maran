@@ -1137,6 +1137,13 @@ def reconciler_status():
     return position_reconciler.status()
 
 
+@app.get("/patterns/status", tags=["Risk"])
+def patterns_status():
+    """Live per-pattern edge tracker: win-rate, Sharpe, and muted patterns."""
+    from pattern_monitor import pattern_monitor
+    return pattern_monitor.stats()
+
+
 @app.get("/broker/status", tags=["System"])
 def broker_status():
     """Return connection status for primary (Zerodha/active broker) and all secondary brokers."""
