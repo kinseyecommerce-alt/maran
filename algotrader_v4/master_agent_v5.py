@@ -464,6 +464,11 @@ class MasterAgent:
         order_guard.reset_daily()
         for a in ALL_AGENTS.values():
             a.reset_daily()
+        try:
+            from pattern_monitor import pattern_monitor
+            pattern_monitor.reset_daily()
+        except Exception:
+            pass
         await send_telegram("<b>New trading day</b> — counters reset")
         from n8n_bridge import notify as _n8n
         asyncio.create_task(_n8n("system", {"type": "daily_reset"}))

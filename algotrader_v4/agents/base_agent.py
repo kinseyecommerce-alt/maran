@@ -171,6 +171,16 @@ def _setup_tsl_callbacks() -> None:
         risk_manager.position_closed()
         trailing_sl_engine.deregister(pos.order_id)
 
+        # Attribute outcome to the pattern decay monitor.
+        try:
+            from pattern_monitor import pattern_monitor as _pm
+            _denom = pos.entry_price * pos.quantity
+            if _denom:
+                _pm.record(pos.strategy, (entry or {}).get("pattern", ""),
+                           pnl / _denom * 100.0)
+        except Exception:
+            pass
+
         # Mirror exit to secondary brokers (multi-broker mode)
         if settings.enable_multi_broker and broker_router.has_secondaries:
             try:
@@ -267,6 +277,16 @@ def _setup_tsl_callbacks() -> None:
             risk_manager.position_closed()
             trailing_sl_engine.deregister(pos.order_id)
 
+            # Attribute outcome to the pattern decay monitor.
+            try:
+                from pattern_monitor import pattern_monitor as _pm
+                _denom = pos.entry_price * pos.quantity
+                if _denom:
+                    _pm.record(pos.strategy, (entry or {}).get("pattern", ""),
+                               pnl_est / _denom * 100.0)
+            except Exception:
+                pass
+
             # Mirror exit to secondary brokers (multi-broker mode)
             if settings.enable_multi_broker and broker_router.has_secondaries:
                 try:
@@ -351,6 +371,10 @@ class BaseAgent(ABC):
         # Phase 3E: adaptive engine feedback — refreshed every 300s
         self._last_adaptive_refresh: float = 0.0
         self._adaptive_min_score_override: Optional[int] = None
+        # Latency guard: epoch until which new entries are paused after a slow
+        # order placement (stale-price protection); last measured latency (ms).
+        self._latency_cooldown_until: float = 0.0
+        self._last_order_latency_ms: float = 0.0
 
     @abstractmethod
     def evaluate_tick(self, snap: MarketSnapshot) -> tuple[str, Optional[dict]]:
@@ -486,6 +510,15 @@ class BaseAgent(ABC):
                 await self._check_exits_on_tick(snap)
                 action, signal = self.evaluate_tick(snap)
                 if action in ("BUY", "SELL") and signal:
+                    # Pattern decay guard — mute a setup whose live edge has gone
+                    # negative this session (auto re-enabled at daily reset).
+                    _pat = signal.get("pattern", "")
+                    if _pat:
+                        from pattern_monitor import pattern_monitor as _pm
+                        if not _pm.is_enabled(self.name, _pat):
+                            logger.debug("[{}] {} pattern '{}' muted (decayed edge) — skip",
+                                         self.name, snap.symbol, _pat)
+                            continue
                     # ML signal filter — GBM win-probability gate
                     if getattr(settings, "use_ml_filter", False):
                         try:
@@ -814,6 +847,34 @@ class BaseAgent(ABC):
         except Exception:
             pass
         return qty
+
+    def _apply_l2_fill_gate(self, snap: MarketSnapshot, action: str, qty: int) -> int:
+        """Check the requested qty against visible L2 depth. Returns the qty to
+        actually send: unchanged when the book is deep enough (or depth is
+        unavailable), shrunk to the fillable size, or 0 to skip the trade."""
+        bid_depth = getattr(snap.tick, "bid_depth", None)
+        ask_depth = getattr(snap.tick, "ask_depth", None)
+        if not bid_depth and not ask_depth:
+            return qty   # no L2 feed (PAPER/sim) — never block on missing data
+        from l2_fill_model import is_book_acceptable
+        ok, est = is_book_acceptable(
+            action, qty, bid_depth, ask_depth, snap.tick.ltp,
+            min_fill_prob=float(getattr(settings, "l2_min_fill_prob", 0.5)),
+            max_slippage_bps=float(getattr(settings, "l2_max_slippage_bps", 25.0)),
+        )
+        if ok or est.levels_used == 0:
+            return qty
+        if getattr(settings, "l2_shrink_to_book", True) and est.fill_prob > 0:
+            shrunk = int(qty * est.fill_prob)
+            if shrunk > 0:
+                logger.info("[{}] {} L2 thin book — shrinking qty {}→{} "
+                            "(fill_prob={:.0%} slip={:.0f}bps)",
+                            self.name, snap.symbol, qty, shrunk,
+                            est.fill_prob, est.slippage_bps)
+                return shrunk
+        logger.debug("[{}] {} L2 fill gate BLOCK fill_prob={:.0%} slip={:.0f}bps — skip",
+                     self.name, snap.symbol, est.fill_prob, est.slippage_bps)
+        return 0
 
     async def _pre_claim_checks(
         self, snap: MarketSnapshot, action: str, loop: asyncio.AbstractEventLoop,
@@ -1217,6 +1278,9 @@ class BaseAgent(ABC):
                 "tradingsymbol": signal.get("tradingsymbol",
                                   signal.get("futures_symbol",
                                   signal.get("option_symbol", sym))),
+                # Pattern that triggered this entry — used to attribute the
+                # realised outcome back to the pattern decay monitor on exit.
+                "pattern": signal.get("pattern", ""),
             }
         trailing_sl_engine.register(
             symbol=sym, strategy=self.name, side=action,
@@ -1248,10 +1312,28 @@ class BaseAgent(ABC):
         size_factor = signal.get("_gate_size_factor", 1.0)  # capture before _compute_qty pops it
         loop        = asyncio.get_running_loop()
 
+        # Latency guard: a slow order placement means the broker/network path is
+        # degraded and fills will print against stale prices. Pause new entries
+        # for a short cooldown, then let one through to re-measure.
+        if getattr(settings, "use_latency_guard", False):
+            if _time.time() < self._latency_cooldown_until:
+                logger.debug("[{}] {} latency cooldown active ({:.0f}ms last) — skip entry",
+                             self.name, snap.symbol, self._last_order_latency_ms)
+                return
+
         if not await self._pre_claim_checks(snap, action, loop, signal):
             return
 
         qty = self._compute_qty(snap, action, signal)  # after pre-claim: avoids aggregator side-effect on vetoed trades
+        if qty <= 0:
+            return
+
+        # L2 fill-quality gate: a thin book turns a MARKET order into real
+        # slippage. Shrink to what the visible book can absorb, or skip.
+        if getattr(settings, "use_l2_fill_gate", False):
+            qty = self._apply_l2_fill_gate(snap, action, qty)
+            if qty <= 0:
+                return
 
         _order_t0 = _time.monotonic()
         try:
@@ -1260,6 +1342,15 @@ class BaseAgent(ABC):
             return
 
         latency_ms = (_time.monotonic() - _order_t0) * 1000
+        self._last_order_latency_ms = latency_ms
+        if getattr(settings, "use_latency_guard", False):
+            budget = float(getattr(settings, "max_order_latency_ms", 1500.0))
+            if latency_ms > budget:
+                cooldown = float(getattr(settings, "latency_cooldown_sec", 30.0))
+                self._latency_cooldown_until = _time.time() + cooldown
+                logger.warning(
+                    "[{}] order latency {:.0f}ms > budget {:.0f}ms — pausing new "
+                    "entries for {:.0f}s", self.name, latency_ms, budget, cooldown)
         logger.info("[{}] order latency: {:.0f}ms | entry={} sl={}", self.name, latency_ms, order_id, sl_order_id)
         logger.debug("[{}] _try_enter total: {:.0f}ms", self.name, (_time.monotonic() - _t0) * 1000)
         await self._register_position(snap, action, signal, qty, order_id, sl_order_id, size_factor, latency_ms)
@@ -1343,6 +1434,17 @@ class BaseAgent(ABC):
                         f"Orphan SL-M {_sl_oid} live after strategy exit "
                         f"for {sym} ({self.name}) — cancel failed")
             trailing_sl_engine.deregister(_entry_oid if _entry_oid is not None else oid)
+
+            # Attribute outcome to the pattern decay monitor.
+            try:
+                from pattern_monitor import pattern_monitor as _pm
+                _ep = pos.get("average_price") or snap.tick.ltp
+                _denom = _ep * qty
+                if _denom:
+                    _pm.record(self.name, (_sl_entry or {}).get("pattern", ""),
+                               pnl / _denom * 100.0)
+            except Exception:
+                pass
 
             # Persist to SQLite (Phase 3) — non-blocking async variant
             try:

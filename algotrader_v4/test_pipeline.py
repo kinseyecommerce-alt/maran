@@ -4470,6 +4470,286 @@ run("settings + startup wiring present",             t_recon_settings_and_wiring
 
 
 # ══════════════════════════════════════════════════════════════════════════
+# 31. EXECUTION & EDGE GUARDS (pattern decay, L2 fill, disclosed qty, latency)
+# ══════════════════════════════════════════════════════════════════════════
+section("31. EXECUTION & EDGE GUARDS")
+
+# ── Pattern decay monitor ─────────────────────────────────────────────────
+def t_pattern_enabled_by_default():
+    from pattern_monitor import PatternMonitor
+    pm = PatternMonitor()
+    assert pm.is_enabled("intraday", "EMA9X") is True
+    assert pm.is_enabled("intraday", "") is True   # blank pattern always passes
+
+def t_pattern_disables_on_decay():
+    from pattern_monitor import PatternMonitor
+    from config import settings as _s
+    pm = PatternMonitor()
+    n = int(getattr(_s, "pattern_min_trades", 12))
+    # Feed a clearly losing record: negative mean AND negative Sharpe
+    for _ in range(n + 2):
+        pm.record("intraday", "BADPAT", -1.0)
+    assert pm.is_enabled("intraday", "BADPAT") is False, "losing pattern must be muted"
+
+def t_pattern_winner_stays_enabled():
+    from pattern_monitor import PatternMonitor
+    from config import settings as _s
+    pm = PatternMonitor()
+    n = int(getattr(_s, "pattern_min_trades", 12))
+    for i in range(n + 2):
+        pm.record("intraday", "GOODPAT", 1.5 if i % 4 else -0.5)  # net positive
+    assert pm.is_enabled("intraday", "GOODPAT") is True, "profitable pattern must stay live"
+
+def t_pattern_min_sample_respected():
+    from pattern_monitor import PatternMonitor
+    pm = PatternMonitor()
+    for _ in range(3):       # below min_trades — must not mute on tiny sample
+        pm.record("intraday", "FEWPAT", -5.0)
+    assert pm.is_enabled("intraday", "FEWPAT") is True
+
+def t_pattern_reset_reenables():
+    from pattern_monitor import PatternMonitor
+    from config import settings as _s
+    pm = PatternMonitor()
+    n = int(getattr(_s, "pattern_min_trades", 12))
+    for _ in range(n + 2):
+        pm.record("intraday", "RSTPAT", -2.0)
+    assert pm.is_enabled("intraday", "RSTPAT") is False
+    pm.reset_daily()
+    assert pm.is_enabled("intraday", "RSTPAT") is True, "daily reset must un-mute"
+
+def t_pattern_manual_enable():
+    from pattern_monitor import PatternMonitor
+    from config import settings as _s
+    pm = PatternMonitor()
+    n = int(getattr(_s, "pattern_min_trades", 12))
+    for _ in range(n + 2):
+        pm.record("intraday", "MANPAT", -1.0)
+    assert pm.enable("intraday", "MANPAT") is True
+    assert pm.is_enabled("intraday", "MANPAT") is True
+
+def t_pattern_flag_off_never_mutes():
+    from pattern_monitor import PatternMonitor
+    from config import settings as _s
+    pm = PatternMonitor()
+    old = _s.use_pattern_monitor
+    _s.use_pattern_monitor = False
+    try:
+        for _ in range(50):
+            pm.record("intraday", "OFFPAT", -3.0)
+        assert pm.is_enabled("intraday", "OFFPAT") is True
+    finally:
+        _s.use_pattern_monitor = old
+
+def t_pattern_status_shape():
+    from pattern_monitor import PatternMonitor
+    pm = PatternMonitor()
+    pm.record("intraday", "SHPAT", 1.0)
+    st = pm.stats()
+    assert "tracked" in st and "disabled" in st and "patterns" in st
+    assert "intraday::SHPAT" in st["patterns"]
+
+def t_pattern_wired_into_base_agent():
+    import inspect
+    from agents import base_agent as _ba
+    src = inspect.getsource(_ba)
+    assert "pattern_monitor" in src and "is_enabled" in src, "firing gate must call monitor"
+    assert "_pm.record(" in src, "exits must record outcomes"
+
+# ── L2 fill model ─────────────────────────────────────────────────────────
+def t_l2_empty_depth_neutral():
+    from l2_fill_model import estimate_fill
+    est = estimate_fill("BUY", 100, [], [], 100.0)
+    assert est.fill_prob == 1.0 and est.levels_used == 0, "missing depth must not block"
+
+def t_l2_deep_book_full_fill():
+    from l2_fill_model import estimate_fill
+    ask = [(100.1, 500), (100.2, 500)]
+    est = estimate_fill("BUY", 200, [], ask, 100.0)
+    assert est.fill_prob == 1.0 and est.levels_used == 1, f"deep book full fill, got {est}"
+
+def t_l2_thin_book_partial():
+    from l2_fill_model import estimate_fill
+    ask = [(100.1, 30), (100.5, 20)]   # only 50 available vs 200 wanted
+    est = estimate_fill("BUY", 200, [], ask, 100.0)
+    assert est.fill_prob == 0.25, f"50/200 = 0.25 fill, got {est.fill_prob}"
+    assert est.slippage_bps > 0
+
+def t_l2_sell_uses_bid_side():
+    from l2_fill_model import estimate_fill
+    bid = [(99.9, 40)]
+    est = estimate_fill("SELL", 100, bid, [], 100.0)
+    assert est.fill_prob == 0.4, f"sell consumes bids, got {est.fill_prob}"
+
+def t_l2_gate_acceptable_passes():
+    from l2_fill_model import is_book_acceptable
+    ask = [(100.05, 1000)]
+    ok, est = is_book_acceptable("BUY", 100, [], ask, 100.0, 0.5, 25.0)
+    assert ok is True
+
+def t_l2_gate_thin_blocks():
+    from l2_fill_model import is_book_acceptable
+    ask = [(100.1, 10)]
+    ok, est = is_book_acceptable("BUY", 100, [], ask, 100.0, 0.5, 25.0)
+    assert ok is False and est.fill_prob < 0.5
+
+def t_l2_dict_depth_supported():
+    from l2_fill_model import estimate_fill
+    ask = [{"price": 100.1, "quantity": 100}]
+    est = estimate_fill("BUY", 100, [], ask, 100.0)
+    assert est.fill_prob == 1.0
+
+def t_l2_wired_into_base_agent():
+    import inspect
+    from agents import base_agent as _ba
+    src = inspect.getsource(_ba)
+    assert "_apply_l2_fill_gate" in src and "use_l2_fill_gate" in src
+
+# ── Disclosed quantity (iceberg-lite) ─────────────────────────────────────
+def t_disclosed_off_by_default():
+    from kite_client import kite_client as kc
+    from config import settings as _s
+    old = _s.use_disclosed_qty
+    _s.use_disclosed_qty = False
+    try:
+        d = kc._resolve_disclosed_qty("NSE", "MARKET", 1000, 1000.0, 0)
+        assert d == 0, "disabled flag → no disclosed qty"
+    finally:
+        _s.use_disclosed_qty = old
+
+def t_disclosed_large_equity_order():
+    from kite_client import kite_client as kc
+    from config import settings as _s
+    old = _s.use_disclosed_qty
+    _s.use_disclosed_qty = True
+    try:
+        # 1000 @ ₹1000 = ₹10L > 5L threshold → disclose ~20%
+        d = kc._resolve_disclosed_qty("NSE", "LIMIT", 1000, 1000.0, 0)
+        assert 0 < d < 1000, f"large order must disclose a slice, got {d}"
+        assert d >= 100, "must respect NSE 10% floor"
+    finally:
+        _s.use_disclosed_qty = old
+
+def t_disclosed_small_order_untouched():
+    from kite_client import kite_client as kc
+    from config import settings as _s
+    old = _s.use_disclosed_qty
+    _s.use_disclosed_qty = True
+    try:
+        d = kc._resolve_disclosed_qty("NSE", "MARKET", 10, 100.0, 0)  # ₹1000 < threshold
+        assert d == 0, "small order needs no disclosure"
+    finally:
+        _s.use_disclosed_qty = old
+
+def t_disclosed_explicit_value_wins():
+    from kite_client import kite_client as kc
+    d = kc._resolve_disclosed_qty("NSE", "MARKET", 1000, 1000.0, 150)
+    assert d == 150, "explicit caller value must be honored"
+
+def t_disclosed_fno_excluded():
+    from kite_client import kite_client as kc
+    from config import settings as _s
+    old = _s.use_disclosed_qty
+    _s.use_disclosed_qty = True
+    try:
+        d = kc._resolve_disclosed_qty("NFO", "MARKET", 1000, 1000.0, 0)
+        assert d == 0, "disclosed qty is equity-only"
+    finally:
+        _s.use_disclosed_qty = old
+
+def t_disclosed_recorded_in_paper():
+    from kite_client import kite_client as kc
+    oid = kc.place_order(tradingsymbol="DISCTEST", exchange="NSE",
+                         transaction_type="BUY", quantity=10, order_type="MARKET",
+                         disclosed_quantity=5)
+    rec = kc._paper_orders.get(oid)
+    assert rec is not None and rec.get("disclosed_quantity") == 5
+
+# ── Latency guard ─────────────────────────────────────────────────────────
+def t_latency_state_initialised():
+    from agents.strategy_agents import ALL_AGENTS
+    a = next(iter(ALL_AGENTS.values()))
+    assert hasattr(a, "_latency_cooldown_until")
+    assert hasattr(a, "_last_order_latency_ms")
+
+def t_latency_cooldown_blocks_entry():
+    import asyncio, time as _t
+    from agents.strategy_agents import ALL_AGENTS
+    from config import settings as _s
+    a = next(iter(ALL_AGENTS.values()))
+    old = _s.use_latency_guard
+    _s.use_latency_guard = True
+    a._latency_cooldown_until = _t.time() + 60
+    try:
+        class _Tick:
+            ltp = 100.0; bid_depth = []; ask_depth = []
+        class _Snap:
+            symbol = "LATSYM"; tick = _Tick()
+        # _try_enter must early-return during cooldown without placing anything.
+        ran = asyncio.run(
+            a._try_enter(_Snap(), "BUY", {"pattern": "X", "score": 5}))
+        assert ran is None
+    finally:
+        _s.use_latency_guard = old
+        a._latency_cooldown_until = 0.0
+
+def t_latency_wired():
+    import inspect
+    from agents import base_agent as _ba
+    src = inspect.getsource(_ba)
+    assert "use_latency_guard" in src and "_latency_cooldown_until" in src
+    assert "max_order_latency_ms" in src
+
+def t_exec_guards_settings_present():
+    from config import settings as _s
+    for f in ("use_pattern_monitor", "pattern_window", "pattern_min_trades",
+              "use_l2_fill_gate", "l2_min_fill_prob", "l2_max_slippage_bps",
+              "use_disclosed_qty", "disclosed_qty_pct",
+              "use_latency_guard", "max_order_latency_ms"):
+        assert hasattr(_s, f), f"missing setting {f}"
+
+def t_patterns_status_endpoint():
+    import inspect, main as _m
+    src = inspect.getsource(_m)
+    assert "/patterns/status" in src
+
+def t_pattern_reset_in_daily():
+    import inspect, master_agent_v5 as _ma
+    src = inspect.getsource(_ma)
+    assert "pattern_monitor" in src and "reset_daily" in src
+
+run("pattern: enabled by default",                   t_pattern_enabled_by_default)
+run("pattern: disables on decayed edge",             t_pattern_disables_on_decay)
+run("pattern: winner stays enabled",                 t_pattern_winner_stays_enabled)
+run("pattern: respects min sample",                  t_pattern_min_sample_respected)
+run("pattern: daily reset re-enables",               t_pattern_reset_reenables)
+run("pattern: manual enable works",                  t_pattern_manual_enable)
+run("pattern: flag off never mutes",                 t_pattern_flag_off_never_mutes)
+run("pattern: status shape",                         t_pattern_status_shape)
+run("pattern: wired into base_agent",                t_pattern_wired_into_base_agent)
+run("L2: empty depth is neutral",                    t_l2_empty_depth_neutral)
+run("L2: deep book → full fill",                     t_l2_deep_book_full_fill)
+run("L2: thin book → partial fill",                  t_l2_thin_book_partial)
+run("L2: SELL consumes bid side",                    t_l2_sell_uses_bid_side)
+run("L2: gate passes on deep book",                  t_l2_gate_acceptable_passes)
+run("L2: gate blocks on thin book",                  t_l2_gate_thin_blocks)
+run("L2: dict-shaped depth supported",               t_l2_dict_depth_supported)
+run("L2: wired into base_agent",                     t_l2_wired_into_base_agent)
+run("disclosed: off by default",                     t_disclosed_off_by_default)
+run("disclosed: large equity order sliced",          t_disclosed_large_equity_order)
+run("disclosed: small order untouched",              t_disclosed_small_order_untouched)
+run("disclosed: explicit value wins",                t_disclosed_explicit_value_wins)
+run("disclosed: F&O excluded",                       t_disclosed_fno_excluded)
+run("disclosed: recorded in paper order",            t_disclosed_recorded_in_paper)
+run("latency: state initialised on agents",          t_latency_state_initialised)
+run("latency: cooldown blocks new entry",            t_latency_cooldown_blocks_entry)
+run("latency: wired into base_agent",                t_latency_wired)
+run("exec guards: all settings present",             t_exec_guards_settings_present)
+run("patterns/status endpoint present",              t_patterns_status_endpoint)
+run("pattern reset wired into daily reset",          t_pattern_reset_in_daily)
+
+
+# ══════════════════════════════════════════════════════════════════════════
 # FINAL SUMMARY
 # ══════════════════════════════════════════════════════════════════════════
 failed = summary()
