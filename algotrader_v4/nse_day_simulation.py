@@ -419,17 +419,19 @@ AGENT_CLASSES = [
 ]
 
 
-def run_simulation(seed: int = 2026) -> dict[str, dict[str, AgentTracker]]:
-    """Returns {tf: {agent_name: AgentTracker}}"""
+def run_simulation(seed: int = 2026, verbose: bool = True) -> tuple[dict, list]:
+    """Returns (trackers, signals_log) where trackers = {tf: {agent_name: AgentTracker}}"""
     global _sim_bar_time
 
-    print(f"\n{B}{'═'*72}{X}")
-    print(f"{B}  NSE Day Simulation — {date.today().strftime('%A %d %b %Y')}{X}")
-    print(f"  Symbols: {len(SYMBOLS)}  |  Session: 09:15 – 15:30 IST  |  Timeframes: 1m / 5m / 15m")
-    print(f"{B}{'═'*72}{X}\n")
+    if verbose:
+        print(f"\n{B}{'═'*72}{X}")
+        print(f"{B}  NSE Day Simulation — {date.today().strftime('%A %d %b %Y')}{X}")
+        print(f"  Symbols: {len(SYMBOLS)}  |  Session: 09:15 – 15:30 IST  |  Timeframes: 1m / 5m / 15m")
+        print(f"{B}{'═'*72}{X}\n")
 
     # Build session data for all symbols
-    print(f"  {D}Building intraday candle history …{X}", end="", flush=True)
+    if verbose:
+        print(f"  {D}Building intraday candle history …{X}", end="", flush=True)
     sessions: dict[str, dict[str, pd.DataFrame]] = {}
     for sym, meta in SYMBOLS.items():
         df_1m = build_1min_session(sym, meta, seed=seed)
@@ -438,7 +440,8 @@ def run_simulation(seed: int = 2026) -> dict[str, dict[str, AgentTracker]]:
             "5m":   resample_ohlcv(df_1m, "5min"),
             "15m":  resample_ohlcv(df_1m, "15min"),
         }
-    print(f"  {G}done{X}\n")
+    if verbose:
+        print(f"  {G}done{X}\n")
 
     # Trackers: {tf: {agent_name: AgentTracker}}
     trackers: dict[str, dict[str, AgentTracker]] = {}
@@ -450,7 +453,8 @@ def run_simulation(seed: int = 2026) -> dict[str, dict[str, AgentTracker]]:
 
     # Simulate each timeframe independently
     for tf_label, tf_freq, tf_bar_sec in TIMEFRAMES:
-        print(f"  {C}{B}── {tf_label.upper()} TIMEFRAME ──────────────────────────────{X}")
+        if verbose:
+            print(f"  {C}{B}── {tf_label.upper()} TIMEFRAME ──────────────────────────────{X}")
 
         # Build agents fresh per timeframe (clean state)
         agents = [(name, cls()) for name, cls in AGENT_CLASSES]
@@ -516,12 +520,13 @@ def run_simulation(seed: int = 2026) -> dict[str, dict[str, AgentTracker]]:
                 tracker_set[agent_name].squareoff_all(final_px, sq_ts)
 
         # Print per-TF signal count
-        total_sigs = sum(len(t.trades) for t in trackers[tf_label].values())
-        print(f"    Signals fired this TF: {total_sigs}")
-        for agent_name, _ in AGENT_CLASSES:
-            n = len(trackers[tf_label][agent_name].trades)
-            print(f"      {agent_name:10s}: {n} trades")
-        print()
+        if verbose:
+            total_sigs = sum(len(t.trades) for t in trackers[tf_label].values())
+            print(f"    Signals fired this TF: {total_sigs}")
+            for agent_name, _ in AGENT_CLASSES:
+                n = len(trackers[tf_label][agent_name].trades)
+                print(f"      {agent_name:10s}: {n} trades")
+            print()
 
     return trackers, all_signals_log
 
@@ -660,8 +665,115 @@ def print_report(trackers: dict, all_signals_log: list):
     print(f"{B}{'═'*72}{X}\n")
 
 
+def run_multi_day(n_days: int, base_seed: int = 2026) -> None:
+    """Run N independent simulated trading days and print a consolidated report."""
+    import contextlib, io
+    AGENTS = [name for name, _ in AGENT_CLASSES]
+    # per-agent per-day P&L accumulator
+    daily_pnl: dict[str, list[float]] = {a: [] for a in AGENTS}
+    # equity curve (cumulative) per agent
+    equity: dict[str, float] = {a: 0.0 for a in AGENTS}
+
+    # ── Header ────────────────────────────────────────────────────────────────
+    print(f"\n{B}{'═'*72}{X}")
+    print(f"{B}  NSE Multi-Day Simulation — {n_days} trading days{X}")
+    print(f"  Seeds: {base_seed} … {base_seed + n_days - 1}  |  1M timeframe primary")
+    print(f"{B}{'═'*72}{X}")
+
+    col_w = 10
+    header = f"  {'Day':>4}  " + "".join(f"{a[:col_w]:>{col_w+2}}" for a in AGENTS)
+    print(f"\n{D}{header}{X}")
+    print(f"  {D}{'─'*72}{X}")
+
+    for day in range(1, n_days + 1):
+        seed = base_seed + day - 1
+        print(f"  Day {day:>3}  ", end="", flush=True)
+
+        with contextlib.redirect_stderr(io.StringIO()):
+            trackers, _ = run_simulation(seed=seed, verbose=False)
+
+        for agent_name in AGENTS:
+            # Sum P&L across all timeframes for the day
+            day_pnl = sum(
+                trackers[tf][agent_name].metrics()["total_pnl_rs"]
+                for tf, _, _ in TIMEFRAMES
+            )
+            daily_pnl[agent_name].append(day_pnl)
+            equity[agent_name] += day_pnl
+            col = G if day_pnl >= 0 else R
+            print(f"{col}{day_pnl:>+10,.0f}{X}  ", end="")
+        print()
+
+    # ── Final summary ─────────────────────────────────────────────────────────
+    print(f"\n{B}{'═'*72}{X}")
+    print(f"{B}  MULTI-DAY SUMMARY ({n_days} days){X}")
+    print(f"{'═'*72}{X}\n")
+    print(f"  {'Agent':12s} {'TotP&L':>10} {'AvgDay':>10} {'BestDay':>10} {'WorstDay':>10} {'WinDays':>8} {'MaxDD':>8}")
+    print(f"  {D}{'─'*70}{X}")
+
+    leaderboard = []
+    for agent_name in AGENTS:
+        pnls = daily_pnl[agent_name]
+        total  = sum(pnls)
+        avg    = total / n_days
+        best   = max(pnls)
+        worst  = min(pnls)
+        wins   = sum(1 for p in pnls if p > 0)
+        # running drawdown
+        peak = 0.0; eq = 0.0; max_dd = 0.0
+        for p in pnls:
+            eq += p
+            peak = max(peak, eq)
+            max_dd = max(max_dd, peak - eq)
+        leaderboard.append((agent_name, total, avg, best, worst, wins, max_dd))
+
+    leaderboard.sort(key=lambda x: x[1], reverse=True)
+    medals = ["🥇", "🥈", "🥉"] + [f" {i}." for i in range(4, len(AGENTS) + 1)]
+    for i, (name, total, avg, best, worst, wins, max_dd) in enumerate(leaderboard):
+        tc = G if total >= 0 else R
+        print(f"  {medals[i]} {B}{name:10s}{X}"
+              f"  {tc}₹{total:>+9,.0f}{X}"
+              f"  {tc}₹{avg:>+8,.0f}{X}"
+              f"  {G}₹{best:>+8,.0f}{X}"
+              f"  {R}₹{worst:>+8,.0f}{X}"
+              f"  {wins:>4}/{n_days}"
+              f"  ₹{max_dd:>7,.0f}")
+
+    # ── ASCII equity curve (top 3 agents, 1M-equivalent) ─────────────────────
+    print(f"\n  {B}── Equity Curve (cumulative P&L across days) ──{X}")
+    CHART_W = 50
+    top3 = [r[0] for r in leaderboard[:3]]
+    cols_map = {top3[0]: G, top3[1]: C, top3[2]: Y} if len(top3) >= 3 else {}
+    for agent_name in top3:
+        pnls  = daily_pnl[agent_name]
+        cum   = [sum(pnls[:i+1]) for i in range(n_days)]
+        lo, hi = min(cum), max(cum)
+        span  = hi - lo if hi != lo else 1
+        bar_len = lambda v: int((v - lo) / span * CHART_W)
+        col   = cols_map.get(agent_name, G)
+        row   = "".join("█" if bar_len(v) > bar_len(cum[max(0,i-1)]) else
+                        "▓" if bar_len(v) == bar_len(cum[max(0,i-1)]) else "░"
+                        for i, v in enumerate(cum))
+        fin_col = G if cum[-1] >= 0 else R
+        print(f"  {col}{B}{agent_name:10s}{X} {col}{row[:CHART_W]}{X} {fin_col}₹{cum[-1]:>+,.0f}{X}")
+
+    print(f"\n{B}{'═'*72}{X}")
+    print(f"{B}  DONE{X}  |  {n_days} days  |  "
+          f"{n_days * len(TIMEFRAMES) * len(SYMBOLS)} simulation-symbol-timeframes")
+    print(f"{B}{'═'*72}{X}\n")
+
+
 if __name__ == "__main__":
+    import argparse
+    parser = argparse.ArgumentParser(description="NSE Intraday Simulation")
+    parser.add_argument("--days",  type=int, default=1,    help="Number of simulated trading days (default: 1)")
+    parser.add_argument("--seed",  type=int, default=2026, help="Base random seed (default: 2026)")
+    args = parser.parse_args()
+
     t0 = _time.time()
-    trackers, signals_log = run_simulation(seed=2026)
-    print_report(trackers, signals_log)
+    if args.days == 1:
+        trackers, signals_log = run_simulation(seed=args.seed, verbose=True)
+        print_report(trackers, signals_log)
+    else:
+        run_multi_day(n_days=args.days, base_seed=args.seed)
     print(f"  {D}Elapsed: {_time.time()-t0:.1f}s{X}\n")
