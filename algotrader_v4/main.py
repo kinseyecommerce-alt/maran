@@ -1484,6 +1484,40 @@ def patch_pattern_toggle(req: PatternToggleRequest):
     return {"agent": req.agent, "pattern": req.pattern, "enabled": req.enabled}
 
 
+class TradingModeRequest(BaseModel):
+    mode: str          # "PAPER" or "LIVE"
+    confirm: bool = False
+
+
+@app.post("/settings/trading-mode", tags=["Settings"])
+def set_trading_mode(req: TradingModeRequest):
+    """Switch trading mode between PAPER and LIVE at runtime.
+    Requires confirm=true when switching to LIVE as a safety gate.
+    The change is in-memory only; update .env to make it permanent.
+    """
+    from fastapi import HTTPException
+    mode = req.mode.upper()
+    if mode not in ("PAPER", "LIVE"):
+        raise HTTPException(status_code=400, detail="mode must be PAPER or LIVE")
+    if mode == "LIVE" and not req.confirm:
+        raise HTTPException(status_code=400, detail="confirm=true required to switch to LIVE mode")
+    prev = settings.trading_mode
+    settings.trading_mode = mode
+    logger.warning("Trading mode changed: {} → {} (in-memory only; update .env to persist)", prev, mode)
+    return {
+        "status": "ok",
+        "trading_mode": mode,
+        "previous": prev,
+        "note": "Change is in-memory. Update TRADING_MODE in .env and restart for full effect (tick feed switch).",
+    }
+
+
+@app.get("/settings/trading-mode", tags=["Settings"])
+def get_trading_mode():
+    """Return current trading mode."""
+    return {"trading_mode": settings.trading_mode}
+
+
 # ── WebSocket ────────────────────────────────────────────────────────────────────
 # Auth via Authorization header (preferred) or legacy ?token= query param.
 # Header form keeps token out of server logs, browser history, and proxy logs.

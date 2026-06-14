@@ -1155,6 +1155,27 @@
 <!-- ── Toast container ──────────────────────────────────────── -->
 <div id="toast-container"></div>
 
+<!-- ── Trading Mode Switch Modal ─────────────────────────────── -->
+<div class="overlay" id="mode-switch-overlay" style="display:none;z-index:10000"
+     onclick="if(event.target===this)closeModeToggle()">
+  <div class="dialog" style="max-width:420px">
+    <div class="dialog-title" id="mode-switch-title">Switch Trading Mode</div>
+    <div class="dialog-body" id="mode-switch-body"></div>
+    <div id="mode-switch-live-warning" style="display:none;background:#2d1a1a;border:1px solid #c0392b;
+         border-radius:6px;padding:10px 14px;margin-bottom:16px;font-size:12.5px;color:#e74c3c;line-height:1.6">
+      ⚠️ <strong>REAL MONEY WARNING</strong><br>
+      Switching to LIVE mode will place <strong>real orders on NSE/BSE</strong> using your Zerodha account.<br>
+      Make sure your Kite credentials and access token are valid before proceeding.
+    </div>
+    <div class="dialog-btns">
+      <button class="btn btn-ghost" onclick="closeModeToggle()">Cancel</button>
+      <button class="btn" id="mode-switch-confirm-btn"
+              style="background:var(--accent);color:#fff"
+              onclick="confirmModeSwitch()">Switch to PAPER</button>
+    </div>
+  </div>
+</div>
+
 <!-- ── BLACK SWAN banner (hidden by default, shown during BLACK_SWAN regime) ── -->
 <div id="black-swan-banner" style="display:none;position:fixed;top:0;left:0;right:0;z-index:9999;
   padding:10px 16px;font-weight:700;font-size:0.85rem;letter-spacing:0.04em;text-align:center;
@@ -2456,8 +2477,13 @@
           <div class="settings-title"><i data-lucide="terminal"></i> Admin</div>
           <div class="kite-info-row">
             <span class="kite-info-label">Trading Mode</span>
-            <span class="kite-info-val">
+            <span class="kite-info-val" style="display:flex;align-items:center;gap:10px">
               <span class="mode-badge" id="settings-mode-badge">PAPER</span>
+              <button id="mode-toggle-btn" onclick="openModeToggle()"
+                style="font-size:11px;padding:4px 10px;border-radius:5px;border:1px solid var(--border);
+                       background:var(--bg3);color:var(--fg2);cursor:pointer">
+                Switch Mode
+              </button>
             </span>
           </div>
           <div class="kite-info-row">
@@ -3894,6 +3920,52 @@ function renderMode(mode) {
       el.className = `mode-badge ${modeStr.toLowerCase()}`;
     }
   });
+}
+
+function openModeToggle() {
+  const current = (state.mode || 'PAPER').toUpperCase();
+  const target  = current === 'PAPER' ? 'LIVE' : 'PAPER';
+  const isToLive = target === 'LIVE';
+  const body  = document.getElementById('mode-switch-body');
+  const warn  = document.getElementById('mode-switch-live-warning');
+  const btn   = document.getElementById('mode-switch-confirm-btn');
+  const title = document.getElementById('mode-switch-title');
+  title.textContent = `Switch to ${target} Mode`;
+  body.textContent  = `Current mode: ${current}. Switch to ${target} mode?`;
+  warn.style.display = isToLive ? 'block' : 'none';
+  btn.textContent   = `Switch to ${target}`;
+  btn.style.background = isToLive ? '#c0392b' : 'var(--accent)';
+  btn._target = target;
+  const ol = document.getElementById('mode-switch-overlay');
+  ol.style.display = 'flex';
+}
+
+function closeModeToggle() {
+  document.getElementById('mode-switch-overlay').style.display = 'none';
+}
+
+async function confirmModeSwitch() {
+  const btn    = document.getElementById('mode-switch-confirm-btn');
+  const target = btn._target;
+  btn.disabled = true;
+  btn.textContent = 'Switching…';
+  try {
+    const res = await fetch('/settings/trading-mode', {
+      method: 'POST',
+      headers: {'Content-Type':'application/json'},
+      body: JSON.stringify({ mode: target, confirm: true }),
+    });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.detail || 'Failed');
+    renderMode(data.trading_mode);
+    closeModeToggle();
+    showToast(`Switched to ${data.trading_mode} mode`, 'success');
+  } catch(e) {
+    showToast(`Mode switch failed: ${e.message}`, 'error');
+  } finally {
+    btn.disabled = false;
+    btn.textContent = `Switch to ${target}`;
+  }
 }
 
 /* ═══════════════════════════════════════════════════════════════
