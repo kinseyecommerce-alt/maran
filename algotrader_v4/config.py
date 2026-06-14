@@ -76,6 +76,11 @@ class Settings(BaseSettings):
     pattern_min_trades: int = Field(default=12, gt=1)    # min sample before muting
     pattern_disable_sharpe: float = 0.0                  # mute when rolling Sharpe < this AND mean < 0
 
+    # News / corporate-action gate
+    use_news_gate: bool = False             # block trades on negative news (opt-in)
+    news_block_hours: int = 4              # how long to hold a news block
+    news_poll_interval_sec: int = 300      # how often to refresh NSE announcements
+
     # L2 fill-quality gate — size/skip on thin order books (LIVE only; needs depth)
     use_l2_fill_gate: bool = False                       # opt-in: needs L2 depth feed
     l2_min_fill_prob: float = Field(default=0.5, ge=0, le=1)   # min fraction of qty the book must absorb
@@ -243,12 +248,21 @@ class Settings(BaseSettings):
     max_portfolio_beta: float = 1.3   # block BUY if portfolio beta would exceed this
     use_ml_filter: bool = False       # GBM win-probability gate (requires trained model)
     ml_filter_min_prob: float = 0.45  # minimum predicted win probability to enter
+    use_ml_signals: bool = False      # sklearn signal scorer gate
+    ml_signal_min_confidence: float = 0.5  # minimum ML confidence to pass
+
+    # Portfolio VaR / CVaR gate
+    use_portfolio_var: bool = False          # block new entries that breach CVaR limit
+    portfolio_var_limit_pct: float = 2.0    # max allowed portfolio CVaR as % of total_capital
 
     # TWAP order splitting (large-lot market impact reduction)
     use_twap: bool = False            # split large orders into equal slices
     twap_slices: int = 4              # number of child orders per TWAP execution
     twap_interval_sec: int = 15       # seconds between each slice
     twap_min_qty: int = 100           # only TWAP if qty >= this (don't slice small retail lots)
+    # Aliases accepted by twap_executor (mirrors twap_min_qty / twap_interval_sec * twap_slices)
+    twap_threshold_qty: int = 0       # alias for twap_min_qty (0 = use twap_min_qty)
+    twap_duration_sec: int = 0        # alias for twap_interval_sec * twap_slices (0 = compute)
 
     # Real-time tick feed
     use_kite_websocket: bool = True   # use KiteConnect WebSocket for ticks in LIVE mode

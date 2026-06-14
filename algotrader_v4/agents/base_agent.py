@@ -960,6 +960,28 @@ class BaseAgent(ABC):
                 return False
         except Exception:
             pass
+
+        try:
+            from news_gate import news_gate as _ng
+            blocked, reason = _ng.is_blocked(sym)
+            if blocked:
+                logger.debug("[{}] {} NEWS BLOCK: {}", self.name, sym, reason)
+                return False
+        except Exception:
+            pass
+
+        try:
+            from ml_signal_scorer import ml_signal_scorer as _mls
+            action_hint = signal.get("action", "BUY")
+            ml_score = _mls.score(snap, action_hint)
+            min_conf = getattr(settings, "ml_signal_min_confidence", 0.5)
+            if getattr(settings, "use_ml_signals", False) and ml_score < min_conf:
+                logger.debug("[{}] {} ML score {:.2f} < {:.2f} — skipping entry",
+                             self.name, sym, ml_score, min_conf)
+                return False
+        except Exception:
+            pass
+
         return True
 
     async def _place_orders(
@@ -1033,6 +1055,19 @@ class BaseAgent(ABC):
         if catalyst > 0.3:
             qty = min(int(qty * 1.2), int(settings.max_position_size // ltp))
             logger.debug("[{}] {} positive catalyst {:.2f} → qty bumped to {}", self.name, sym, catalyst, qty)
+
+        try:
+            from portfolio_var import portfolio_var as _pvar
+            notional = qty * ltp
+            var_ok, var_reason = _pvar.check_pre_trade(sym, notional)
+            if not var_ok:
+                logger.info("[{}] {} portfolio VaR BLOCK: {}", self.name, sym, var_reason)
+                order_guard.release_claim(sym, self.name, action)
+                raise RuntimeError("portfolio_var_breach")
+        except RuntimeError:
+            raise
+        except Exception:
+            pass
 
         allowed, _ = risk_manager.check_before_order(sym, qty, ltp, action)
         if not allowed:

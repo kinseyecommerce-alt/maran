@@ -4980,6 +4980,244 @@ run("brain: all settings present",                   t_brain_settings_present)
 
 
 # ══════════════════════════════════════════════════════════════════════════
+# Section 33 — Gap-Fill: Portfolio VaR, ML Signal, TWAP, News Gate
+# ══════════════════════════════════════════════════════════════════════════
+
+def t_portfolio_var_import():
+    from portfolio_var import portfolio_var
+    assert callable(portfolio_var.check_pre_trade)
+    assert callable(portfolio_var.compute)
+    assert callable(portfolio_var.status)
+
+def t_portfolio_var_disabled_by_default():
+    from config import settings
+    from portfolio_var import portfolio_var
+    settings.use_portfolio_var = False
+    ok, reason = portfolio_var.check_pre_trade("RELIANCE", 50000)
+    assert ok is True and reason == ""
+
+def t_portfolio_var_empty_positions_safe():
+    from config import settings
+    from portfolio_var import portfolio_var
+    settings.use_portfolio_var = True
+    result = portfolio_var.compute([])
+    assert result["n_positions"] == 0
+    assert result["cvar_99"] == 0.0
+    settings.use_portfolio_var = False
+
+def t_portfolio_var_status_shape():
+    from portfolio_var import portfolio_var
+    s = portfolio_var.status()
+    for k in ("var_95", "var_99", "cvar_99", "total_notional", "n_positions",
+              "var_limit_pct", "capital", "var_limit_inr", "use_portfolio_var"):
+        assert k in s, f"missing key {k}"
+
+def t_portfolio_var_settings_present():
+    from config import settings
+    assert hasattr(settings, "use_portfolio_var")
+    assert hasattr(settings, "portfolio_var_limit_pct")
+
+def t_ml_signal_import():
+    from ml_signal_scorer import ml_signal_scorer
+    assert callable(ml_signal_scorer.score)
+    assert callable(ml_signal_scorer.train)
+    assert callable(ml_signal_scorer.status)
+
+def t_ml_signal_returns_float():
+    from ml_signal_scorer import ml_signal_scorer
+
+    class FakeInd:
+        ema9=100; ema21=98; vwap=99; rsi_14=55; rsi_7=58; macd=0.5; macd_signal=0.3
+        macd_hist=0.2; bb_upper=105; bb_lower=95; bb_mid=100; atr_14=2.0
+        stoch_rsi_k=60; stoch_rsi_d=55; vwap_upper2=103; vwap_lower2=97
+
+    class FakeTick:
+        ltp=100.0; volume=10000
+
+    class FakeSnap:
+        symbol="RELIANCE"; indicators=FakeInd(); tick=FakeTick()
+
+    score = ml_signal_scorer.score(FakeSnap(), "BUY")
+    assert isinstance(score, float)
+    assert 0.0 <= score <= 1.0
+
+def t_ml_signal_disabled_passes_all():
+    from config import settings
+    from ml_signal_scorer import ml_signal_scorer
+
+    class FakeInd:
+        ema9=90; ema21=100; vwap=95; rsi_14=30; rsi_7=28; macd=-0.5; macd_signal=-0.2
+        macd_hist=-0.3; bb_upper=105; bb_lower=85; bb_mid=95; atr_14=3.0
+        stoch_rsi_k=20; stoch_rsi_d=22; vwap_upper2=98; vwap_lower2=88
+
+    class FakeTick:
+        ltp=90.0; volume=5000
+
+    class FakeSnap:
+        symbol="INFY"; indicators=FakeInd(); tick=FakeTick()
+
+    settings.use_ml_signals = False
+    score = ml_signal_scorer.score(FakeSnap(), "BUY")
+    assert score == 1.0  # gate bypassed
+
+def t_ml_signal_no_model_returns_neutral():
+    from config import settings
+    from ml_signal_scorer import ml_signal_scorer
+
+    class FakeInd:
+        ema9=100; ema21=99; vwap=100; rsi_14=50; rsi_7=50; macd=0; macd_signal=0
+        macd_hist=0; bb_upper=102; bb_lower=98; bb_mid=100; atr_14=1.0
+        stoch_rsi_k=50; stoch_rsi_d=50; vwap_upper2=101; vwap_lower2=99
+
+    class FakeTick:
+        ltp=100.0; volume=1000
+
+    class FakeSnap:
+        symbol="UNKNOWNSYMBOL_XYZ99"; indicators=FakeInd(); tick=FakeTick()
+
+    settings.use_ml_signals = True
+    score = ml_signal_scorer.score(FakeSnap(), "BUY")
+    assert score == 0.5  # neutral when no model
+    settings.use_ml_signals = False
+
+def t_ml_signal_status_shape():
+    from ml_signal_scorer import ml_signal_scorer
+    s = ml_signal_scorer.status()
+    for k in ("loaded_models", "use_ml_signals", "min_confidence"):
+        assert k in s, f"missing key {k}"
+
+def t_ml_signal_settings_present():
+    from config import settings
+    assert hasattr(settings, "use_ml_signals")
+    assert hasattr(settings, "ml_signal_min_confidence")
+
+def t_twap_import():
+    from twap_executor import twap_executor
+    assert callable(twap_executor.place_twap)
+    assert callable(twap_executor.place_vwap)
+    assert callable(twap_executor.status)
+
+def t_twap_paper_instant():
+    import asyncio
+    from config import settings
+    from twap_executor import twap_executor
+    settings.trading_mode = "PAPER"
+    settings.use_twap = True
+    settings.twap_threshold_qty = 10
+    settings.twap_slices = 3
+    settings.twap_duration_sec = 60
+
+    ids = asyncio.run(twap_executor.place_twap("RELIANCE", 30, "BUY", tag="test"))
+    assert len(ids) == 3
+    assert all(isinstance(i, str) for i in ids)
+
+def t_twap_below_threshold_single_order():
+    import asyncio
+    from config import settings
+    from twap_executor import twap_executor
+    settings.trading_mode = "PAPER"
+    settings.use_twap = True
+    settings.twap_threshold_qty = 500
+    settings.twap_slices = 5
+
+    ids = asyncio.run(twap_executor.place_twap("TCS", 50, "BUY", tag="test"))
+    assert len(ids) == 1  # below threshold → single order
+
+def t_twap_vwap_profile():
+    import asyncio
+    from config import settings
+    from twap_executor import twap_executor
+    settings.trading_mode = "PAPER"
+    settings.use_twap = True
+
+    ids = asyncio.run(twap_executor.place_vwap("INFY", 100, "BUY", volume_profile=[0.5, 0.3, 0.2]))
+    assert len(ids) == 3
+
+def t_twap_settings_present():
+    from config import settings
+    for f in ("use_twap", "twap_slices", "twap_interval_sec", "twap_min_qty"):
+        assert hasattr(settings, f), f"missing {f}"
+
+def t_news_gate_import():
+    from news_gate import news_gate
+    assert callable(news_gate.is_blocked)
+    assert callable(news_gate.block)
+    assert callable(news_gate.unblock)
+    assert callable(news_gate.status)
+
+def t_news_gate_manual_block_unblock():
+    from config import settings
+    from news_gate import news_gate
+    settings.use_news_gate = True
+    news_gate.block("RELIANCE", "test fraud probe", hours=1)
+    blocked, reason = news_gate.is_blocked("RELIANCE")
+    assert blocked is True
+    assert "fraud" in reason.lower() or "test" in reason.lower()
+    news_gate.unblock("RELIANCE")
+    blocked2, _ = news_gate.is_blocked("RELIANCE")
+    assert blocked2 is False
+
+def t_news_gate_disabled_passes_all():
+    from config import settings
+    from news_gate import news_gate
+    settings.use_news_gate = False
+    news_gate.block("TCS", "should be ignored", hours=24)
+    blocked, _ = news_gate.is_blocked("TCS")
+    assert blocked is False
+    news_gate.unblock("TCS")
+
+def t_news_gate_status_shape():
+    from news_gate import news_gate
+    s = news_gate.status()
+    for k in ("blocked", "last_poll", "use_news_gate"):
+        assert k in s, f"missing key {k}"
+
+def t_news_gate_settings_present():
+    from config import settings
+    for f in ("use_news_gate", "news_block_hours", "news_poll_interval_sec"):
+        assert hasattr(settings, f), f"missing {f}"
+
+def t_gap_rest_endpoints_present():
+    import main as _m
+    routes = {r.path for r in _m.app.routes}
+    for ep in ("/risk/var", "/news/gate", "/news/gate/refresh",
+               "/ml/signal/status", "/twap/status", "/twap/place"):
+        assert ep in routes, f"endpoint {ep} missing from main.py"
+
+def t_gap_base_agent_wired():
+    import inspect
+    import agents.base_agent as _ba
+    src = inspect.getsource(_ba)
+    assert "news_gate" in src, "news_gate not wired into base_agent"
+    assert "ml_signal_scorer" in src, "ml_signal_scorer not wired into base_agent"
+    assert "portfolio_var" in src, "portfolio_var not wired into base_agent"
+
+run("portfolio_var: module imports cleanly",          t_portfolio_var_import)
+run("portfolio_var: disabled by default",             t_portfolio_var_disabled_by_default)
+run("portfolio_var: empty positions safe",            t_portfolio_var_empty_positions_safe)
+run("portfolio_var: status has correct keys",         t_portfolio_var_status_shape)
+run("portfolio_var: settings present",                t_portfolio_var_settings_present)
+run("ml_signal: module imports cleanly",              t_ml_signal_import)
+run("ml_signal: score returns 0-1 float",             t_ml_signal_returns_float)
+run("ml_signal: disabled → score == 1.0",             t_ml_signal_disabled_passes_all)
+run("ml_signal: no model → neutral 0.5",              t_ml_signal_no_model_returns_neutral)
+run("ml_signal: status has correct keys",             t_ml_signal_status_shape)
+run("ml_signal: settings present",                    t_ml_signal_settings_present)
+run("twap: module imports cleanly",                   t_twap_import)
+run("twap: PAPER mode places all slices instantly",   t_twap_paper_instant)
+run("twap: below threshold → single order",           t_twap_below_threshold_single_order)
+run("twap: VWAP profile distributes correctly",       t_twap_vwap_profile)
+run("twap: settings present",                         t_twap_settings_present)
+run("news_gate: module imports cleanly",              t_news_gate_import)
+run("news_gate: manual block/unblock",                t_news_gate_manual_block_unblock)
+run("news_gate: disabled passes all",                 t_news_gate_disabled_passes_all)
+run("news_gate: status has correct keys",             t_news_gate_status_shape)
+run("news_gate: settings present",                    t_news_gate_settings_present)
+run("gap-5: REST endpoints in main.py",               t_gap_rest_endpoints_present)
+run("gap-5: base_agent wired to all 3 modules",       t_gap_base_agent_wired)
+
+
+# ══════════════════════════════════════════════════════════════════════════
 # FINAL SUMMARY
 # ══════════════════════════════════════════════════════════════════════════
 failed = summary()

@@ -2847,3 +2847,86 @@ if __name__ == "__main__":
 
     import uvicorn
     uvicorn.run("main:app", host=settings.host, port=settings.port, reload=False)
+
+
+# ── Gap-5 Intelligence Endpoints ──────────────────────────────────────────────
+
+@app.get("/risk/var", tags=["Risk"])
+async def get_portfolio_var():
+    """Real-time portfolio VaR and CVaR across all open positions."""
+    from portfolio_var import portfolio_var
+    return portfolio_var.status()
+
+
+@app.get("/news/gate", tags=["Risk"])
+async def get_news_gate():
+    """Current news gate block list and last poll time."""
+    from news_gate import news_gate
+    return news_gate.status()
+
+
+@app.post("/news/gate/block", tags=["Risk"])
+async def news_gate_block(symbol: str, reason: str = "manual", hours: float = None):
+    """Manually block a symbol from trading (news/event-driven risk)."""
+    from news_gate import news_gate
+    news_gate.block(symbol.upper(), reason, hours)
+    return {"blocked": symbol.upper(), "reason": reason}
+
+
+@app.delete("/news/gate/block/{symbol}", tags=["Risk"])
+async def news_gate_unblock(symbol: str):
+    """Remove manual news block for a symbol."""
+    from news_gate import news_gate
+    news_gate.unblock(symbol.upper())
+    return {"unblocked": symbol.upper()}
+
+
+@app.post("/news/gate/refresh", tags=["Risk"])
+async def news_gate_refresh():
+    """Poll NSE corporate announcements and update block list."""
+    from news_gate import news_gate
+    await news_gate.refresh()
+    return news_gate.status()
+
+
+@app.get("/ml/signal/status", tags=["Risk"])
+async def get_ml_signal_status():
+    """ML signal scorer status and loaded models."""
+    from ml_signal_scorer import ml_signal_scorer
+    return ml_signal_scorer.status()
+
+
+@app.post("/ml/signal/train/{symbol}", tags=["Risk"])
+async def train_ml_signal(symbol: str):
+    """Train or retrain the ML signal model for a symbol."""
+    from ml_signal_scorer import ml_signal_scorer
+    loop = asyncio.get_event_loop()
+    success = await loop.run_in_executor(None, lambda: ml_signal_scorer.train(symbol.upper()))
+    return {"symbol": symbol.upper(), "trained": success}
+
+
+@app.get("/twap/status", tags=["Orders"])
+async def get_twap_status():
+    """Active TWAP/VWAP order status."""
+    from twap_executor import twap_executor
+    return twap_executor.status()
+
+
+@app.post("/twap/place", tags=["Orders"])
+async def place_twap_order(
+    symbol: str,
+    qty: int,
+    direction: str,
+    exchange: str = "NSE",
+    product: str = "MIS",
+    duration_sec: float = None,
+    slices: int = None,
+):
+    """Manually place a TWAP order for a large lot. direction: BUY or SELL."""
+    from twap_executor import twap_executor
+    loop = asyncio.get_event_loop()
+    ids = await twap_executor.place_twap(
+        symbol.upper(), qty, direction.upper(), exchange, product,
+        tag="manual-twap", duration_sec=duration_sec, slices=slices, loop=loop,
+    )
+    return {"symbol": symbol.upper(), "order_ids": ids, "qty": qty}
