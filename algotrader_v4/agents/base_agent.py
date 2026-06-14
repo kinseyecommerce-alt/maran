@@ -519,6 +519,22 @@ class BaseAgent(ABC):
                             logger.debug("[{}] {} pattern '{}' muted (decayed edge) — skip",
                                          self.name, snap.symbol, _pat)
                             continue
+
+                    # Cross-agent signal bus: publish so other agents can read
+                    # cross-strategy conviction before their own pre-claim checks.
+                    try:
+                        from signal_bus import signal_bus as _sbus
+                        from market_regime import regime_detector as _rd
+                        _regime = _rd.current_regime.value if (
+                            _rd.current_regime) else ""
+                        _sbus.publish(
+                            agent=self.name, symbol=snap.symbol,
+                            direction=action, score=signal.get("score", 0),
+                            regime=_regime, pattern=signal.get("pattern", ""),
+                        )
+                    except Exception:
+                        pass
+
                     # ML signal filter — GBM win-probability gate
                     if getattr(settings, "use_ml_filter", False):
                         try:
@@ -846,6 +862,20 @@ class BaseAgent(ABC):
                 logger.info("[{}] {} CONSENSUS boost {:.0%} → qty={}", self.name, snap.symbol, boost, qty)
         except Exception:
             pass
+
+        # Cross-agent signal bus boost — other agents signalling same direction
+        try:
+            from signal_bus import signal_bus as _sbus
+            _bus_boost = _sbus.consensus_boost(snap.symbol, action, self.name)
+            if _bus_boost > 0:
+                cap_notional = min(float(settings.max_position_size),
+                                   risk_manager.max_capital_for_agent(self.name))
+                cap = int(cap_notional // max(ltp, 1))
+                qty = min(int(qty * (1 + _bus_boost)), cap)
+                logger.info("[{}] {} BUS boost {:.0%} → qty={}", self.name, snap.symbol, _bus_boost, qty)
+        except Exception:
+            pass
+
         return qty
 
     def _apply_l2_fill_gate(self, snap: MarketSnapshot, action: str, qty: int) -> int:

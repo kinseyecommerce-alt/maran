@@ -1,5 +1,6 @@
 """
-pattern_monitor.py — live per-pattern performance-decay guard.
+pattern_monitor.py — live per-pattern performance-decay guard with
+cross-session memory.
 
 `adaptive_engine` tracks edge per (strategy, symbol). This module tracks
 it per (strategy, pattern): a setup that backtested well can stop working
@@ -8,14 +9,21 @@ rolling window of each pattern's realised outcomes and auto-disable a
 pattern whose live edge has clearly gone negative, so a decaying setup
 stops firing for the rest of the session instead of bleeding capital.
 
+Cross-session memory: rolling stats are persisted to the kv_store at day
+end and reloaded at startup. A pattern that was losing across multiple
+previous sessions starts the new day with a partial negative prior rather
+than a clean slate, making decay detection faster in live production.
+
 Design choices (deliberately conservative — a false mute costs opportunity,
 a missed mute costs money, but over-muting starves the system):
   • Disable requires BOTH a minimum sample AND a clearly losing record
     (negative mean return AND negative rolling Sharpe). A high-win-rate /
     low-Sharpe scalper is NOT muted, nor is a low-win-rate / positive-
     expectancy runner.
-  • Disable is sticky for the session; `reset_daily()` wipes history and
-    the disabled set so every pattern gets a fresh start each trading day.
+  • In-session disable is sticky for the day; `reset_daily()` wipes the
+    in-session disabled set and saves history to the DB for next session.
+  • Cross-session carry-over seeds the deque with saved prior observations
+    so the min-sample threshold is met faster on a known-bad pattern.
   • Everything is gated by `settings.use_pattern_monitor` (default on) and
     every knob has a safe getattr default so the module works even if the
     settings fields are absent.
@@ -23,6 +31,7 @@ a missed mute costs money, but over-muting starves the system):
 
 from __future__ import annotations
 
+import json
 import math
 from collections import deque
 from threading import Lock
@@ -37,7 +46,10 @@ def _cfg(name: str, default):
 
 
 class PatternMonitor:
-    """Rolling per-(strategy, pattern) edge tracker with auto-disable."""
+    """Rolling per-(strategy, pattern) edge tracker with auto-disable
+    and cross-session persistence."""
+
+    _KV_KEY = "pattern_monitor_history"
 
     def __init__(self) -> None:
         self._lock = Lock()
@@ -112,11 +124,64 @@ class PatternMonitor:
             return False
 
     def reset_daily(self) -> None:
-        """Fresh start each trading day: clear history and un-mute everything."""
+        """Save rolling history to DB, then clear in-session disabled set.
+        History is preserved in-memory so today's trades still count; the
+        next startup will reload history from the DB."""
+        self.save_history()
         with self._lock:
-            self._hist.clear()
             self._disabled.clear()
-        logger.info("[PatternMonitor] reset for new trading day")
+        logger.info("[PatternMonitor] daily reset — history saved, mutes cleared")
+
+    # ── Cross-session persistence ──────────────────────────────────────
+    def save_history(self) -> None:
+        """Persist rolling deque contents to kv_store for next session."""
+        try:
+            from state_store import set_kv
+            window = int(_cfg("pattern_window", 20))
+            with self._lock:
+                payload = {
+                    f"{s}::{p}": list(dq)[-window:]
+                    for (s, p), dq in self._hist.items()
+                    if dq
+                }
+            set_kv(self._KV_KEY, json.dumps(payload))
+            logger.debug("[PatternMonitor] saved {} patterns to DB", len(payload))
+        except Exception as exc:
+            logger.warning("[PatternMonitor] save_history failed (non-critical): {}", exc)
+
+    def load_history(self) -> None:
+        """Reload prior-session rolling stats from kv_store. Called at startup
+        so a pattern that was losing yesterday starts today with a partial prior
+        rather than a fresh deque — decay detection converges faster."""
+        try:
+            from state_store import get_kv
+            raw = get_kv(self._KV_KEY, "")
+            if not raw:
+                return
+            payload: dict = json.loads(raw)
+            window = int(_cfg("pattern_window", 20))
+            carry_pct = float(_cfg("pattern_history_carry_pct", 0.5))
+            with self._lock:
+                for key_str, vals in payload.items():
+                    if "::" not in key_str or not vals:
+                        continue
+                    strat, pat = key_str.split("::", 1)
+                    # Carry only the most recent half of the window to avoid
+                    # over-weighting stale history. A neutral/positive prior
+                    # provides no seed — only a negative prior earns carry-over.
+                    carry_n = max(1, int(len(vals) * carry_pct))
+                    carried = vals[-carry_n:]
+                    key = (strat, pat)
+                    dq = self._hist.get(key)
+                    if dq is None:
+                        dq = deque(maxlen=window)
+                        self._hist[key] = dq
+                    for v in carried:
+                        dq.appendleft(float(v))  # prepend as older observations
+            logger.info("[PatternMonitor] loaded history for {} patterns from DB",
+                        len(payload))
+        except Exception as exc:
+            logger.warning("[PatternMonitor] load_history failed (non-critical): {}", exc)
 
     def stats(self) -> dict:
         with self._lock:

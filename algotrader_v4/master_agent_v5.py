@@ -165,6 +165,18 @@ class MasterAgent:
                     f"Kite connection failed — check KITE_ACCESS_TOKEN in .env: {exc}"
                 )
 
+        # Load cross-session memory and adaptive capital weights at startup
+        try:
+            from pattern_monitor import pattern_monitor
+            pattern_monitor.load_history()
+        except Exception as exc:
+            logger.warning("[master_v5] pattern_monitor.load_history failed: {}", exc)
+        try:
+            from agent_capital_allocator import agent_capital_allocator
+            agent_capital_allocator.load()
+        except Exception as exc:
+            logger.warning("[master_v5] agent_capital_allocator.load failed: {}", exc)
+
         report: dict[str, dict] = {}
 
         for strat in strategies:
@@ -485,6 +497,22 @@ class MasterAgent:
                         len(report["strategies_retire"]))
         except Exception as exc:
             logger.error("[master] Nightly adaptive review failed: {}", exc)
+
+        # Adaptive capital rebalance — shift agent buckets toward best performers
+        try:
+            from agent_capital_allocator import agent_capital_allocator
+            result = agent_capital_allocator.rebalance()
+            if "delta" in result:
+                logger.info("[master] Capital rebalance: {}", result["delta"])
+        except Exception as exc:
+            logger.warning("[master] Capital rebalance failed (non-critical): {}", exc)
+
+        # Persist pattern history for cross-session memory
+        try:
+            from pattern_monitor import pattern_monitor
+            pattern_monitor.save_history()
+        except Exception as exc:
+            logger.warning("[master] Pattern history save failed (non-critical): {}", exc)
 
     async def _weekly_memory_synthesis(self) -> None:
         try:

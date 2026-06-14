@@ -92,6 +92,22 @@ class Settings(BaseSettings):
     max_order_latency_ms: float = Field(default=1500.0, gt=0)
     latency_cooldown_sec: float = Field(default=30.0, gt=0)
 
+    # Cross-session pattern memory — carry prior rolling stats across restarts
+    pattern_history_carry_pct: float = Field(default=0.5, gt=0, le=1)  # fraction of prior window to seed
+
+    # Cross-agent signal bus — real-time cross-strategy conviction sharing
+    use_signal_bus: bool = True
+    signal_bus_window_sec: float = Field(default=60.0, gt=0)   # event TTL
+    signal_bus_min_score: int = Field(default=3, ge=0)          # min signal score to count toward boost
+    signal_bus_max_boost: float = Field(default=0.25, ge=0, le=1)  # max size boost per agreed agent
+
+    # Adaptive agent capital allocation — shift buckets toward best Sharpe agents
+    use_adaptive_capital: bool = False                           # opt-in (needs ≥N live trades)
+    adaptive_capital_days: int = Field(default=5, ge=1)          # rolling look-back days
+    adaptive_capital_min_trades: int = Field(default=10, ge=1)   # minimum trades before shifting
+    adaptive_capital_step_pct: float = Field(default=5.0, gt=0)  # max pct shift per rebalance
+    adaptive_capital_floor_ratio: float = Field(default=0.10, gt=0, le=0.5)  # floor = ratio × baseline
+
     # Backtest gate thresholds
     bt_min_win_rate: float = 55.0
     bt_min_sharpe: float = 1.0

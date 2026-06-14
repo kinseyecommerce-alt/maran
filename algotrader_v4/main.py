@@ -1144,6 +1144,35 @@ def patterns_status():
     return pattern_monitor.stats()
 
 
+@app.get("/signals/bus", tags=["Risk"])
+def signals_bus_status():
+    """Cross-agent signal bus: active events and consensus by symbol."""
+    from signal_bus import signal_bus
+    return {"status": signal_bus.status(), "recent": signal_bus.recent(limit=30)}
+
+
+@app.get("/capital/status", tags=["Risk"])
+def capital_status():
+    """Adaptive capital allocator: current bucket weights and baselines."""
+    from agent_capital_allocator import agent_capital_allocator
+    return agent_capital_allocator.status()
+
+
+@app.post("/capital/rebalance", tags=["Risk"])
+def capital_rebalance():
+    """Force a capital rebalance now (normally runs nightly)."""
+    from agent_capital_allocator import agent_capital_allocator
+    return agent_capital_allocator.rebalance()
+
+
+@app.post("/capital/reset", tags=["Risk"])
+def capital_reset():
+    """Reset capital weights to baseline values."""
+    from agent_capital_allocator import agent_capital_allocator
+    agent_capital_allocator.reset()
+    return {"ok": True}
+
+
 @app.get("/broker/status", tags=["System"])
 def broker_status():
     """Return connection status for primary (Zerodha/active broker) and all secondary brokers."""

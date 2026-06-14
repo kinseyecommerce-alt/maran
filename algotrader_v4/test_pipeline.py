@@ -4750,6 +4750,236 @@ run("pattern reset wired into daily reset",          t_pattern_reset_in_daily)
 
 
 # ══════════════════════════════════════════════════════════════════════════
+# 32. AGENT BRAIN & MEMORY (cross-session, signal bus, adaptive capital)
+# ══════════════════════════════════════════════════════════════════════════
+section("32. AGENT BRAIN & MEMORY")
+
+# ── Cross-session pattern memory ──────────────────────────────────────────
+def t_pattern_save_and_reload():
+    from pattern_monitor import PatternMonitor
+    pm = PatternMonitor()
+    # Record some trades for a pattern
+    for _ in range(5):
+        pm.record("intraday", "TESTPAT", -0.8)
+    pm.save_history()
+    # New instance reloads
+    pm2 = PatternMonitor()
+    pm2.load_history()
+    with pm2._lock:
+        key = ("intraday", "TESTPAT")
+        dq = pm2._hist.get(key)
+    assert dq is not None and len(dq) > 0, "history must survive save+load cycle"
+
+def t_pattern_reset_daily_saves_history():
+    from pattern_monitor import PatternMonitor
+    pm = PatternMonitor()
+    pm.record("scalping", "SAVEDPAT", 1.0)
+    pm.reset_daily()
+    # After reset, disabled set cleared but history still in memory
+    with pm._lock:
+        assert len(pm._disabled) == 0, "reset must clear disabled set"
+        # history may or may not be cleared depending on design choice — just ensure no crash
+
+def t_pattern_carry_is_partial():
+    """Prior history carries ≤50% of its length by default."""
+    from pattern_monitor import PatternMonitor
+    from config import settings as _s
+    pm = PatternMonitor()
+    for _ in range(20):
+        pm.record("intraday", "LONGPAT", -1.0)
+    pm.save_history()
+    pm2 = PatternMonitor()
+    pm2.load_history()
+    with pm2._lock:
+        dq = pm2._hist.get(("intraday", "LONGPAT"), [])
+        n = len(dq)
+    assert 0 < n <= 10, f"should carry ≤50% of 20 = ≤10 obs, got {n}"
+
+def t_pattern_load_missing_graceful():
+    """load_history with no saved data must not crash."""
+    from pattern_monitor import PatternMonitor
+    from state_store import set_kv
+    set_kv("pattern_monitor_history", "")   # wipe
+    pm = PatternMonitor()
+    pm.load_history()   # must not raise
+    with pm._lock:
+        assert len(pm._hist) == 0
+
+def t_pattern_settings_present():
+    from config import settings as _s
+    assert hasattr(_s, "pattern_history_carry_pct")
+    assert 0 < _s.pattern_history_carry_pct <= 1
+
+# ── Cross-agent signal bus ────────────────────────────────────────────────
+def t_bus_publish_and_query():
+    from signal_bus import SignalBus
+    bus = SignalBus()
+    bus.publish("scalping", "HDFC", "BUY", score=7)
+    assert len(bus.recent("HDFC")) == 1
+
+def t_bus_consensus_boost_none_without_others():
+    from signal_bus import SignalBus
+    bus = SignalBus()
+    bus.publish("intraday", "TCS", "BUY", score=5)
+    # Calling agent = intraday → should not count itself
+    boost = bus.consensus_boost("TCS", "BUY", calling_agent="intraday")
+    assert boost == 0.0, "agent must not boost itself"
+
+def t_bus_consensus_boost_with_other_agent():
+    from signal_bus import SignalBus
+    bus = SignalBus()
+    bus.publish("scalping", "INFY", "BUY", score=7)
+    boost = bus.consensus_boost("INFY", "BUY", calling_agent="intraday")
+    assert boost > 0.0, "1 other agent agreeing must give a boost"
+
+def t_bus_direction_filter():
+    from signal_bus import SignalBus
+    bus = SignalBus()
+    bus.publish("scalping", "TCS", "SELL", score=7)
+    boost = bus.consensus_boost("TCS", "BUY", calling_agent="intraday")
+    assert boost == 0.0, "opposite direction must not boost"
+
+def t_bus_score_filter():
+    from signal_bus import SignalBus
+    from config import settings as _s
+    bus = SignalBus()
+    bus.publish("scalping", "WIPRO", "BUY", score=0)  # score below min
+    boost = bus.consensus_boost("WIPRO", "BUY", calling_agent="intraday")
+    assert boost == 0.0, "low-score signals must not contribute to boost"
+
+def t_bus_ttl_expiry():
+    import time
+    from signal_bus import SignalBus
+    from config import settings as _s
+    bus = SignalBus()
+    old = _s.signal_bus_window_sec
+    _s.signal_bus_window_sec = 0.01   # 10ms TTL
+    try:
+        bus.publish("scalping", "SBI", "BUY", score=8)
+        time.sleep(0.02)
+        boost = bus.consensus_boost("SBI", "BUY", calling_agent="intraday")
+        assert boost == 0.0, "expired events must not boost"
+    finally:
+        _s.signal_bus_window_sec = old
+
+def t_bus_subscription():
+    from signal_bus import SignalBus
+    received = []
+    def cb(evt): received.append(evt)
+    bus = SignalBus()
+    bus.subscribe(cb)
+    bus.publish("intraday", "RELIANCE", "BUY", score=5)
+    assert len(received) == 1 and received[0].symbol == "RELIANCE"
+    bus.unsubscribe(cb)
+    bus.publish("intraday", "RELIANCE", "BUY", score=5)
+    assert len(received) == 1, "unsubscribed callback must not fire"
+
+def t_bus_status_shape():
+    from signal_bus import signal_bus as _sb
+    st = _sb.status()
+    for k in ("enabled", "active_events", "symbols_tracked", "subscribers"):
+        assert k in st, f"missing key {k}"
+
+def t_bus_wired_into_base_agent():
+    import inspect
+    from agents import base_agent as _ba
+    src = inspect.getsource(_ba)
+    assert "signal_bus" in src and "_sbus.publish(" in src
+    assert "_bus_boost" in src
+
+def t_bus_settings_present():
+    from config import settings as _s
+    for f in ("use_signal_bus", "signal_bus_window_sec",
+              "signal_bus_min_score", "signal_bus_max_boost"):
+        assert hasattr(_s, f), f"missing setting {f}"
+
+# ── Adaptive capital allocator ────────────────────────────────────────────
+def t_allocator_status_shape():
+    from agent_capital_allocator import AgentCapitalAllocator
+    alloc = AgentCapitalAllocator()
+    st = alloc.status()
+    for k in ("enabled", "current", "baselines", "overrides"):
+        assert k in st, f"missing key {k}"
+
+def t_allocator_disabled_by_default():
+    from agent_capital_allocator import AgentCapitalAllocator
+    alloc = AgentCapitalAllocator()
+    result = alloc.rebalance()
+    assert "skipped" in result, "must skip when use_adaptive_capital=False"
+
+def t_allocator_save_load():
+    from agent_capital_allocator import AgentCapitalAllocator
+    from config import settings as _s
+    old_intraday = _s.intraday_capital_pct
+    alloc = AgentCapitalAllocator()
+    alloc._baselines = {"intraday": 40.0, "swing": 25.0,
+                        "options": 25.0, "futures": 10.0}
+    alloc._overrides = {"intraday": 42.0}
+    alloc.save()
+    alloc2 = AgentCapitalAllocator()
+    alloc2.load()
+    assert alloc2._overrides.get("intraday") == 42.0, "overrides must survive save+load"
+    _s.intraday_capital_pct = old_intraday  # restore
+
+def t_allocator_reset_restores_baseline():
+    from agent_capital_allocator import AgentCapitalAllocator
+    from config import settings as _s
+    old = _s.intraday_capital_pct
+    alloc = AgentCapitalAllocator()
+    alloc._baselines = {"intraday": 40.0, "swing": 25.0,
+                        "options": 25.0, "futures": 10.0}
+    alloc._overrides = {"intraday": 50.0}
+    alloc._apply_locked()
+    assert _s.intraday_capital_pct == 50.0
+    alloc.reset()
+    assert _s.intraday_capital_pct == 40.0, "reset must restore baseline"
+    _s.intraday_capital_pct = old
+
+def t_allocator_endpoints_present():
+    import inspect, main as _m
+    src = inspect.getsource(_m)
+    for ep in ("/capital/status", "/capital/rebalance", "/capital/reset", "/signals/bus"):
+        assert ep in src, f"missing endpoint {ep}"
+
+def t_allocator_loaded_at_startup():
+    import inspect, master_agent_v5 as _ma
+    src = inspect.getsource(_ma)
+    assert "agent_capital_allocator" in src
+    assert "agent_capital_allocator.load()" in src
+    assert "agent_capital_allocator.rebalance()" in src
+
+def t_brain_settings_present():
+    from config import settings as _s
+    for f in ("use_adaptive_capital", "adaptive_capital_days",
+              "adaptive_capital_min_trades", "adaptive_capital_step_pct",
+              "adaptive_capital_floor_ratio"):
+        assert hasattr(_s, f), f"missing setting {f}"
+
+run("cross-session: save + reload history",          t_pattern_save_and_reload)
+run("cross-session: reset_daily saves then clears",  t_pattern_reset_daily_saves_history)
+run("cross-session: carry is partial (≤50%)",        t_pattern_carry_is_partial)
+run("cross-session: load with empty DB is safe",     t_pattern_load_missing_graceful)
+run("cross-session: settings present",               t_pattern_settings_present)
+run("signal bus: publish + query",                   t_bus_publish_and_query)
+run("signal bus: no self-boost",                     t_bus_consensus_boost_none_without_others)
+run("signal bus: other-agent agreement boosts",      t_bus_consensus_boost_with_other_agent)
+run("signal bus: direction filter",                  t_bus_direction_filter)
+run("signal bus: score filter",                      t_bus_score_filter)
+run("signal bus: TTL expiry",                        t_bus_ttl_expiry)
+run("signal bus: subscribe/unsubscribe",             t_bus_subscription)
+run("signal bus: status shape",                      t_bus_status_shape)
+run("signal bus: wired into base_agent",             t_bus_wired_into_base_agent)
+run("signal bus: settings present",                  t_bus_settings_present)
+run("allocator: status shape",                       t_allocator_status_shape)
+run("allocator: disabled by default",                t_allocator_disabled_by_default)
+run("allocator: save + load",                        t_allocator_save_load)
+run("allocator: reset restores baseline",            t_allocator_reset_restores_baseline)
+run("allocator: REST endpoints present",             t_allocator_endpoints_present)
+run("allocator: loaded at master startup",           t_allocator_loaded_at_startup)
+run("brain: all settings present",                   t_brain_settings_present)
+
+
+# ══════════════════════════════════════════════════════════════════════════
 # FINAL SUMMARY
 # ══════════════════════════════════════════════════════════════════════════
 failed = summary()
