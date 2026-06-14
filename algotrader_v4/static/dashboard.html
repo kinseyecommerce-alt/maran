@@ -1162,10 +1162,13 @@
     <div class="dialog-title" id="mode-switch-title">Switch Trading Mode</div>
     <div class="dialog-body" id="mode-switch-body"></div>
     <div id="mode-switch-live-warning" style="display:none;background:#2d1a1a;border:1px solid #c0392b;
-         border-radius:6px;padding:10px 14px;margin-bottom:16px;font-size:12.5px;color:#e74c3c;line-height:1.6">
-      ⚠️ <strong>REAL MONEY WARNING</strong><br>
-      Switching to LIVE mode will place <strong>real orders on NSE/BSE</strong> using your Zerodha account.<br>
-      Make sure your Kite credentials and access token are valid before proceeding.
+         border-radius:6px;padding:10px 14px;margin-bottom:16px;font-size:12.5px;color:#e74c3c;line-height:1.7">
+      ⚠️ <strong>REAL MONEY — READ CAREFULLY</strong><br>
+      This switch changes order routing to <strong>real Zerodha API</strong> immediately.<br>
+      However, <strong>the tick feed (price data) does NOT switch</strong> — the bot will still
+      use the simulated GBM feed until you <strong>restart the server</strong> with
+      <code style="background:#1a0a0a;padding:1px 5px;border-radius:3px">TRADING_MODE=LIVE</code> in <code style="background:#1a0a0a;padding:1px 5px;border-radius:3px">.env</code>.<br><br>
+      <strong>For full LIVE trading:</strong> set <code style="background:#1a0a0a;padding:1px 5px;border-radius:3px">TRADING_MODE=LIVE</code> in .env and restart.
     </div>
     <div class="dialog-btns">
       <button class="btn btn-ghost" onclick="closeModeToggle()">Cancel</button>
