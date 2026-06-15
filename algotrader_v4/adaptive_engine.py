@@ -142,7 +142,8 @@ class AdaptiveLearningEngine:
         self._rebacktest_queue: list[dict] = []
         self.backtests_skipped: int = 0
         self.backtests_run:     int = 0
-        self._store = Path("logs/adaptive")
+        import os as _os_ae
+        self._store = Path(_os_ae.environ.get("ADAPTIVE_DATA_DIR", "logs/adaptive"))
         self._store.mkdir(parents=True, exist_ok=True)
         self._load_state()
         logger.info("AdaptiveLearningEngine initialized")

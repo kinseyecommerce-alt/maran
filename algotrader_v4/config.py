@@ -346,7 +346,7 @@ class Settings(BaseSettings):
         return self
 
     class Config:
-        env_file = ".env"
+        env_file = __import__("os").environ.get("APP_ENV_FILE", ".env")
         env_file_encoding = "utf-8"
         case_sensitive = False
 
