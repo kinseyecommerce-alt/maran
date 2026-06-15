@@ -105,3 +105,24 @@ test('settings modal opens and shows connection fields', async ({ page }) => {
   await expect(page.getByText('API Base URL')).toBeVisible()
   await expect(page.getByText('X-API-Key')).toBeVisible()
 })
+
+test('mobile viewport renders the app without blank screen', async ({ page }) => {
+  await page.setViewportSize({ width: 390, height: 844 }) // iPhone 12-ish
+  await page.goto('/')
+  await expect(page.getByText('AlgoTrader Pro')).toBeVisible()
+  // Tab bar is still reachable on a narrow viewport (overflow-x-auto).
+  await expect(page.getByRole('button', { name: /Risk/i })).toBeVisible()
+  const bodyLen = (await page.locator('body').innerText()).length
+  expect(bodyLen).toBeGreaterThan(50) // not a blank page
+})
+
+test('backend down does not crash the UI (graceful degradation)', async ({ page }) => {
+  // Override every backend call with a hard failure — the shell must still render.
+  await page.unroute(`${API}/**`).catch(() => {})
+  await page.route(`${API}/**`, route => route.abort())
+  await page.goto('/')
+  await expect(page.getByText('AlgoTrader Pro')).toBeVisible()
+  // Fallback mode badge still shows; no positions, no blank screen.
+  await expect(page.getByText('PAPER').first()).toBeVisible()
+  await expect(page.getByText(/No open positions/i)).toBeVisible()
+})
