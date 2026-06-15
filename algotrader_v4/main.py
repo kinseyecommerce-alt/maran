@@ -102,12 +102,14 @@ _SENSITIVE_GETS = frozenset({
     "/regime/history",                 # historical regime transitions
     "/regime/plans",                   # all regime strategy plans
     "/symbols/selected",               # live per-strategy watchlists
+    "/admin/users",                    # friend instance list — admin only
 })
 
 @app.middleware("http")
 async def _api_key_gate(request: Request, call_next):
     mutates = request.method in ("POST", "PUT", "PATCH", "DELETE")
-    is_sensitive_get = request.url.path in _SENSITIVE_GETS
+    is_sensitive_get = (request.url.path in _SENSITIVE_GETS
+                        or request.url.path.startswith("/admin/"))
     needs_auth = mutates or is_sensitive_get
     is_exempt = (
         request.url.path in _EXEMPT_PATHS
@@ -1516,6 +1518,131 @@ def set_trading_mode(req: TradingModeRequest):
 def get_trading_mode():
     """Return current trading mode."""
     return {"trading_mode": settings.trading_mode}
+
+
+# ── Admin: Friend Instance Management ─────────────────────────────────────────
+
+def _current_user(request: Request) -> str:
+    """Extract username from JWT cookie or Bearer header."""
+    auth_hdr = request.headers.get("Authorization", "")
+    token = auth_hdr[7:] if auth_hdr.startswith("Bearer ") else ""
+    if not token:
+        token = request.cookies.get("jwt", "")
+    username = decode_token(token) if token else None
+    if not username:
+        raise HTTPException(status_code=401, detail="Not authenticated")
+    return username
+
+def _admin_required(username: str = Depends(_current_user)) -> str:
+    if username != settings.admin_username:
+        raise HTTPException(status_code=403, detail="Admin access required")
+    return username
+
+def _prov():
+    """Lazy-import provision helpers (avoids startup cost if admin dir absent)."""
+    import sys as _s
+    _pth = str(Path(__file__).parent / "admin")
+    if _pth not in _s.path:
+        _s.path.insert(0, _pth)
+    import provision as _prov_mod
+    return _prov_mod
+
+class AdminCreateRequest(BaseModel):
+    user: str = Field(..., min_length=1, max_length=32, pattern=r"^[a-z0-9_]+$")
+    port: int = Field(..., ge=1024, le=65535)
+    capital: float = Field(default=100_000.0, ge=1000.0)
+
+@app.get("/admin/users", tags=["Admin"])
+def admin_list_users(_: str = Depends(_admin_required)):
+    p = _prov()
+    reg = p._load_registry()
+    return sorted([
+        {
+            "user": u,
+            "port": e["port"],
+            "capital": e.get("capital"),
+            "created": e.get("created_at", "")[:10],
+            "running": p._is_running(e.get("pid")),
+            "pid": e.get("pid"),
+        }
+        for u, e in reg.items()
+    ], key=lambda x: x["user"])
+
+@app.post("/admin/users", status_code=201, tags=["Admin"])
+def admin_create_user(body: AdminCreateRequest, _: str = Depends(_admin_required)):
+    import io, contextlib
+    p = _prov()
+    reg = p._load_registry()
+    if body.user in reg:
+        raise HTTPException(409, f"User '{body.user}' already exists")
+    if not p._port_free(body.port):
+        raise HTTPException(409, f"Port {body.port} is already in use")
+    buf = io.StringIO()
+    with contextlib.redirect_stdout(buf):
+        p.cmd_create(body.user, body.port, body.capital)
+    output = buf.getvalue()
+    password = next((ln.split("Password:")[-1].strip()
+                     for ln in output.splitlines() if "Password:" in ln), "")
+    return {"ok": True, "user": body.user, "port": body.port, "password": password}
+
+@app.post("/admin/users/{user}/start", tags=["Admin"])
+def admin_start_user(user: str, _: str = Depends(_admin_required)):
+    import os, subprocess
+    p = _prov()
+    reg = p._load_registry()
+    if user not in reg:
+        raise HTTPException(404, f"Unknown user '{user}'")
+    entry = reg[user]
+    if p._is_running(entry.get("pid")):
+        return {"ok": True, "message": "already running", "pid": entry["pid"]}
+    inst_dir = p._INSTANCES / user
+    env_file = inst_dir / ".env"
+    if not env_file.exists():
+        raise HTTPException(500, f".env missing for {user}")
+    log_path = inst_dir / "logs" / "server.log"
+    log_file = open(log_path, "a")
+    env = {
+        **os.environ,
+        "APP_ENV_FILE": str(env_file),
+        "DATABASE_PATH": str(inst_dir / "data.db"),
+        "KITE_ACCOUNTS_FILE": str(inst_dir / "kite_accounts.json"),
+        "ADAPTIVE_DATA_DIR": str(inst_dir / "logs" / "adaptive"),
+    }
+    proc = subprocess.Popen(
+        ["python", "-m", "uvicorn", "main:app", "--host", "0.0.0.0", "--port", str(entry["port"])],
+        cwd=str(Path(__file__).parent),
+        env=env,
+        stdout=log_file,
+        stderr=log_file,
+    )
+    entry["pid"] = proc.pid
+    p._save_registry(reg)
+    return {"ok": True, "pid": proc.pid, "port": entry["port"]}
+
+@app.post("/admin/users/{user}/stop", tags=["Admin"])
+def admin_stop_user(user: str, _: str = Depends(_admin_required)):
+    p = _prov()
+    reg = p._load_registry()
+    if user not in reg:
+        raise HTTPException(404, f"Unknown user '{user}'")
+    p.cmd_stop(user)
+    return {"ok": True, "user": user}
+
+@app.delete("/admin/users/{user}", tags=["Admin"])
+def admin_delete_user(user: str, _: str = Depends(_admin_required)):
+    import shutil
+    p = _prov()
+    reg = p._load_registry()
+    if user not in reg:
+        raise HTTPException(404, f"Unknown user '{user}'")
+    if p._is_running(reg[user].get("pid")):
+        p.cmd_stop(user)
+    inst_dir = p._INSTANCES / user
+    if inst_dir.exists():
+        shutil.rmtree(inst_dir)
+    del reg[user]
+    p._save_registry(reg)
+    return {"ok": True, "user": user}
 
 
 # ── WebSocket ────────────────────────────────────────────────────────────────────

@@ -2475,6 +2475,58 @@
           </button>
         </div>
 
+        <!-- ── Friend Accounts ───────────────────────────────────── -->
+        <div class="settings-section" id="friend-accounts-section">
+          <div class="settings-title" style="display:flex;align-items:center;gap:10px">
+            <i data-lucide="users"></i> Friend Accounts
+            <button onclick="openAddFriend()"
+              style="margin-left:auto;font-size:11px;padding:4px 12px;border-radius:5px;
+                     border:none;background:var(--green);color:#fff;cursor:pointer">
+              + Add Friend
+            </button>
+          </div>
+          <!-- Inline create form (hidden by default) -->
+          <div id="friend-add-form" style="display:none;background:var(--bg3);border:1px solid var(--border);border-radius:8px;padding:14px;margin-top:10px">
+            <div style="display:grid;grid-template-columns:1fr 1fr 1fr auto;gap:10px;align-items:end">
+              <div>
+                <label style="font-size:11px;color:var(--fg3)">Username</label>
+                <input id="fa-user" placeholder="alice" autocomplete="off"
+                  style="width:100%;box-sizing:border-box;background:var(--bg2);border:1px solid var(--border);
+                         color:var(--fg1);border-radius:5px;padding:6px 8px;font-size:13px;margin-top:3px">
+              </div>
+              <div>
+                <label style="font-size:11px;color:var(--fg3)">Port</label>
+                <input id="fa-port" type="number" placeholder="8001"
+                  style="width:100%;box-sizing:border-box;background:var(--bg2);border:1px solid var(--border);
+                         color:var(--fg1);border-radius:5px;padding:6px 8px;font-size:13px;margin-top:3px">
+              </div>
+              <div>
+                <label style="font-size:11px;color:var(--fg3)">Capital (₹)</label>
+                <input id="fa-capital" type="number" value="100000"
+                  style="width:100%;box-sizing:border-box;background:var(--bg2);border:1px solid var(--border);
+                         color:var(--fg1);border-radius:5px;padding:6px 8px;font-size:13px;margin-top:3px">
+              </div>
+              <div style="display:flex;gap:6px;padding-top:2px">
+                <button onclick="createFriendAccount()"
+                  style="padding:6px 12px;border:none;border-radius:5px;background:var(--green);color:#fff;cursor:pointer;font-size:13px">
+                  Create
+                </button>
+                <button onclick="closeAddFriend()"
+                  style="padding:6px 10px;border:1px solid var(--border);border-radius:5px;
+                         background:transparent;color:var(--fg2);cursor:pointer;font-size:13px">
+                  ✕
+                </button>
+              </div>
+            </div>
+            <div id="fa-result" style="display:none;margin-top:10px;background:var(--bg2);
+              border:1px solid var(--green);border-radius:6px;padding:10px;font-size:12px"></div>
+          </div>
+          <!-- Instances table -->
+          <div id="friend-table" style="margin-top:12px">
+            <p style="font-size:13px;color:var(--fg3)">Loading…</p>
+          </div>
+        </div>
+
         <!-- Admin -->
         <div class="settings-section">
           <div class="settings-title"><i data-lucide="terminal"></i> Admin</div>
@@ -2829,10 +2881,11 @@ function switchTab(name) {
   }
   // Load regime history chart when analytics tab opens
   if (name === 'analytics') fetchRegimeHistory();
-  // Refresh broker statuses when settings tab opens
+  // Refresh broker statuses and friend accounts when settings tab opens
   if (name === 'settings') {
     fetchKiteStatus();
     fetchUpstoxStatus();
+    loadFriendAccounts();
   }
 }
 
@@ -5778,6 +5831,121 @@ if (installBtn) {
       _pwaPrompt.userChoice.then(() => { _pwaPrompt = null; });
     }
   });
+}
+
+// ── Friend Accounts ────────────────────────────────────────────────────────────
+function openAddFriend() {
+  document.getElementById('friend-add-form').style.display = 'block';
+  document.getElementById('fa-result').style.display = 'none';
+}
+function closeAddFriend() {
+  document.getElementById('friend-add-form').style.display = 'none';
+}
+
+async function loadFriendAccounts() {
+  const tbl = document.getElementById('friend-table');
+  if (!tbl) return;
+  try {
+    const data = await api('GET', '/admin/users');
+    if (!data) return;
+    if (data.length === 0) {
+      tbl.innerHTML = '<p style="font-size:13px;color:var(--fg3)">No friend accounts yet. Click <strong>+ Add Friend</strong> to create one.</p>';
+      return;
+    }
+    tbl.innerHTML = `
+      <table style="width:100%;border-collapse:collapse;font-size:13px">
+        <thead>
+          <tr style="color:var(--fg3);text-align:left;border-bottom:1px solid var(--border)">
+            <th style="padding:6px 8px">User</th>
+            <th style="padding:6px 8px">Port</th>
+            <th style="padding:6px 8px">Capital</th>
+            <th style="padding:6px 8px">Created</th>
+            <th style="padding:6px 8px">Status</th>
+            <th style="padding:6px 8px">Actions</th>
+          </tr>
+        </thead>
+        <tbody>
+          ${data.map(u => `
+            <tr style="border-bottom:1px solid var(--border)">
+              <td style="padding:6px 8px;font-weight:600;color:var(--fg1)">${u.user}</td>
+              <td style="padding:6px 8px;color:var(--fg2)">${u.port}</td>
+              <td style="padding:6px 8px;color:var(--fg2)">₹${(u.capital||0).toLocaleString('en-IN')}</td>
+              <td style="padding:6px 8px;color:var(--fg3)">${u.created||'—'}</td>
+              <td style="padding:6px 8px">
+                <span style="font-size:11px;font-weight:600;padding:2px 8px;border-radius:10px;
+                  ${u.running ? 'background:#1a3a2a;color:#3fb950' : 'background:#2d2d2d;color:#8b949e'}">
+                  ${u.running ? '● running' : '○ stopped'}
+                </span>
+              </td>
+              <td style="padding:6px 8px">
+                <div style="display:flex;gap:6px">
+                  ${u.running
+                    ? `<button onclick="stopFriendInstance('${u.user}')"
+                         style="font-size:11px;padding:3px 8px;border:1px solid var(--border);
+                                border-radius:4px;background:var(--bg3);color:var(--fg2);cursor:pointer">Stop</button>`
+                    : `<button onclick="startFriendInstance('${u.user}')"
+                         style="font-size:11px;padding:3px 8px;border:none;
+                                border-radius:4px;background:var(--green);color:#fff;cursor:pointer">Start</button>`
+                  }
+                  <button onclick="deleteFriendInstance('${u.user}')"
+                    style="font-size:11px;padding:3px 8px;border:1px solid #da3633;
+                           border-radius:4px;background:transparent;color:#da3633;cursor:pointer">Delete</button>
+                </div>
+              </td>
+            </tr>`).join('')}
+        </tbody>
+      </table>`;
+  } catch(e) {
+    tbl.innerHTML = '<p style="font-size:13px;color:var(--fg3)">Friend accounts (admin access required).</p>';
+  }
+}
+
+async function createFriendAccount() {
+  const user    = document.getElementById('fa-user').value.trim();
+  const port    = parseInt(document.getElementById('fa-port').value);
+  const capital = parseFloat(document.getElementById('fa-capital').value) || 100000;
+  if (!user || !port) { alert('Username and port are required'); return; }
+  const result = document.getElementById('fa-result');
+  result.style.display = 'none';
+  try {
+    const data = await api('POST', '/admin/users', {user, port, capital});
+    if (!data) return;
+    result.style.display = 'block';
+    result.innerHTML = `<strong style="color:var(--green)">✓ Created!</strong><br>
+      Username: <strong>${data.user}</strong><br>
+      Password: <code style="background:var(--bg3);padding:1px 5px;border-radius:3px">${data.password}</code><br>
+      URL: <span style="color:var(--fg2)">http://YOUR_SERVER:${data.port}/login</span><br>
+      <span style="color:var(--fg3);font-size:11px">Share these credentials. Your friend enters their Zerodha Kite keys in their Settings.</span>`;
+    document.getElementById('fa-user').value = '';
+    document.getElementById('fa-port').value = '';
+    await loadFriendAccounts();
+  } catch(e) {
+    result.style.display = 'block';
+    result.innerHTML = `<span style="color:#da3633">Error: ${e.message||e}</span>`;
+  }
+}
+
+async function startFriendInstance(user) {
+  try {
+    await api('POST', `/admin/users/${user}/start`);
+    await loadFriendAccounts();
+  } catch(e) { alert(`Failed to start ${user}: ${e.message||e}`); }
+}
+
+async function stopFriendInstance(user) {
+  if (!confirm(`Stop ${user}'s trading bot?`)) return;
+  try {
+    await api('POST', `/admin/users/${user}/stop`);
+    await loadFriendAccounts();
+  } catch(e) { alert(`Failed to stop ${user}: ${e.message||e}`); }
+}
+
+async function deleteFriendInstance(user) {
+  if (!confirm(`Delete ${user}'s account and ALL data? This cannot be undone.`)) return;
+  try {
+    await api('DELETE', `/admin/users/${user}`);
+    await loadFriendAccounts();
+  } catch(e) { alert(`Failed to delete ${user}: ${e.message||e}`); }
 }
 
 </script>
