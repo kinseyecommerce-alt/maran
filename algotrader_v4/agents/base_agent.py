@@ -519,6 +519,31 @@ class BaseAgent(ABC):
                             logger.debug("[{}] {} pattern '{}' muted (decayed edge) — skip",
                                          self.name, snap.symbol, _pat)
                             continue
+
+                    # Cross-agent signal bus: publish so other agents can read
+                    # cross-strategy conviction before their own pre-claim checks.
+                    try:
+                        from signal_bus import signal_bus as _sbus
+                        from market_regime import regime_detector as _rd
+                        _regime = _rd.current_regime.value if (
+                            _rd.current_regime) else ""
+                        # Some agents put score directly; others embed it in trigger.
+                        _score = signal.get("score") or 0
+                        if not _score:
+                            _trig = signal.get("trigger", "")
+                            if "score=" in _trig:
+                                try:
+                                    _score = int(_trig.split("score=")[1].split("/")[0].split()[0])
+                                except Exception:
+                                    pass
+                        _sbus.publish(
+                            agent=self.name, symbol=snap.symbol,
+                            direction=action, score=_score,
+                            regime=_regime, pattern=signal.get("pattern", ""),
+                        )
+                    except Exception:
+                        pass
+
                     # ML signal filter — GBM win-probability gate
                     if getattr(settings, "use_ml_filter", False):
                         try:
@@ -846,6 +871,20 @@ class BaseAgent(ABC):
                 logger.info("[{}] {} CONSENSUS boost {:.0%} → qty={}", self.name, snap.symbol, boost, qty)
         except Exception:
             pass
+
+        # Cross-agent signal bus boost — other agents signalling same direction
+        try:
+            from signal_bus import signal_bus as _sbus
+            _bus_boost = _sbus.consensus_boost(snap.symbol, action, self.name)
+            if _bus_boost > 0:
+                cap_notional = min(float(settings.max_position_size),
+                                   risk_manager.max_capital_for_agent(self.name))
+                cap = int(cap_notional // max(ltp, 1))
+                qty = min(int(qty * (1 + _bus_boost)), cap)
+                logger.info("[{}] {} BUS boost {:.0%} → qty={}", self.name, snap.symbol, _bus_boost, qty)
+        except Exception:
+            pass
+
         return qty
 
     def _apply_l2_fill_gate(self, snap: MarketSnapshot, action: str, qty: int) -> int:
@@ -930,6 +969,27 @@ class BaseAgent(ABC):
                 return False
         except Exception:
             pass
+
+        try:
+            from news_gate import news_gate as _ng
+            blocked, reason = _ng.is_blocked(sym)
+            if blocked:
+                logger.debug("[{}] {} NEWS BLOCK: {}", self.name, sym, reason)
+                return False
+        except Exception:
+            pass
+
+        try:
+            from ml_signal_scorer import ml_signal_scorer as _mls
+            ml_score = _mls.score(snap, action)
+            min_conf = getattr(settings, "ml_signal_min_confidence", 0.5)
+            if getattr(settings, "use_ml_signals", False) and ml_score < min_conf:
+                logger.debug("[{}] {} ML score {:.2f} < {:.2f} — skipping entry",
+                             self.name, sym, ml_score, min_conf)
+                return False
+        except Exception:
+            pass
+
         return True
 
     async def _place_orders(
@@ -1003,6 +1063,19 @@ class BaseAgent(ABC):
         if catalyst > 0.3:
             qty = min(int(qty * 1.2), int(settings.max_position_size // ltp))
             logger.debug("[{}] {} positive catalyst {:.2f} → qty bumped to {}", self.name, sym, catalyst, qty)
+
+        try:
+            from portfolio_var import portfolio_var as _pvar
+            notional = qty * ltp
+            var_ok, var_reason = _pvar.check_pre_trade(sym, notional)
+            if not var_ok:
+                logger.info("[{}] {} portfolio VaR BLOCK: {}", self.name, sym, var_reason)
+                order_guard.release_claim(sym, self.name, action)
+                raise RuntimeError("portfolio_var_breach")
+        except RuntimeError:
+            raise
+        except Exception:
+            pass
 
         allowed, _ = risk_manager.check_before_order(sym, qty, ltp, action)
         if not allowed:

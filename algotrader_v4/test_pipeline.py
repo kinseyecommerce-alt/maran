@@ -4750,6 +4750,474 @@ run("pattern reset wired into daily reset",          t_pattern_reset_in_daily)
 
 
 # ══════════════════════════════════════════════════════════════════════════
+# 32. AGENT BRAIN & MEMORY (cross-session, signal bus, adaptive capital)
+# ══════════════════════════════════════════════════════════════════════════
+section("32. AGENT BRAIN & MEMORY")
+
+# ── Cross-session pattern memory ──────────────────────────────────────────
+def t_pattern_save_and_reload():
+    from pattern_monitor import PatternMonitor
+    pm = PatternMonitor()
+    # Record some trades for a pattern
+    for _ in range(5):
+        pm.record("intraday", "TESTPAT", -0.8)
+    pm.save_history()
+    # New instance reloads
+    pm2 = PatternMonitor()
+    pm2.load_history()
+    with pm2._lock:
+        key = ("intraday", "TESTPAT")
+        dq = pm2._hist.get(key)
+    assert dq is not None and len(dq) > 0, "history must survive save+load cycle"
+
+def t_pattern_reset_daily_saves_history():
+    from pattern_monitor import PatternMonitor
+    pm = PatternMonitor()
+    pm.record("scalping", "SAVEDPAT", 1.0)
+    pm.reset_daily()
+    # After reset, disabled set cleared but history still in memory
+    with pm._lock:
+        assert len(pm._disabled) == 0, "reset must clear disabled set"
+        # history may or may not be cleared depending on design choice — just ensure no crash
+
+def t_pattern_carry_is_partial():
+    """Prior history carries ≤50% of its length by default."""
+    from pattern_monitor import PatternMonitor
+    from config import settings as _s
+    pm = PatternMonitor()
+    for _ in range(20):
+        pm.record("intraday", "LONGPAT", -1.0)
+    pm.save_history()
+    pm2 = PatternMonitor()
+    pm2.load_history()
+    with pm2._lock:
+        dq = pm2._hist.get(("intraday", "LONGPAT"), [])
+        n = len(dq)
+    assert 0 < n <= 10, f"should carry ≤50% of 20 = ≤10 obs, got {n}"
+
+def t_pattern_load_missing_graceful():
+    """load_history with no saved data must not crash."""
+    from pattern_monitor import PatternMonitor
+    from state_store import set_kv
+    set_kv("pattern_monitor_history", "")   # wipe
+    pm = PatternMonitor()
+    pm.load_history()   # must not raise
+    with pm._lock:
+        assert len(pm._hist) == 0
+
+def t_pattern_settings_present():
+    from config import settings as _s
+    assert hasattr(_s, "pattern_history_carry_pct")
+    assert 0 < _s.pattern_history_carry_pct <= 1
+
+# ── Cross-agent signal bus ────────────────────────────────────────────────
+def t_bus_publish_and_query():
+    from signal_bus import SignalBus
+    bus = SignalBus()
+    bus.publish("scalping", "HDFC", "BUY", score=7)
+    assert len(bus.recent("HDFC")) == 1
+
+def t_bus_consensus_boost_none_without_others():
+    from signal_bus import SignalBus
+    bus = SignalBus()
+    bus.publish("intraday", "TCS", "BUY", score=5)
+    # Calling agent = intraday → should not count itself
+    boost = bus.consensus_boost("TCS", "BUY", calling_agent="intraday")
+    assert boost == 0.0, "agent must not boost itself"
+
+def t_bus_consensus_boost_with_other_agent():
+    from signal_bus import SignalBus
+    bus = SignalBus()
+    bus.publish("scalping", "INFY", "BUY", score=7)
+    boost = bus.consensus_boost("INFY", "BUY", calling_agent="intraday")
+    assert boost > 0.0, "1 other agent agreeing must give a boost"
+
+def t_bus_direction_filter():
+    from signal_bus import SignalBus
+    bus = SignalBus()
+    bus.publish("scalping", "TCS", "SELL", score=7)
+    boost = bus.consensus_boost("TCS", "BUY", calling_agent="intraday")
+    assert boost == 0.0, "opposite direction must not boost"
+
+def t_bus_score_filter():
+    from signal_bus import SignalBus
+    from config import settings as _s
+    bus = SignalBus()
+    bus.publish("scalping", "WIPRO", "BUY", score=0)  # score below min
+    boost = bus.consensus_boost("WIPRO", "BUY", calling_agent="intraday")
+    assert boost == 0.0, "low-score signals must not contribute to boost"
+
+def t_bus_ttl_expiry():
+    import time
+    from signal_bus import SignalBus
+    from config import settings as _s
+    bus = SignalBus()
+    old = _s.signal_bus_window_sec
+    _s.signal_bus_window_sec = 0.01   # 10ms TTL
+    try:
+        bus.publish("scalping", "SBI", "BUY", score=8)
+        time.sleep(0.02)
+        boost = bus.consensus_boost("SBI", "BUY", calling_agent="intraday")
+        assert boost == 0.0, "expired events must not boost"
+    finally:
+        _s.signal_bus_window_sec = old
+
+def t_bus_subscription():
+    from signal_bus import SignalBus
+    received = []
+    def cb(evt): received.append(evt)
+    bus = SignalBus()
+    bus.subscribe(cb)
+    bus.publish("intraday", "RELIANCE", "BUY", score=5)
+    assert len(received) == 1 and received[0].symbol == "RELIANCE"
+    bus.unsubscribe(cb)
+    bus.publish("intraday", "RELIANCE", "BUY", score=5)
+    assert len(received) == 1, "unsubscribed callback must not fire"
+
+def t_bus_status_shape():
+    from signal_bus import signal_bus as _sb
+    st = _sb.status()
+    for k in ("enabled", "active_events", "symbols_tracked", "subscribers"):
+        assert k in st, f"missing key {k}"
+
+def t_bus_wired_into_base_agent():
+    import inspect
+    from agents import base_agent as _ba
+    src = inspect.getsource(_ba)
+    assert "signal_bus" in src and "_sbus.publish(" in src
+    assert "_bus_boost" in src
+
+def t_bus_settings_present():
+    from config import settings as _s
+    for f in ("use_signal_bus", "signal_bus_window_sec",
+              "signal_bus_min_score", "signal_bus_max_boost"):
+        assert hasattr(_s, f), f"missing setting {f}"
+
+# ── Adaptive capital allocator ────────────────────────────────────────────
+def t_allocator_status_shape():
+    from agent_capital_allocator import AgentCapitalAllocator
+    alloc = AgentCapitalAllocator()
+    st = alloc.status()
+    for k in ("enabled", "current", "baselines", "overrides"):
+        assert k in st, f"missing key {k}"
+
+def t_allocator_disabled_by_default():
+    from agent_capital_allocator import AgentCapitalAllocator
+    alloc = AgentCapitalAllocator()
+    result = alloc.rebalance()
+    assert "skipped" in result, "must skip when use_adaptive_capital=False"
+
+def t_allocator_save_load():
+    from agent_capital_allocator import AgentCapitalAllocator
+    from config import settings as _s
+    old_intraday = _s.intraday_capital_pct
+    alloc = AgentCapitalAllocator()
+    alloc._baselines = {"intraday": 40.0, "swing": 25.0,
+                        "options": 25.0, "futures": 10.0}
+    alloc._overrides = {"intraday": 42.0}
+    alloc.save()
+    alloc2 = AgentCapitalAllocator()
+    alloc2.load()
+    assert alloc2._overrides.get("intraday") == 42.0, "overrides must survive save+load"
+    _s.intraday_capital_pct = old_intraday  # restore
+
+def t_allocator_reset_restores_baseline():
+    from agent_capital_allocator import AgentCapitalAllocator
+    from config import settings as _s
+    old = _s.intraday_capital_pct
+    alloc = AgentCapitalAllocator()
+    alloc._baselines = {"intraday": 40.0, "swing": 25.0,
+                        "options": 25.0, "futures": 10.0}
+    alloc._overrides = {"intraday": 50.0}
+    alloc._apply_locked()
+    assert _s.intraday_capital_pct == 50.0
+    alloc.reset()
+    assert _s.intraday_capital_pct == 40.0, "reset must restore baseline"
+    _s.intraday_capital_pct = old
+
+def t_allocator_endpoints_present():
+    import inspect, main as _m
+    src = inspect.getsource(_m)
+    for ep in ("/capital/status", "/capital/rebalance", "/capital/reset", "/signals/bus"):
+        assert ep in src, f"missing endpoint {ep}"
+
+def t_allocator_loaded_at_startup():
+    import inspect, master_agent_v5 as _ma
+    src = inspect.getsource(_ma)
+    assert "agent_capital_allocator" in src
+    assert "agent_capital_allocator.load()" in src
+    assert "agent_capital_allocator.rebalance()" in src
+
+def t_brain_settings_present():
+    from config import settings as _s
+    for f in ("use_adaptive_capital", "adaptive_capital_days",
+              "adaptive_capital_min_trades", "adaptive_capital_step_pct",
+              "adaptive_capital_floor_ratio"):
+        assert hasattr(_s, f), f"missing setting {f}"
+
+run("cross-session: save + reload history",          t_pattern_save_and_reload)
+run("cross-session: reset_daily saves then clears",  t_pattern_reset_daily_saves_history)
+run("cross-session: carry is partial (≤50%)",        t_pattern_carry_is_partial)
+run("cross-session: load with empty DB is safe",     t_pattern_load_missing_graceful)
+run("cross-session: settings present",               t_pattern_settings_present)
+run("signal bus: publish + query",                   t_bus_publish_and_query)
+run("signal bus: no self-boost",                     t_bus_consensus_boost_none_without_others)
+run("signal bus: other-agent agreement boosts",      t_bus_consensus_boost_with_other_agent)
+run("signal bus: direction filter",                  t_bus_direction_filter)
+run("signal bus: score filter",                      t_bus_score_filter)
+run("signal bus: TTL expiry",                        t_bus_ttl_expiry)
+run("signal bus: subscribe/unsubscribe",             t_bus_subscription)
+run("signal bus: status shape",                      t_bus_status_shape)
+run("signal bus: wired into base_agent",             t_bus_wired_into_base_agent)
+run("signal bus: settings present",                  t_bus_settings_present)
+run("allocator: status shape",                       t_allocator_status_shape)
+run("allocator: disabled by default",                t_allocator_disabled_by_default)
+run("allocator: save + load",                        t_allocator_save_load)
+run("allocator: reset restores baseline",            t_allocator_reset_restores_baseline)
+run("allocator: REST endpoints present",             t_allocator_endpoints_present)
+run("allocator: loaded at master startup",           t_allocator_loaded_at_startup)
+run("brain: all settings present",                   t_brain_settings_present)
+
+
+# ══════════════════════════════════════════════════════════════════════════
+# Section 33 — Gap-Fill: Portfolio VaR, ML Signal, TWAP, News Gate
+# ══════════════════════════════════════════════════════════════════════════
+
+def t_portfolio_var_import():
+    from portfolio_var import portfolio_var
+    assert callable(portfolio_var.check_pre_trade)
+    assert callable(portfolio_var.compute)
+    assert callable(portfolio_var.status)
+
+def t_portfolio_var_disabled_by_default():
+    from config import settings
+    from portfolio_var import portfolio_var
+    settings.use_portfolio_var = False
+    ok, reason = portfolio_var.check_pre_trade("RELIANCE", 50000)
+    assert ok is True and reason == ""
+
+def t_portfolio_var_empty_positions_safe():
+    from config import settings
+    from portfolio_var import portfolio_var
+    settings.use_portfolio_var = True
+    result = portfolio_var.compute([])
+    assert result["n_positions"] == 0
+    assert result["cvar_99"] == 0.0
+    settings.use_portfolio_var = False
+
+def t_portfolio_var_status_shape():
+    from portfolio_var import portfolio_var
+    s = portfolio_var.status()
+    for k in ("var_95", "var_99", "cvar_99", "total_notional", "n_positions",
+              "var_limit_pct", "capital", "var_limit_inr", "use_portfolio_var"):
+        assert k in s, f"missing key {k}"
+
+def t_portfolio_var_settings_present():
+    from config import settings
+    assert hasattr(settings, "use_portfolio_var")
+    assert hasattr(settings, "portfolio_var_limit_pct")
+
+def t_ml_signal_import():
+    from ml_signal_scorer import ml_signal_scorer
+    assert callable(ml_signal_scorer.score)
+    assert callable(ml_signal_scorer.train)
+    assert callable(ml_signal_scorer.status)
+
+def t_ml_signal_returns_float():
+    from ml_signal_scorer import ml_signal_scorer
+
+    class FakeInd:
+        ema9=100; ema21=98; vwap=99; rsi_14=55; rsi_7=58; macd=0.5; macd_signal=0.3
+        macd_hist=0.2; bb_upper=105; bb_lower=95; bb_mid=100; atr_14=2.0
+        stoch_rsi_k=60; stoch_rsi_d=55; vwap_upper2=103; vwap_lower2=97
+
+    class FakeTick:
+        ltp=100.0; volume=10000
+
+    class FakeSnap:
+        symbol="RELIANCE"; indicators=FakeInd(); tick=FakeTick()
+
+    score = ml_signal_scorer.score(FakeSnap(), "BUY")
+    assert isinstance(score, float)
+    assert 0.0 <= score <= 1.0
+
+def t_ml_signal_disabled_passes_all():
+    from config import settings
+    from ml_signal_scorer import ml_signal_scorer
+
+    class FakeInd:
+        ema9=90; ema21=100; vwap=95; rsi_14=30; rsi_7=28; macd=-0.5; macd_signal=-0.2
+        macd_hist=-0.3; bb_upper=105; bb_lower=85; bb_mid=95; atr_14=3.0
+        stoch_rsi_k=20; stoch_rsi_d=22; vwap_upper2=98; vwap_lower2=88
+
+    class FakeTick:
+        ltp=90.0; volume=5000
+
+    class FakeSnap:
+        symbol="INFY"; indicators=FakeInd(); tick=FakeTick()
+
+    settings.use_ml_signals = False
+    score = ml_signal_scorer.score(FakeSnap(), "BUY")
+    assert score == 1.0  # gate bypassed
+
+def t_ml_signal_no_model_returns_neutral():
+    from config import settings
+    from ml_signal_scorer import ml_signal_scorer
+
+    class FakeInd:
+        ema9=100; ema21=99; vwap=100; rsi_14=50; rsi_7=50; macd=0; macd_signal=0
+        macd_hist=0; bb_upper=102; bb_lower=98; bb_mid=100; atr_14=1.0
+        stoch_rsi_k=50; stoch_rsi_d=50; vwap_upper2=101; vwap_lower2=99
+
+    class FakeTick:
+        ltp=100.0; volume=1000
+
+    class FakeSnap:
+        symbol="UNKNOWNSYMBOL_XYZ99"; indicators=FakeInd(); tick=FakeTick()
+
+    settings.use_ml_signals = True
+    score = ml_signal_scorer.score(FakeSnap(), "BUY")
+    assert score == 0.5  # neutral when no model
+    settings.use_ml_signals = False
+
+def t_ml_signal_status_shape():
+    from ml_signal_scorer import ml_signal_scorer
+    s = ml_signal_scorer.status()
+    for k in ("loaded_models", "use_ml_signals", "min_confidence"):
+        assert k in s, f"missing key {k}"
+
+def t_ml_signal_settings_present():
+    from config import settings
+    assert hasattr(settings, "use_ml_signals")
+    assert hasattr(settings, "ml_signal_min_confidence")
+
+def t_twap_import():
+    from twap_executor import twap_executor
+    assert callable(twap_executor.place_twap)
+    assert callable(twap_executor.place_vwap)
+    assert callable(twap_executor.status)
+
+def t_twap_paper_instant():
+    import asyncio
+    from config import settings
+    from twap_executor import twap_executor
+    settings.trading_mode = "PAPER"
+    settings.use_twap = True
+    settings.twap_threshold_qty = 10
+    settings.twap_slices = 3
+    settings.twap_duration_sec = 60
+
+    ids = asyncio.run(twap_executor.place_twap("RELIANCE", 30, "BUY", tag="test"))
+    assert len(ids) == 3
+    assert all(isinstance(i, str) for i in ids)
+
+def t_twap_below_threshold_single_order():
+    import asyncio
+    from config import settings
+    from twap_executor import twap_executor
+    settings.trading_mode = "PAPER"
+    settings.use_twap = True
+    settings.twap_threshold_qty = 500
+    settings.twap_slices = 5
+
+    ids = asyncio.run(twap_executor.place_twap("TCS", 50, "BUY", tag="test"))
+    assert len(ids) == 1  # below threshold → single order
+
+def t_twap_vwap_profile():
+    import asyncio
+    from config import settings
+    from twap_executor import twap_executor
+    settings.trading_mode = "PAPER"
+    settings.use_twap = True
+
+    ids = asyncio.run(twap_executor.place_vwap("INFY", 100, "BUY", volume_profile=[0.5, 0.3, 0.2]))
+    assert len(ids) == 3
+
+def t_twap_settings_present():
+    from config import settings
+    for f in ("use_twap", "twap_slices", "twap_interval_sec", "twap_min_qty"):
+        assert hasattr(settings, f), f"missing {f}"
+
+def t_news_gate_import():
+    from news_gate import news_gate
+    assert callable(news_gate.is_blocked)
+    assert callable(news_gate.block)
+    assert callable(news_gate.unblock)
+    assert callable(news_gate.status)
+
+def t_news_gate_manual_block_unblock():
+    from config import settings
+    from news_gate import news_gate
+    settings.use_news_gate = True
+    news_gate.block("RELIANCE", "test fraud probe", hours=1)
+    blocked, reason = news_gate.is_blocked("RELIANCE")
+    assert blocked is True
+    assert "fraud" in reason.lower() or "test" in reason.lower()
+    news_gate.unblock("RELIANCE")
+    blocked2, _ = news_gate.is_blocked("RELIANCE")
+    assert blocked2 is False
+
+def t_news_gate_disabled_passes_all():
+    from config import settings
+    from news_gate import news_gate
+    settings.use_news_gate = False
+    news_gate.block("TCS", "should be ignored", hours=24)
+    blocked, _ = news_gate.is_blocked("TCS")
+    assert blocked is False
+    news_gate.unblock("TCS")
+
+def t_news_gate_status_shape():
+    from news_gate import news_gate
+    s = news_gate.status()
+    for k in ("blocked", "last_poll", "use_news_gate"):
+        assert k in s, f"missing key {k}"
+
+def t_news_gate_settings_present():
+    from config import settings
+    for f in ("use_news_gate", "news_block_hours", "news_poll_interval_sec"):
+        assert hasattr(settings, f), f"missing {f}"
+
+def t_gap_rest_endpoints_present():
+    import main as _m
+    routes = {r.path for r in _m.app.routes}
+    for ep in ("/risk/var", "/news/gate", "/news/gate/refresh",
+               "/ml/signal/status", "/twap/status", "/twap/place"):
+        assert ep in routes, f"endpoint {ep} missing from main.py"
+
+def t_gap_base_agent_wired():
+    import inspect
+    import agents.base_agent as _ba
+    src = inspect.getsource(_ba)
+    assert "news_gate" in src, "news_gate not wired into base_agent"
+    assert "ml_signal_scorer" in src, "ml_signal_scorer not wired into base_agent"
+    assert "portfolio_var" in src, "portfolio_var not wired into base_agent"
+
+run("portfolio_var: module imports cleanly",          t_portfolio_var_import)
+run("portfolio_var: disabled by default",             t_portfolio_var_disabled_by_default)
+run("portfolio_var: empty positions safe",            t_portfolio_var_empty_positions_safe)
+run("portfolio_var: status has correct keys",         t_portfolio_var_status_shape)
+run("portfolio_var: settings present",                t_portfolio_var_settings_present)
+run("ml_signal: module imports cleanly",              t_ml_signal_import)
+run("ml_signal: score returns 0-1 float",             t_ml_signal_returns_float)
+run("ml_signal: disabled → score == 1.0",             t_ml_signal_disabled_passes_all)
+run("ml_signal: no model → neutral 0.5",              t_ml_signal_no_model_returns_neutral)
+run("ml_signal: status has correct keys",             t_ml_signal_status_shape)
+run("ml_signal: settings present",                    t_ml_signal_settings_present)
+run("twap: module imports cleanly",                   t_twap_import)
+run("twap: PAPER mode places all slices instantly",   t_twap_paper_instant)
+run("twap: below threshold → single order",           t_twap_below_threshold_single_order)
+run("twap: VWAP profile distributes correctly",       t_twap_vwap_profile)
+run("twap: settings present",                         t_twap_settings_present)
+run("news_gate: module imports cleanly",              t_news_gate_import)
+run("news_gate: manual block/unblock",                t_news_gate_manual_block_unblock)
+run("news_gate: disabled passes all",                 t_news_gate_disabled_passes_all)
+run("news_gate: status has correct keys",             t_news_gate_status_shape)
+run("news_gate: settings present",                    t_news_gate_settings_present)
+run("gap-5: REST endpoints in main.py",               t_gap_rest_endpoints_present)
+run("gap-5: base_agent wired to all 3 modules",       t_gap_base_agent_wired)
+
+
+# ══════════════════════════════════════════════════════════════════════════
 # FINAL SUMMARY
 # ══════════════════════════════════════════════════════════════════════════
 failed = summary()

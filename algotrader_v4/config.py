@@ -76,6 +76,11 @@ class Settings(BaseSettings):
     pattern_min_trades: int = Field(default=12, gt=1)    # min sample before muting
     pattern_disable_sharpe: float = 0.0                  # mute when rolling Sharpe < this AND mean < 0
 
+    # News / corporate-action gate
+    use_news_gate: bool = False             # block trades on negative news (opt-in)
+    news_block_hours: int = 4              # how long to hold a news block
+    news_poll_interval_sec: int = 300      # how often to refresh NSE announcements
+
     # L2 fill-quality gate — size/skip on thin order books (LIVE only; needs depth)
     use_l2_fill_gate: bool = False                       # opt-in: needs L2 depth feed
     l2_min_fill_prob: float = Field(default=0.5, ge=0, le=1)   # min fraction of qty the book must absorb
@@ -91,6 +96,22 @@ class Settings(BaseSettings):
     use_latency_guard: bool = False                      # opt-in
     max_order_latency_ms: float = Field(default=1500.0, gt=0)
     latency_cooldown_sec: float = Field(default=30.0, gt=0)
+
+    # Cross-session pattern memory — carry prior rolling stats across restarts
+    pattern_history_carry_pct: float = Field(default=0.5, gt=0, le=1)  # fraction of prior window to seed
+
+    # Cross-agent signal bus — real-time cross-strategy conviction sharing
+    use_signal_bus: bool = True
+    signal_bus_window_sec: float = Field(default=60.0, gt=0)   # event TTL
+    signal_bus_min_score: int = Field(default=3, ge=0)          # min signal score to count toward boost
+    signal_bus_max_boost: float = Field(default=0.25, ge=0, le=1)  # max size boost per agreed agent
+
+    # Adaptive agent capital allocation — shift buckets toward best Sharpe agents
+    use_adaptive_capital: bool = False                           # opt-in (needs ≥N live trades)
+    adaptive_capital_days: int = Field(default=5, ge=1)          # rolling look-back days
+    adaptive_capital_min_trades: int = Field(default=10, ge=1)   # minimum trades before shifting
+    adaptive_capital_step_pct: float = Field(default=5.0, gt=0)  # max pct shift per rebalance
+    adaptive_capital_floor_ratio: float = Field(default=0.10, gt=0, le=0.5)  # floor = ratio × baseline
 
     # Backtest gate thresholds
     bt_min_win_rate: float = 55.0
@@ -227,12 +248,21 @@ class Settings(BaseSettings):
     max_portfolio_beta: float = 1.3   # block BUY if portfolio beta would exceed this
     use_ml_filter: bool = False       # GBM win-probability gate (requires trained model)
     ml_filter_min_prob: float = 0.45  # minimum predicted win probability to enter
+    use_ml_signals: bool = False      # sklearn signal scorer gate
+    ml_signal_min_confidence: float = 0.5  # minimum ML confidence to pass
+
+    # Portfolio VaR / CVaR gate
+    use_portfolio_var: bool = False          # block new entries that breach CVaR limit
+    portfolio_var_limit_pct: float = 2.0    # max allowed portfolio CVaR as % of total_capital
 
     # TWAP order splitting (large-lot market impact reduction)
     use_twap: bool = False            # split large orders into equal slices
     twap_slices: int = 4              # number of child orders per TWAP execution
     twap_interval_sec: int = 15       # seconds between each slice
     twap_min_qty: int = 100           # only TWAP if qty >= this (don't slice small retail lots)
+    # Aliases accepted by twap_executor (mirrors twap_min_qty / twap_interval_sec * twap_slices)
+    twap_threshold_qty: int = 0       # alias for twap_min_qty (0 = use twap_min_qty)
+    twap_duration_sec: int = 0        # alias for twap_interval_sec * twap_slices (0 = compute)
 
     # Real-time tick feed
     use_kite_websocket: bool = True   # use KiteConnect WebSocket for ticks in LIVE mode

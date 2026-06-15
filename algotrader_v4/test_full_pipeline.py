@@ -233,6 +233,12 @@ async def stage_agents():
             with patch("agents.strategy_agents.now_ist", return_value=MKT), \
                  patch.object(claude_trade_gate, "assess", _stub_assess):
                 for s in snaps:
+                    # recipes() builds all snaps up front, but agents are driven
+                    # serially over ~16s. base_agent drops snaps older than 5s
+                    # (monotonic) to avoid acting on stale prices, so refresh the
+                    # stamp right before injection — a live tick would arrive now.
+                    import time as _t
+                    s.tick._monotonic_ts = _t.monotonic()
                     await q.put(s)
                 # Let the async _run_loop drain the queue and place orders.
                 entry = None

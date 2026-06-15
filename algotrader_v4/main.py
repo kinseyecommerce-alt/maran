@@ -1144,6 +1144,35 @@ def patterns_status():
     return pattern_monitor.stats()
 
 
+@app.get("/signals/bus", tags=["Risk"])
+def signals_bus_status():
+    """Cross-agent signal bus: active events and consensus by symbol."""
+    from signal_bus import signal_bus
+    return {"status": signal_bus.status(), "recent": signal_bus.recent(limit=30)}
+
+
+@app.get("/capital/status", tags=["Risk"])
+def capital_status():
+    """Adaptive capital allocator: current bucket weights and baselines."""
+    from agent_capital_allocator import agent_capital_allocator
+    return agent_capital_allocator.status()
+
+
+@app.post("/capital/rebalance", tags=["Risk"])
+def capital_rebalance():
+    """Force a capital rebalance now (normally runs nightly)."""
+    from agent_capital_allocator import agent_capital_allocator
+    return agent_capital_allocator.rebalance()
+
+
+@app.post("/capital/reset", tags=["Risk"])
+def capital_reset():
+    """Reset capital weights to baseline values."""
+    from agent_capital_allocator import agent_capital_allocator
+    agent_capital_allocator.reset()
+    return {"ok": True}
+
+
 @app.get("/broker/status", tags=["System"])
 def broker_status():
     """Return connection status for primary (Zerodha/active broker) and all secondary brokers."""
@@ -1453,6 +1482,40 @@ def patch_pattern_toggle(req: PatternToggleRequest):
         raise HTTPException(status_code=400, detail=f"Unknown pattern '{req.pattern}' for agent '{req.agent}'")
     bot_state.set_pattern_enabled(req.agent, req.pattern, req.enabled)
     return {"agent": req.agent, "pattern": req.pattern, "enabled": req.enabled}
+
+
+class TradingModeRequest(BaseModel):
+    mode: str          # "PAPER" or "LIVE"
+    confirm: bool = False
+
+
+@app.post("/settings/trading-mode", tags=["Settings"])
+def set_trading_mode(req: TradingModeRequest):
+    """Switch trading mode between PAPER and LIVE at runtime.
+    Requires confirm=true when switching to LIVE as a safety gate.
+    The change is in-memory only; update .env to make it permanent.
+    """
+    from fastapi import HTTPException
+    mode = req.mode.upper()
+    if mode not in ("PAPER", "LIVE"):
+        raise HTTPException(status_code=400, detail="mode must be PAPER or LIVE")
+    if mode == "LIVE" and not req.confirm:
+        raise HTTPException(status_code=400, detail="confirm=true required to switch to LIVE mode")
+    prev = settings.trading_mode
+    settings.trading_mode = mode
+    logger.warning("Trading mode changed: {} → {} (in-memory only; update .env to persist)", prev, mode)
+    return {
+        "status": "ok",
+        "trading_mode": mode,
+        "previous": prev,
+        "note": "Change is in-memory. Update TRADING_MODE in .env and restart for full effect (tick feed switch).",
+    }
+
+
+@app.get("/settings/trading-mode", tags=["Settings"])
+def get_trading_mode():
+    """Return current trading mode."""
+    return {"trading_mode": settings.trading_mode}
 
 
 # ── WebSocket ────────────────────────────────────────────────────────────────────
@@ -2818,3 +2881,86 @@ if __name__ == "__main__":
 
     import uvicorn
     uvicorn.run("main:app", host=settings.host, port=settings.port, reload=False)
+
+
+# ── Gap-5 Intelligence Endpoints ──────────────────────────────────────────────
+
+@app.get("/risk/var", tags=["Risk"])
+async def get_portfolio_var():
+    """Real-time portfolio VaR and CVaR across all open positions."""
+    from portfolio_var import portfolio_var
+    return portfolio_var.status()
+
+
+@app.get("/news/gate", tags=["Risk"])
+async def get_news_gate():
+    """Current news gate block list and last poll time."""
+    from news_gate import news_gate
+    return news_gate.status()
+
+
+@app.post("/news/gate/block", tags=["Risk"])
+async def news_gate_block(symbol: str, reason: str = "manual", hours: float = None):
+    """Manually block a symbol from trading (news/event-driven risk)."""
+    from news_gate import news_gate
+    news_gate.block(symbol.upper(), reason, hours)
+    return {"blocked": symbol.upper(), "reason": reason}
+
+
+@app.delete("/news/gate/block/{symbol}", tags=["Risk"])
+async def news_gate_unblock(symbol: str):
+    """Remove manual news block for a symbol."""
+    from news_gate import news_gate
+    news_gate.unblock(symbol.upper())
+    return {"unblocked": symbol.upper()}
+
+
+@app.post("/news/gate/refresh", tags=["Risk"])
+async def news_gate_refresh():
+    """Poll NSE corporate announcements and update block list."""
+    from news_gate import news_gate
+    await news_gate.refresh()
+    return news_gate.status()
+
+
+@app.get("/ml/signal/status", tags=["Risk"])
+async def get_ml_signal_status():
+    """ML signal scorer status and loaded models."""
+    from ml_signal_scorer import ml_signal_scorer
+    return ml_signal_scorer.status()
+
+
+@app.post("/ml/signal/train/{symbol}", tags=["Risk"])
+async def train_ml_signal(symbol: str):
+    """Train or retrain the ML signal model for a symbol."""
+    from ml_signal_scorer import ml_signal_scorer
+    loop = asyncio.get_event_loop()
+    success = await loop.run_in_executor(None, lambda: ml_signal_scorer.train(symbol.upper()))
+    return {"symbol": symbol.upper(), "trained": success}
+
+
+@app.get("/twap/status", tags=["Orders"])
+async def get_twap_status():
+    """Active TWAP/VWAP order status."""
+    from twap_executor import twap_executor
+    return twap_executor.status()
+
+
+@app.post("/twap/place", tags=["Orders"])
+async def place_twap_order(
+    symbol: str,
+    qty: int,
+    direction: str,
+    exchange: str = "NSE",
+    product: str = "MIS",
+    duration_sec: float = None,
+    slices: int = None,
+):
+    """Manually place a TWAP order for a large lot. direction: BUY or SELL."""
+    from twap_executor import twap_executor
+    loop = asyncio.get_event_loop()
+    ids = await twap_executor.place_twap(
+        symbol.upper(), qty, direction.upper(), exchange, product,
+        tag="manual-twap", duration_sec=duration_sec, slices=slices, loop=loop,
+    )
+    return {"symbol": symbol.upper(), "order_ids": ids, "qty": qty}
