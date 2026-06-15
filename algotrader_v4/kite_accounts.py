@@ -13,7 +13,9 @@ import threading
 from pathlib import Path
 from typing import Optional
 
-_STORE_PATH = Path(__file__).parent / "kite_accounts.json"
+import os as _os_ka
+_STORE_PATH = Path(_os_ka.environ.get("KITE_ACCOUNTS_FILE",
+                                      str(Path(__file__).parent / "kite_accounts.json")))
 _lock = threading.Lock()
 _accounts: dict[str, dict] = {}
 _loaded = False
