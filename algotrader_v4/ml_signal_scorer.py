@@ -85,20 +85,30 @@ class MLSignalScorer:
         # Label: 1 if next-day close > today * 1.002
         label = (close.shift(-1) > close * 1.002).astype(int)
 
+        # Features must match _features_from_snap (same 12, same order):
+        #  1. EMA9/EMA21 ratio  2. price vs VWAP  3. RSI-14  4. MACD-hist/ATR
+        #  5. BB position       6. ATR/price       7. StochRSI-K  8. StochRSI-D
+        #  9. upper-band dist  10. lower-band dist 11. RSI-7  12. MACD/ATR
+        rsi7 = ta.momentum.RSIIndicator(close=close, window=7).rsi()
+        stoch = ta.momentum.StochRSIIndicator(close=close)
+        stoch_k = stoch.stochrsi_k()
+        stoch_d = stoch.stochrsi_d()
+        vwap_proxy = close.rolling(20).mean()  # rolling-VWAP proxy from daily OHLCV
+        bb_range = (bb_upper - bb_lower).replace(0, np.nan)
         import pandas as pd
         feat_df = pd.DataFrame({
-            "ema_ratio": ema9 / ema21.replace(0, np.nan),
-            "price_vwap": (close - close.rolling(20).mean()) / close.rolling(20).mean().replace(0, np.nan),
-            "rsi14": rsi14 / 100.0,
-            "macd_hist_norm": macd_hist / atr14.replace(0, np.nan),
-            "bb_pos": (close - bb_lower) / (bb_upper - bb_lower).replace(0, np.nan),
-            "atr_ratio": atr14 / close.replace(0, np.nan),
-            "vol_ratio": volume / volume.rolling(20).mean().replace(0, np.nan),
-            "macd_norm": macd_line / atr14.replace(0, np.nan),
-            "ema9": ema9,
-            "rsi14_raw": rsi14,
-            "macd_hist": macd_hist,
-            "close_pct": close.pct_change(),
+            "f01_ema_ratio":        ema9 / ema21.replace(0, np.nan),
+            "f02_price_vwap":       (close - vwap_proxy) / vwap_proxy.replace(0, np.nan),
+            "f03_rsi14":            rsi14 / 100.0,
+            "f04_macd_hist_atr":    macd_hist / atr14.replace(0, np.nan),
+            "f05_bb_pos":           (close - bb_lower) / bb_range,
+            "f06_atr_ratio":        atr14 / close.replace(0, np.nan),
+            "f07_stoch_k":          stoch_k / 100.0,
+            "f08_stoch_d":          stoch_d / 100.0,
+            "f09_upper_dist":       (bb_upper - close) / atr14.replace(0, np.nan),
+            "f10_lower_dist":       (close - bb_lower) / atr14.replace(0, np.nan),
+            "f11_rsi7":             rsi7 / 100.0,
+            "f12_macd_atr":         macd_line / atr14.replace(0, np.nan),
         })
 
         feat_df["label"] = label

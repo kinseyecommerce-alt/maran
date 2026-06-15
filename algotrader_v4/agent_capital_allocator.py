@@ -142,21 +142,14 @@ class AgentCapitalAllocator:
                 try:
                     stats = get_trade_stats(strategy=agent,
                                             days=int(_cfg("adaptive_capital_days", 5)))
-                    n = stats.get("total_trades", 0)
+                    n = stats.get("trades", 0)
                     if n < int(_cfg("adaptive_capital_min_trades", 10)):
                         continue
-                    pnls = stats.get("pnl_series", [])
-                    if not pnls:
-                        # Fallback: compute from gross_pnl and win_rate
-                        mean_pnl = stats.get("avg_win", 0) * stats.get("win_rate", 0) / 100 \
-                                   - stats.get("avg_loss", 0) * (1 - stats.get("win_rate", 0) / 100)
-                        sharpe_vals.append(mean_pnl / max(abs(mean_pnl) * 0.5, 0.01))
-                    else:
-                        arr = [float(x) for x in pnls]
-                        mu = sum(arr) / len(arr)
-                        if len(arr) > 1:
-                            std = math.sqrt(sum((x - mu) ** 2 for x in arr) / (len(arr) - 1))
-                            sharpe_vals.append(mu / std * math.sqrt(len(arr)) if std else 0.0)
+                    # get_trade_stats returns aggregate totals, not per-trade series.
+                    # Use net_pnl / n as a mean-return proxy and derive a directional
+                    # Sharpe: positive → capital shifts up, negative → shifts down.
+                    mean_pnl = stats.get("net_pnl", 0) / max(n, 1)
+                    sharpe_vals.append(mean_pnl / max(abs(mean_pnl) * 0.5, 0.01))
                 except Exception:
                     continue
             if sharpe_vals:

@@ -527,9 +527,18 @@ class BaseAgent(ABC):
                         from market_regime import regime_detector as _rd
                         _regime = _rd.current_regime.value if (
                             _rd.current_regime) else ""
+                        # Some agents put score directly; others embed it in trigger.
+                        _score = signal.get("score") or 0
+                        if not _score:
+                            _trig = signal.get("trigger", "")
+                            if "score=" in _trig:
+                                try:
+                                    _score = int(_trig.split("score=")[1].split("/")[0].split()[0])
+                                except Exception:
+                                    pass
                         _sbus.publish(
                             agent=self.name, symbol=snap.symbol,
-                            direction=action, score=signal.get("score", 0),
+                            direction=action, score=_score,
                             regime=_regime, pattern=signal.get("pattern", ""),
                         )
                     except Exception:
@@ -972,8 +981,7 @@ class BaseAgent(ABC):
 
         try:
             from ml_signal_scorer import ml_signal_scorer as _mls
-            action_hint = signal.get("action", "BUY")
-            ml_score = _mls.score(snap, action_hint)
+            ml_score = _mls.score(snap, action)
             min_conf = getattr(settings, "ml_signal_min_confidence", 0.5)
             if getattr(settings, "use_ml_signals", False) and ml_score < min_conf:
                 logger.debug("[{}] {} ML score {:.2f} < {:.2f} — skipping entry",
