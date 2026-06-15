@@ -39,18 +39,19 @@ def _start_server():
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
     )
-    # Wait up to 15 s for the server to be ready.
-    deadline = time.time() + 15
+    # Wait up to 45 s for the server to be ready.
+    # Startup includes TrueData connection attempt (~5 s timeout) + symbol scanner.
+    deadline = time.time() + 45
     while time.time() < deadline:
         try:
-            r = requests.get(f"{BASE}/health", timeout=1)
+            r = requests.get(f"{BASE}/health", timeout=2)
             if r.status_code == 200:
                 break
         except requests.ConnectionError:
-            time.sleep(0.5)
+            time.sleep(1)
     else:
         _proc.terminate()
-        pytest.fail("uvicorn did not start within 15 s")
+        pytest.fail("uvicorn did not start within 45 s")
 
     yield
 
