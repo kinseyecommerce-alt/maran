@@ -305,6 +305,7 @@ class Settings(BaseSettings):
     adaptive_refresh_sec:     int   = 300    # how often base_agent re-reads adaptive params
     ws_max_connections:       int   = 50     # max simultaneous WebSocket clients
     order_max_retries:        int   = 3      # kite_client retry attempts on transient error
+    tick_interval_ms:         int   = 250    # PAPER mode poll interval (ms); 250 = 4 ticks/s
 
     # Server
     host: str = "0.0.0.0"

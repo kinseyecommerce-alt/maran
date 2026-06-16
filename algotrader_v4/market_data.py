@@ -365,7 +365,10 @@ class PaperTickSimulator:
                 del self._prices[k]
 
         price = self._prices.get(symbol, 1000.0)
-        shock = random.gauss(0, 0.00008)
+        # Scale GBM sigma by sqrt(dt) so per-second realized vol is constant
+        # regardless of tick_interval_ms (0.00008 per-second sigma baseline).
+        dt = settings.tick_interval_ms / 1000.0
+        shock = random.gauss(0, 0.00008 * math.sqrt(dt))
         price = max(price * math.exp(shock), 1.0)
         self._prices[symbol] = price
 
