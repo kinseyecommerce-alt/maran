@@ -103,6 +103,7 @@ _SENSITIVE_GETS = frozenset({
     "/regime/plans",                   # all regime strategy plans
     "/symbols/selected",               # live per-strategy watchlists
     "/admin/users",                    # friend instance list — admin only
+    "/portfolio/greeks",               # live options greeks — exposes position details
 })
 
 @app.middleware("http")
@@ -2201,6 +2202,118 @@ async def options_chain(symbol: str, expiry_offset_days: int = Query(default=0))
         "symbol": sym, "spot": spot, "atm_strike": atm_strike,
         "expiry": str(expiry), "atm_iv_pct": round(atm_iv * 100, 1),
         "chain": chain,
+    }
+
+
+@app.get("/portfolio/greeks", tags=["Options"])
+async def portfolio_greeks():
+    """
+    Live Black-Scholes greeks for all open options positions.
+    Parses NSE contract symbols (weekly and monthly) to extract underlying,
+    strike, and option type, then computes delta/gamma/theta/vega using the
+    current spot price and VIX-derived ATM IV.
+    Returns per-position greeks + portfolio aggregate.
+    """
+    from greeks_engine import calculate_greeks, parse_nfo_symbol
+    from tick_engine import tick_engine as _te
+    from datetime import datetime as _dt
+
+    raw_positions = kite_client.positions().get("net", [])
+    option_positions = [
+        p for p in raw_positions
+        if p.get("quantity", 0) != 0
+        and (p.get("tradingsymbol", "").endswith("CE")
+             or p.get("tradingsymbol", "").endswith("PE"))
+    ]
+
+    # ATM IV from India VIX (used for all positions; falls back to 20%)
+    atm_iv = 0.20
+    try:
+        vix_tick, _ = _te.latest("INDIA VIX")
+        if vix_tick and vix_tick.ltp > 0:
+            atm_iv = vix_tick.ltp / 100.0
+    except Exception:
+        pass
+
+    _index_defaults = {"NIFTY": 24000.0, "BANKNIFTY": 52000.0,
+                       "FINNIFTY": 23000.0, "MIDCPNIFTY": 12000.0}
+
+    result_positions: list[dict] = []
+    net = {"delta": 0.0, "gamma": 0.0, "theta": 0.0, "vega": 0.0}
+
+    for pos in option_positions:
+        sym = pos.get("tradingsymbol", "")
+        qty = pos.get("quantity", 0)
+        avg_price = pos.get("average_price", 0.0)
+
+        parsed = parse_nfo_symbol(sym)
+        if not parsed:
+            continue
+
+        underlying = parsed["underlying"]
+        strike     = parsed["strike"]
+        opt_type   = parsed["opt_type"]
+        expiry     = parsed["expiry"]
+
+        spot = 0.0
+        try:
+            tick, _ = _te.latest(underlying)
+            if tick:
+                spot = tick.ltp
+        except Exception:
+            pass
+        if spot <= 0:
+            spot = _index_defaults.get(underlying, 0.0)
+        if spot <= 0:
+            continue
+
+        try:
+            g = calculate_greeks(spot, strike, expiry, opt_type,
+                                 max(avg_price, 0.05), atm_iv=atm_iv)
+        except Exception:
+            continue
+
+        pos_delta = round(g.delta * qty, 4)
+        pos_gamma = round(g.gamma * qty, 6)
+        pos_theta = round(g.theta * qty, 4)
+        pos_vega  = round(g.vega  * qty, 4)
+
+        net["delta"] += pos_delta
+        net["gamma"] += pos_gamma
+        net["theta"] += pos_theta
+        net["vega"]  += pos_vega
+
+        result_positions.append({
+            "symbol":    sym,
+            "underlying": underlying,
+            "strike":    strike,
+            "opt_type":  opt_type,
+            "expiry":    str(expiry),
+            "qty":       qty,
+            "avg_price": round(avg_price, 2),
+            "spot":      round(spot, 2),
+            "delta":     round(g.delta, 4),
+            "gamma":     round(g.gamma, 6),
+            "theta":     round(g.theta, 4),
+            "vega":      round(g.vega, 4),
+            "iv_pct":    round(g.iv * 100, 1),
+            "moneyness": g.moneyness,
+            "pos_delta": pos_delta,
+            "pos_gamma": pos_gamma,
+            "pos_theta": pos_theta,
+            "pos_vega":  pos_vega,
+        })
+
+    return {
+        "positions": result_positions,
+        "portfolio": {
+            "net_delta":      round(net["delta"], 4),
+            "net_gamma":      round(net["gamma"], 6),
+            "net_theta":      round(net["theta"], 4),
+            "net_vega":       round(net["vega"], 4),
+            "position_count": len(result_positions),
+        },
+        "as_of": _dt.now().isoformat(),
     }
 
 

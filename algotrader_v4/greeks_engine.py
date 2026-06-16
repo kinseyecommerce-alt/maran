@@ -210,3 +210,71 @@ def days_to_next_expiry(option_type_day: str = "thursday") -> int:
     target = day_map.get(option_type_day.lower(), 3)
     days_ahead = (target - today.weekday()) % 7
     return max(days_ahead, 1)
+
+
+# ── NSE contract-symbol parser ────────────────────────────────────────────────
+
+_MONTH_NAMES = ["JAN","FEB","MAR","APR","MAY","JUN","JUL","AUG","SEP","OCT","NOV","DEC"]
+_WEEKLY_MONTH_CODES = "123456789OND"
+
+
+def _last_thursday_of_month(year: int, month: int) -> date:
+    """Return the last Thursday of the given month."""
+    from datetime import timedelta
+    if month == 12:
+        last_day = date(year + 1, 1, 1) - timedelta(days=1)
+    else:
+        last_day = date(year, month + 1, 1) - timedelta(days=1)
+    while last_day.weekday() != 3:
+        last_day -= timedelta(days=1)
+    return last_day
+
+
+def parse_nfo_symbol(sym: str) -> "dict | None":
+    """Parse an NSE NFO contract symbol into its components.
+
+    Returns a dict with keys:
+      underlying (str), strike (int), opt_type ("CE"|"PE"), expiry (date)
+    Returns None if not a recognisable options symbol.
+
+    Supported formats (per NSE/Zerodha convention):
+      Weekly index:  {SYM}{YY}{M_CODE}{DD}{strike}{CE|PE}
+        e.g. NIFTY26604 1650CE  (NIFTY, 2026, Jun=6, day=04, strike=1650)
+      Monthly/stock: {SYM}{YY}{MON}{strike}{CE|PE}
+        e.g. NIFTY26JAN25000CE  (NIFTY, 2026, Jan, strike=25000)
+    """
+    import re
+    if not (sym.endswith("CE") or sym.endswith("PE")):
+        return None
+    opt_type = sym[-2:]
+    rest = sym[:-2]
+
+    # Monthly format: {SYM}{YY}{3-letter month}{strike}
+    m = re.match(r'^([A-Z]+)(\d{2})([A-Z]{3})(\d+)$', rest)
+    if m:
+        underlying, yy, mon, strike_str = m.groups()
+        if mon not in _MONTH_NAMES:
+            return None
+        month_idx = _MONTH_NAMES.index(mon) + 1
+        year = 2000 + int(yy)
+        expiry = _last_thursday_of_month(year, month_idx)
+        return {"underlying": underlying, "strike": int(strike_str),
+                "opt_type": opt_type, "expiry": expiry}
+
+    # Weekly format: {SYM}{YY}{1-char month code}{2-digit day}{strike}
+    m2 = re.match(r'^([A-Z]+)(\d{2})([0-9OND])(\d{2})(\d+)$', rest)
+    if m2:
+        underlying, yy, m_code, dd_str, strike_str = m2.groups()
+        if m_code not in _WEEKLY_MONTH_CODES:
+            return None
+        month_idx = _WEEKLY_MONTH_CODES.index(m_code) + 1
+        year = 2000 + int(yy)
+        day = int(dd_str)
+        try:
+            expiry = date(year, month_idx, day)
+        except ValueError:
+            return None
+        return {"underlying": underlying, "strike": int(strike_str),
+                "opt_type": opt_type, "expiry": expiry}
+
+    return None

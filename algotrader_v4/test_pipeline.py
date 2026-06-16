@@ -5218,6 +5218,61 @@ run("gap-5: base_agent wired to all 3 modules",       t_gap_base_agent_wired)
 
 
 # ══════════════════════════════════════════════════════════════════════════
+# 33. OPTIONS GREEKS
+# ══════════════════════════════════════════════════════════════════════════
+
+def t_greeks_parse_weekly_nifty():
+    from greeks_engine import parse_nfo_symbol
+    r = parse_nfo_symbol("NIFTY26604 1650CE".replace(" ", ""))
+    assert r is not None, "weekly NIFTY parse returned None"
+    assert r["underlying"] == "NIFTY"
+    assert r["strike"] == 1650
+    assert r["opt_type"] == "CE"
+    # Weekly expiry derived from day=04 Jun 2026 → a real date
+    from datetime import date
+    assert r["expiry"] == date(2026, 6, 4)
+
+def t_greeks_parse_monthly_banknifty():
+    from greeks_engine import parse_nfo_symbol
+    r = parse_nfo_symbol("BANKNIFTY26JAN52000PE")
+    assert r is not None, "monthly BANKNIFTY parse returned None"
+    assert r["underlying"] == "BANKNIFTY"
+    assert r["strike"] == 52000
+    assert r["opt_type"] == "PE"
+    # Monthly expiry is last Thursday of Jan 2026
+    assert r["expiry"].year == 2026
+    assert r["expiry"].month == 1
+    assert r["expiry"].weekday() == 3  # Thursday
+
+def t_greeks_ce_delta_range():
+    from greeks_engine import calculate_greeks
+    from datetime import date, timedelta
+    expiry = date.today() + timedelta(days=7)
+    g = calculate_greeks(24000, 24000, expiry, "CE", 200.0)
+    assert 0.0 < g.delta < 1.0, f"CE delta out of (0,1): {g.delta}"
+    assert g.gamma > 0, f"gamma must be positive: {g.gamma}"
+
+def t_greeks_pe_delta_range():
+    from greeks_engine import calculate_greeks
+    from datetime import date, timedelta
+    expiry = date.today() + timedelta(days=7)
+    g = calculate_greeks(24000, 24000, expiry, "PE", 200.0)
+    assert -1.0 < g.delta < 0.0, f"PE delta out of (-1,0): {g.delta}"
+
+def t_greeks_portfolio_endpoint_exists():
+    import main as _m
+    routes = {r.path for r in _m.app.routes}
+    assert "/portfolio/greeks" in routes, "/portfolio/greeks not registered in main.py"
+    assert "/portfolio/greeks" in _m._SENSITIVE_GETS, "/portfolio/greeks not in _SENSITIVE_GETS"
+
+run("greeks: parse_nfo_symbol weekly NIFTY CE",           t_greeks_parse_weekly_nifty)
+run("greeks: parse_nfo_symbol monthly BANKNIFTY PE",      t_greeks_parse_monthly_banknifty)
+run("greeks: CE delta in (0, 1) and gamma > 0",           t_greeks_ce_delta_range)
+run("greeks: PE delta in (-1, 0)",                        t_greeks_pe_delta_range)
+run("greeks: /portfolio/greeks endpoint + sensitive",     t_greeks_portfolio_endpoint_exists)
+
+
+# ══════════════════════════════════════════════════════════════════════════
 # FINAL SUMMARY
 # ══════════════════════════════════════════════════════════════════════════
 failed = summary()

@@ -1594,6 +1594,28 @@
             </table>
           </div>
         </div>
+        <!-- Portfolio Greeks -->
+        <div class="card section-gap">
+          <div class="card-header" style="display:flex;align-items:center;gap:10px;flex-wrap:wrap">
+            <h3 class="card-title"><i data-lucide="zap"></i> Live Position Greeks</h3>
+            <button class="btn btn-blue" style="margin-left:auto" onclick="fetchPortfolioGreeks()">Refresh</button>
+          </div>
+          <div id="pg-portfolio-summary" style="display:grid;grid-template-columns:repeat(4,1fr);gap:8px;margin-bottom:10px"></div>
+          <div class="table-wrap">
+            <table class="data-table" id="pg-table">
+              <thead>
+                <tr>
+                  <th>Contract</th><th>Type</th><th>Strike</th><th>Qty</th>
+                  <th>Spot</th><th>Avg Premium</th><th>IV%</th>
+                  <th>Delta</th><th>Gamma</th><th>Theta</th><th>Vega</th><th>Pos Delta</th>
+                </tr>
+              </thead>
+              <tbody id="pg-tbody">
+                <tr><td colspan="12" class="no-data">Click Refresh to load live position greeks</td></tr>
+              </tbody>
+            </table>
+          </div>
+        </div>
         <!-- Multi-Leg Builder (Phase 5E) -->
         <div class="card section-gap">
           <div class="card-header" style="display:flex;align-items:center;gap:10px;flex-wrap:wrap">
@@ -5198,6 +5220,53 @@ async function fetchOptionsChain() {
     const expEl = document.getElementById('oc-expiry');
     if (spotEl) spotEl.textContent = 'Spot: —';
     if (expEl) expEl.textContent = 'Expiry: —';
+  }
+}
+
+// ── Portfolio Greeks ──────────────────────────────────────────────────────────
+async function fetchPortfolioGreeks() {
+  const summary = document.getElementById('pg-portfolio-summary');
+  const tbody   = document.getElementById('pg-tbody');
+  try {
+    const data = await api('GET', '/portfolio/greeks');
+    if (!data) return;
+    const p = data.portfolio || {};
+    const deltaColor = v => v > 0 ? 'var(--green)' : v < 0 ? 'var(--red)' : 'var(--fg3)';
+    summary.innerHTML = `
+      <div class="stat-card"><div class="stat-label">Net Delta</div>
+        <div class="stat-value" style="color:${deltaColor(p.net_delta)}">${(p.net_delta||0).toFixed(4)}</div></div>
+      <div class="stat-card"><div class="stat-label">Net Gamma</div>
+        <div class="stat-value">${(p.net_gamma||0).toFixed(6)}</div></div>
+      <div class="stat-card"><div class="stat-label">Net Theta (daily)</div>
+        <div class="stat-value" style="color:var(--red)">${(p.net_theta||0).toFixed(2)}</div></div>
+      <div class="stat-card"><div class="stat-label">Net Vega</div>
+        <div class="stat-value">${(p.net_vega||0).toFixed(4)}</div></div>`;
+    const positions = data.positions || [];
+    if (!positions.length) {
+      tbody.innerHTML = '<tr><td colspan="12" class="no-data">No open options positions</td></tr>';
+      return;
+    }
+    tbody.innerHTML = positions.map(pos => {
+      const typeColor = pos.opt_type === 'CE' ? '#3b82f6' : '#ef4444';
+      const mono = pos.moneyness === 'ATM' ? 'var(--yellow)' : pos.moneyness === 'ITM' ? 'var(--green)' : 'var(--fg3)';
+      return `<tr>
+        <td style="font-size:11px;font-weight:600">${escHtml(pos.symbol)}</td>
+        <td style="color:${typeColor};font-weight:700">${escHtml(pos.opt_type)}</td>
+        <td>${pos.strike}</td>
+        <td style="color:${pos.qty>0?'var(--green)':'var(--red)'}">${pos.qty}</td>
+        <td>₹${(pos.spot||0).toFixed(2)}</td>
+        <td>₹${(pos.avg_price||0).toFixed(2)}</td>
+        <td style="color:${mono}">${pos.iv_pct||0}%</td>
+        <td style="color:${typeColor}">${(pos.delta||0).toFixed(4)}</td>
+        <td>${(pos.gamma||0).toFixed(6)}</td>
+        <td style="color:var(--red)">${(pos.theta||0).toFixed(4)}</td>
+        <td>${(pos.vega||0).toFixed(4)}</td>
+        <td style="font-weight:600;color:${pos.pos_delta>0?'var(--green)':'var(--red)'}">${(pos.pos_delta||0).toFixed(4)}</td>
+      </tr>`;
+    }).join('');
+  } catch(e) {
+    if (summary) summary.innerHTML = '';
+    if (tbody) tbody.innerHTML = `<tr><td colspan="12" class="no-data" style="color:var(--red)">Error: ${escHtml(e.message)}</td></tr>`;
   }
 }
 
