@@ -885,7 +885,7 @@ class TickEngine:
 
     async def _poll_loop(self) -> None:
         """
-        Polls all subscribed symbols every 1 second.
+        Polls subscribed symbols every settings.tick_interval_ms milliseconds (default 250ms = 4/s).
         During off-market hours, slows to every 30 seconds (to check status).
         Symbols already receiving WebSocket ticks are skipped to avoid duplicate processing.
         """
@@ -933,9 +933,9 @@ class TickEngine:
             else:
                 await self._fetch_kite_batch()
 
-            # Sleep the remainder of 1 second
+            # Sleep the remainder of the configured tick interval
             elapsed = time.monotonic() - t_start
-            await asyncio.sleep(max(0, 1.0 - elapsed))
+            await asyncio.sleep(max(0, settings.tick_interval_ms / 1000 - elapsed))
 
     async def _fetch_and_process(self, symbol: str) -> None:
         """PAPER mode only — generate next GBM tick and process it."""
