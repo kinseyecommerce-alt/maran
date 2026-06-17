@@ -2219,6 +2219,9 @@
             <button class="btn btn-blue btn-sm" onclick="connectKiteOAuth()">
               <i data-lucide="log-in"></i> Authorize with Kite
             </button>
+            <button class="btn btn-sm" style="background:var(--surface2)" onclick="triggerKiteTOTPRefresh()" id="totp-refresh-btn" title="Trigger TOTP auto-login (requires KITE_USER_ID, KITE_PASSWORD, KITE_TOTP_SECRET in .env)">
+              <i data-lucide="key-round"></i> TOTP Auto-Refresh
+            </button>
             <button class="btn btn-sm" style="background:var(--surface2)" onclick="fetchKiteStatus()">
               <i data-lucide="refresh-cw"></i> Refresh Status
             </button>
@@ -3879,6 +3882,26 @@ async function connectKiteOAuth() {
     }
   } catch (e) {
     showToast('Error fetching Kite login URL: ' + e.message, 'error');
+  }
+}
+
+async function triggerKiteTOTPRefresh() {
+  const btn = document.getElementById('totp-refresh-btn');
+  const orig = btn.innerHTML;
+  btn.disabled = true;
+  btn.innerHTML = '<i data-lucide="loader-2"></i> Logging in…';
+  lucide.createIcons();
+  try {
+    const d = await api('POST', '/auth/kite/refresh');
+    toast(d.message || 'Kite token refreshed via TOTP', 'ok');
+    await fetchKiteStatus();
+    await fetchReadiness();
+  } catch (e) {
+    toast('TOTP refresh failed: ' + (e.message || 'check .env for KITE_USER_ID / KITE_PASSWORD / KITE_TOTP_SECRET'), 'error');
+  } finally {
+    btn.disabled = false;
+    btn.innerHTML = orig;
+    lucide.createIcons();
   }
 }
 
