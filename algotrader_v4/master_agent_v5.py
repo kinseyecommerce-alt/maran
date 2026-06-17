@@ -440,19 +440,23 @@ class MasterAgent:
         threshold = getattr(settings, "min_rolling_sharpe", 0.5)
         try:
             summary = adaptive_engine.summary()
-            for strategy, data in summary.items():
+            # all_params keys are "strategy::symbol"; values are AdaptiveParams.to_dict()
+            # summary.items() yields top-level aggregates (total_pairs, active, …) — the
+            # sharpe_20 field lives one level deeper inside all_params.
+            for key, data in summary.get("all_params", {}).items():
                 if not isinstance(data, dict):
                     continue
                 sharpe = data.get("sharpe_20", None)
                 if sharpe is None:
                     continue
-                count = self._rolling_sharpe_below_count.get(strategy, 0)
+                count = self._rolling_sharpe_below_count.get(key, 0)
                 if sharpe < threshold:
                     count += 1
-                    self._rolling_sharpe_below_count[strategy] = count
+                    self._rolling_sharpe_below_count[key] = count
                     if count == 3:
+                        strategy_name = key.split("::")[0] if "::" in key else key
                         msg = (
-                            f"⚠️ <b>Sharpe Alert: {strategy.upper()}</b>\n"
+                            f"⚠️ <b>Sharpe Alert: {strategy_name.upper()}</b>\n"
                             f"Rolling-20 Sharpe: {sharpe:.2f} (threshold: {threshold})\n"
                             f"Win rate: {data.get('win_rate_20', 0)*100:.0f}% | "
                             f"Trades: {data.get('adaptation_count', 0)}"
@@ -460,7 +464,7 @@ class MasterAgent:
                         logger.warning("[master] {}", msg.replace("<b>", "").replace("</b>", ""))
                         asyncio.create_task(send_telegram(msg))
                 else:
-                    self._rolling_sharpe_below_count[strategy] = 0
+                    self._rolling_sharpe_below_count[key] = 0
         except Exception as exc:
             logger.debug("[master] Sharpe check error: {}", exc)
 
