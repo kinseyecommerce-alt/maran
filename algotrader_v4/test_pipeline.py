@@ -5601,6 +5601,23 @@ run("platform: _auto_start_bot checks is_nse_holiday before starting",  t_auto_s
 run("platform: holiday guard is first check in _auto_start_bot",         t_auto_start_holiday_guard_before_strategy_check)
 run("platform: _kite_token_refresh sends holiday-aware Telegram note",   t_kite_refresh_holiday_note)
 
+def t_auto_start_scanner_fallback_uses_correct_api():
+    """_auto_start_bot scanner fallback must use all_selected_flat() and run(), not missing last_scan/scan."""
+    import inspect
+    import platform_scheduler as _ps
+    src = inspect.getsource(_ps.PlatformScheduler._auto_start_bot)
+    assert "last_scan" not in src, \
+        "_auto_start_bot must NOT access symbol_scanner.last_scan (attribute does not exist on SymbolScanner)"
+    assert "symbol_scanner.scan" not in src, \
+        "_auto_start_bot must NOT call symbol_scanner.scan (method does not exist; use run())"
+    assert "all_selected_flat" in src, \
+        "_auto_start_bot must call symbol_scanner.all_selected_flat() to get cached results"
+    assert "symbol_scanner.run" in src or ".run()" in src, \
+        "_auto_start_bot must call symbol_scanner.run() for fresh scan"
+
+run("platform: scanner fallback uses all_selected_flat() and run(), not missing last_scan/scan",
+    t_auto_start_scanner_fallback_uses_correct_api)
+
 
 # ══════════════════════════════════════════════════════════════════════════
 # 42. MASTER AGENT HOLIDAY GUARD

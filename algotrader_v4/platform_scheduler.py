@@ -186,7 +186,7 @@ class PlatformScheduler:
             ]
         else:
             from symbol_scanner import symbol_scanner
-            watchlist = symbol_scanner.last_scan or await asyncio.to_thread(symbol_scanner.scan)
+            watchlist = symbol_scanner.all_selected_flat() or await symbol_scanner.run()
 
         if not watchlist:
             await send_telegram("⚠️ <b>Auto-start skipped</b> — watchlist is empty")
