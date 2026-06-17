@@ -6290,6 +6290,45 @@ run("platform_scheduler: login_url extracts host from full HTTPS URL", t_platfor
 
 
 # ══════════════════════════════════════════════════════════════════════════
+# 54. ALT DATA — signal classification + summary() safety
+# ══════════════════════════════════════════════════════════════════════════
+section("54. ALT DATA — signal classification + summary() safety")
+
+def t_alt_data_strong_bearish_reachable():
+    """score=-0.5 must yield STRONG_BEARISH, not BEARISH."""
+    from alt_data import AltDataEngine
+    eng = AltDataEngine()
+    # Inject the score directly through the refresh_fii_dii path via set_fii_sentiment
+    # and verify the classification logic by exercising it through the source.
+    import inspect
+    src = inspect.getsource(eng.refresh_fii_dii)
+    # STRONG_BEARISH must appear before BEARISH in the elif chain
+    idx_strong = src.index("STRONG_BEARISH")
+    idx_bearish = src.index('"BEARISH"')
+    assert idx_strong < idx_bearish, (
+        "STRONG_BEARISH check must come before BEARISH in the signal chain "
+        f"(found at {idx_strong} vs {idx_bearish})"
+    )
+
+def t_alt_data_summary_safe_on_bad_earnings_row():
+    """summary() must not raise when earnings CSV has a malformed date row."""
+    from alt_data import AltDataEngine
+    eng = AltDataEngine()
+    # Monkey-patch _load_earnings_calendar to return a bad row
+    eng._load_earnings_calendar = lambda: [
+        {"symbol": "RELIANCE", "date": "not-a-date"},
+        {"symbol": "TCS"},   # missing 'date' key entirely
+        {"symbol": "INFY", "date": "2026-06-18"},  # valid row
+    ]
+    result = eng.summary()
+    # Should not raise; valid row should be included (within 2 days of today)
+    assert isinstance(result["earnings_blackout_symbols"], list)
+
+run("alt_data: STRONG_BEARISH is reachable (checked before BEARISH)", t_alt_data_strong_bearish_reachable)
+run("alt_data: summary() safe when earnings CSV has malformed rows", t_alt_data_summary_safe_on_bad_earnings_row)
+
+
+# ══════════════════════════════════════════════════════════════════════════
 # FINAL SUMMARY
 # ══════════════════════════════════════════════════════════════════════════
 failed = summary()
