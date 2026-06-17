@@ -651,15 +651,16 @@ class BacktestEngine:
         max_dd_pct = (max_dd / max(abs(peak.max()), 1)) * 100 if peak.max() != 0 else 0.0
 
         gross_profit = sum(wins)              if wins   else 0.0
-        gross_loss   = sum(abs(l) for l in losses) if losses else 1.0
-        pf           = gross_profit / gross_loss if gross_loss > 0 else 0.0
+        gross_loss   = sum(abs(l) for l in losses) if losses else 0.0
+        # When gross_loss == 0 (all-win sequence), profit_factor is mathematically
+        # infinite. Cap to 999.0 so to_dict() doesn't emit a raw currency value.
+        pf           = gross_profit / gross_loss if gross_loss > 0 else (999.0 if gross_profit > 0 else 0.0)
 
         n_trades = max(len(pnls), 1)
         # Annualise using trade count; assume ~5 trading days per trade on average.
         # Cap at 4× (roughly 4 years max annualisation) to prevent extreme blow-up on
         # small samples.
         ann_factor = min(252.0 / max(n_trades / 5, 1), 4.0)
-        ann_return = (total_pnl / max(abs(total_pnl) + 1, 1)) * ann_factor if total_pnl != 0 else 0.0
         capital = 100_000.0  # reference capital for return calculation
         ann_return = (total_pnl / capital) * ann_factor
         calmar = ann_return / abs(max_dd_pct / 100) if max_dd_pct != 0 else 0.0
