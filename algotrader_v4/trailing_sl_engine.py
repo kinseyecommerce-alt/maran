@@ -578,7 +578,8 @@ class TrailingSLEngine:
     # ── Queries ────────────────────────────────────────────────────────
 
     def get_position(self, order_id: str) -> Optional[PositionSL]:
-        return self._positions.get(order_id)
+        with self._lock:
+            return self._positions.get(order_id)
 
     def tighten_all(self, trail_pct: float = 0.5) -> int:
         """Emergency TSL tightening — called on BLACK_SWAN detection.

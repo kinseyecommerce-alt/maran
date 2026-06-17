@@ -7223,6 +7223,47 @@ def t_kite_client_profile_paper_mode():
 run("kite_client: profile() returns stub in PAPER mode without broker call", t_kite_client_profile_paper_mode)
 
 
+# ─────────────────────────────────────────────────────────────────────────────
+section("70. TRAILING SL ENGINE — get_position reads _positions without lock")
+# ─────────────────────────────────────────────────────────────────────────────
+# Bug: get_position() read self._positions.get() without holding _lock.
+# All other access paths (register, deregister, on_tick, tighten_all) hold
+# _lock. Concurrent deregister() + get_position() on CPython is safe due to
+# GIL, but semantically incorrect and fragile. Fixed by adding the lock.
+
+def t_tsl_get_position_uses_lock():
+    """get_position must acquire _lock before reading _positions."""
+    import inspect
+    from trailing_sl_engine import TrailingSLEngine
+
+    src = inspect.getsource(TrailingSLEngine.get_position)
+    assert "self._lock" in src, (
+        "TrailingSLEngine.get_position() must hold self._lock when reading "
+        "_positions — all other _positions access paths hold the lock; "
+        "inconsistent locking breaks thread-safety semantics"
+    )
+
+run("trailing_sl_engine: get_position() acquires _lock before reading _positions", t_tsl_get_position_uses_lock)
+
+
+def t_tsl_get_position_returns_registered():
+    """get_position must return the PositionSL registered for a given order_id."""
+    from trailing_sl_engine import TrailingSLEngine
+
+    engine = TrailingSLEngine()
+    engine.register(
+        symbol="RELIANCE", strategy="intraday", side="BUY",
+        entry_price=2500.0, quantity=10, order_id="TEST-001",
+    )
+    pos = engine.get_position("TEST-001")
+    assert pos is not None, "get_position should return the registered PositionSL"
+    assert pos.symbol == "RELIANCE"
+    assert engine.get_position("NO-SUCH-ID") is None, \
+        "get_position should return None for unknown order_id"
+
+run("trailing_sl_engine: get_position returns registered position correctly", t_tsl_get_position_returns_registered)
+
+
 # ══════════════════════════════════════════════════════════════════════════
 # FINAL SUMMARY
 # ══════════════════════════════════════════════════════════════════════════
