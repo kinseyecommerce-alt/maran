@@ -7455,6 +7455,26 @@ run("tick_engine: start_loop() uses get_running_loop not get_event_loop", t_tick
 
 
 # ══════════════════════════════════════════════════════════════════════════
+# 75. AUTO BACKTEST RUNNER — deprecated get_event_loop in async run_one
+# ══════════════════════════════════════════════════════════════════════════
+section("75. AUTO BACKTEST RUNNER — deprecated get_event_loop in async run_one")
+
+def t_auto_backtest_runner_no_get_event_loop():
+    """run() nested async helper run_one must use get_running_loop, not get_event_loop."""
+    import inspect
+    from auto_backtest_runner import AutoBacktestRunner
+
+    src = inspect.getsource(AutoBacktestRunner.run_all)
+    assert "get_event_loop()" not in src, (
+        "AutoBacktestRunner.run() (including nested run_one) must not call "
+        "asyncio.get_event_loop() inside an async function — use get_running_loop() "
+        "(deprecated in Python 3.10+ inside coroutines)"
+    )
+
+run("auto_backtest_runner: run() uses get_running_loop not get_event_loop", t_auto_backtest_runner_no_get_event_loop)
+
+
+# ══════════════════════════════════════════════════════════════════════════
 # FINAL SUMMARY
 # ══════════════════════════════════════════════════════════════════════════
 failed = summary()

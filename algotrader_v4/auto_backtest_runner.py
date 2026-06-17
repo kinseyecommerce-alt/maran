@@ -338,7 +338,7 @@ class AutoBacktestRunner:
 
         async def run_one(sym, strat):
             async with sem:
-                loop = asyncio.get_event_loop()
+                loop = asyncio.get_running_loop()
                 result = await loop.run_in_executor(None, self._run_single, sym, strat)
                 if sym not in self._results: self._results[sym] = {}
                 self._results[sym][strat] = result
