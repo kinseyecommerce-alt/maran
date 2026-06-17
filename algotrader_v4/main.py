@@ -2712,12 +2712,18 @@ async def _prewarm_gate() -> None:
 @app.on_event("startup")
 async def on_startup():
     # Initialise SQLite state store
-    from state_store import init_db, get_daily_pnl
+    from state_store import init_db, get_daily_pnl, get_kv
     init_db()
     # Restore persisted kill-switch state AFTER the DB is guaranteed to exist
     # (a restart must never silently clear an emergency halt). Also re-halts
     # risk_manager when KILLED was restored.
     sebi_compliance.restore_state_from_db()
+    # Restore Kite access token from SQLite if .env has none (crash-restart recovery)
+    if not settings.kite_access_token:
+        saved_token = get_kv("kite_access_token", "")
+        if saved_token:
+            settings.kite_access_token = saved_token
+            logger.info("[startup] Kite access token restored from state_store")
     today_pnl = get_daily_pnl()
     if today_pnl != 0:
         risk_manager.daily_realised_pnl = today_pnl

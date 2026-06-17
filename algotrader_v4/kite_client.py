@@ -167,6 +167,12 @@ class KiteClient:
             token = access_token or settings.kite_access_token
         kite.set_access_token(token)
         self._kite = kite
+        settings.kite_access_token = token
+        try:
+            from state_store import set_kv
+            set_kv("kite_access_token", token)
+        except Exception:
+            pass
         logger.info("Kite auth OK (orders-only, rate-limited mode)")
         return token
 
