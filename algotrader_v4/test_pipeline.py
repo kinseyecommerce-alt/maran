@@ -6096,6 +6096,92 @@ run("sebi: reset_kill_switch source sets is_trading_halted=False", t_reset_kill_
 
 
 # ══════════════════════════════════════════════════════════════════════════
+# 51. ADAPTIVE ENGINE — avg_loss_pct NaN guard
+# ══════════════════════════════════════════════════════════════════════════
+
+def t_avg_loss_pct_all_winners_is_zero():
+    """
+    When every trade in the rolling window is a win, np.mean([]) returns nan.
+    The old guard 'if trades' never caught this — it only checked the outer list.
+    After the fix, avg_loss_pct must be 0.0 (not nan) when there are no losses.
+    nan would be serialised as NaN in the JSON state file, which json.loads
+    rejects on the next startup — wiping all adaptive params silently.
+    """
+    import math
+    from adaptive_engine import AdaptiveLearningEngine, TradeRecord
+    from datetime import datetime
+
+    engine = AdaptiveLearningEngine.__new__(AdaptiveLearningEngine)
+    engine._params = {}
+    engine._trades = {}
+    engine._rebacktest_queue = []
+    engine.backtests_skipped = 0
+    engine.backtests_run     = 0
+    import os, pathlib
+    engine._store = pathlib.Path(os.devnull).parent  # won't save
+    engine._store = pathlib.Path("/tmp/adaptive_test")
+    engine._store.mkdir(exist_ok=True)
+
+    # Create a run of all-winning trades
+    def _make_win(i):
+        return TradeRecord(
+            id=str(i), symbol="TEST", strategy="intraday", side="BUY",
+            entry=100.0, exit=102.0, qty=10, pnl=20.0, pnl_pct=2.0,
+            won=True, regime="BULL_TREND", sl_pct=1.0, target_pct=2.0,
+            exit_reason="TARGET", entry_time=datetime.now().isoformat(), hold_bars=5,
+        )
+
+    from adaptive_engine import AdaptiveParams
+    params = AdaptiveParams(strategy="intraday", symbol="TEST")
+    trades = [_make_win(i) for i in range(10)]
+    engine._update_rolling_metrics(params, trades)
+
+    assert not math.isnan(params.avg_loss_pct), (
+        "avg_loss_pct must not be nan when all trades are wins — "
+        "nan corrupts the JSON state file and wipes all adaptive params on next startup"
+    )
+    assert params.avg_loss_pct == 0.0, f"expected 0.0, got {params.avg_loss_pct}"
+    assert params.avg_win_pct > 0.0
+
+
+def t_avg_loss_pct_state_file_roundtrip():
+    """avg_loss_pct=0.0 (all wins) must survive a JSON save/load round-trip."""
+    import json, math, pathlib, tempfile
+    from adaptive_engine import AdaptiveLearningEngine, AdaptiveParams, TradeRecord
+    from datetime import datetime
+
+    engine = AdaptiveLearningEngine.__new__(AdaptiveLearningEngine)
+    engine._params = {}
+    engine._trades = {}
+    engine._rebacktest_queue = []
+    engine.backtests_skipped = 0
+    engine.backtests_run     = 0
+
+    with tempfile.TemporaryDirectory() as td:
+        engine._store = pathlib.Path(td)
+        params = AdaptiveParams(strategy="intraday", symbol="SAVE_TEST")
+        params.avg_loss_pct = 0.0
+
+        engine._params["intraday::SAVE_TEST"] = params
+        engine._save_state()
+
+        # Verify the JSON file contains no NaN
+        state_file = pathlib.Path(td) / "adaptive_params.json"
+        raw = state_file.read_text()
+        assert "NaN" not in raw and "nan" not in raw, (
+            f"State file must not contain NaN/nan — got:\n{raw[:200]}"
+        )
+
+        # Verify the JSON round-trips without error
+        loaded = json.loads(raw)
+        assert "intraday::SAVE_TEST" in loaded
+
+
+run("adaptive_engine: avg_loss_pct is 0.0 (not nan) when all trades are wins", t_avg_loss_pct_all_winners_is_zero)
+run("adaptive_engine: state file roundtrip safe when avg_loss_pct=0.0", t_avg_loss_pct_state_file_roundtrip)
+
+
+# ══════════════════════════════════════════════════════════════════════════
 # FINAL SUMMARY
 # ══════════════════════════════════════════════════════════════════════════
 failed = summary()
