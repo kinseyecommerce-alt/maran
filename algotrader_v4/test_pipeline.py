@@ -5279,9 +5279,7 @@ run("greeks: /portfolio/greeks endpoint + sensitive",     t_greeks_portfolio_end
 def t_health_architecture_reflects_tick_interval():
     import main as _m
     from config import settings
-    # Build architecture string the same way the endpoint does
     expected = f"tick-driven {settings.tick_interval_ms}ms"
-    # Verify the health endpoint body would contain the right string
     import inspect
     src = inspect.getsource(_m.health)
     assert "tick_interval_ms" in src, "health endpoint must use settings.tick_interval_ms"
@@ -5309,7 +5307,6 @@ def t_readiness_missing_list_non_null():
     import main as _m
     import inspect
     src = inspect.getsource(_m.readiness)
-    # Must compute `missing` from checks dict
     assert "missing" in src and "checks" in src
 
 run("health: architecture string uses tick_interval_ms",  t_health_architecture_reflects_tick_interval)
