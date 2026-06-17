@@ -461,6 +461,25 @@ class SEBICompliance:
         except Exception as exc:
             logger.error("SEBI audit log file write error: {}", exc)
 
+    def _load_audit_from_file(self, date_str: str) -> list[dict]:
+        """Load audit records from the on-disk NDJSON file for *date_str*.
+
+        Called when the in-memory cache is empty — which happens after a restart
+        because _audit_log is not persisted across process boundaries.
+        """
+        log_file = _AUDIT_LOG_DIR / f"sebi_audit_{date_str}.json"
+        if not log_file.exists():
+            return []
+        records: list[dict] = []
+        try:
+            for line in log_file.read_text().splitlines():
+                line = line.strip()
+                if line:
+                    records.append(json.loads(line))
+        except Exception as exc:
+            logger.warning("SEBI: could not read audit file {}: {}", log_file, exc)
+        return records
+
     def query_audit_log(
         self,
         date_str:   str,
@@ -469,11 +488,15 @@ class SEBICompliance:
         decision:   Optional[str] = None,
     ) -> list[dict]:
         with self._lock:
-            records = self._audit_log.get(date_str, [])
-            if strategy: records = [r for r in records if r.strategy == strategy]
-            if symbol:   records = [r for r in records if r.symbol   == symbol]
-            if decision: records = [r for r in records if r.decision == decision]
-            return [r.__dict__ for r in records]
+            mem_records = self._audit_log.get(date_str, [])
+            result = [r.__dict__ for r in mem_records]
+        # After restart the in-memory log is empty; fall back to on-disk NDJSON.
+        if not result:
+            result = self._load_audit_from_file(date_str)
+        if strategy: result = [r for r in result if r.get("strategy") == strategy]
+        if symbol:   result = [r for r in result if r.get("symbol")   == symbol]
+        if decision: result = [r for r in result if r.get("decision") == decision]
+        return result
 
     # ── Reg 6: strategy disclosure ─────────────────────────────────────────────
     def get_strategy_logic_disclosure(self, strategy: str) -> dict:
@@ -539,6 +562,9 @@ class SEBICompliance:
         with self._lock:
             today_records = self._audit_log.get(date_str, [])
             today_entries = [r.__dict__ for r in today_records]
+        # After restart the in-memory log is empty; fall back to on-disk NDJSON.
+        if not today_entries:
+            today_entries = self._load_audit_from_file(date_str)
         event_counts: dict[str, int] = {}
         for e in today_entries:
             etype = e.get("decision", "UNKNOWN")

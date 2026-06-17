@@ -5708,6 +5708,99 @@ run("main: agent_buckets options maps to options",                      t_capita
 
 
 # ══════════════════════════════════════════════════════════════════════════
+# 46. SEBI COMPLIANCE — AUDIT LOG DISK FALLBACK
+# ══════════════════════════════════════════════════════════════════════════
+section("46. SEBI COMPLIANCE — AUDIT LOG DISK FALLBACK")
+
+def t_load_audit_from_file_reads_ndjson():
+    """_load_audit_from_file must parse NDJSON records written by _record_audit."""
+    import tempfile, json as _json
+    from pathlib import Path as _Path
+    from sebi_compliance import SEBICompliance, _AUDIT_LOG_DIR
+
+    sc = SEBICompliance(restore_state=False)
+    test_date = "2099-01-01"
+    # Write a synthetic audit NDJSON to the log dir
+    _AUDIT_LOG_DIR.mkdir(exist_ok=True)
+    log_file = _AUDIT_LOG_DIR / f"sebi_audit_{test_date}.json"
+    test_record = {
+        "timestamp": "2099-01-01T09:30:00", "strategy": "intraday", "symbol": "RELIANCE",
+        "exchange": "NSE", "transaction_type": "BUY", "quantity": 10, "order_type": "MARKET",
+        "price": 2500.0, "signal_source": "agent_intraday", "regime": "TRENDING",
+        "decision": "APPROVED", "reason": "All checks passed",
+        "algo_id": "ALGO-INTRA-001", "order_id": "TEST123",
+    }
+    try:
+        log_file.write_text(_json.dumps(test_record) + "\n")
+        records = sc._load_audit_from_file(test_date)
+        assert len(records) == 1, f"Expected 1 record from disk, got {len(records)}"
+        assert records[0]["strategy"] == "intraday"
+        assert records[0]["symbol"] == "RELIANCE"
+    finally:
+        log_file.unlink(missing_ok=True)
+
+def t_query_audit_log_falls_back_to_disk():
+    """query_audit_log returns disk records when in-memory cache is empty (post-restart case)."""
+    import json as _json
+    from sebi_compliance import SEBICompliance, _AUDIT_LOG_DIR
+
+    sc = SEBICompliance(restore_state=False)
+    test_date = "2099-01-02"
+    _AUDIT_LOG_DIR.mkdir(exist_ok=True)
+    log_file = _AUDIT_LOG_DIR / f"sebi_audit_{test_date}.json"
+    test_record = {
+        "timestamp": "2099-01-02T10:00:00", "strategy": "scalping", "symbol": "TCS",
+        "exchange": "NSE", "transaction_type": "BUY", "quantity": 5, "order_type": "MARKET",
+        "price": 4000.0, "signal_source": "agent_scalping", "regime": "RANGING",
+        "decision": "APPROVED", "reason": "All checks passed",
+        "algo_id": "ALGO-SCALP-004", "order_id": "TEST456",
+    }
+    try:
+        log_file.write_text(_json.dumps(test_record) + "\n")
+        # in-memory _audit_log is empty for this date (simulates post-restart state)
+        assert test_date not in sc._audit_log, "Pre-condition: in-memory log must be empty"
+        result = sc.query_audit_log(test_date)
+        assert len(result) == 1, f"Expected 1 record via disk fallback, got {len(result)}"
+        assert result[0]["strategy"] == "scalping"
+        assert result[0]["symbol"] == "TCS"
+        # Test filter pass-through on disk-sourced records
+        filtered = sc.query_audit_log(test_date, strategy="intraday")
+        assert len(filtered) == 0, "Filter on disk-sourced records should work"
+    finally:
+        log_file.unlink(missing_ok=True)
+
+def t_generate_daily_report_falls_back_to_disk():
+    """generate_daily_report falls back to disk when in-memory cache is empty."""
+    import json as _json
+    from sebi_compliance import SEBICompliance, _AUDIT_LOG_DIR
+
+    sc = SEBICompliance(restore_state=False)
+    test_date = "2099-01-03"
+    _AUDIT_LOG_DIR.mkdir(exist_ok=True)
+    log_file = _AUDIT_LOG_DIR / f"sebi_audit_{test_date}.json"
+    test_record = {
+        "timestamp": "2099-01-03T11:00:00", "strategy": "futures", "symbol": "NIFTY",
+        "exchange": "NFO", "transaction_type": "BUY", "quantity": 50, "order_type": "MARKET",
+        "price": 25000.0, "signal_source": "agent_futures", "regime": "TRENDING",
+        "decision": "REJECTED", "reason": "Kill switch active",
+        "algo_id": "ALGO-FUT-006", "order_id": "",
+    }
+    try:
+        log_file.write_text(_json.dumps(test_record) + "\n")
+        report = sc.generate_daily_report(test_date)
+        assert report["total_events"] == 1, \
+            f"Expected 1 event in report (disk fallback), got {report['total_events']}"
+        assert report["event_counts"].get("REJECTED") == 1, \
+            "Report should show 1 REJECTED event from disk"
+    finally:
+        log_file.unlink(missing_ok=True)
+
+run("sebi: _load_audit_from_file reads NDJSON records from disk",           t_load_audit_from_file_reads_ndjson)
+run("sebi: query_audit_log falls back to disk when in-memory empty",        t_query_audit_log_falls_back_to_disk)
+run("sebi: generate_daily_report falls back to disk when in-memory empty",  t_generate_daily_report_falls_back_to_disk)
+
+
+# ══════════════════════════════════════════════════════════════════════════
 # FINAL SUMMARY
 # ══════════════════════════════════════════════════════════════════════════
 failed = summary()
