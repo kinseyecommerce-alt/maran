@@ -45,7 +45,7 @@ import pandas as pd
 import ta
 from loguru import logger
 
-from market_data import nse_client, yf_client
+from market_data import nse_client, yf_client, ALL_INDICES
 
 
 # ── Regime enum ────────────────────────────────────────────────────────────────
@@ -391,7 +391,7 @@ class MarketRegimeDetector:
     async def _collect_vix(self, s: RegimeSignals) -> None:
         """India VIX from NSE API."""
         try:
-            data = await nse_client.get("/api/allIndices")
+            data = await nse_client.get(ALL_INDICES)
             if data:
                 for item in data.get("data", []):
                     if "VIX" in item.get("indexSymbol","").upper():
