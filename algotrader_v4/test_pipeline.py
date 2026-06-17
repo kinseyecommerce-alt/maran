@@ -6182,6 +6182,74 @@ run("adaptive_engine: state file roundtrip safe when avg_loss_pct=0.0", t_avg_lo
 
 
 # ══════════════════════════════════════════════════════════════════════════
+# 52. MASTER AGENT — _check_rolling_sharpe iterates all_params not summary root
+# ══════════════════════════════════════════════════════════════════════════
+
+def t_check_rolling_sharpe_finds_sharpe_data():
+    """
+    _check_rolling_sharpe iterated summary.items() where the only dict value
+    is summary["all_params"] = {"strategy::symbol": {...}}. At that level
+    data.get("sharpe_20") always returns None (the key is "strategy::symbol",
+    not "sharpe_20"), so Sharpe alerts never fired.
+
+    After the fix it iterates summary["all_params"].items() and correctly reads
+    data["sharpe_20"] from each AdaptiveParams.to_dict() entry.
+    """
+    import inspect
+    import master_agent_v5 as _ma
+
+    src = inspect.getsource(_ma.MasterAgent._check_rolling_sharpe)
+    # Must iterate all_params, not the top-level summary dict
+    assert 'summary.get("all_params"' in src or "summary.get('all_params'" in src, (
+        "_check_rolling_sharpe must iterate summary.get('all_params', {}).items() "
+        "— iterating the top-level summary dict never finds 'sharpe_20' values"
+    )
+    # Must NOT iterate summary.items() at the outer loop (which misses the nested data)
+    assert 'for strategy, data in summary.items()' not in src, (
+        "Old broken iteration 'for strategy, data in summary.items()' still present"
+    )
+
+
+def t_check_rolling_sharpe_increments_count():
+    """
+    End-to-end: inject a param set with low sharpe_20 into adaptive_engine,
+    call _check_rolling_sharpe 3 times, confirm count reaches 3.
+    No Telegram sends in test (send_telegram is a no-op without bot token).
+    """
+    import asyncio
+    from master_agent_v5 import MasterAgent
+    from adaptive_engine import adaptive_engine, AdaptiveParams
+
+    # Inject a low-sharpe param set
+    key = "_test_intraday::_TEST_SYM"
+    adaptive_engine._params[key] = AdaptiveParams(
+        strategy="_test_intraday", symbol="_TEST_SYM",
+        sharpe_20=-0.5,  # well below any threshold
+    )
+
+    agent = MasterAgent.__new__(MasterAgent)
+    agent._rolling_sharpe_below_count = {}
+
+    async def _run():
+        for _ in range(3):
+            await agent._check_rolling_sharpe()
+
+    asyncio.run(_run())
+
+    assert agent._rolling_sharpe_below_count.get(key, 0) == 3, (
+        f"Expected count=3 for low-sharpe key '{key}', "
+        f"got {agent._rolling_sharpe_below_count}"
+    )
+
+    # Cleanup
+    adaptive_engine._params.pop(key, None)
+
+
+run("master: _check_rolling_sharpe iterates all_params not summary root", t_check_rolling_sharpe_finds_sharpe_data)
+run("master: _check_rolling_sharpe increments count for low-sharpe strategy", t_check_rolling_sharpe_increments_count)
+
+
+# ══════════════════════════════════════════════════════════════════════════
 # FINAL SUMMARY
 # ══════════════════════════════════════════════════════════════════════════
 failed = summary()
