@@ -60,6 +60,14 @@ def _rbi_mpc_dates(year: int) -> list[date]:
     return result
 
 
+def _within_earnings_window(row: dict, days: int = 2) -> bool:
+    try:
+        event_date = date.fromisoformat(row["date"])
+        return abs((event_date - date.today()).days) <= days
+    except (ValueError, KeyError, TypeError):
+        return False
+
+
 class AltDataEngine:
     """
     Provides alternative data signals to strategy agents.
@@ -303,8 +311,8 @@ class AltDataEngine:
             parsed["signal"] = (
                 "STRONG_BULLISH" if score >= 0.4 else
                 "BULLISH"        if score >= 0.2 else
-                "BEARISH"        if score <= -0.2 else
                 "STRONG_BEARISH" if score <= -0.4 else
+                "BEARISH"        if score <= -0.2 else
                 "NEUTRAL"
             )
 
@@ -481,8 +489,10 @@ class AltDataEngine:
             "next_fno_expiry":    str(self.next_fno_expiry()),
             "fii_dii":            fii_data,
             "fii_sentiment":      self._fii_sentiment,
-            "earnings_blackout_symbols": [row["symbol"] for row in self._load_earnings_calendar()
-                                          if abs((date.fromisoformat(row["date"]) - date.today()).days) <= 2],
+            "earnings_blackout_symbols": [
+                row["symbol"] for row in self._load_earnings_calendar()
+                if _within_earnings_window(row)
+            ],
         }
 
 
