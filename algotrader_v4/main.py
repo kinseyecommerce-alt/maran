@@ -81,7 +81,7 @@ app.openapi = _custom_openapi
 
 
 # ── CRIT-1: API key gate (all mutating routes + sensitive GETs) ───────────────────
-_EXEMPT_PATHS = frozenset({"/health", "/openapi.json", "/auth/login-url", "/config/validate"})
+_EXEMPT_PATHS = frozenset({"/health", "/readiness", "/openapi.json", "/auth/login-url", "/config/validate"})
 _EXEMPT_PREFIXES = ("/swagger-static",)
 _SENSITIVE_GETS = frozenset({
     "/portfolio/positions", "/portfolio/orders", "/sebi/audit-log",
@@ -1903,7 +1903,7 @@ def whitelist_ip(req: WhitelistIPRequest):
 @app.get("/health", tags=["System"])
 def health():
     return {"status": "ok", "version": "4.0.0", "mode": settings.trading_mode,
-            "architecture": "tick-driven 1s",
+            "architecture": f"tick-driven {settings.tick_interval_ms}ms",
             "market_data_source": "KiteConnect (WebSocket + REST quote; orders + market data)",
             "market_open": is_market_open(),
             "master": "running" if master_agent.running else "stopped",
@@ -1911,7 +1911,39 @@ def health():
             "agents": {n: a.state.running for n, a in ALL_AGENTS.items()},
             "agent_enabled": dict(bot_state._agent_enabled),
             "subscribed_symbols": tick_engine.symbols(),
+            "kite_token": bool(settings.kite_access_token),
             "time": now_ist().strftime("%H:%M:%S IST")}
+
+
+@app.get("/readiness", tags=["System"])
+def readiness():
+    """Deployment readiness check — returns a summary of what's configured vs missing.
+    Safe to call without auth (like /health). Used by monitoring and setup scripts."""
+    creds = kite_client.validate_credentials()
+    checks = {
+        "kite_api_key":      bool(settings.kite_api_key),
+        "kite_api_secret":   bool(settings.kite_api_secret),
+        "kite_access_token": bool(settings.kite_access_token),
+        "kite_initialised":  bool(creds.get("kite_initialised")),
+        "anthropic_api_key": bool(settings.anthropic_api_key),
+        "jwt_secret_key":    bool(settings.jwt_secret_key),
+        "telegram_bot":      bool(settings.telegram_bot_token and settings.telegram_chat_id),
+        "auto_login_ready":  bool(settings.kite_user_id and settings.kite_totp_secret),
+    }
+    ready_for_live = all([
+        checks["kite_api_key"], checks["kite_api_secret"],
+        checks["kite_access_token"], checks["kite_initialised"],
+    ])
+    missing = [k for k, v in checks.items() if not v]
+    return {
+        "mode":          settings.trading_mode,
+        "ready_for_live": ready_for_live,
+        "checks":        checks,
+        "missing":       missing,
+        "tick_interval_ms": settings.tick_interval_ms,
+        "market_open":   is_market_open(),
+        "time":          now_ist().strftime("%H:%M:%S IST"),
+    }
 
 
 # ── Config validate ────────────────────────────────────────────────────────────
