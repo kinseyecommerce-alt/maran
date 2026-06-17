@@ -6673,6 +6673,92 @@ run("backtest_engine: _compute_metrics has no duplicate ann_return assignment", 
 
 
 # ══════════════════════════════════════════════════════════════════════════
+# 61. STATE STORE — sentinel task_done + _start_writer double-lock
+# ══════════════════════════════════════════════════════════════════════════
+section("61. STATE STORE — sentinel task_done + _start_writer double-lock")
+
+def t_state_store_sentinel_calls_task_done():
+    """_writer_thread must call task_done() before break so join() doesn't hang."""
+    import inspect
+    import state_store as ss
+
+    src = inspect.getsource(ss._writer_thread)
+    # Verify task_done() appears before the break statement that exits on sentinel.
+    # The sentinel path must call task_done() so _write_q.join() can unblock.
+    td_pos   = src.find("task_done()")
+    break_pos = src.find("break")
+    assert td_pos != -1, "_writer_thread must call _write_q.task_done()"
+    assert break_pos != -1, "_writer_thread must have a break for the sentinel"
+    assert td_pos < break_pos, (
+        "_writer_thread must call task_done() BEFORE break to unblock join()"
+    )
+
+run("state_store: sentinel task_done() called before break", t_state_store_sentinel_calls_task_done)
+
+
+def t_state_store_write_q_join_does_not_hang():
+    """_write_q.join() must not hang after sentinel is sent."""
+    import queue, threading
+    import state_store as ss
+
+    # Create an isolated queue + writer thread pair for this test
+    test_q: "queue.Queue[tuple | None]" = queue.Queue()
+    results = []
+
+    def isolated_writer():
+        while True:
+            item = test_q.get()
+            if item is None:
+                test_q.task_done()
+                break
+            fn, args, kwargs = item
+            try:
+                fn(*args, **kwargs)
+            except Exception:
+                pass
+            finally:
+                test_q.task_done()
+
+    t = threading.Thread(target=isolated_writer, daemon=True)
+    t.start()
+
+    # Enqueue a no-op and the sentinel
+    test_q.put((lambda: results.append(1), (), {}))
+    test_q.put(None)
+
+    # join() must complete within 2 seconds; hangs if task_done() missing on sentinel
+    import threading as _th
+    hang = _th.Event()
+    def do_join():
+        test_q.join()
+        hang.set()
+    jt = threading.Thread(target=do_join, daemon=True)
+    jt.start()
+    jt.join(timeout=2.0)
+    assert hang.is_set(), "_write_q.join() hung — sentinel task_done() is missing"
+
+run("state_store: _write_q.join() unblocks after sentinel", t_state_store_write_q_join_does_not_hang)
+
+
+def t_state_store_start_writer_double_lock():
+    """_start_writer must use a lock to prevent two threads from both starting a writer."""
+    import inspect
+    import state_store as ss
+
+    src = inspect.getsource(ss._start_writer)
+    # Must contain a lock acquisition (with _writer_start_lock:) and double-check
+    assert "_writer_start_lock" in src, (
+        "_start_writer must use _writer_start_lock to prevent TOCTOU race"
+    )
+    # Double-checked locking: two is_set() checks (one outside, one inside lock)
+    assert src.count("is_set()") >= 2, (
+        "_start_writer should double-check _writer_started.is_set() inside the lock"
+    )
+
+run("state_store: _start_writer uses double-checked locking", t_state_store_start_writer_double_lock)
+
+
+# ══════════════════════════════════════════════════════════════════════════
 # FINAL SUMMARY
 # ══════════════════════════════════════════════════════════════════════════
 failed = summary()

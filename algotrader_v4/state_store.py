@@ -35,6 +35,7 @@ _write_q: "_queue.Queue[tuple | None]" = _queue.Queue(
     maxsize=__import__("config").settings.db_write_queue_size
 )
 _writer_started = threading.Event()
+_writer_start_lock = threading.Lock()   # prevents concurrent _start_writer races
 
 
 def _writer_thread() -> None:
@@ -42,6 +43,7 @@ def _writer_thread() -> None:
     while True:
         item = _write_q.get()
         if item is None:          # sentinel → shutdown
+            _write_q.task_done()  # acknowledge before break so join() can unblock
             break
         fn, args, kwargs = item
         try:
@@ -54,10 +56,15 @@ def _writer_thread() -> None:
 
 
 def _start_writer() -> None:
+    # Double-checked locking: fast path avoids lock acquisition after first start.
+    # Without the lock, two threads could both see is_set()==False and both start
+    # a writer thread, causing the queue to be drained by two concurrent threads.
     if not _writer_started.is_set():
-        t = threading.Thread(target=_writer_thread, daemon=True, name="db-writer")
-        t.start()
-        _writer_started.set()
+        with _writer_start_lock:
+            if not _writer_started.is_set():
+                t = threading.Thread(target=_writer_thread, daemon=True, name="db-writer")
+                t.start()
+                _writer_started.set()
 
 
 def _enqueue(fn, *args, **kwargs) -> None:
