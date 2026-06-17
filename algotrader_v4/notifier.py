@@ -45,7 +45,7 @@ class Notifier:
                 self.send_email(full_subject, full_body)
                 logger.debug("Notifier: email sent — {}", full_subject)
             except Exception as exc:
-                logger.debug("Notifier: email failed — {}: {}", full_subject, exc)
+                logger.warning("Notifier: email failed — {}: {}", full_subject, exc)
 
         # Telegram
         if (getattr(settings, "telegram_bot_token", "")
@@ -55,7 +55,7 @@ class Notifier:
                 self.send_telegram(msg)
                 logger.debug("Notifier: telegram sent — {}", full_subject)
             except Exception as exc:
-                logger.debug("Notifier: telegram failed — {}: {}", full_subject, exc)
+                logger.warning("Notifier: telegram failed — {}: {}", full_subject, exc)
 
     def send_email(self, subject: str, body: str) -> None:
         """SMTP/TLS using smtplib; smtp_user → alert_email."""

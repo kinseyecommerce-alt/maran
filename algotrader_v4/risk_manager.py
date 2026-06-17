@@ -147,7 +147,8 @@ def get_kelly_fraction(agent_name: str) -> float:
         avg_win  = sum(p.avg_win_pct for p in params_list) / n
         avg_loss = abs(sum(p.avg_loss_pct for p in params_list) / n)
         return _compute_kelly(win_rate, avg_win, avg_loss)
-    except Exception:
+    except Exception as exc:
+        logger.debug("[RiskManager] Kelly fraction calculation failed for {}: {}", agent_name, exc)
         return 0.0
 
 

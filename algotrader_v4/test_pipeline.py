@@ -8203,6 +8203,93 @@ run("greeks_engine: vol_surface_iv returns clamped atm_iv when spot < 0", t_gree
 
 
 # ══════════════════════════════════════════════════════════════════════════
+# 97. NOTIFIER + ORDER_GUARD + RISK_MANAGER — SILENT FAILURE VISIBILITY
+# ══════════════════════════════════════════════════════════════════════════
+section("97. NOTIFIER + ORDER_GUARD + RISK_MANAGER — SILENT FAILURE VISIBILITY")
+
+
+def t_notifier_email_failure_logs_warning():
+    """notifier.send() must log email failures at WARNING, not DEBUG.
+    Silent debug-level failures mean operators never see when the alert system breaks."""
+    import inspect
+    import notifier as _n
+    src = inspect.getsource(_n.Notifier.send)
+    # There must be a WARNING log in the email-failed branch
+    assert "email failed" in src, "send() must log 'email failed' message"
+    # Verify it uses logger.warning not logger.debug for the failure
+    lines = src.splitlines()
+    for i, line in enumerate(lines):
+        if "email failed" in line:
+            assert "warning" in line.lower(), (
+                f"email failure must be logged at WARNING level, got: {line.strip()}"
+            )
+
+run("notifier: email failure logged at WARNING not DEBUG", t_notifier_email_failure_logs_warning)
+
+
+def t_notifier_telegram_failure_logs_warning():
+    """notifier.send() must log Telegram failures at WARNING, not DEBUG."""
+    import inspect
+    import notifier as _n
+    src = inspect.getsource(_n.Notifier.send)
+    lines = src.splitlines()
+    for line in lines:
+        if "telegram failed" in line:
+            assert "warning" in line.lower(), (
+                f"telegram failure must be logged at WARNING level, got: {line.strip()}"
+            )
+
+run("notifier: telegram failure logged at WARNING not DEBUG", t_notifier_telegram_failure_logs_warning)
+
+
+def t_order_guard_persist_logs_on_failure():
+    """order_guard._persist_trade_count() must not silently pass on exception —
+    trade count loss on restart would allow bypassing the daily limit after a crash."""
+    import inspect
+    import order_guard as _og
+    src = inspect.getsource(_og.OrderGuard._persist_trade_count)
+    assert "pass" not in src.replace("# ", ""), (
+        "_persist_trade_count must not use bare 'pass' — log the exception"
+    )
+    assert "logger" in src, (
+        "_persist_trade_count must log the exception so count-persistence failures are visible"
+    )
+
+run("order_guard: _persist_trade_count logs on failure (not silent pass)", t_order_guard_persist_logs_on_failure)
+
+
+def t_order_guard_restore_logs_on_failure():
+    """order_guard.restore_counts() must not silently pass on exception —
+    a silent restore failure resets all trade counts to 0, allowing unlimited trading after restart."""
+    import inspect
+    import order_guard as _og
+    src = inspect.getsource(_og.OrderGuard.restore_counts)
+    # Last except clause must not be a bare pass
+    lines = [l.strip() for l in src.splitlines()]
+    for i, line in enumerate(lines):
+        if line.startswith("except Exception") and i + 1 < len(lines):
+            next_line = lines[i + 1]
+            assert next_line != "pass", (
+                "restore_counts outer except must log the exception, not pass silently"
+            )
+
+run("order_guard: restore_counts logs on failure (not silent pass)", t_order_guard_restore_logs_on_failure)
+
+
+def t_risk_manager_kelly_logs_on_failure():
+    """risk_manager.get_kelly_fraction() must log exception before returning 0.0
+    so bugs in Kelly calculation are visible rather than silently masked."""
+    import inspect
+    import risk_manager as _rm
+    src = inspect.getsource(_rm.get_kelly_fraction)
+    assert "logger" in src or "logger.debug" in src, (
+        "get_kelly_fraction except clause must log the exception before returning 0.0"
+    )
+
+run("risk_manager: get_kelly_fraction logs exception before returning 0.0", t_risk_manager_kelly_logs_on_failure)
+
+
+# ══════════════════════════════════════════════════════════════════════════
 # FINAL SUMMARY
 # ══════════════════════════════════════════════════════════════════════════
 failed = summary()
