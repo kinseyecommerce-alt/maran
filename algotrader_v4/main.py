@@ -1928,15 +1928,16 @@ def readiness():
     Safe to call without auth (like /health). Used by monitoring and setup scripts."""
     creds = kite_client.validate_credentials()
     checks = {
-        "kite_api_key":      bool(settings.kite_api_key),
-        "kite_api_secret":   bool(settings.kite_api_secret),
-        "kite_access_token": bool(settings.kite_access_token),
-        "kite_initialised":  bool(creds.get("kite_initialised")),
-        "anthropic_api_key": bool(settings.anthropic_api_key),
-        "jwt_secret_key":    bool(settings.jwt_secret_key),
-        "telegram_bot":      bool(settings.telegram_bot_token and settings.telegram_chat_id),
-        "auto_login_ready":  bool(settings.kite_user_id and settings.kite_password
-                                  and settings.kite_totp_secret and settings.kite_redirect_url),
+        "kite_api_key":         bool(settings.kite_api_key),
+        "kite_api_secret":      bool(settings.kite_api_secret),
+        "kite_access_token":    bool(settings.kite_access_token),
+        "kite_initialised":     bool(creds.get("kite_initialised")),
+        "anthropic_api_key":    bool(settings.anthropic_api_key),
+        "jwt_secret_key":       bool(settings.jwt_secret_key),
+        "telegram_bot":         bool(settings.telegram_bot_token and settings.telegram_chat_id),
+        "auto_login_ready":     bool(settings.kite_user_id and settings.kite_password
+                                     and settings.kite_totp_secret and settings.kite_redirect_url),
+        "auto_start_configured": bool(settings.auto_start_strategies),
     }
     ready_for_live = all([
         checks["kite_api_key"], checks["kite_api_secret"],
