@@ -1,0 +1,36 @@
+name: Deploy to GigaNodes VPS
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'algotrader_v4/**'
+  workflow_dispatch:        # manual trigger from GitHub Actions tab
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Deploy to GigaNodes via SSH
+        uses: appleboy/ssh-action@v1.0.3
+        with:
+          host: ${{ secrets.GIGANODES_HOST }}
+          username: ${{ secrets.GIGANODES_USER }}
+          key: ${{ secrets.GIGANODES_SSH_KEY }}
+          port: ${{ secrets.GIGANODES_PORT || 22 }}
+          timeout: 180s
+          script: |
+            set -e
+            cd /opt/algotrader
+            git fetch origin main
+            git checkout main
+            git pull origin main
+            venv/bin/pip install -q -r requirements.txt
+            sudo systemctl restart algotrader
+            sleep 5
+            curl -sf http://localhost:8000/health | python3 -c "
+            import sys, json
+            d = json.load(sys.stdin)
+            assert d.get('status') == 'ok', f'Health check failed: {d}'
+            print(f'✓ Deploy complete — mode={d[\"mode\"]} agents={len(d.get(\"agents\", []))}')
+            "
