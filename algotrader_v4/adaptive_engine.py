@@ -327,14 +327,16 @@ class AdaptiveLearningEngine:
 
     def _update_rolling_metrics(self, params: AdaptiveParams, trades: list[TradeRecord]) -> None:
         if not trades: return
-        pnls = [t.pnl_pct for t in trades]
-        wins = [t for t in trades if t.won]
+        wins   = [t for t in trades if t.won]
+        losses = [t for t in trades if not t.won]
         params.win_rate_20  = len(wins) / len(trades)
-        if len(pnls) > 1:
-            arr = np.array(pnls)
+        if len(trades) > 1:
+            arr = np.array([t.pnl_pct for t in trades])
             params.sharpe_20 = float(arr.mean() / arr.std() * math.sqrt(len(arr))) if arr.std() > 0 else 0
-        params.avg_win_pct  = float(np.mean([t.pnl_pct for t in wins])) if wins else 0
-        params.avg_loss_pct = float(np.mean([t.pnl_pct for t in trades if not t.won])) if trades else 0
+        params.avg_win_pct  = float(np.mean([t.pnl_pct for t in wins]))   if wins   else 0.0
+        # Guard on the losses list, not trades: if trades is non-empty but has no
+        # losses, np.mean([]) returns nan, which corrupts the JSON state file on save.
+        params.avg_loss_pct = float(np.mean([t.pnl_pct for t in losses])) if losses else 0.0
 
     def _queue_rebacktest(self, strategy: str, symbol: str, reason: str) -> None:
         entry = {"strategy": strategy, "symbol": symbol, "reason": reason,
