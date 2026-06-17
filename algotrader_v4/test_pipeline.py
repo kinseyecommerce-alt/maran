@@ -6782,6 +6782,70 @@ run("claude_trade_gate: assess() uses get_running_loop not get_event_loop", t_cl
 
 
 # ══════════════════════════════════════════════════════════════════════════
+# 63. TWAP ENGINE — blocking place_order in async context
+# ══════════════════════════════════════════════════════════════════════════
+section("63. TWAP ENGINE — blocking place_order in async context")
+
+def t_twap_execute_uses_run_in_executor():
+    """execute() must use run_in_executor for place_order to avoid blocking the event loop."""
+    import inspect
+    from twap_engine import TWAPEngine
+
+    src = inspect.getsource(TWAPEngine.execute)
+    assert "run_in_executor" in src, (
+        "TWAPEngine.execute must use run_in_executor for kite_client.place_order "
+        "to avoid blocking the asyncio event loop during HTTP calls"
+    )
+    # Must NOT call place_order directly (outside run_in_executor)
+    # Simple heuristic: kite_client.place_order should appear inside a lambda
+    assert "lambda" in src, (
+        "TWAPEngine.execute should wrap place_order in a lambda for run_in_executor"
+    )
+
+run("twap_engine: execute() uses run_in_executor for place_order", t_twap_execute_uses_run_in_executor)
+
+
+def t_twap_execute_does_not_block_loop():
+    """execute() must not call place_order synchronously (blocking event loop)."""
+    import asyncio
+    from unittest.mock import patch, MagicMock
+    from twap_engine import TWAPEngine
+
+    engine = TWAPEngine()
+    loop_blocked = []
+
+    async def _run():
+        # Patch place_order to track whether it was called from executor thread
+        import threading
+        main_thread = threading.current_thread()
+        call_threads = []
+
+        def fake_place_order(**kwargs):
+            call_threads.append(threading.current_thread())
+            return "ORDER-001"
+
+        with patch("twap_engine.kite_client.place_order", side_effect=fake_place_order), \
+             patch("twap_engine.settings") as ms:
+            ms.use_twap = True
+            ms.twap_min_qty = 1
+            ms.twap_slices = 2
+            ms.twap_interval_sec = 0
+            await engine.execute("RELIANCE", "BUY", 10, "MIS", "TEST", "NSE")
+
+        # If run_in_executor is used, place_order runs in a ThreadPoolExecutor thread,
+        # NOT in the main event loop thread.
+        for t in call_threads:
+            assert t != main_thread, (
+                "place_order was called from the event loop thread — "
+                "it must run via run_in_executor to avoid blocking"
+            )
+
+    asyncio.run(_run())
+
+run("twap_engine: place_order runs in executor thread, not event loop", t_twap_execute_does_not_block_loop)
+
+
+# ══════════════════════════════════════════════════════════════════════════
 # FINAL SUMMARY
 # ══════════════════════════════════════════════════════════════════════════
 failed = summary()
