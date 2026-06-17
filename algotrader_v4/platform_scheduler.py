@@ -54,8 +54,8 @@ class PlatformScheduler:
     async def stop(self) -> None:
         try:
             self._sched.shutdown(wait=False)
-        except Exception:
-            pass
+        except Exception as exc:
+            logger.debug("[platform] scheduler shutdown error (non-critical): {}", exc)
 
     # ── Jobs ──────────────────────────────────────────────────────────────────
 

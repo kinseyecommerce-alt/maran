@@ -8290,6 +8290,58 @@ run("risk_manager: get_kelly_fraction logs exception before returning 0.0", t_ri
 
 
 # ══════════════════════════════════════════════════════════════════════════
+# 98. NSE_DAY_SIMULATION + PLATFORM_SCHEDULER — NAMEERROR + SILENT STOP
+# ══════════════════════════════════════════════════════════════════════════
+section("98. NSE_DAY_SIMULATION + PLATFORM_SCHEDULER — NAMEERROR + SILENT STOP")
+
+
+def t_make_snapshot_no_day_open_column():
+    """make_snapshot() must not raise NameError when 'day_open' column is absent.
+    Without the initialization guard, day_open is undefined when the if-block is skipped."""
+    import pandas as pd
+    import numpy as np
+    from nse_day_simulation import make_snapshot
+    from tick_engine import LiveIndicators
+
+    n = 30
+    idx = pd.date_range("2025-01-02 09:16", periods=n, freq="1min")
+    prices = np.linspace(100, 110, n)
+    df = pd.DataFrame({
+        "open": prices, "high": prices + 0.5, "low": prices - 0.5,
+        "close": prices, "volume": [1000] * n,
+    }, index=idx)
+    # Deliberately omit "day_open" column — make_snapshot must not crash
+    ind = LiveIndicators(symbol="TESTSTOCK", ema9=105.0, ema21=103.0, rsi_14=55.0)
+    try:
+        snap = make_snapshot("TESTSTOCK", ind, df, bar_idx=25, ltp=108.0)
+        assert snap is not None, "make_snapshot must return a valid snapshot"
+    except NameError as e:
+        raise AssertionError(
+            f"make_snapshot raised NameError when 'day_open' column absent: {e}"
+        )
+
+run("nse_day_simulation: make_snapshot without day_open column does not raise NameError", t_make_snapshot_no_day_open_column)
+
+
+def t_platform_scheduler_stop_logs_on_error():
+    """platform_scheduler.PlatformScheduler.stop() must not use bare except: pass —
+    scheduler shutdown errors should be logged so operators see any cleanup failures."""
+    import inspect
+    import platform_scheduler as _ps
+    src = inspect.getsource(_ps.PlatformScheduler.stop)
+    # The except clause must not be a bare pass
+    lines = [l.strip() for l in src.splitlines()]
+    for i, line in enumerate(lines):
+        if line.startswith("except") and i + 1 < len(lines):
+            next_line = lines[i + 1]
+            assert next_line != "pass", (
+                "PlatformScheduler.stop() must log shutdown errors, not pass silently"
+            )
+
+run("platform_scheduler: stop() logs on shutdown error (not bare pass)", t_platform_scheduler_stop_logs_on_error)
+
+
+# ══════════════════════════════════════════════════════════════════════════
 # FINAL SUMMARY
 # ══════════════════════════════════════════════════════════════════════════
 failed = summary()

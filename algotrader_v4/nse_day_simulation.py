@@ -231,6 +231,7 @@ def make_snapshot(sym: str, ind: LiveIndicators, df: pd.DataFrame,
                                close=row.close, volume=row.volume, ts=ts2))
     row = df.iloc[bar_idx]
     # Use day_open for the session's open price (not pre-history open)
+    day_open: float = 0.0
     if "day_open" in df.columns:
         day_open = float(df["day_open"].iloc[bar_idx])
     if not day_open or day_open <= 0:
