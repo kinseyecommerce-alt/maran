@@ -8159,6 +8159,50 @@ run("sebi_compliance: os module imported for chmod", t_sebi_audit_log_os_importe
 
 
 # ══════════════════════════════════════════════════════════════════════════
+# 96. TICK ENGINE + GREEKS ENGINE — CONCURRENT ITERATION + ZERO-SPOT GUARD
+# ══════════════════════════════════════════════════════════════════════════
+section("96. TICK ENGINE + GREEKS ENGINE — CONCURRENT ITERATION + ZERO-SPOT GUARD")
+
+
+def t_tick_engine_all_latest_uses_list_snapshot():
+    """tick_engine.all_latest() must snapshot dict keys before iterating to prevent
+    RuntimeError when _process_tick adds a new symbol from the event loop while a sync
+    endpoint iterates from a uvicorn executor thread."""
+    import inspect
+    import tick_engine as _te
+    src = inspect.getsource(_te.TickEngine.all_latest)
+    assert "list(self._latest_tick)" in src, (
+        "TickEngine.all_latest() must use list(self._latest_tick) to snapshot keys "
+        "before iteration — concurrent dict resize causes RuntimeError"
+    )
+
+run("tick_engine: all_latest snapshots keys with list() to prevent concurrent-resize RuntimeError", t_tick_engine_all_latest_uses_list_snapshot)
+
+
+def t_greeks_vol_surface_iv_zero_spot_returns_atm_iv():
+    """vol_surface_iv() must not divide by spot when spot == 0.
+    Instead it should return a clamped ATM IV value."""
+    from greeks_engine import vol_surface_iv
+    result = vol_surface_iv(spot=0.0, strike=18000.0, atm_iv=0.20, opt_type="CE")
+    assert 0.05 <= result <= 2.0, (
+        f"vol_surface_iv(spot=0) must return clamped atm_iv, got {result}"
+    )
+
+run("greeks_engine: vol_surface_iv returns clamped atm_iv when spot == 0 (no ZeroDivisionError)", t_greeks_vol_surface_iv_zero_spot_returns_atm_iv)
+
+
+def t_greeks_vol_surface_iv_negative_spot_safe():
+    """vol_surface_iv() must not crash on negative spot."""
+    from greeks_engine import vol_surface_iv
+    result = vol_surface_iv(spot=-5.0, strike=18000.0, atm_iv=0.15, opt_type="PE")
+    assert 0.05 <= result <= 2.0, (
+        f"vol_surface_iv(spot<0) must return clamped atm_iv, got {result}"
+    )
+
+run("greeks_engine: vol_surface_iv returns clamped atm_iv when spot < 0", t_greeks_vol_surface_iv_negative_spot_safe)
+
+
+# ══════════════════════════════════════════════════════════════════════════
 # FINAL SUMMARY
 # ══════════════════════════════════════════════════════════════════════════
 failed = summary()

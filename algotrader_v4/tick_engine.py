@@ -978,7 +978,7 @@ class TickEngine:
 
     def all_latest(self) -> dict[str, dict]:
         result = {}
-        for sym in self._latest_tick:
+        for sym in list(self._latest_tick):  # snapshot keys — new-symbol writes from event loop can change size during sync-endpoint iteration
             tick = self._latest_tick[sym]
             ind  = self._latest_ind[sym]
             if tick and ind:

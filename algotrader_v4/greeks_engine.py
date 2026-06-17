@@ -154,6 +154,8 @@ def vol_surface_iv(
     moneyness = (K - S) / S  (positive = OTM call / ITM put)
     iv = atm_iv * (1 + skew_slope * m + smile_curve * m²)
     """
+    if spot <= 0:
+        return max(0.05, min(atm_iv, 2.0))
     m = (strike - spot) / spot
     iv = atm_iv * (1.0 + skew_slope * m + smile_curve * m * m)
     return max(0.05, min(iv, 2.0))  # clamp to [5%, 200%]
