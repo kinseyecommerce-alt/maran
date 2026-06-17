@@ -2532,7 +2532,7 @@ class ScalpingAgent(BaseAgent):
 
         # 9. HMA direction flip + tight spread (FIXED: uses correct prev_hma_dir)
         if _bs.is_pattern_enabled("scalping", "HMA_MICRO"):
-            if ind.hma and ind.hma > 0 and getattr(ind, "spread", 0) > 0:
+            if ind.hma and ind.hma > 0 and getattr(ind, "spread", 0) > 0 and ltp > 0:
                 spread_pct = ind.spread / ltp * 100
                 if prev_hma_dir != "UP"   and ind.hma_dir == "UP"   and spread_pct < 0.03 and ind.volume_ratio >= 1.2:
                     return "BUY",  "HMA_MICRO"
