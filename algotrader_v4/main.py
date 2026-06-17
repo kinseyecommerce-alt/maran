@@ -425,13 +425,6 @@ def root_redirect():
     from fastapi.responses import RedirectResponse
     return RedirectResponse(url="/dashboard")
 
-@app.get("/gate/log", tags=["Intelligence"])
-def gate_log(n: int = 50):
-    """Last N Claude trade gate decisions (newest first)."""
-    from claude_trade_gate import get_gate_log
-    return {"decisions": get_gate_log(n), "total": n}
-
-
 @app.get("/agents/activity", tags=["Agents"])
 def agent_activity(n: int = 100):
     """Live agent order activity feed — signals, gate decisions, entries, SL/target hits."""
@@ -2913,7 +2906,7 @@ async def on_shutdown():
     # 4. Stop platform scheduler
     try:
         from platform_scheduler import platform_scheduler
-        platform_scheduler.stop()
+        await platform_scheduler.stop()
     except Exception:
         pass
 
