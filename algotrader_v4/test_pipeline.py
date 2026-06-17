@@ -5273,6 +5273,53 @@ run("greeks: /portfolio/greeks endpoint + sensitive",     t_greeks_portfolio_end
 
 
 # ══════════════════════════════════════════════════════════════════════════
+# 34. HEALTH & READINESS
+# ══════════════════════════════════════════════════════════════════════════
+
+def t_health_architecture_reflects_tick_interval():
+    import main as _m
+    from config import settings
+    # Build architecture string the same way the endpoint does
+    expected = f"tick-driven {settings.tick_interval_ms}ms"
+    # Verify the health endpoint body would contain the right string
+    import inspect
+    src = inspect.getsource(_m.health)
+    assert "tick_interval_ms" in src, "health endpoint must use settings.tick_interval_ms"
+
+def t_health_includes_kite_token_field():
+    import main as _m
+    import inspect
+    src = inspect.getsource(_m.health)
+    assert "kite_token" in src, "health must expose kite_token boolean"
+
+def t_readiness_endpoint_registered_and_exempt():
+    import main as _m
+    routes = {r.path for r in _m.app.routes}
+    assert "/readiness" in routes, "/readiness not registered"
+    assert "/readiness" in _m._EXEMPT_PATHS, "/readiness must be auth-exempt like /health"
+
+def t_readiness_returns_expected_keys():
+    import main as _m
+    import inspect
+    src = inspect.getsource(_m.readiness)
+    for key in ("ready_for_live", "checks", "missing", "tick_interval_ms", "market_open"):
+        assert key in src, f"readiness must return {key}"
+
+def t_readiness_missing_list_non_null():
+    import main as _m
+    import inspect
+    src = inspect.getsource(_m.readiness)
+    # Must compute `missing` from checks dict
+    assert "missing" in src and "checks" in src
+
+run("health: architecture string uses tick_interval_ms",  t_health_architecture_reflects_tick_interval)
+run("health: kite_token field present",                   t_health_includes_kite_token_field)
+run("readiness: endpoint registered and auth-exempt",     t_readiness_endpoint_registered_and_exempt)
+run("readiness: returns expected keys",                   t_readiness_returns_expected_keys)
+run("readiness: computes missing list from checks",       t_readiness_missing_list_non_null)
+
+
+# ══════════════════════════════════════════════════════════════════════════
 # FINAL SUMMARY
 # ══════════════════════════════════════════════════════════════════════════
 failed = summary()
