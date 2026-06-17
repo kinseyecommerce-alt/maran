@@ -471,6 +471,20 @@ class MasterAgent:
             from n8n_bridge import notify as _n8n
             asyncio.create_task(_n8n("system", {"type": "squareoff", "positions_closed": len(ids)}))
 
+        # Daily summary — fire regardless of whether positions were open
+        try:
+            from state_store import get_trade_stats, get_daily_pnl
+            from notifier import notifier as _notifier
+            today_stats = get_trade_stats(days=1)
+            await asyncio.to_thread(
+                _notifier.send_daily_summary,
+                pnl=risk_manager.daily_realised_pnl,
+                trades=today_stats.get("trades", risk_manager.trades_today),
+                win_rate=today_stats.get("win_rate", 0.0),
+            )
+        except Exception as exc:
+            logger.warning("[master] Daily summary alert failed: {}", exc)
+
     async def _daily_reset(self) -> None:
         risk_manager.reset_daily()
         order_guard.reset_daily()
