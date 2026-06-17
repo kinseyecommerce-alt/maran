@@ -5623,6 +5623,44 @@ run("event_calendar: _inject_rbi_dates() populates _MARKET_KEY cache",      t_in
 
 
 # ══════════════════════════════════════════════════════════════════════════
+# 44. RISK MANAGER — AGENT CAPITAL BUCKET COVERAGE
+# ══════════════════════════════════════════════════════════════════════════
+
+def t_new_equity_agents_in_bucket_map():
+    """mean_reversion, momentum, pairs must appear in _AGENT_TO_BUCKET."""
+    import risk_manager as _rm
+    for agent in ("mean_reversion", "momentum", "pairs"):
+        assert agent in _rm._AGENT_TO_BUCKET, \
+            f"'{agent}' missing from _AGENT_TO_BUCKET — falls back to full intraday bucket"
+        assert _rm._AGENT_TO_BUCKET[agent] == "intraday", \
+            f"'{agent}' should use 'intraday' bucket, got {_rm._AGENT_TO_BUCKET[agent]!r}"
+
+def t_new_equity_agents_in_max_pos_map():
+    """mean_reversion, momentum, pairs must appear in _AGENT_MAX_POS and use per-position split."""
+    import risk_manager as _rm
+    for agent in ("mean_reversion", "momentum", "pairs"):
+        assert agent in _rm._AGENT_MAX_POS, \
+            f"'{agent}' missing from _AGENT_MAX_POS — falls back to lot-based (max_pos=1)"
+        assert _rm._AGENT_MAX_POS[agent] is not None, \
+            f"'{agent}' should have a max-positions config attr, not None (lot-based)"
+
+def t_new_equity_agents_capital_less_than_intraday_bucket():
+    """max_capital_for_agent('mean_reversion') must be < total intraday bucket."""
+    from risk_manager import risk_manager as _rm
+    from config import settings
+    intraday_bucket = settings.total_capital * settings.intraday_capital_pct / 100
+    cap = _rm.max_capital_for_agent("mean_reversion")
+    assert cap < intraday_bucket, (
+        f"mean_reversion capital ₹{cap:.0f} >= full intraday bucket ₹{intraday_bucket:.0f} "
+        f"— agents receive full bucket instead of per-position slice"
+    )
+
+run("risk_manager: mean_reversion/momentum/pairs in _AGENT_TO_BUCKET",       t_new_equity_agents_in_bucket_map)
+run("risk_manager: mean_reversion/momentum/pairs in _AGENT_MAX_POS",         t_new_equity_agents_in_max_pos_map)
+run("risk_manager: mean_reversion capital < full intraday bucket",            t_new_equity_agents_capital_less_than_intraday_bucket)
+
+
+# ══════════════════════════════════════════════════════════════════════════
 # FINAL SUMMARY
 # ══════════════════════════════════════════════════════════════════════════
 failed = summary()
