@@ -39,8 +39,6 @@ class MLSignalScorer:
         atr_14 = float(ind.atr_14 or 1) or 1.0
         stoch_k = float(ind.stoch_rsi_k or 50)
         stoch_d = float(ind.stoch_rsi_d or 50)
-        vwap_upper2 = float(ind.vwap_upper2 or ltp * 1.02)
-        vwap_lower2 = float(ind.vwap_lower2 or ltp * 0.98)
 
         bb_range = max(bb_upper - bb_lower, 1.0)
 
@@ -53,8 +51,8 @@ class MLSignalScorer:
             atr_14 / max(ltp, 1e-6),                          # 6. volatility ratio
             stoch_k / 100.0,                                  # 7. Stoch RSI K
             stoch_d / 100.0,                                  # 8. Stoch RSI D
-            (vwap_upper2 - ltp) / atr_14,                     # 9. distance to upper band
-            (ltp - vwap_lower2) / atr_14,                     # 10. distance to lower band
+            (bb_upper - ltp) / atr_14,                        # 9. distance to BB upper (matches training)
+            (ltp - bb_lower) / atr_14,                        # 10. distance to BB lower (matches training)
             rsi_7 / 100.0,                                    # 11. RSI-7 normalised
             macd / atr_14,                                    # 12. MACD / ATR
         ], dtype=float)
