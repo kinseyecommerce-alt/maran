@@ -336,6 +336,13 @@ class SEBICompliance:
             self._state       = KillSwitchState.ACTIVE
             self._kill_reason = ""
         self._persist_state()
+        # Mirror trigger_kill_switch in reverse: clear the risk-manager halt so
+        # check_before_order() unblocks immediately (not just at EOD reset).
+        try:
+            from risk_manager import risk_manager as _rm
+            _rm.is_trading_halted = False
+        except Exception:
+            pass
         logger.warning("SEBI: Kill switch reset — trading ACTIVE")
         return True, "ACTIVE"
 
