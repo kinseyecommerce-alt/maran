@@ -9,6 +9,7 @@ Jobs (all IST, Mon–Fri):
 from __future__ import annotations
 
 import asyncio
+from urllib.parse import urlparse
 from loguru import logger
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 
@@ -134,8 +135,9 @@ class PlatformScheduler:
         except Exception as exc:
             self._token_ok = False
             logger.error("[platform] Kite token refresh failed: {}", exc)
-            login_url = f"https://{settings.kite_redirect_url.split('/')[2]}/login" \
-                        if settings.kite_redirect_url else "/login"
+            _parsed = urlparse(settings.kite_redirect_url)
+            _host = _parsed.netloc or _parsed.path.split("/")[0]
+            login_url = f"https://{_host}/login" if _host else "/login"
             await send_telegram(
                 f"⚠️ <b>Kite auto-login failed</b>\n"
                 f"Reason: {exc}\n\n"
