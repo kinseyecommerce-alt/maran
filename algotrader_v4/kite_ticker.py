@@ -93,8 +93,8 @@ class KiteTicker:
         if self._kws:
             try:
                 self._kws.stop()
-            except Exception:
-                pass
+            except Exception as exc:
+                logger.debug("[KiteTicker] WebSocket stop error (non-critical): {}", exc)
 
     # ── KiteConnect callbacks (called from C thread) ──────────────────────────
 

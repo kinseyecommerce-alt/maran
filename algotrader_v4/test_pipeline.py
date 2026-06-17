@@ -8485,6 +8485,59 @@ run("news_gate: _audit logs on failure (not bare pass)", t_news_gate_audit_logs_
 
 
 # ══════════════════════════════════════════════════════════════════════════
+# 101. STRATEGY_SIGNALS + KITE_TICKER + CORRELATION_GUARD FINAL FIXES
+# ══════════════════════════════════════════════════════════════════════════
+section("101. STRATEGY_SIGNALS + KITE_TICKER + CORRELATION_GUARD FINAL FIXES")
+
+
+def t_strategy_signals_orb_zero_low_guard():
+    """strategy_signals._signals_orb() must guard or_low > 0 before dividing
+    (or_high - or_low) / or_low — a zero low-price candle crashes the signal engine."""
+    import inspect
+    import strategy_signals as _ss
+    src = inspect.getsource(_ss._signals_orb)
+    assert "or_low <= 0" in src or "or_low > 0" in src, (
+        "_signals_orb must guard against or_low == 0 before computing width = (or_high-or_low)/or_low"
+    )
+
+run("strategy_signals: _signals_orb guards or_low <= 0 before ORB width division", t_strategy_signals_orb_zero_low_guard)
+
+
+def t_kite_ticker_stop_logs_on_error():
+    """kite_ticker.KiteTicker.stop() must log WebSocket stop errors instead of
+    silent pass — exceptions during stop() hide cleanup failures."""
+    import inspect
+    import kite_ticker as _kt
+    src = inspect.getsource(_kt.KiteTicker.stop)
+    lines = [l.strip() for l in src.splitlines()]
+    for i, line in enumerate(lines):
+        if line.startswith("except") and i + 1 < len(lines):
+            next_line = lines[i + 1]
+            assert next_line != "pass", (
+                "KiteTicker.stop() except must log, not pass silently"
+            )
+
+run("kite_ticker: stop() logs on WebSocket stop error (not bare pass)", t_kite_ticker_stop_logs_on_error)
+
+
+def t_correlation_guard_logs_on_lookup_failure():
+    """correlation_guard.get_correlation() must log exception before returning 0.0
+    so lookup failures are visible in logs."""
+    import inspect
+    import correlation_guard as _cg
+    src = inspect.getsource(_cg.get_correlation)
+    lines = [l.strip() for l in src.splitlines()]
+    for i, line in enumerate(lines):
+        if line.startswith("except Exception") and i + 1 < len(lines):
+            next_line = lines[i + 1]
+            assert next_line != "return 0.0" and "logger" in src, (
+                "get_correlation must log on exception before returning 0.0"
+            )
+
+run("correlation_guard: get_correlation logs on lookup failure (not silent return)", t_correlation_guard_logs_on_lookup_failure)
+
+
+# ══════════════════════════════════════════════════════════════════════════
 # FINAL SUMMARY
 # ══════════════════════════════════════════════════════════════════════════
 failed = summary()

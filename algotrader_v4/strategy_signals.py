@@ -107,6 +107,9 @@ def _signals_orb(df: pd.DataFrame) -> pd.Series:
     while i < len(df) - 4:
         or_high = df["high"].iloc[i:i+2].max()
         or_low  = df["low"].iloc[i:i+2].min()
+        if or_low <= 0:
+            i += 26
+            continue
         width   = (or_high - or_low) / or_low * 100
         if 0.3 < width < 2.5:
             for j in range(i + 2, min(i + 6, len(df))):

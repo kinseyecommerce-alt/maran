@@ -169,7 +169,8 @@ def get_correlation(sym_a: str, sym_b: str) -> float:
         # numpy scalar → plain float; guard against NaN
         result = float(val)
         return 0.0 if np.isnan(result) else result
-    except Exception:
+    except Exception as exc:
+        logger.debug("[correlation_guard] lookup failed for {}/{}: {}", sym_a, sym_b, exc)
         return 0.0
 
 
