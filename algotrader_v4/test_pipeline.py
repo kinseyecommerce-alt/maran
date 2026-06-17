@@ -6499,6 +6499,64 @@ run("atomic_bracket: _place_sl_order logs error on last retry", t_atomic_bracket
 
 
 # ══════════════════════════════════════════════════════════════════════════
+# 58. BROKER ROUTER — clear_secondaries thread-safety
+# ══════════════════════════════════════════════════════════════════════════
+section("58. BROKER ROUTER — clear_secondaries thread-safety")
+
+def t_broker_router_clear_replaces_not_mutates():
+    """clear_secondaries must replace the list reference, not clear it in-place."""
+    import inspect
+    from broker_router import BrokerRouter
+
+    src = inspect.getsource(BrokerRouter.clear_secondaries)
+    # Must NOT call self._secondaries.clear() — that mutates in-place and
+    # can raise RuntimeError in any concurrent iteration.
+    assert "self._secondaries.clear()" not in src, (
+        "clear_secondaries must NOT call self._secondaries.clear() — "
+        "assign a new list instead to avoid RuntimeError in concurrent iterations"
+    )
+    assert "self._secondaries = []" in src, (
+        "clear_secondaries must assign self._secondaries = []"
+    )
+
+run("broker_router: clear_secondaries assigns new list (thread-safe)", t_broker_router_clear_replaces_not_mutates)
+
+
+def t_broker_router_clear_does_not_disrupt_concurrent_iter():
+    """clear_secondaries must not raise when a thread is mid-iteration."""
+    import threading
+    from broker_router import BrokerRouter
+
+    router = BrokerRouter()
+    # Pre-populate some secondaries
+    for i in range(5):
+        router.add_secondary(f"broker{i}", object())
+
+    errors = []
+    snapshot = None
+
+    def iterate():
+        nonlocal snapshot
+        try:
+            # Simulate mid-iteration snapshot (same pattern as mirror_exit)
+            snap = list(router._secondaries)
+            snapshot = snap
+        except Exception as exc:
+            errors.append(exc)
+
+    def clear():
+        router.clear_secondaries()
+
+    t1 = threading.Thread(target=iterate)
+    t2 = threading.Thread(target=clear)
+    t1.start(); t2.start()
+    t1.join(); t2.join()
+    assert not errors, f"clear_secondaries disrupted concurrent iteration: {errors}"
+
+run("broker_router: clear_secondaries does not raise during concurrent read", t_broker_router_clear_does_not_disrupt_concurrent_iter)
+
+
+# ══════════════════════════════════════════════════════════════════════════
 # FINAL SUMMARY
 # ══════════════════════════════════════════════════════════════════════════
 failed = summary()
