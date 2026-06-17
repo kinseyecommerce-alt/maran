@@ -5661,6 +5661,53 @@ run("risk_manager: mean_reversion capital < full intraday bucket",            t_
 
 
 # ══════════════════════════════════════════════════════════════════════════
+# 45. MAIN.PY — CAPITAL ALLOCATION API RESPONSE CORRECTNESS
+# ══════════════════════════════════════════════════════════════════════════
+section("45. MAIN.PY — CAPITAL ALLOCATION AGENT BUCKETS")
+
+def t_capital_allocation_futures_bucket_correct():
+    """agent_buckets in /settings/capital-allocation must show futures→futures, not futures→options."""
+    import re
+    from pathlib import Path
+    src = (Path(__file__).parent / "main.py").read_text()
+    # Locate the agent_buckets dict literal inside get_capital_allocation
+    fn_match = re.search(r'"agent_buckets"\s*:\s*\{[^}]+\}', src, re.DOTALL)
+    assert fn_match, "agent_buckets dict not found in main.py get_capital_allocation"
+    chunk = fn_match.group(0)
+    assert '"futures": "futures"' in chunk, \
+        "agent_buckets incorrectly maps futures to wrong bucket (expected futures→futures)"
+    assert '"futures": "options"' not in chunk, \
+        "agent_buckets maps futures→options (wrong — futures capital is a separate bucket)"
+
+def t_capital_allocation_all_agents_covered():
+    """agent_buckets must include intraday, scalping, swing, options, futures."""
+    import re
+    from pathlib import Path
+    src = (Path(__file__).parent / "main.py").read_text()
+    fn_match = re.search(r'"agent_buckets"\s*:\s*\{[^}]+\}', src, re.DOTALL)
+    assert fn_match, "agent_buckets dict not found in main.py"
+    chunk = fn_match.group(0)
+    for agent in ("intraday", "scalping", "swing", "options", "futures"):
+        assert f'"{agent}"' in chunk, \
+            f"agent_buckets dict missing entry for '{agent}'"
+
+def t_capital_allocation_options_bucket_label():
+    """options agent must map to options bucket (not intraday or futures)."""
+    import re
+    from pathlib import Path
+    src = (Path(__file__).parent / "main.py").read_text()
+    fn_match = re.search(r'"agent_buckets"\s*:\s*\{[^}]+\}', src, re.DOTALL)
+    assert fn_match, "agent_buckets dict not found in main.py"
+    chunk = fn_match.group(0)
+    assert '"options": "options"' in chunk, \
+        "agent_buckets should map options→options"
+
+run("main: agent_buckets futures maps to futures (not options)",        t_capital_allocation_futures_bucket_correct)
+run("main: agent_buckets covers all 5 agent types",                     t_capital_allocation_all_agents_covered)
+run("main: agent_buckets options maps to options",                      t_capital_allocation_options_bucket_label)
+
+
+# ══════════════════════════════════════════════════════════════════════════
 # FINAL SUMMARY
 # ══════════════════════════════════════════════════════════════════════════
 failed = summary()

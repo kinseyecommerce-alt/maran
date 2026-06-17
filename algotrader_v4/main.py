@@ -1314,7 +1314,7 @@ def get_capital_allocation():
         },
         "agent_buckets": {
             "intraday": "intraday", "scalping": "intraday",
-            "swing": "swing",       "options": "options",  "futures": "options",
+            "swing": "swing",       "options": "options",  "futures": "futures",
         }
     }
 
