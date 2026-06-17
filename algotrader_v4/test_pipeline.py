@@ -6759,6 +6759,29 @@ run("state_store: _start_writer uses double-checked locking", t_state_store_star
 
 
 # ══════════════════════════════════════════════════════════════════════════
+# 62. CLAUDE TRADE GATE — deprecated get_event_loop in async context
+# ══════════════════════════════════════════════════════════════════════════
+section("62. CLAUDE TRADE GATE — deprecated get_event_loop in async context")
+
+def t_claude_gate_uses_get_running_loop():
+    """assess() must use get_running_loop(), not deprecated get_event_loop()."""
+    import inspect
+    import claude_trade_gate as ctg
+
+    src = inspect.getsource(ctg.assess)
+    assert "get_event_loop()" not in src, (
+        "assess() must not call asyncio.get_event_loop() — "
+        "use asyncio.get_running_loop() inside async code (deprecated in Python 3.10+)"
+    )
+    assert src.count("get_running_loop()") >= 2, (
+        "assess() should call asyncio.get_running_loop() at least twice "
+        "(latency t0 start and t0 end)"
+    )
+
+run("claude_trade_gate: assess() uses get_running_loop not get_event_loop", t_claude_gate_uses_get_running_loop)
+
+
+# ══════════════════════════════════════════════════════════════════════════
 # FINAL SUMMARY
 # ══════════════════════════════════════════════════════════════════════════
 failed = summary()

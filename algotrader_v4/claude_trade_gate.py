@@ -336,7 +336,7 @@ async def assess(snap, action: str, signal: dict, strategy: str) -> GateDecision
         return GateDecision(confidence=60, enter=True, size_factor=0.5,
                             reason="Gate circuit breaker open — reduced size, no AI assessment")
 
-    t0 = asyncio.get_event_loop().time()
+    t0 = asyncio.get_running_loop().time()
     ctx = _build_context(snap, action, signal, strategy)
 
     try:
@@ -362,7 +362,7 @@ async def assess(snap, action: str, signal: dict, strategy: str) -> GateDecision
             # One fast retry — a single transient timeout shouldn't skip assessment
             logger.warning("[gate] {} timeout — retrying once", snap.symbol)
             resp = await _call()
-        latency = int((asyncio.get_event_loop().time() - t0) * 1000)
+        latency = int((asyncio.get_running_loop().time() - t0) * 1000)
         _consec_failures = 0
 
         # FIX 4: wrap response parsing so any unexpected format falls back safely
