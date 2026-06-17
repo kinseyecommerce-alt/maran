@@ -6955,6 +6955,85 @@ def t_tick_engine_fetch_kite_batch_executes_in_executor():
 run("tick_engine: _fetch_kite_batch wraps quote_kite in run_in_executor", t_tick_engine_fetch_kite_batch_executes_in_executor)
 
 
+# ─────────────────────────────────────────────────────────────────────────────
+section("66. MAIN.PY — FD leak, kill-switch silent swallow, get_event_loop in async")
+# ─────────────────────────────────────────────────────────────────────────────
+
+def t_main_admin_start_closes_log_file():
+    """admin_start_user must close log_file in parent after Popen (no FD leak)."""
+    import inspect
+    import main as _main
+    src = inspect.getsource(_main.admin_start_user)
+    # Fix: log_file.close() called in a finally block after Popen
+    assert "log_file.close()" in src, (
+        "admin_start_user must close log_file after Popen to prevent FD leak "
+        "(subprocess inherits FD; parent must close its copy)"
+    )
+    assert "finally" in src, (
+        "admin_start_user must use try/finally around Popen so log_file is "
+        "closed even if Popen raises"
+    )
+
+run("main: admin_start_user closes log_file in finally block (no FD leak)", t_main_admin_start_closes_log_file)
+
+
+def t_main_kill_switch_alert_logs_failure():
+    """Kill-switch alert must log notification failures, not silently swallow them."""
+    import inspect
+    import main as _main
+    src = inspect.getsource(_main.trigger_kill_switch)
+    # The fix replaces `except Exception: pass` with `except Exception as _exc: logger.warning(...)`
+    assert "except Exception:\n            pass" not in src, (
+        "trigger_kill_switch _alert() must not silently swallow notification failures — "
+        "use logger.warning so operators know when kill-switch alerts fail to dispatch"
+    )
+    assert "logger.warning" in src, (
+        "trigger_kill_switch _alert() must log notification failures via logger.warning"
+    )
+
+run("main: kill-switch _alert() logs notification failures instead of swallowing", t_main_kill_switch_alert_logs_failure)
+
+
+def t_main_db_cleanup_uses_running_loop():
+    """db_cleanup _run() must use get_running_loop(), not deprecated get_event_loop()."""
+    import inspect
+    import main as _main
+    src = inspect.getsource(_main.db_cleanup)
+    assert "get_event_loop()" not in src, (
+        "db_cleanup must use asyncio.get_running_loop() inside its inner async _run() "
+        "coroutine — get_event_loop() is deprecated in Python 3.10+ in async context"
+    )
+    assert "get_running_loop()" in src
+
+run("main: db_cleanup uses get_running_loop() in async _run()", t_main_db_cleanup_uses_running_loop)
+
+
+def t_main_train_ml_signal_uses_running_loop():
+    """train_ml_signal must use get_running_loop(), not deprecated get_event_loop()."""
+    import inspect
+    import main as _main
+    src = inspect.getsource(_main.train_ml_signal)
+    assert "get_event_loop()" not in src, (
+        "train_ml_signal must not use asyncio.get_event_loop() inside an async def"
+    )
+    assert "get_running_loop()" in src
+
+run("main: train_ml_signal uses get_running_loop()", t_main_train_ml_signal_uses_running_loop)
+
+
+def t_main_place_twap_order_uses_running_loop():
+    """place_twap_order must use get_running_loop(), not deprecated get_event_loop()."""
+    import inspect
+    import main as _main
+    src = inspect.getsource(_main.place_twap_order)
+    assert "get_event_loop()" not in src, (
+        "place_twap_order must not use asyncio.get_event_loop() inside an async def"
+    )
+    assert "get_running_loop()" in src
+
+run("main: place_twap_order uses get_running_loop()", t_main_place_twap_order_uses_running_loop)
+
+
 # ══════════════════════════════════════════════════════════════════════════
 # FINAL SUMMARY
 # ══════════════════════════════════════════════════════════════════════════

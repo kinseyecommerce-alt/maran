@@ -1594,7 +1594,6 @@ def admin_start_user(user: str, _: str = Depends(_admin_required)):
     if not env_file.exists():
         raise HTTPException(500, f".env missing for {user}")
     log_path = inst_dir / "logs" / "server.log"
-    log_file = open(log_path, "a")
     env = {
         **os.environ,
         "APP_ENV_FILE": str(env_file),
@@ -1602,13 +1601,18 @@ def admin_start_user(user: str, _: str = Depends(_admin_required)):
         "KITE_ACCOUNTS_FILE": str(inst_dir / "kite_accounts.json"),
         "ADAPTIVE_DATA_DIR": str(inst_dir / "logs" / "adaptive"),
     }
-    proc = subprocess.Popen(
-        ["python", "-m", "uvicorn", "main:app", "--host", "0.0.0.0", "--port", str(entry["port"])],
-        cwd=str(Path(__file__).parent),
-        env=env,
-        stdout=log_file,
-        stderr=log_file,
-    )
+    log_file = open(log_path, "a")
+    try:
+        proc = subprocess.Popen(
+            ["python", "-m", "uvicorn", "main:app", "--host", "0.0.0.0", "--port", str(entry["port"])],
+            cwd=str(Path(__file__).parent),
+            env=env,
+            stdout=log_file,
+            stderr=log_file,
+        )
+    finally:
+        # Close parent's copy; subprocess inherits the FD and keeps the file open.
+        log_file.close()
     entry["pid"] = proc.pid
     p._save_registry(reg)
     return {"ok": True, "pid": proc.pid, "port": entry["port"]}
@@ -1857,8 +1861,8 @@ async def trigger_kill_switch(reason: str = "Manual kill switch"):
         try:
             from notifier import notifier as _notifier
             await asyncio.to_thread(_notifier.send_kill_switch_alert, reason)
-        except Exception:
-            pass
+        except Exception as _exc:
+            logger.warning("[kill-switch] alert dispatch failed: {}", _exc)
     asyncio.create_task(_alert())
     return {"status": "KILLED", "reason": reason}
 
@@ -3141,7 +3145,7 @@ async def db_cleanup(keep_days: int = Query(default=None, ge=30, le=365)):
     days = keep_days if keep_days is not None else settings.db_keep_days
 
     async def _run():
-        loop = asyncio.get_event_loop()
+        loop = asyncio.get_running_loop()
         removed = await loop.run_in_executor(None, lambda: cleanup_old_data(keep_days=days))
         await loop.run_in_executor(None, vacuum_db)
         logger.info("[db/cleanup] manual cleanup complete: {}", removed)
@@ -3214,7 +3218,7 @@ async def get_ml_signal_status():
 async def train_ml_signal(symbol: str):
     """Train or retrain the ML signal model for a symbol."""
     from ml_signal_scorer import ml_signal_scorer
-    loop = asyncio.get_event_loop()
+    loop = asyncio.get_running_loop()
     success = await loop.run_in_executor(None, lambda: ml_signal_scorer.train(symbol.upper()))
     return {"symbol": symbol.upper(), "trained": success}
 
@@ -3238,7 +3242,7 @@ async def place_twap_order(
 ):
     """Manually place a TWAP order for a large lot. direction: BUY or SELL."""
     from twap_executor import twap_executor
-    loop = asyncio.get_event_loop()
+    loop = asyncio.get_running_loop()
     ids = await twap_executor.place_twap(
         symbol.upper(), qty, direction.upper(), exchange, product,
         tag="manual-twap", duration_sec=duration_sec, slices=slices, loop=loop,
