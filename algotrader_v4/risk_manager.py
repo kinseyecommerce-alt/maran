@@ -252,15 +252,16 @@ class RiskManager:
                 first_breach = not self.is_trading_halted
                 self.is_trading_halted = True
                 if first_breach:
-                    try:
-                        from notifier import notifier as _notifier
-                        _notifier.send(
-                            subject=f"Daily loss limit ₹{settings.max_daily_loss:.0f} hit",
-                            body=f"Trading halted. Current P&L: ₹{self.daily_realised_pnl:.0f}",
-                            level="CRITICAL",
-                        )
-                    except Exception:
-                        pass
+                    # Spawn a daemon thread so the SMTP/Telegram call does NOT
+                    # block self._lock — a slow mail server would otherwise freeze
+                    # all concurrent agent check_before_order() calls.
+                    import threading as _threading
+                    _threading.Thread(
+                        target=self._send_loss_limit_notification,
+                        args=(self.daily_realised_pnl,),
+                        daemon=True,
+                        name="risk-loss-notify",
+                    ).start()
                 return False, msg
 
             if transaction_type == "BUY":
@@ -273,6 +274,17 @@ class RiskManager:
                 return False, msg
 
             return True, "OK"
+
+    def _send_loss_limit_notification(self, pnl: float) -> None:
+        try:
+            from notifier import notifier as _notifier
+            _notifier.send(
+                subject=f"Daily loss limit ₹{settings.max_daily_loss:.0f} hit",
+                body=f"Trading halted. Current P&L: ₹{pnl:.0f}",
+                level="CRITICAL",
+            )
+        except Exception:
+            pass
 
     def _check_market_hours(self) -> tuple[bool, str]:
         from config import settings
@@ -381,9 +393,11 @@ class RiskManager:
                 qty = max(1, int(qty * 0.85))
         except Exception:
             pass
-        # Re-validate after scaling: an up-scaled qty must never exceed the
-        # allocated capital (clamp back down to what cap can actually cover).
-        max_affordable = int(cap // price)
+        # Re-validate after scaling: clamp to max_position_size (not the per-agent cap)
+        # so that FII bullish scaling (+10%/+20%) can actually push qty above the
+        # per-agent allocation up to the hard absolute limit.  Bearish scaling already
+        # reduced qty below cap, so this clamp has no effect in that direction.
+        max_affordable = int(settings.max_position_size // price)
         if qty > max_affordable:
             qty = max_affordable
         return max(qty, 1)
