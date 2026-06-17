@@ -2261,25 +2261,28 @@ class ScalpingAgent(BaseAgent):
 
     MIN_SCORE = 5    # raised from 3 — quality over quantity
 
-    # Per-symbol rolling state (updated AFTER pattern detection — critical fix)
-    _prev_ema9:         dict[str, float]  = {}
-    _prev_ema21:        dict[str, float]  = {}
-    _prev_ltp:          dict[str, float]  = {}
-    _prev_near_vwap:    dict[str, bool]   = {}
-    _prev_st_dir:       dict[str, str]    = {}
-    _prev_stochrsi_k:   dict[str, float]  = {}
-    _prev_hma_dir_sc:   dict[str, str]    = {}
-    _prev_williams_sc:  dict[str, float]  = {}
-    _prev_squeeze_sc:   dict[str, bool]   = {}
-    _prev_macd_hist_sc: dict[str, float]  = {}   # MACD cross detection (NEW)
-    _prev_rsi7_sc:      dict[str, float]  = {}   # RSI-7 extreme snap (NEW)
-    _orb_high:          dict[str, float]  = {}
-    _orb_low:           dict[str, float]  = {}
-    _last_candle_ts:    dict[str, object] = {}
-    _last_signal_ts:    dict[str, datetime] = {}
-    _last_signal_dir:   dict[str, str]    = {}
-    _loss_streak:       dict[str, int]    = {}
-    _cooldown_until:    dict[str, datetime] = {}
+    def __init__(self) -> None:
+        super().__init__()
+        # Per-symbol rolling state (instance-level — class-level dicts would be
+        # shared across all ScalpingAgent instances, causing cross-instance pollution)
+        self._prev_ema9:         dict = {}
+        self._prev_ema21:        dict = {}
+        self._prev_ltp:          dict = {}
+        self._prev_near_vwap:    dict = {}
+        self._prev_st_dir:       dict = {}
+        self._prev_stochrsi_k:   dict = {}
+        self._prev_hma_dir_sc:   dict = {}
+        self._prev_williams_sc:  dict = {}
+        self._prev_squeeze_sc:   dict = {}
+        self._prev_macd_hist_sc: dict = {}
+        self._prev_rsi7_sc:      dict = {}
+        self._orb_high:          dict = {}
+        self._orb_low:           dict = {}
+        self._last_candle_ts:    dict = {}
+        self._last_signal_ts:    dict = {}
+        self._last_signal_dir:   dict = {}
+        self._loss_streak:       dict = {}
+        self._cooldown_until:    dict = {}
 
     # ── Entry ─────────────────────────────────────────────────────────────────
 
@@ -2913,33 +2916,36 @@ class FuturesAgent(BaseAgent):
     MIN_SCORE = 4
     COOL_S    = 180
 
-    _orb_high:              dict = {}
-    _orb_low:               dict = {}
-    _orb_fired:             dict = {}
-    _prev_above_vwap:       dict = {}
-    _prev_macd_hist:        dict = {}
-    _prev_ltp:              dict = {}
-    _cool_ts:               dict = {}
-    _day_high:              dict = {}   # sym → float (rolling daily high for ATR_BREAK)
-    _day_low:               dict = {}   # sym → float
-    _prev_day_high:         dict = {}   # sym → day high BEFORE current tick (ATR_BREAK)
-    _prev_day_low:          dict = {}   # sym → day low  BEFORE current tick (ATR_BREAK)
-    _prev_stochrsi_k_fut:   dict = {}   # sym → float (StochRSI cross detection)
-    _prev_hma_dir_fut:      dict = {}   # sym → str (HMA direction)
-    _prev_ema_bull:         dict = {}   # sym → bool (EMA_TREND first-bar detection)
-    _prev_ema_bear:         dict = {}   # sym → bool (EMA_TREND first-bar detection)
-    _ema_bull_streak:       dict = {}   # sym → int (consecutive bull-aligned bars)
-    _ema_bear_streak:       dict = {}   # sym → int (consecutive bear-aligned bars)
-    _prev_above_vwap_u2:    dict = {}   # sym → bool (VWAP_BAND_BREAK upper cross)
-    _prev_below_vwap_l2:    dict = {}   # sym → bool (VWAP_BAND_BREAK lower cross)
-    _momentum_streak_up:    dict = {}   # sym → int (MOMENTUM_CATCH consecutive STRONG_UP)
-    _momentum_streak_dn:    dict = {}   # sym → int (MOMENTUM_CATCH consecutive STRONG_DOWN)
-    # ── new state (world-class upgrade) ──────────────────────────────────────
-    _prev_atr_fut:          dict = {}   # sym → float (ATR compression detection)
-    _prev_ltp2:             dict = {}   # sym → float (2 ticks ago for velocity)
-    _atr_streak_low:        dict = {}   # sym → int   (consecutive low-ATR bars)
-    _prev_williams_fut:     dict = {}   # sym → float (Williams %R cross)
-    _prev_bb_width_fut:     dict = {}   # sym → float (BB width trend)
+    def __init__(self) -> None:
+        super().__init__()
+        # Per-symbol rolling state (instance-level — class-level dicts would be
+        # shared across all FuturesAgent instances, causing cross-instance pollution)
+        self._orb_high:              dict = {}
+        self._orb_low:               dict = {}
+        self._orb_fired:             dict = {}
+        self._prev_above_vwap:       dict = {}
+        self._prev_macd_hist:        dict = {}
+        self._prev_ltp:              dict = {}
+        self._cool_ts:               dict = {}
+        self._day_high:              dict = {}
+        self._day_low:               dict = {}
+        self._prev_day_high:         dict = {}
+        self._prev_day_low:          dict = {}
+        self._prev_stochrsi_k_fut:   dict = {}
+        self._prev_hma_dir_fut:      dict = {}
+        self._prev_ema_bull:         dict = {}
+        self._prev_ema_bear:         dict = {}
+        self._ema_bull_streak:       dict = {}
+        self._ema_bear_streak:       dict = {}
+        self._prev_above_vwap_u2:    dict = {}
+        self._prev_below_vwap_l2:    dict = {}
+        self._momentum_streak_up:    dict = {}
+        self._momentum_streak_dn:    dict = {}
+        self._prev_atr_fut:          dict = {}
+        self._prev_ltp2:             dict = {}
+        self._atr_streak_low:        dict = {}
+        self._prev_williams_fut:     dict = {}
+        self._prev_bb_width_fut:     dict = {}
 
     def evaluate_tick(self, snap: MarketSnapshot) -> tuple[str, Optional[dict]]:
         from macro_signals import macro_signals
