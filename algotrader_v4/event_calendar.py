@@ -15,14 +15,21 @@ from market_data import nse_client
 
 
 # ── RBI MPC announcement dates ────────────────────────────────────────────────
-# Full FY2025-26 calendar — add future dates as published by RBI.
+# FY2025-26 + FY2026-27 calendar.  VERIFY ANNUALLY against rbi.org.in.
+# Dates sourced from alt_data._rbi_mpc_dates (known table for 2025-2026).
 RBI_DATES: list[str] = [
     "2025-06-04",
     "2025-08-06",
     "2025-10-08",
     "2025-12-05",
     "2026-02-06",
-    "2026-04-08",
+    "2026-04-09",
+    "2026-06-05",
+    "2026-08-07",
+    "2026-10-09",
+    "2026-12-04",
+    "2027-02-05",  # approximate — verify against rbi.org.in when published
+    "2027-04-02",  # approximate — verify against rbi.org.in when published
 ]
 
 # ── Risk classification ───────────────────────────────────────────────────────

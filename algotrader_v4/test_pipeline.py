@@ -5590,6 +5590,39 @@ run("master: holiday guard precedes squareoff_all_positions()",         t_auto_s
 
 
 # ══════════════════════════════════════════════════════════════════════════
+# 43. EVENT CALENDAR — RBI DATE COVERAGE
+# ══════════════════════════════════════════════════════════════════════════
+
+def t_rbi_dates_has_future_entry():
+    """RBI_DATES must contain at least one date after 2026-06-17 (compile-time guard)."""
+    from datetime import date
+    from event_calendar import RBI_DATES
+    future = [d for d in RBI_DATES if date.fromisoformat(d) > date(2026, 6, 17)]
+    assert future, f"RBI_DATES has no dates after 2026-06-17 — event guard silently dead. Got: {RBI_DATES}"
+
+def t_rbi_dates_covers_second_half_2026():
+    """At least Aug, Oct, Dec 2026 RBI dates must be present."""
+    from event_calendar import RBI_DATES
+    required = {"2026-08", "2026-10", "2026-12"}
+    present  = {d[:7] for d in RBI_DATES}
+    missing  = required - present
+    assert not missing, f"Missing FY2026-27 RBI dates for: {missing}"
+
+def t_inject_rbi_dates_populates_market_cache():
+    """_inject_rbi_dates() must inject at least one future event into _MARKET_KEY."""
+    import event_calendar as _ec
+    _ec._event_cache.clear()
+    _ec._inject_rbi_dates()
+    events = _ec._event_cache.get(_ec._MARKET_KEY, [])
+    rbi_events = [e for e in events if e.get("event_type") == "RBI_MPC"]
+    assert rbi_events, "_inject_rbi_dates() produced no RBI_MPC events — all dates may be past"
+
+run("event_calendar: RBI_DATES has at least one entry after 2026-06-17",    t_rbi_dates_has_future_entry)
+run("event_calendar: RBI_DATES covers Aug/Oct/Dec 2026",                    t_rbi_dates_covers_second_half_2026)
+run("event_calendar: _inject_rbi_dates() populates _MARKET_KEY cache",      t_inject_rbi_dates_populates_market_cache)
+
+
+# ══════════════════════════════════════════════════════════════════════════
 # FINAL SUMMARY
 # ══════════════════════════════════════════════════════════════════════════
 failed = summary()
