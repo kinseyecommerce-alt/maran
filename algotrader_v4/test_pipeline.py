@@ -5863,6 +5863,29 @@ run("sebi: generate_daily_report falls back to disk when in-memory empty",  t_ge
 
 
 # ══════════════════════════════════════════════════════════════════════════
+# 47. MARKET REGIME — VIX URL REGRESSION
+# ══════════════════════════════════════════════════════════════════════════
+
+def t_market_regime_vix_collect_uses_absolute_url():
+    """_collect_vix must use the ALL_INDICES constant (absolute URL), not a bare path.
+
+    Passing a relative '/api/allIndices' to httpx raises InvalidURL — the NSE VIX
+    feed is silently bypassed every cycle and the yfinance fallback is always used.
+    """
+    import inspect
+    from market_regime import MarketRegimeDetector
+    src = inspect.getsource(MarketRegimeDetector._collect_vix)
+    assert '"/api/allIndices"' not in src, \
+        "_collect_vix must not pass a bare path string to nse_client.get(); " \
+        "use the ALL_INDICES constant (full URL) from market_data"
+    assert "ALL_INDICES" in src, \
+        "_collect_vix must use ALL_INDICES (the full https://... URL) so the NSE VIX feed works"
+
+run("market_regime: _collect_vix uses ALL_INDICES constant, not bare relative path",
+    t_market_regime_vix_collect_uses_absolute_url)
+
+
+# ══════════════════════════════════════════════════════════════════════════
 # FINAL SUMMARY
 # ══════════════════════════════════════════════════════════════════════════
 failed = summary()
