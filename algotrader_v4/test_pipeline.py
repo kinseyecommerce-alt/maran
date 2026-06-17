@@ -8044,6 +8044,121 @@ run("ml_signal_filter: _encode acquires self._lock for thread-safe check-then-se
 
 
 # ══════════════════════════════════════════════════════════════════════════
+# 94. STRATEGY AGENTS — ScalpingAgent HMA_MICRO divides by ltp without zero guard
+# ══════════════════════════════════════════════════════════════════════════
+section("94. STRATEGY AGENTS — ScalpingAgent HMA_MICRO spread_pct must guard ltp > 0")
+
+def t_scalping_hma_micro_ltp_guard_in_source():
+    """spread_pct = ind.spread / ltp * 100 in ScalpingAgent._detect_pattern()
+    raises ZeroDivisionError when a corrupted tick delivers ltp=0.
+    The enclosing condition must include an explicit ltp > 0 guard."""
+    import inspect
+    from agents.strategy_agents import ScalpingAgent
+
+    src = inspect.getsource(ScalpingAgent._detect_pattern)
+    # Find the HMA_MICRO block and verify ltp > 0 is in the condition
+    hma_idx = src.find("HMA_MICRO")
+    assert hma_idx != -1, "HMA_MICRO pattern not found in ScalpingAgent._detect_pattern"
+    block = src[hma_idx - 300: hma_idx + 200]
+    assert "ltp > 0" in block, (
+        "ScalpingAgent HMA_MICRO block must guard ltp > 0 before computing "
+        "spread_pct = ind.spread / ltp * 100 — a zero LTP tick crashes the pattern detector"
+    )
+
+run("strategy_agents: ScalpingAgent HMA_MICRO pattern guards ltp > 0", t_scalping_hma_micro_ltp_guard_in_source)
+
+
+def t_bb_width_squeeze_ltp_guard_is_safe():
+    """MeanReversionAgent._pat_bb_width_squeeze checks ltp <= 0 before dividing:
+    `if ltp <= 0 or band_width / ltp > 0.008` — Python short-circuits left-to-right
+    so the division is never reached when ltp=0. Verify the guard exists."""
+    import inspect
+    from agents.strategy_agents import MeanReversionAgent
+
+    src = inspect.getsource(MeanReversionAgent._pat_bb_width_squeeze)
+    assert "ltp <= 0" in src, (
+        "MeanReversionAgent._pat_bb_width_squeeze must check ltp <= 0 before dividing band_width/ltp"
+    )
+
+run("strategy_agents: MeanReversionAgent BB_WIDTH_SQUEEZE guard ltp <= 0 before division", t_bb_width_squeeze_ltp_guard_is_safe)
+
+
+# ══════════════════════════════════════════════════════════════════════════
+# 95. SECURITY — AUTH TIMING SAFETY + SEBI AUDIT LOG PERMISSIONS
+# ══════════════════════════════════════════════════════════════════════════
+section("95. SECURITY — AUTH TIMING SAFETY + SEBI AUDIT LOG PERMISSIONS")
+
+
+def t_auth_plaintext_uses_compare_digest():
+    """auth.authenticate() must use hmac.compare_digest for the plaintext fallback path
+    to prevent timing-oracle attacks that reveal valid passwords character-by-character."""
+    import inspect
+    import auth as _auth_mod
+    src = inspect.getsource(_auth_mod.authenticate)
+    assert "compare_digest" in src, (
+        "auth.authenticate plaintext fallback must use hmac.compare_digest(), not == operator"
+    )
+
+run("auth: plaintext fallback uses hmac.compare_digest (timing-safe)", t_auth_plaintext_uses_compare_digest)
+
+
+def t_auth_hmac_imported_at_module_level():
+    """auth.py must import hmac at module level so it is always available."""
+    import auth as _auth_mod
+    assert hasattr(_auth_mod, "hmac"), (
+        "auth.py must import hmac at module level"
+    )
+
+run("auth: hmac imported at module level", t_auth_hmac_imported_at_module_level)
+
+
+def t_auth_compare_digest_rejects_wrong_password():
+    """authenticate() must return False for a wrong plaintext password."""
+    from unittest.mock import patch
+    import auth as _auth_mod
+
+    # Simulate no hash configured — plaintext fallback path
+    with patch.object(_auth_mod.settings, "admin_password_hash", ""), \
+         patch.object(_auth_mod.settings, "admin_username", "admin"), \
+         patch.object(_auth_mod.settings, "admin_password", "correct-password"):
+        assert not _auth_mod.authenticate("admin", "wrong-password"), (
+            "authenticate() must reject wrong plaintext password"
+        )
+        assert _auth_mod.authenticate("admin", "correct-password"), (
+            "authenticate() must accept correct plaintext password"
+        )
+
+run("auth: compare_digest rejects wrong password and accepts correct one", t_auth_compare_digest_rejects_wrong_password)
+
+
+def t_sebi_audit_log_chmod_in_source():
+    """sebi_compliance._record_audit() must call os.chmod(..., 0o600) after writing
+    the audit log file so only the process owner can read sensitive audit records."""
+    import inspect
+    import sebi_compliance as _sc
+    src = inspect.getsource(_sc.SEBICompliance._record_audit)
+    assert "os.chmod" in src, (
+        "SEBICompliance._record_audit must call os.chmod(log_file, 0o600) after write"
+    )
+    assert "0o600" in src, (
+        "SEBICompliance._record_audit must restrict audit file to mode 0o600"
+    )
+
+run("sebi_compliance: audit log file chmod 0o600 present in _record_audit", t_sebi_audit_log_chmod_in_source)
+
+
+def t_sebi_audit_log_os_imported():
+    """sebi_compliance.py must import os so os.chmod is available."""
+    import sebi_compliance as _sc
+    import os as _os
+    assert hasattr(_sc, "os") or "import os" in open(_sc.__file__).read(), (
+        "sebi_compliance.py must import os for os.chmod"
+    )
+
+run("sebi_compliance: os module imported for chmod", t_sebi_audit_log_os_imported)
+
+
+# ══════════════════════════════════════════════════════════════════════════
 # FINAL SUMMARY
 # ══════════════════════════════════════════════════════════════════════════
 failed = summary()

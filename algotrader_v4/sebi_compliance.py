@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import hmac
 import json
+import os
 import uuid
 from collections import defaultdict
 from dataclasses import dataclass, field
@@ -461,12 +462,13 @@ class SEBICompliance:
         )
         today = date.today().isoformat()
         self._audit_log[today].append(rec)
-        # MED-4: persist to append-only NDJSON file
+        # persist to append-only NDJSON file; restrict permissions so only process owner can read
         try:
             _AUDIT_LOG_DIR.mkdir(exist_ok=True)
             log_file = _AUDIT_LOG_DIR / f"sebi_audit_{today}.json"
             with open(log_file, "a") as fh:
                 fh.write(json.dumps(rec.__dict__) + "\n")
+            os.chmod(log_file, 0o600)
         except Exception as exc:
             logger.error("SEBI audit log file write error: {}", exc)
 

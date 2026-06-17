@@ -3,6 +3,7 @@ auth.py — JWT app login + Kite OAuth helpers
 """
 from __future__ import annotations
 
+import hmac
 import warnings
 from datetime import datetime, timedelta
 from typing import Optional
@@ -36,8 +37,13 @@ def authenticate(username: str, password: str) -> bool:
         return False
     if settings.admin_password_hash:
         return verify_password(password, settings.admin_password_hash)
-    # fallback for dev: plain password comparison
-    return password == settings.admin_password
+    # fallback for dev only — timing-safe comparison guards against brute-force timing attacks
+    from loguru import logger
+    logger.warning("[auth] Using plaintext admin_password fallback — set ADMIN_PASSWORD_HASH in .env for production")
+    return hmac.compare_digest(
+        password.encode("utf-8"),
+        (settings.admin_password or "").encode("utf-8"),
+    )
 
 
 # ── JWT ───────────────────────────────────────────────────────────
