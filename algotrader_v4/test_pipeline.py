@@ -6914,6 +6914,47 @@ def t_notifier_send_swallows_smtp_timeout():
 run("notifier: send() swallows socket.timeout from unreachable SMTP server", t_notifier_send_swallows_smtp_timeout)
 
 
+# ─────────────────────────────────────────────────────────────────────────────
+section("65. TICK ENGINE — deprecated get_event_loop in async _fetch_kite_batch")
+# ─────────────────────────────────────────────────────────────────────────────
+# Bug: _fetch_kite_batch() used asyncio.get_event_loop().run_in_executor()
+# inside an async def. In Python 3.10+ this is deprecated (raises DeprecationWarning
+# and is slated for removal). The correct call inside a coroutine is
+# asyncio.get_running_loop().run_in_executor().
+
+def t_tick_engine_fetch_kite_batch_uses_running_loop():
+    """_fetch_kite_batch must use get_running_loop(), not get_event_loop()."""
+    import inspect
+    from tick_engine import TickEngine
+
+    src = inspect.getsource(TickEngine._fetch_kite_batch)
+    assert "get_event_loop()" not in src, (
+        "TickEngine._fetch_kite_batch must not use asyncio.get_event_loop() "
+        "inside an async def — use asyncio.get_running_loop() instead "
+        "(deprecated in Python 3.10+)"
+    )
+    assert "get_running_loop()" in src, (
+        "TickEngine._fetch_kite_batch must use asyncio.get_running_loop() "
+        "for run_in_executor() inside an async context"
+    )
+
+run("tick_engine: _fetch_kite_batch uses get_running_loop() not get_event_loop()", t_tick_engine_fetch_kite_batch_uses_running_loop)
+
+
+def t_tick_engine_fetch_kite_batch_executes_in_executor():
+    """_fetch_kite_batch must use run_in_executor for the blocking quote_kite call."""
+    import inspect
+    from tick_engine import TickEngine
+
+    src = inspect.getsource(TickEngine._fetch_kite_batch)
+    assert "run_in_executor" in src, (
+        "TickEngine._fetch_kite_batch must wrap kite_client.quote_kite() in "
+        "run_in_executor() to avoid blocking the asyncio event loop"
+    )
+
+run("tick_engine: _fetch_kite_batch wraps quote_kite in run_in_executor", t_tick_engine_fetch_kite_batch_executes_in_executor)
+
+
 # ══════════════════════════════════════════════════════════════════════════
 # FINAL SUMMARY
 # ══════════════════════════════════════════════════════════════════════════

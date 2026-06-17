@@ -955,7 +955,7 @@ class TickEngine:
             return
         instruments = [f"{self._exchange.get(s, 'NSE')}:{s}" for s in pending]
         try:
-            raw = await asyncio.get_event_loop().run_in_executor(
+            raw = await asyncio.get_running_loop().run_in_executor(
                 None, lambda: kite_client.quote_kite(instruments)
             )
         except Exception as exc:
