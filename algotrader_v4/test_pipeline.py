@@ -6385,6 +6385,51 @@ run("risk_manager: FII +20% qty scaling not cancelled by per-agent cap", t_risk_
 
 
 # ══════════════════════════════════════════════════════════════════════════
+# 56. KITE CLIENT — paper position avg_price reset on re-entry
+# ══════════════════════════════════════════════════════════════════════════
+section("56. KITE CLIENT — paper position avg_price reset on re-entry")
+
+def t_kite_paper_avg_price_reset_on_reentry():
+    """Re-entering a flat paper position must reset average_price to the new fill."""
+    from kite_client import KiteClient
+    from config import settings as _s
+    _orig_mode = _s.trading_mode
+    _s.trading_mode = "PAPER"
+    try:
+        kc = KiteClient.__new__(KiteClient)
+        KiteClient.__init__(kc)
+        # First trade: BUY 10 @ ₹1000
+        kc._update_paper_position({
+            "tradingsymbol": "TEST", "exchange": "NSE", "product": "MIS",
+            "transaction_type": "BUY", "quantity": 10,
+            "price": 1000.0, "average_price": 1000.0, "last_price": 1000.0,
+        })
+        # Close: SELL 10 @ ₹1050 → qty becomes 0
+        kc._update_paper_position({
+            "tradingsymbol": "TEST", "exchange": "NSE", "product": "MIS",
+            "transaction_type": "SELL", "quantity": 10,
+            "price": 1050.0, "average_price": 1050.0, "last_price": 1050.0,
+        })
+        pos_after_close = next(p for p in kc._paper_positions if p["tradingsymbol"] == "TEST")
+        assert pos_after_close["quantity"] == 0, "Expected flat after SELL"
+        # Re-enter: BUY 10 @ ₹1060 — average_price MUST reset to ₹1060
+        kc._update_paper_position({
+            "tradingsymbol": "TEST", "exchange": "NSE", "product": "MIS",
+            "transaction_type": "BUY", "quantity": 10,
+            "price": 1060.0, "average_price": 1060.0, "last_price": 1060.0,
+        })
+        pos = next(p for p in kc._paper_positions if p["tradingsymbol"] == "TEST")
+        assert pos["quantity"] == 10
+        assert pos["average_price"] == 1060.0, (
+            f"average_price should be ₹1060 after re-entry, got ₹{pos['average_price']}"
+        )
+    finally:
+        _s.trading_mode = _orig_mode
+
+run("kite_client: paper position avg_price resets to fill price on re-entry", t_kite_paper_avg_price_reset_on_reentry)
+
+
+# ══════════════════════════════════════════════════════════════════════════
 # FINAL SUMMARY
 # ══════════════════════════════════════════════════════════════════════════
 failed = summary()

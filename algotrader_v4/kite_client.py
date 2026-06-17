@@ -778,7 +778,12 @@ class KiteClient:
                     old_qty = pos["quantity"]
                     new_qty = old_qty + qty_delta
                     if new_qty != 0 and abs(qty_delta) > 0:
-                        if (old_qty > 0 and qty_delta > 0) or (old_qty < 0 and qty_delta < 0):
+                        if old_qty == 0:
+                            # Re-entering a flat position — reset average to this fill price.
+                            # Without this branch average_price retained the previous-trade
+                            # value, causing phantom instant P&L on every second entry.
+                            pos["average_price"] = fill_price
+                        elif (old_qty > 0 and qty_delta > 0) or (old_qty < 0 and qty_delta < 0):
                             # Adding to existing position — weighted average
                             pos["average_price"] = round(
                                 (pos["average_price"] * abs(old_qty) + fill_price * abs(qty_delta))
