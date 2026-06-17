@@ -47,7 +47,10 @@ class BrokerRouter:
         self._secondaries = [(n, c) for n, c in self._secondaries if n != name]
 
     def clear_secondaries(self) -> None:
-        self._secondaries.clear()
+        # Assign a new list rather than mutating in-place: concurrent iterations
+        # (mirror_exit, squareoff_all_secondaries) hold a reference to the old
+        # list and continue safely; .clear() would corrupt their iteration.
+        self._secondaries = []
 
     @property
     def has_secondaries(self) -> bool:
