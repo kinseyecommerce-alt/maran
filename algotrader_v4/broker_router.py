@@ -111,8 +111,9 @@ class BrokerRouter:
                                    name, entry_id, sl_exc)
                     try:
                         client.cancel_order(entry_id)
-                    except Exception:
-                        pass
+                    except Exception as cancel_exc:
+                        logger.error("[BrokerRouter] {} cancel of entry {} also failed (position may be unprotected): {}",
+                                     name, entry_id, cancel_exc)
                     continue
 
                 broker_details[name] = {

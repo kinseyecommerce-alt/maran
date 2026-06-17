@@ -363,8 +363,8 @@ class MarketRegimeDetector:
             low   = df_d["low"]
 
             s.nifty_ltp       = float(close.iloc[-1])
-            s.nifty_1d_chg_pct= float((close.iloc[-1]-close.iloc[-2])/close.iloc[-2]*100)
-            s.nifty_5d_chg_pct= float((close.iloc[-1]-close.iloc[-6])/close.iloc[-6]*100) if len(close)>=6 else 0
+            s.nifty_1d_chg_pct= float((close.iloc[-1]-close.iloc[-2])/close.iloc[-2]*100) if close.iloc[-2] != 0 else 0.0
+            s.nifty_5d_chg_pct= float((close.iloc[-1]-close.iloc[-6])/close.iloc[-6]*100) if len(close)>=6 and close.iloc[-6] != 0 else 0.0
 
             if len(close) >= 20:
                 s.nifty_ema20 = float(ta.trend.EMAIndicator(close, 20).ema_indicator().iloc[-1])
@@ -381,7 +381,7 @@ class MarketRegimeDetector:
             if not df_5m.empty and len(df_5m) >= 6:
                 recent = df_5m["close"].tail(6)
                 x = list(range(len(recent)))
-                if len(x) > 1:
+                if len(x) > 1 and recent.iloc[0] != 0:
                     slope = float((recent.iloc[-1] - recent.iloc[0]) / recent.iloc[0] * 100)
                     s.nifty_slope_30min = slope
 

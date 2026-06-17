@@ -128,7 +128,7 @@ class TWAPExecutor:
     ) -> list[str]:
         """VWAP: qty per slice proportional to volume_profile weights (uniform if None)."""
         loop = loop or asyncio.get_running_loop()
-        n = settings.twap_slices
+        n = max(1, settings.twap_slices)
         dur = _duration()
 
         if not volume_profile:

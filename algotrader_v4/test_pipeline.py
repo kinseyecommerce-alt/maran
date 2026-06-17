@@ -8342,6 +8342,84 @@ run("platform_scheduler: stop() logs on shutdown error (not bare pass)", t_platf
 
 
 # ══════════════════════════════════════════════════════════════════════════
+# 99. TWAP + MARKET_REGIME + LEVELS_ENGINE + BROKER_ROUTER AUDIT FIXES
+# ══════════════════════════════════════════════════════════════════════════
+section("99. TWAP + MARKET_REGIME + LEVELS_ENGINE + BROKER_ROUTER AUDIT FIXES")
+
+
+def t_twap_executor_place_vwap_zero_slices_safe():
+    """twap_executor.place_vwap() uses n = max(1, settings.twap_slices) so that
+    [1.0 / n] never divides by zero when twap_slices is misconfigured as 0."""
+    import inspect
+    import twap_executor as _te
+    src = inspect.getsource(_te.TWAPExecutor.place_vwap)
+    assert "max(1," in src, (
+        "place_vwap must clamp n = max(1, settings.twap_slices) to prevent ZeroDivisionError"
+    )
+
+run("twap_executor: place_vwap guards twap_slices=0 with max(1,...)", t_twap_executor_place_vwap_zero_slices_safe)
+
+
+def t_market_regime_nifty_1d_chg_zero_guard():
+    """market_regime._collect_nifty() must guard close.iloc[-2] != 0 before division
+    to prevent ZeroDivisionError on corrupted market data."""
+    import inspect
+    import market_regime as _mr
+    src = inspect.getsource(_mr.MarketRegimeDetector._collect_nifty)
+    assert "close.iloc[-2] != 0" in src, (
+        "_collect_nifty must guard close.iloc[-2] != 0 before nifty_1d_chg_pct division"
+    )
+
+run("market_regime: _collect_nifty guards close.iloc[-2] != 0 before 1d pct change", t_market_regime_nifty_1d_chg_zero_guard)
+
+
+def t_market_regime_slope_zero_guard():
+    """market_regime._collect_nifty() must guard recent.iloc[0] != 0 before
+    slope = (recent[-1] - recent[0]) / recent[0] — zero first candle crashes."""
+    import inspect
+    import market_regime as _mr
+    src = inspect.getsource(_mr.MarketRegimeDetector._collect_nifty)
+    assert "recent.iloc[0] != 0" in src, (
+        "_collect_nifty must guard recent.iloc[0] != 0 before 30-min slope division"
+    )
+
+run("market_regime: _collect_nifty guards recent.iloc[0] != 0 before slope", t_market_regime_slope_zero_guard)
+
+
+def t_levels_engine_zero_ltp_returns_empty():
+    """level_context() must return '' immediately when ltp <= 0 to avoid
+    ZeroDivisionError when dividing (price - ltp) / ltp * 100."""
+    from levels_engine import level_context
+    result = level_context("RELIANCE", ltp=0.0)
+    assert result == "", f"level_context(ltp=0) must return '' not crash, got {result!r}"
+    result_neg = level_context("RELIANCE", ltp=-5.0)
+    assert result_neg == "", f"level_context(ltp<0) must return '' not crash, got {result_neg!r}"
+
+run("levels_engine: level_context returns '' on ltp <= 0 (no ZeroDivisionError)", t_levels_engine_zero_ltp_returns_empty)
+
+
+def t_broker_router_cancel_logs_on_failure():
+    """broker_router.mirror_entry() must log an error if cancel_order fails after
+    SL-M placement fails — silent pass would hide orphan unprotected positions."""
+    import inspect
+    import broker_router as _br
+    src = inspect.getsource(_br.BrokerRouter.mirror_entry)
+    # After SL-M fails, the cancel_order try-except must log, not pass
+    lines = src.splitlines()
+    for i, line in enumerate(lines):
+        if "cancel_order" in line and i + 1 < len(lines):
+            # Find the except block after cancel_order
+            for j in range(i + 1, min(i + 5, len(lines))):
+                if "except" in lines[j] and j + 1 < len(lines):
+                    next_action = lines[j + 1].strip()
+                    assert next_action != "pass", (
+                        "cancel_order except must log (not pass silently) so orphan positions are visible"
+                    )
+
+run("broker_router: cancel_order after SL-M failure logs error (not silent pass)", t_broker_router_cancel_logs_on_failure)
+
+
+# ══════════════════════════════════════════════════════════════════════════
 # FINAL SUMMARY
 # ══════════════════════════════════════════════════════════════════════════
 failed = summary()

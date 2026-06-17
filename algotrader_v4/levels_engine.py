@@ -146,6 +146,8 @@ def level_context(symbol: str, ltp: float) -> str:
         return ""
 
     ltp = float(ltp)
+    if ltp <= 0:
+        return ""
 
     # ── Resistance candidates (above ltp) ──────────────────────────────
     resistance_candidates: dict[str, Optional[float]] = {
