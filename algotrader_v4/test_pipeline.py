@@ -7320,6 +7320,65 @@ run("adaptive_engine: _load_state loads valid entries despite unknown JSON field
 
 
 # ══════════════════════════════════════════════════════════════════════════
+# 72. ATOMIC BRACKET — silent swallow of cancel_order failures
+# ══════════════════════════════════════════════════════════════════════════
+section("72. ATOMIC BRACKET — silent swallow of cancel_order failures")
+
+def t_atomic_bracket_cancel_entry_timeout_logs():
+    """Silent `except Exception: pass` on entry cancel replaced with logger.warning."""
+    import inspect
+    from atomic_bracket import AtomicBracketEngine
+
+    # Find the block: fill_price is None → cancel entry → except Exception
+    src = inspect.getsource(AtomicBracketEngine.execute)
+    # The old code had `except Exception: pass` after cancel_order in the fill_price is None branch
+    lines = src.splitlines()
+    in_timeout_block = False
+    for line in lines:
+        stripped = line.strip()
+        if "fill_price is None" in stripped:
+            in_timeout_block = True
+        if in_timeout_block and stripped.startswith("except Exception"):
+            assert "pass" not in stripped or "logger" in stripped.lower(), (
+                "cancel_order failure after fill timeout must log with logger.warning, "
+                "not silently swallow"
+            )
+            # Check the next line isn't just `pass`
+            break
+    assert in_timeout_block, "Could not find fill_price-is-None timeout block in execute()"
+
+run("atomic_bracket: cancel_order failure on entry timeout logs warning (not silent swallow)", t_atomic_bracket_cancel_entry_timeout_logs)
+
+
+def t_atomic_bracket_cancel_sl_tsl_exit_logs():
+    """Silent `except Exception: pass` on SL-M cancel after TSL exit replaced with logger.warning."""
+    import inspect
+    from atomic_bracket import AtomicBracketEngine
+
+    src = inspect.getsource(AtomicBracketEngine._on_tsl_sl_hit)
+    assert "logger.warning" in src, (
+        "_on_tsl_sl_hit() must log a warning when cancel_order for the SL-M "
+        "fails — silent swallow hides whether the SL-M is still live on the exchange"
+    )
+
+run("atomic_bracket: cancel_order failure on TSL exit logs warning", t_atomic_bracket_cancel_sl_tsl_exit_logs)
+
+
+def t_atomic_bracket_cancel_sl_target_exit_logs():
+    """Silent `except Exception: pass` on SL-M cancel after T2 target exit replaced with logger.warning."""
+    import inspect
+    from atomic_bracket import AtomicBracketEngine
+
+    src = inspect.getsource(AtomicBracketEngine._on_tsl_target_hit)
+    assert "logger.warning" in src, (
+        "_on_tsl_target_hit() must log a warning when cancel_order for the SL-M "
+        "fails — silent swallow hides whether the SL-M would execute a spurious trade"
+    )
+
+run("atomic_bracket: cancel_order failure on T2 target exit logs warning", t_atomic_bracket_cancel_sl_target_exit_logs)
+
+
+# ══════════════════════════════════════════════════════════════════════════
 # FINAL SUMMARY
 # ══════════════════════════════════════════════════════════════════════════
 failed = summary()

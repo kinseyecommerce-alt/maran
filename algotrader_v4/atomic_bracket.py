@@ -223,7 +223,8 @@ class AtomicBracketEngine:
             try:
                 await asyncio.get_running_loop().run_in_executor(
                     None, lambda: kite_client.cancel_order(entry_oid))
-            except Exception: pass
+            except Exception as _exc:
+                logger.warning("Bracket {} — cancel timed-out entry {} failed: {}", bracket_id, entry_oid, _exc)
             order_guard.release_claim(symbol, strategy, side)
             bracket.status = BracketStatus.CANCELLED
             await self._broadcast_update(bracket)
@@ -371,7 +372,9 @@ class AtomicBracketEngine:
                 try:
                     await _loop.run_in_executor(
                         None, lambda: kite_client.cancel_order(bracket.sl_order_id))
-                except Exception: pass
+                except Exception as _exc:
+                    logger.warning("Bracket {} — cancel SL-M {} on TSL exit failed: {}",
+                                   bracket.bracket_id, bracket.sl_order_id, _exc)
 
         if not sl_already_filled:
             exit_side = "SELL" if bracket.side == "BUY" else "BUY"
@@ -426,7 +429,9 @@ class AtomicBracketEngine:
                     try:
                         await _loop.run_in_executor(
                             None, lambda: kite_client.cancel_order(bracket.sl_order_id))
-                    except Exception: pass
+                    except Exception as _exc:
+                        logger.warning("Bracket {} — cancel SL-M {} on T2 exit failed: {}",
+                                       bracket.bracket_id, bracket.sl_order_id, _exc)
             except Exception as exc:
                 # Exit order failed — SL-M is still active, position is protected.
                 # Abort cleanup: guard held, TSL registered, trade unrecorded.
