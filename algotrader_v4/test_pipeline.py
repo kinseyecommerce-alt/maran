@@ -5930,6 +5930,75 @@ run("market_regime: _collect_vix uses ALL_INDICES constant, not bare relative pa
 
 
 # ══════════════════════════════════════════════════════════════════════════
+# 48. STRATEGY AGENTS — INSTANCE-LEVEL STATE ISOLATION
+# ══════════════════════════════════════════════════════════════════════════
+section("48. STRATEGY AGENTS — INSTANCE-LEVEL STATE ISOLATION")
+
+def t_scalping_agent_state_is_instance_level():
+    """ScalpingAgent per-symbol state must be instance-level, not class-level.
+    Class-level dicts are shared across all instances, causing cross-instance
+    state pollution (e.g. a test-time second instance inherits the first's state).
+    """
+    from agents.strategy_agents import ScalpingAgent
+    a = ScalpingAgent()
+    b = ScalpingAgent()
+    a._prev_ema9["RELIANCE"] = 999.0
+    assert b._prev_ema9.get("RELIANCE") is None, \
+        "ScalpingAgent._prev_ema9 is class-level (shared) — must be instance-level"
+
+def t_scalping_agent_all_state_dicts_are_instance_level():
+    """All mutable state dicts on ScalpingAgent must not be shared at class level."""
+    from agents.strategy_agents import ScalpingAgent
+    state_attrs = [
+        "_prev_ema9", "_prev_ema21", "_prev_ltp", "_prev_near_vwap",
+        "_prev_st_dir", "_prev_stochrsi_k", "_prev_hma_dir_sc",
+        "_prev_williams_sc", "_prev_squeeze_sc", "_prev_macd_hist_sc",
+        "_prev_rsi7_sc", "_orb_high", "_orb_low", "_last_candle_ts",
+        "_last_signal_ts", "_last_signal_dir", "_loss_streak", "_cooldown_until",
+    ]
+    a, b = ScalpingAgent(), ScalpingAgent()
+    for attr in state_attrs:
+        assert getattr(a, attr) is not getattr(b, attr), \
+            f"ScalpingAgent.{attr} is shared across instances (class-level dict)"
+
+def t_futures_agent_state_is_instance_level():
+    """FuturesAgent per-symbol state must be instance-level, not class-level."""
+    from agents.strategy_agents import FuturesAgent
+    a = FuturesAgent()
+    b = FuturesAgent()
+    a._prev_ltp["NIFTY"] = 24000.0
+    assert b._prev_ltp.get("NIFTY") is None, \
+        "FuturesAgent._prev_ltp is class-level (shared) — must be instance-level"
+
+def t_futures_agent_all_state_dicts_are_instance_level():
+    """All mutable state dicts on FuturesAgent must not be shared at class level."""
+    from agents.strategy_agents import FuturesAgent
+    state_attrs = [
+        "_orb_high", "_orb_low", "_orb_fired", "_prev_above_vwap",
+        "_prev_macd_hist", "_prev_ltp", "_cool_ts", "_day_high", "_day_low",
+        "_prev_day_high", "_prev_day_low", "_prev_stochrsi_k_fut",
+        "_prev_hma_dir_fut", "_prev_ema_bull", "_prev_ema_bear",
+        "_ema_bull_streak", "_ema_bear_streak", "_prev_above_vwap_u2",
+        "_prev_below_vwap_l2", "_momentum_streak_up", "_momentum_streak_dn",
+        "_prev_atr_fut", "_prev_ltp2", "_atr_streak_low",
+        "_prev_williams_fut", "_prev_bb_width_fut",
+    ]
+    a, b = FuturesAgent(), FuturesAgent()
+    for attr in state_attrs:
+        assert getattr(a, attr) is not getattr(b, attr), \
+            f"FuturesAgent.{attr} is shared across instances (class-level dict)"
+
+run("scalping: _prev_ema9 is instance-level (not shared across instances)",
+    t_scalping_agent_state_is_instance_level)
+run("scalping: all state dicts are instance-level",
+    t_scalping_agent_all_state_dicts_are_instance_level)
+run("futures: _prev_ltp is instance-level (not shared across instances)",
+    t_futures_agent_state_is_instance_level)
+run("futures: all state dicts are instance-level",
+    t_futures_agent_all_state_dicts_are_instance_level)
+
+
+# ══════════════════════════════════════════════════════════════════════════
 # FINAL SUMMARY
 # ══════════════════════════════════════════════════════════════════════════
 failed = summary()
