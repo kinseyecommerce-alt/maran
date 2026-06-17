@@ -288,6 +288,12 @@ class KiteClient:
         self._pos_cache_ts = now
         return result
 
+    def profile(self) -> dict:
+        """Return Zerodha user profile. PAPER: returns a stub so auth checks pass."""
+        if settings.trading_mode == "PAPER":
+            return {"user_id": "PAPER", "user_name": "Paper Trader", "email": ""}
+        return _with_retry(self.kite.profile, label="profile")
+
     def holdings(self) -> list[dict]:
         if settings.trading_mode == "PAPER":
             return []

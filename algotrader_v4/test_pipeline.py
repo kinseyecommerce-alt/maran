@@ -7182,6 +7182,47 @@ def t_master_auto_squareoff_not_blocking():
 run("master_agent: _auto_squareoff uses asyncio.to_thread for blocking squareoff call", t_master_auto_squareoff_not_blocking)
 
 
+# ─────────────────────────────────────────────────────────────────────────────
+section("69. KITE CLIENT — missing profile() caused AttributeError on auto-start")
+# ─────────────────────────────────────────────────────────────────────────────
+# Bug: kite_client.profile() is called in platform_scheduler._auto_start_bot()
+# and main.kite_status() to verify authentication. KiteClient had no profile()
+# method, so these calls always raised AttributeError:
+#   - In _auto_start_bot(): auto-start always aborted ("Kite not authenticated")
+#   - In kite_status(): always returned {"connected": False}
+# Fix: added profile() method that returns stub in PAPER mode,
+# calls self.kite.profile() with retry in LIVE mode.
+
+def t_kite_client_has_profile_method():
+    """KiteClient must expose a profile() method."""
+    from kite_client import KiteClient
+    assert hasattr(KiteClient, "profile"), (
+        "KiteClient.profile() is missing — platform_scheduler._auto_start_bot() "
+        "calls kite_client.profile() to verify authentication; without it, "
+        "auto-start always aborts with AttributeError"
+    )
+
+run("kite_client: profile() method exists", t_kite_client_has_profile_method)
+
+
+def t_kite_client_profile_paper_mode():
+    """profile() in PAPER mode must return a stub dict without hitting the broker."""
+    from unittest.mock import patch
+    from kite_client import KiteClient
+
+    k = KiteClient()
+    with patch("kite_client.settings") as ms:
+        ms.trading_mode = "PAPER"
+        result = k.profile()
+    assert isinstance(result, dict), "profile() must return a dict"
+    assert "user_id" in result, "profile() result must include 'user_id'"
+    assert result["user_id"] == "PAPER", (
+        "profile() in PAPER mode should return stub profile with user_id='PAPER'"
+    )
+
+run("kite_client: profile() returns stub in PAPER mode without broker call", t_kite_client_profile_paper_mode)
+
+
 # ══════════════════════════════════════════════════════════════════════════
 # FINAL SUMMARY
 # ══════════════════════════════════════════════════════════════════════════
