@@ -5091,6 +5091,48 @@ def t_ml_signal_settings_present():
     assert hasattr(settings, "use_ml_signals")
     assert hasattr(settings, "ml_signal_min_confidence")
 
+def t_ml_signal_features_use_bb_not_vwap_bands():
+    """Features 9 and 10 must use BB bands to match training, not VWAP bands."""
+    import inspect
+    from ml_signal_scorer import MLSignalScorer
+    src = inspect.getsource(MLSignalScorer._features_from_snap)
+    assert "bb_upper" in src, "feature 9 must reference bb_upper (not vwap_upper2)"
+    assert "bb_lower" in src, "feature 10 must reference bb_lower (not vwap_lower2)"
+    assert "vwap_upper2" not in src, "inference must NOT use vwap_upper2 for band-distance features"
+    assert "vwap_lower2" not in src, "inference must NOT use vwap_lower2 for band-distance features"
+
+def t_ml_signal_feature9_positive_when_price_below_bb_upper():
+    """Feature 9: (bb_upper - ltp) / atr should be positive when price is below BB upper."""
+    import numpy as np
+    from ml_signal_scorer import MLSignalScorer
+
+    class FakeInd:
+        ema9=100; ema21=98; vwap=99; rsi_14=55; rsi_7=58; macd=0.5; macd_signal=0.3
+        macd_hist=0.2; bb_upper=110; bb_lower=90; bb_mid=100; atr_14=2.0
+        stoch_rsi_k=60; stoch_rsi_d=55; vwap_upper2=103; vwap_lower2=97
+
+    class FakeTick:
+        ltp=100.0; volume=10000
+
+    class FakeSnap:
+        symbol="RELIANCE"; indicators=FakeInd(); tick=FakeTick()
+
+    scorer = MLSignalScorer()
+    feats = scorer._features_from_snap(FakeSnap())
+    # Feature 9 = (bb_upper - ltp) / atr = (110 - 100) / 2 = 5.0 (clipped to 5.0)
+    assert feats[8] > 0, f"Feature 9 should be positive (price below BB upper), got {feats[8]}"
+    # Feature 10 = (ltp - bb_lower) / atr = (100 - 90) / 2 = 5.0 (clipped to 5.0)
+    assert feats[9] > 0, f"Feature 10 should be positive (price above BB lower), got {feats[9]}"
+
+def t_ml_signal_training_inference_feature_alignment():
+    """Features 9 and 10 in _features_from_hist and _features_from_snap must both use BB bands."""
+    import inspect
+    from ml_signal_scorer import MLSignalScorer
+    train_src = inspect.getsource(MLSignalScorer._features_from_hist)
+    infer_src = inspect.getsource(MLSignalScorer._features_from_snap)
+    assert "bb_upper" in train_src and "bb_lower" in train_src, "training must use BB bands"
+    assert "bb_upper" in infer_src and "bb_lower" in infer_src, "inference must use BB bands"
+
 def t_twap_import():
     from twap_executor import twap_executor
     assert callable(twap_executor.place_twap)
@@ -5203,6 +5245,9 @@ run("ml_signal: disabled → score == 1.0",             t_ml_signal_disabled_pas
 run("ml_signal: no model → neutral 0.5",              t_ml_signal_no_model_returns_neutral)
 run("ml_signal: status has correct keys",             t_ml_signal_status_shape)
 run("ml_signal: settings present",                    t_ml_signal_settings_present)
+run("ml_signal: features 9+10 use BB bands not VWAP bands",      t_ml_signal_features_use_bb_not_vwap_bands)
+run("ml_signal: feature 9 positive when price below BB upper",    t_ml_signal_feature9_positive_when_price_below_bb_upper)
+run("ml_signal: training and inference features both use BB bands", t_ml_signal_training_inference_feature_alignment)
 run("twap: module imports cleanly",                   t_twap_import)
 run("twap: PAPER mode places all slices instantly",   t_twap_paper_instant)
 run("twap: below threshold → single order",           t_twap_below_threshold_single_order)
