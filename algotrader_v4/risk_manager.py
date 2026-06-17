@@ -362,7 +362,8 @@ class RiskManager:
             logger.debug("Kelly sizing: agent={} kf={:.3f} cap=₹{:.0f}", agent, kf, cap)
         if risk_pct and price > 0:
             sl_amount = price * (settings.stop_loss_pct / 100)
-            cap = min(cap, (cap * risk_pct / 100) / sl_amount * price)
+            if sl_amount > 0:   # guard: stop_loss_pct=0 would cause ZeroDivisionError
+                cap = min(cap, (cap * risk_pct / 100) / sl_amount * price)
         qty = int(cap // price)
         if qty <= 0:
             # Capital cannot cover even 1 share — skip the trade rather than
@@ -400,7 +401,9 @@ class RiskManager:
         max_affordable = int(settings.max_position_size // price)
         if qty > max_affordable:
             qty = max_affordable
-        return max(qty, 1)
+        # Do NOT force qty=1 when max_affordable==0: a single share would exceed
+        # max_position_size. Return qty as-is (0 means skip the trade).
+        return qty
 
     def sl_price(self, entry: float, side: str) -> float:
         pct = settings.stop_loss_pct / 100
@@ -550,12 +553,13 @@ class RiskManager:
             prev_pnl = self.daily_realised_pnl
             self.daily_realised_pnl += pnl
             self.trades_today += 1
-        logger.info("Trade P&L ₹{:.0f} | Day total ₹{:.0f}", pnl, self.daily_realised_pnl)
+            new_pnl = self.daily_realised_pnl  # capture inside lock to avoid race
+        logger.info("Trade P&L ₹{:.0f} | Day total ₹{:.0f}", pnl, new_pnl)
         # Broadcast risk_alert when daily loss crosses 50% of max_daily_loss
         max_loss = settings.max_daily_loss or 0
         if max_loss > 0:
             threshold = -0.5 * max_loss
-            if self.daily_realised_pnl < threshold <= prev_pnl:
+            if new_pnl < threshold <= prev_pnl:
                 if self.ws_broadcast is not None:
                     import asyncio
                     payload = {

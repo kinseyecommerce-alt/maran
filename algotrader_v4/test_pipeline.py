@@ -7034,6 +7034,94 @@ def t_main_place_twap_order_uses_running_loop():
 run("main: place_twap_order uses get_running_loop()", t_main_place_twap_order_uses_running_loop)
 
 
+# ─────────────────────────────────────────────────────────────────────────────
+section("67. RISK MANAGER — stop_loss_pct=0 divide-by-zero, max qty clamp, race")
+# ─────────────────────────────────────────────────────────────────────────────
+
+def t_risk_calculate_quantity_zero_stop_loss_pct():
+    """calculate_quantity must not raise ZeroDivisionError when stop_loss_pct==0."""
+    from unittest.mock import patch
+    from risk_manager import RiskManager
+
+    rm = RiskManager()
+    with patch("risk_manager.settings") as ms:
+        ms.use_kelly_capital_sizing = False
+        ms.total_capital = 1_000_000
+        ms.intraday_capital_pct = 30
+        ms.max_intraday_positions = 5
+        ms.stop_loss_pct = 0          # ← triggers the bug
+        ms.max_position_size = 200_000
+        ms.auto_size_by_atr = False
+        ms.max_trades_intraday = 100
+        try:
+            qty = rm.calculate_quantity(price=1500.0, agent="intraday", risk_pct=2.0)
+            assert isinstance(qty, int), f"Expected int, got {type(qty)}"
+        except ZeroDivisionError:
+            assert False, (
+                "calculate_quantity raised ZeroDivisionError when stop_loss_pct=0 — "
+                "sl_amount must be guarded with > 0 before division"
+            )
+
+run("risk_manager: calculate_quantity handles stop_loss_pct=0 without ZeroDivisionError", t_risk_calculate_quantity_zero_stop_loss_pct)
+
+
+def t_risk_calculate_quantity_max_affordable_zero():
+    """calculate_quantity must return 0 (not 1) when max_position_size < price."""
+    from unittest.mock import patch
+    from risk_manager import RiskManager
+
+    rm = RiskManager()
+    with patch("risk_manager.settings") as ms:
+        ms.use_kelly_capital_sizing = False
+        ms.total_capital = 1_000_000
+        ms.intraday_capital_pct = 30
+        ms.max_intraday_positions = 1
+        ms.stop_loss_pct = 2
+        ms.max_position_size = 5_000   # less than price below
+        ms.auto_size_by_atr = False
+        ms.max_trades_intraday = 100
+        # price=6000 → max_affordable = int(5000 // 6000) = 0
+        # qty after capital calc = int(300_000 // 6000) = 50 → clamped to 0
+        # With bug: max(0, 1) = 1 → places ₹6000 order exceeding ₹5000 limit
+        # With fix: returns 0 → trade skipped
+        with patch.object(rm, "max_capital_for_agent", return_value=300_000), \
+             patch("risk_manager.alt_data", None, create=True):
+            try:
+                from alt_data import alt_data_engine
+            except Exception:
+                pass
+            qty = rm.calculate_quantity(price=6_000.0, agent="intraday")
+        assert qty == 0, (
+            f"calculate_quantity returned {qty} instead of 0 when max_position_size < price — "
+            "max(qty, 1) must not force qty=1 when max_affordable==0 (would exceed position limit)"
+        )
+
+run("risk_manager: calculate_quantity returns 0 when max_position_size < price (not 1)", t_risk_calculate_quantity_max_affordable_zero)
+
+
+def t_risk_record_trade_threshold_uses_local_snapshot():
+    """record_trade must compare against a locked snapshot of daily_realised_pnl, not re-read it."""
+    import inspect
+    from risk_manager import RiskManager
+
+    src = inspect.getsource(RiskManager.record_trade)
+    # The fix captures new_pnl inside the lock and uses it for the threshold comparison.
+    assert "new_pnl" in src, (
+        "record_trade must capture new_pnl inside the lock to avoid reading "
+        "self.daily_realised_pnl outside the lock for the threshold comparison"
+    )
+    # Must NOT use self.daily_realised_pnl for the comparison after the lock is released
+    lines = [l.strip() for l in src.splitlines()]
+    for line in lines:
+        if "threshold" in line and "self.daily_realised_pnl" in line and "<" in line:
+            assert False, (
+                "record_trade compares self.daily_realised_pnl against threshold outside the lock — "
+                "race condition: use the local new_pnl snapshot instead"
+            )
+
+run("risk_manager: record_trade uses locked new_pnl snapshot for threshold check (no race)", t_risk_record_trade_threshold_uses_local_snapshot)
+
+
 # ══════════════════════════════════════════════════════════════════════════
 # FINAL SUMMARY
 # ══════════════════════════════════════════════════════════════════════════
