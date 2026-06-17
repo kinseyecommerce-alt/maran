@@ -300,6 +300,10 @@ class AtomicBracketEngine:
             except Exception as exc:
                 if attempt < self.SL_RETRY_MAX:
                     await asyncio.sleep(0.05)
+                else:
+                    logger.error(
+                        "SL order failed after {} attempts for {} {}: {}",
+                        self.SL_RETRY_MAX, bracket.symbol, bracket.strategy, exc)
         return False
 
     async def _emergency_reverse(self, bracket: BracketOrder) -> None:
@@ -473,11 +477,20 @@ class AtomicBracketEngine:
                     order_id=bracket.sl_order_id, trigger_price=new_sl))
         except Exception as exc:
             logger.warning("TSL modify failed, replacing SL order: {}", exc)
+            cancel_ok = False
             try:
                 await _loop.run_in_executor(
                     None, lambda: kite_client.cancel_order(bracket.sl_order_id))
-            except Exception: pass
-            await self._place_sl_order(bracket)
+                cancel_ok = True
+            except Exception as cancel_exc:
+                # Cancel failed — old SL-M may already be live or triggered.
+                # Do NOT place a second SL order: that would create an unintended
+                # reverse position if the first SL-M is still in the book.
+                logger.warning(
+                    "Cancel old SL {} failed — skipping replacement to avoid double-SL: {}",
+                    bracket.sl_order_id, cancel_exc)
+            if cancel_ok:
+                await self._place_sl_order(bracket)
         await self._broadcast_update(bracket)
 
     def _find_by_symbol_strategy(self, symbol: str, strategy: str) -> Optional[BracketOrder]:
