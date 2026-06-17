@@ -7265,6 +7265,61 @@ run("trailing_sl_engine: get_position returns registered position correctly", t_
 
 
 # ══════════════════════════════════════════════════════════════════════════
+# 71. ADAPTIVE ENGINE — _load_state unknown-field TypeError discards state
+# ══════════════════════════════════════════════════════════════════════════
+section("71. ADAPTIVE ENGINE — _load_state unknown-field TypeError discards state")
+
+def t_adaptive_load_state_filters_unknown_fields():
+    """_load_state must ignore unrecognised JSON keys so a field rename/removal
+    between code versions doesn't discard all learned adaptive state."""
+    import inspect
+    from adaptive_engine import AdaptiveLearningEngine
+
+    src = inspect.getsource(AdaptiveLearningEngine._load_state)
+    assert "dc_fields" in src or "_valid" in src, (
+        "_load_state must filter JSON keys against valid AdaptiveParams fields "
+        "so unknown/removed fields don't cause TypeError and lose all state"
+    )
+
+run("adaptive_engine: _load_state filters unknown JSON keys", t_adaptive_load_state_filters_unknown_fields)
+
+
+def t_adaptive_load_state_survives_extra_fields():
+    """_load_state must silently ignore an extra field in the JSON state file."""
+    import json
+    import os
+    import tempfile
+    from unittest.mock import patch
+    from adaptive_engine import AdaptiveLearningEngine
+
+    state = {
+        "intraday::RELIANCE": {
+            "strategy": "intraday", "symbol": "RELIANCE",
+            "sl_pct": 1.2, "target_pct": 2.5, "trail_pct": 0.4,
+            "size_factor": 1.0, "min_rsi": 45.0, "max_rsi": 67.0,
+            "min_adx": 20.0, "min_vol_ratio": 1.2,
+            "win_rate_20": 0.6, "sharpe_20": 1.1, "avg_win_pct": 2.0,
+            "avg_loss_pct": -1.0, "streak": 3, "status": "ACTIVE",
+            "last_updated": "2026-01-01T00:00:00", "adaptation_count": 5,
+            "regime_performance": {},
+            "obsolete_field_from_old_version": "should_be_ignored",
+        }
+    }
+    with tempfile.TemporaryDirectory() as tmp:
+        state_file = Path(tmp) / "adaptive_params.json"
+        state_file.write_text(json.dumps(state))
+        with patch.dict(os.environ, {"ADAPTIVE_DATA_DIR": tmp}):
+            engine = AdaptiveLearningEngine()
+    assert "intraday::RELIANCE" in engine._params, (
+        "_load_state must load the valid entry even when the JSON contains "
+        "an unknown field ('obsolete_field_from_old_version')"
+    )
+    assert engine._params["intraday::RELIANCE"].sl_pct == 1.2
+
+run("adaptive_engine: _load_state loads valid entries despite unknown JSON fields", t_adaptive_load_state_survives_extra_fields)
+
+
+# ══════════════════════════════════════════════════════════════════════════
 # FINAL SUMMARY
 # ══════════════════════════════════════════════════════════════════════════
 failed = summary()

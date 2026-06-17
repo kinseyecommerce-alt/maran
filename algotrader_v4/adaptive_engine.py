@@ -43,7 +43,7 @@ import json
 import math
 import time
 from collections import deque
-from dataclasses import dataclass, field, asdict
+from dataclasses import dataclass, field, asdict, fields as dc_fields
 from datetime import datetime, date, timedelta
 from pathlib import Path
 from typing import Optional
@@ -358,12 +358,11 @@ class AdaptiveLearningEngine:
         try:
             with open(path) as f:
                 data = json.load(f)
+            _valid = {f.name for f in dc_fields(AdaptiveParams)} - {"strategy", "symbol"}
             for key, d in data.items():
                 strategy, symbol = key.split("::")
-                self._params[key] = AdaptiveParams(
-                    strategy=strategy, symbol=symbol,
-                    **{k: v for k, v in d.items() if k not in ("strategy", "symbol")}
-                )
+                filtered = {k: v for k, v in d.items() if k in _valid}
+                self._params[key] = AdaptiveParams(strategy=strategy, symbol=symbol, **filtered)
             logger.info("Loaded {} adaptive param sets", len(self._params))
         except Exception as exc:
             logger.warning("Could not load adaptive state: {}", exc)
