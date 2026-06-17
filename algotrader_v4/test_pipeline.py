@@ -5467,6 +5467,35 @@ run("readiness: auto_start_configured True when set",           t_readiness_auto
 
 
 # ══════════════════════════════════════════════════════════════════════════
+# 39. KITE TOKEN PERSISTENCE
+# ══════════════════════════════════════════════════════════════════════════
+
+def t_set_access_token_updates_settings():
+    import kite_client as _kc
+    import inspect
+    src = inspect.getsource(_kc.KiteClient.set_access_token)
+    assert "settings.kite_access_token = token" in src, \
+        "set_access_token must update settings.kite_access_token"
+
+def t_set_access_token_persists_to_state_store():
+    import kite_client as _kc
+    import inspect
+    src = inspect.getsource(_kc.KiteClient.set_access_token)
+    assert "set_kv" in src, "set_access_token must persist token via set_kv"
+
+def t_startup_restores_token_from_state_store():
+    import main as _m
+    import inspect
+    src = inspect.getsource(_m.on_startup)
+    assert "kite_access_token" in src and "get_kv" in src, \
+        "on_startup must restore kite_access_token from state_store when .env is empty"
+
+run("kite_token: set_access_token updates settings.kite_access_token",   t_set_access_token_updates_settings)
+run("kite_token: set_access_token persists to state_store via set_kv",   t_set_access_token_persists_to_state_store)
+run("kite_token: on_startup restores token from state_store if .env empty", t_startup_restores_token_from_state_store)
+
+
+# ══════════════════════════════════════════════════════════════════════════
 # FINAL SUMMARY
 # ══════════════════════════════════════════════════════════════════════════
 failed = summary()
