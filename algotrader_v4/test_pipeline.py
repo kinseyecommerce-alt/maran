@@ -5496,6 +5496,36 @@ run("kite_token: on_startup restores token from state_store if .env empty", t_st
 
 
 # ══════════════════════════════════════════════════════════════════════════
+# 40. PRE-MARKET REPORT KEY CONSISTENCY
+# ══════════════════════════════════════════════════════════════════════════
+
+def t_premarket_prompt_uses_fno_key():
+    import inspect
+    import pre_market_report as _pmr
+    src = inspect.getsource(_pmr)
+    assert '"fno": <0-100>' in src, \
+        "_SYSTEM_PROMPT must use 'fno' key (not 'options') to match formatter"
+
+def t_premarket_fallback_uses_fno_key():
+    import inspect
+    import pre_market_report as _pmr
+    src = inspect.getsource(_pmr)
+    assert '"fno": 25' in src, \
+        "fallback strategy_weights must use 'fno' key to match formatter"
+
+def t_premarket_formatter_reads_fno_key():
+    import inspect
+    import pre_market_report as _pmr
+    src = inspect.getsource(_pmr._format_telegram)
+    assert "weights.get('fno'" in src, \
+        "_format_telegram must read 'fno' key from strategy_weights"
+
+run("pre_market: _SYSTEM_PROMPT uses 'fno' key in strategy_weights",   t_premarket_prompt_uses_fno_key)
+run("pre_market: fallback strategy_weights uses 'fno' key",            t_premarket_fallback_uses_fno_key)
+run("pre_market: _format_telegram reads 'fno' from strategy_weights",  t_premarket_formatter_reads_fno_key)
+
+
+# ══════════════════════════════════════════════════════════════════════════
 # FINAL SUMMARY
 # ══════════════════════════════════════════════════════════════════════════
 failed = summary()
