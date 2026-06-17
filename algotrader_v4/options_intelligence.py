@@ -381,7 +381,7 @@ async def get_iv_context(symbol: str) -> dict:
         if _s.use_truedata_options:
             try:
                 from truedata_client import truedata_options
-                td_rows = await asyncio.get_event_loop().run_in_executor(
+                td_rows = await asyncio.get_running_loop().run_in_executor(
                     None, lambda: truedata_options.get_option_chain(symbol)
                 )
                 if td_rows:

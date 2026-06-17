@@ -653,7 +653,7 @@ class TickEngine:
     def start_loop(self) -> None:
         """Called once FastAPI is running — starts the async polling loop and WebSocket."""
         self._running = True
-        self._loop = asyncio.get_event_loop()
+        self._loop = asyncio.get_running_loop()
         self._task = asyncio.create_task(self._poll_loop())
 
         # Start tick WebSocket in LIVE mode — TrueData preferred, Kite as fallback

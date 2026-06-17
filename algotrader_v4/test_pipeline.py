@@ -7403,6 +7403,58 @@ run("twap_executor: place_twap/place_vwap use get_running_loop not get_event_loo
 
 
 # ══════════════════════════════════════════════════════════════════════════
+# 74. MARKET REGIME / OPTIONS INTELLIGENCE / TICK ENGINE — get_event_loop
+# ══════════════════════════════════════════════════════════════════════════
+section("74. MARKET REGIME / OPTIONS INTELLIGENCE / TICK ENGINE — deprecated get_event_loop")
+
+def t_market_regime_no_get_event_loop():
+    """_collect_nifty, _collect_breadth, _collect_sectors must use get_running_loop."""
+    import inspect
+    from market_regime import MarketRegimeDetector
+
+    for method_name in ("_collect_nifty", "_collect_breadth", "_collect_sectors"):
+        src = inspect.getsource(getattr(MarketRegimeDetector, method_name))
+        assert "get_event_loop()" not in src, (
+            f"market_regime.MarketRegimeDetector.{method_name}() must not call "
+            f"asyncio.get_event_loop() inside an async function — use get_running_loop()"
+        )
+
+run("market_regime: async collectors use get_running_loop not get_event_loop", t_market_regime_no_get_event_loop)
+
+
+def t_options_intelligence_no_get_event_loop():
+    """options_intelligence must not use get_event_loop inside async functions."""
+    import inspect
+    import options_intelligence as oi
+
+    for name in dir(oi):
+        obj = getattr(oi, name, None)
+        if callable(obj) and asyncio.iscoroutinefunction(obj):
+            src = inspect.getsource(obj)
+            assert "get_event_loop()" not in src, (
+                f"options_intelligence.{name}() must not call asyncio.get_event_loop() "
+                f"inside an async function — use get_running_loop()"
+            )
+
+run("options_intelligence: async functions use get_running_loop not get_event_loop", t_options_intelligence_no_get_event_loop)
+
+
+def t_tick_engine_start_loop_no_get_event_loop():
+    """TickEngine.start_loop() must not call deprecated get_event_loop."""
+    import inspect
+    from tick_engine import TickEngine
+
+    src = inspect.getsource(TickEngine.start_loop)
+    assert "get_event_loop()" not in src, (
+        "TickEngine.start_loop() must not call asyncio.get_event_loop() — "
+        "it is always called from within FastAPI startup (running event loop), "
+        "so get_running_loop() is correct and avoids the Python 3.10+ deprecation"
+    )
+
+run("tick_engine: start_loop() uses get_running_loop not get_event_loop", t_tick_engine_start_loop_no_get_event_loop)
+
+
+# ══════════════════════════════════════════════════════════════════════════
 # FINAL SUMMARY
 # ══════════════════════════════════════════════════════════════════════════
 failed = summary()

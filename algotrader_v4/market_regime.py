@@ -336,7 +336,7 @@ class MarketRegimeDetector:
     async def _collect_nifty(self, s: RegimeSignals) -> None:
         """NIFTY 50 trend from yfinance."""
         try:
-            loop = asyncio.get_event_loop()
+            loop = asyncio.get_running_loop()
 
             # Daily data for trend
             df_d = await loop.run_in_executor(
@@ -426,7 +426,7 @@ class MarketRegimeDetector:
         """
         try:
             from symbol_scanner import NIFTY_50
-            loop = asyncio.get_event_loop()
+            loop = asyncio.get_running_loop()
 
             adv = 0; dec = 0
             # Sample 20 stocks to keep it fast
@@ -459,7 +459,7 @@ class MarketRegimeDetector:
     async def _collect_sectors(self, s: RegimeSignals) -> None:
         """Which sectors are leading / lagging today."""
         try:
-            loop = asyncio.get_event_loop()
+            loop = asyncio.get_running_loop()
             sector_chg: dict[str, float] = {}
 
             async def fetch_sector(name, ticker):
