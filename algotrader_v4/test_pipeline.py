@@ -7475,6 +7475,45 @@ run("auto_backtest_runner: run() uses get_running_loop not get_event_loop", t_au
 
 
 # ══════════════════════════════════════════════════════════════════════════
+# 76. TRUEDATA CLIENT — duplicate is_connected property silently drops stale-tick detection
+# ══════════════════════════════════════════════════════════════════════════
+section("76. TRUEDATA CLIENT — duplicate is_connected property discards stale-tick detection")
+
+def t_truedata_is_connected_single_definition():
+    """is_connected must appear exactly once; the duplicate naive definition
+    overwrote the first and silently discarded the 30-second stale-tick check."""
+    import inspect
+    from truedata_client import TrueDataTicker
+
+    # Python's class dict keeps last definition — check source has exactly one @property
+    src = inspect.getsource(TrueDataTicker)
+    count = src.count("def is_connected")
+    assert count == 1, (
+        f"TrueDataTicker.is_connected is defined {count} times — "
+        "the duplicate naive definition at the bottom of the class overwrites the "
+        "first and silently drops the 30s stale-tick health check"
+    )
+
+run("truedata_client: is_connected property defined exactly once (no duplicate)", t_truedata_is_connected_single_definition)
+
+
+def t_truedata_is_connected_checks_stale_ticks():
+    """is_connected must include a stale-tick check (last_tick_ts), not just
+    return self._connected (which misses silent feed death)."""
+    import inspect
+    from truedata_client import TrueDataTicker
+
+    src = inspect.getsource(TrueDataTicker.is_connected.fget)
+    assert "_last_tick_ts" in src or "last_tick" in src, (
+        "TrueDataTicker.is_connected must check last_tick_ts to detect "
+        "silent feed death (socket open but no data for >30s) — the naive "
+        "'return self._connected' would miss this failure mode"
+    )
+
+run("truedata_client: is_connected checks stale-tick timestamp not just _connected flag", t_truedata_is_connected_checks_stale_ticks)
+
+
+# ══════════════════════════════════════════════════════════════════════════
 # FINAL SUMMARY
 # ══════════════════════════════════════════════════════════════════════════
 failed = summary()

@@ -239,10 +239,6 @@ class TrueDataTicker:
             except Exception:
                 pass
 
-    @property
-    def is_connected(self) -> bool:
-        return self._connected
-
 
 # ── TrueDataHistoricalClient — OHLCV history ──────────────────────────────────
 
