@@ -5558,6 +5558,38 @@ run("platform: _kite_token_refresh sends holiday-aware Telegram note",   t_kite_
 
 
 # ══════════════════════════════════════════════════════════════════════════
+# 42. MASTER AGENT HOLIDAY GUARD
+# ══════════════════════════════════════════════════════════════════════════
+
+def t_daily_reset_holiday_note():
+    import inspect
+    import master_agent_v5 as _m
+    src = inspect.getsource(_m.MasterAgent._daily_reset)
+    assert "is_nse_holiday" in src, \
+        "_daily_reset must include holiday note in Telegram message"
+
+def t_auto_squareoff_skips_holiday():
+    import inspect
+    import master_agent_v5 as _m
+    src = inspect.getsource(_m.MasterAgent._auto_squareoff)
+    assert "is_nse_holiday" in src, \
+        "_auto_squareoff must skip squareoff and summary on NSE holidays"
+
+def t_auto_squareoff_holiday_guard_first():
+    import inspect
+    import master_agent_v5 as _m
+    src = inspect.getsource(_m.MasterAgent._auto_squareoff)
+    holiday_pos = src.index("is_nse_holiday")
+    squareoff_pos = src.index("squareoff_all_positions")
+    assert holiday_pos < squareoff_pos, \
+        "Holiday guard must precede squareoff_all_positions() call"
+
+run("master: _daily_reset includes holiday note in Telegram",           t_daily_reset_holiday_note)
+run("master: _auto_squareoff skips on NSE holiday",                     t_auto_squareoff_skips_holiday)
+run("master: holiday guard precedes squareoff_all_positions()",         t_auto_squareoff_holiday_guard_first)
+
+
+# ══════════════════════════════════════════════════════════════════════════
 # FINAL SUMMARY
 # ══════════════════════════════════════════════════════════════════════════
 failed = summary()

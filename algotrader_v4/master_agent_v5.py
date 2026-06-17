@@ -465,6 +465,11 @@ class MasterAgent:
             logger.debug("[master] Sharpe check error: {}", exc)
 
     async def _auto_squareoff(self) -> None:
+        from ist_clock import is_nse_holiday, now_ist
+        if is_nse_holiday(now_ist().date()):
+            logger.info("[master] NSE holiday — squareoff skipped")
+            return
+
         ids = kite_client.squareoff_all_positions()
         if ids:
             await send_telegram(f"<b>Auto square-off</b>\n{len(ids)} positions closed")
@@ -495,7 +500,9 @@ class MasterAgent:
             pattern_monitor.reset_daily()
         except Exception:
             pass
-        await send_telegram("<b>New trading day</b> — counters reset")
+        from ist_clock import is_nse_holiday, now_ist
+        holiday_note = " (NSE holiday — no trading today)" if is_nse_holiday(now_ist().date()) else ""
+        await send_telegram(f"<b>New trading day</b> — counters reset{holiday_note}")
         from n8n_bridge import notify as _n8n
         asyncio.create_task(_n8n("system", {"type": "daily_reset"}))
 
