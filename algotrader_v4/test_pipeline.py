@@ -5317,6 +5317,46 @@ run("readiness: computes missing list from checks",       t_readiness_missing_li
 
 
 # ══════════════════════════════════════════════════════════════════════════
+# 35. AUTO-LOGIN READINESS
+# ══════════════════════════════════════════════════════════════════════════
+
+def t_auto_login_ready_checks_all_four_fields():
+    import main as _m
+    import inspect
+    src = inspect.getsource(_m.readiness)
+    for field in ("kite_user_id", "kite_password", "kite_totp_secret", "kite_redirect_url"):
+        assert field in src, f"auto_login_ready must check {field}"
+
+def t_auto_login_ready_false_when_password_missing():
+    from config import settings as s
+    orig_pw, orig_redirect = s.kite_password, s.kite_redirect_url
+    try:
+        s.kite_password    = ""
+        s.kite_redirect_url = "https://example.com/callback"
+        result = bool(s.kite_user_id and s.kite_password
+                      and s.kite_totp_secret and s.kite_redirect_url)
+        assert not result, "auto_login_ready must be False when kite_password empty"
+    finally:
+        s.kite_password, s.kite_redirect_url = orig_pw, orig_redirect
+
+def t_auto_login_ready_false_when_redirect_missing():
+    from config import settings as s
+    orig_pw, orig_redirect = s.kite_password, s.kite_redirect_url
+    try:
+        s.kite_password     = "somepass"
+        s.kite_redirect_url = ""
+        result = bool(s.kite_user_id and s.kite_password
+                      and s.kite_totp_secret and s.kite_redirect_url)
+        assert not result, "auto_login_ready must be False when kite_redirect_url empty"
+    finally:
+        s.kite_password, s.kite_redirect_url = orig_pw, orig_redirect
+
+run("auto_login: readiness checks all 4 required fields",          t_auto_login_ready_checks_all_four_fields)
+run("auto_login: ready=False when kite_password missing",          t_auto_login_ready_false_when_password_missing)
+run("auto_login: ready=False when kite_redirect_url missing",      t_auto_login_ready_false_when_redirect_missing)
+
+
+# ══════════════════════════════════════════════════════════════════════════
 # FINAL SUMMARY
 # ══════════════════════════════════════════════════════════════════════════
 failed = summary()

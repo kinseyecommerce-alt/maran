@@ -1928,7 +1928,8 @@ def readiness():
         "anthropic_api_key": bool(settings.anthropic_api_key),
         "jwt_secret_key":    bool(settings.jwt_secret_key),
         "telegram_bot":      bool(settings.telegram_bot_token and settings.telegram_chat_id),
-        "auto_login_ready":  bool(settings.kite_user_id and settings.kite_totp_secret),
+        "auto_login_ready":  bool(settings.kite_user_id and settings.kite_password
+                                  and settings.kite_totp_secret and settings.kite_redirect_url),
     }
     ready_for_live = all([
         checks["kite_api_key"], checks["kite_api_secret"],
