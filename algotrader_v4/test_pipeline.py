@@ -5526,6 +5526,38 @@ run("pre_market: _format_telegram reads 'fno' from strategy_weights",  t_premark
 
 
 # ══════════════════════════════════════════════════════════════════════════
+# 41. PLATFORM SCHEDULER — HOLIDAY GUARD
+# ══════════════════════════════════════════════════════════════════════════
+
+def t_auto_start_skips_nse_holiday():
+    import inspect
+    import platform_scheduler as _ps
+    src = inspect.getsource(_ps.PlatformScheduler._auto_start_bot)
+    assert "is_nse_holiday" in src, \
+        "_auto_start_bot must check is_nse_holiday() to skip trading on NSE holidays"
+
+def t_auto_start_holiday_guard_before_strategy_check():
+    import inspect
+    import platform_scheduler as _ps
+    src = inspect.getsource(_ps.PlatformScheduler._auto_start_bot)
+    holiday_pos = src.index("is_nse_holiday")
+    strategy_pos = src.index("auto_start_strategies")
+    assert holiday_pos < strategy_pos, \
+        "Holiday guard must be the first check in _auto_start_bot"
+
+def t_kite_refresh_holiday_note():
+    import inspect
+    import platform_scheduler as _ps
+    src = inspect.getsource(_ps.PlatformScheduler._kite_token_refresh)
+    assert "is_nse_holiday" in src, \
+        "_kite_token_refresh must include holiday-aware note in Telegram message"
+
+run("platform: _auto_start_bot checks is_nse_holiday before starting",  t_auto_start_skips_nse_holiday)
+run("platform: holiday guard is first check in _auto_start_bot",         t_auto_start_holiday_guard_before_strategy_check)
+run("platform: _kite_token_refresh sends holiday-aware Telegram note",   t_kite_refresh_holiday_note)
+
+
+# ══════════════════════════════════════════════════════════════════════════
 # FINAL SUMMARY
 # ══════════════════════════════════════════════════════════════════════════
 failed = summary()

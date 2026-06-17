@@ -121,12 +121,15 @@ class PlatformScheduler:
         logger.info("[platform] Kite token refresh starting…")
         try:
             from kite_auto_login import refresh_kite_token_async
+            from ist_clock import is_nse_holiday, now_ist
             token = await refresh_kite_token_async()
             self._token_ok = True
+            market_note = "NSE holiday today — no trading." if is_nse_holiday(now_ist().date()) \
+                          else "Market opens in 25 minutes."
             await send_telegram(
                 f"✅ <b>Kite token refreshed</b>\n"
                 f"Token: <code>{token[:8]}…</code>\n"
-                f"Market opens in 25 minutes."
+                f"{market_note}"
             )
         except Exception as exc:
             self._token_ok = False
@@ -140,6 +143,11 @@ class PlatformScheduler:
             )
 
     async def _auto_start_bot(self) -> None:
+        from ist_clock import is_nse_holiday, now_ist
+        if is_nse_holiday(now_ist().date()):
+            logger.info("[platform] NSE holiday — auto-start skipped")
+            return
+
         if not settings.auto_start_strategies:
             logger.info("[platform] AUTO_START_STRATEGIES not set — skipping auto-start")
             return
