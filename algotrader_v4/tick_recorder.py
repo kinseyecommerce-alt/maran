@@ -67,6 +67,12 @@ class TickRecorder:
         with self._lock:
             self._enabled = False
             counts = dict(self._counts)
+            conn, self._conn = self._conn, None
+        if conn is not None:
+            try:
+                conn.close()
+            except Exception:
+                pass
         logger.info("TickRecorder stopped — recorded {} ticks", sum(counts.values()))
         return counts
 

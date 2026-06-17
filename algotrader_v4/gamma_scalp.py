@@ -72,6 +72,10 @@ def build_gex_profile(symbol: str, chain: list[dict], spot: float,
     Build GEX profile from NSE chain list.
     chain items: {strike, CE:{iv:%, oi:int}, PE:{iv:%, oi:int}}
     """
+    if spot <= 0:
+        return GEXProfile(symbol=symbol, spot=spot, net_gex=0.0, regime="NEUTRAL",
+                          top_call_wall=None, top_put_wall=None, zero_gamma_level=None,
+                          flip_pct=None, pin_risk=False, pin_strike=None)
     T = max(days_to_expiry / 365.0, 0.5 / 365.0)
     strike_gex: dict[int, tuple[float, int]] = {}   # strike → (gex, total_oi)
 

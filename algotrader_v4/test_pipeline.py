@@ -7681,6 +7681,112 @@ run("portfolio_backtest: simulate(total_capital=0) returns empty result without 
 
 
 # ══════════════════════════════════════════════════════════════════════════
+# 80. TICK RECORDER — stop() did not close SQLite connection (resource leak)
+# ══════════════════════════════════════════════════════════════════════════
+section("80. TICK RECORDER — stop() must close SQLite connection to release file lock")
+
+def t_tick_recorder_stop_closes_connection():
+    """stop() must close and nullify self._conn.
+    Leaving it open holds a file lock on ticks.db and leaks a file descriptor."""
+    import inspect
+    from tick_recorder import TickRecorder
+
+    src = inspect.getsource(TickRecorder.stop)
+    assert "close()" in src, (
+        "TickRecorder.stop() must call conn.close() to release the SQLite file lock; "
+        "leaving the connection open leaks a file descriptor and blocks other processes"
+    )
+
+run("tick_recorder: stop() calls conn.close() to release SQLite file lock", t_tick_recorder_stop_closes_connection)
+
+
+def t_tick_recorder_stop_nullifies_conn():
+    """After stop(), self._conn must be None so that record() fast-paths correctly."""
+    import inspect
+    from tick_recorder import TickRecorder
+
+    src = inspect.getsource(TickRecorder.stop)
+    # Accept either `self._conn = None` or the swap idiom `conn, self._conn = self._conn, None`
+    assert ("self._conn = None" in src or "self._conn=None" in src
+            or ("self._conn" in src and ", None" in src)), (
+        "TickRecorder.stop() must set self._conn = None after closing; "
+        "otherwise record() can attempt to use a closed connection"
+    )
+
+run("tick_recorder: stop() sets self._conn = None after closing", t_tick_recorder_stop_nullifies_conn)
+
+
+def t_tick_recorder_stop_functional():
+    """stop() on a started recorder must close connection without raising."""
+    import tempfile
+    from pathlib import Path
+    from tick_recorder import TickRecorder
+
+    with tempfile.TemporaryDirectory() as tmp:
+        rec = TickRecorder(db_path=Path(tmp) / "test_ticks.db")
+        rec.start()
+        assert rec._conn is not None, "conn should exist after start()"
+        rec.stop()
+        assert rec._conn is None, "conn must be None after stop()"
+
+run("tick_recorder: start then stop leaves conn=None (connection closed)", t_tick_recorder_stop_functional)
+
+
+# ══════════════════════════════════════════════════════════════════════════
+# 81. GAMMA SCALP — build_gex_profile divides by spot with no zero guard
+# ══════════════════════════════════════════════════════════════════════════
+section("81. GAMMA SCALP — build_gex_profile must guard spot <= 0 before computing GEX")
+
+def t_gamma_scalp_spot_zero_guard_in_source():
+    """build_gex_profile must guard spot <= 0 before division.
+    Lines computing gamma = _n(d1) / (spot * ...) and (k - spot) / spot raise
+    ZeroDivisionError when spot = 0 (data feed error or corrupted market data)."""
+    import inspect
+    import gamma_scalp as _gs
+
+    src = inspect.getsource(_gs.build_gex_profile)
+    assert "spot <= 0" in src or "spot == 0" in src, (
+        "build_gex_profile must guard against spot <= 0 before the main loop; "
+        "gamma = _n(d1) / (spot * sigma * sqrt(T)) raises ZeroDivisionError when spot=0"
+    )
+
+run("gamma_scalp: build_gex_profile checks spot <= 0 before dividing", t_gamma_scalp_spot_zero_guard_in_source)
+
+
+def t_gamma_scalp_spot_zero_no_crash():
+    """build_gex_profile(spot=0) must return a neutral GEXProfile, not raise."""
+    import gamma_scalp as _gs
+
+    chain = [{"strike": 22000, "CE": {"iv": 20, "oi": 1000}, "PE": {"iv": 20, "oi": 800}}]
+    try:
+        result = _gs.build_gex_profile("NIFTY", chain, spot=0.0)
+    except ZeroDivisionError:
+        raise AssertionError(
+            "build_gex_profile raised ZeroDivisionError with spot=0 — "
+            "must return a neutral GEXProfile instead"
+        )
+    assert result.regime == "NEUTRAL", f"Expected NEUTRAL regime, got {result.regime}"
+
+run("gamma_scalp: build_gex_profile(spot=0) returns neutral profile without crash", t_gamma_scalp_spot_zero_no_crash)
+
+
+def t_gamma_scalp_spot_negative_no_crash():
+    """build_gex_profile(spot=-1) must not crash (negative price from bad feed)."""
+    import gamma_scalp as _gs
+
+    chain = [{"strike": 22000, "CE": {"iv": 20, "oi": 500}, "PE": {"iv": 20, "oi": 500}}]
+    try:
+        _gs.build_gex_profile("NIFTY", chain, spot=-1.0)
+    except (ZeroDivisionError, ValueError, OverflowError) as exc:
+        raise AssertionError(
+            f"build_gex_profile raised {type(exc).__name__} with spot=-1 — "
+            "must handle gracefully"
+        )
+
+run("gamma_scalp: build_gex_profile(spot=-1) returns without error", t_gamma_scalp_spot_negative_no_crash)
+
+
+# ══════════════════════════════════════════════════════════════════════════
 # FINAL SUMMARY
 # ══════════════════════════════════════════════════════════════════════════
 failed = summary()
