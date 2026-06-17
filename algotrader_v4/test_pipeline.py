@@ -8420,6 +8420,71 @@ run("broker_router: cancel_order after SL-M failure logs error (not silent pass)
 
 
 # ══════════════════════════════════════════════════════════════════════════
+# 100. PROFIT_OPTIMIZER + NEWS_GATE — SILENT EXCEPTION VISIBILITY
+# ══════════════════════════════════════════════════════════════════════════
+section("100. PROFIT_OPTIMIZER + NEWS_GATE — SILENT EXCEPTION VISIBILITY")
+
+
+def t_profit_optimizer_backtest_loop_logs_on_failure():
+    """profit_optimizer phase1_optimise loop must log backtest failures instead of
+    silently passing — silent failures corrupt optimization results by silently excluding symbols."""
+    import inspect
+    import profit_optimizer as _po
+    src = inspect.getsource(_po.phase1_optimise)
+    # The inner except must not be bare pass
+    lines = [l.strip() for l in src.splitlines()]
+    for i, line in enumerate(lines):
+        if line == "except Exception:" and i + 1 < len(lines):
+            next_line = lines[i + 1]
+            assert next_line != "pass", (
+                "phase1_optimise inner except must log the exception, not pass silently"
+            )
+
+run("profit_optimizer: phase1_optimise backtest loop logs on failure", t_profit_optimizer_backtest_loop_logs_on_failure)
+
+
+def t_news_gate_earnings_check_logs_on_failure():
+    """news_gate.is_blocked() must log when the earnings check fails instead of
+    silently passing — silent failure allows trades during earnings windows."""
+    import inspect
+    import news_gate as _ng
+    src = inspect.getsource(_ng.NewsGate.is_blocked)
+    assert "logger.debug" in src or "logger.warning" in src, (
+        "NewsGate.is_blocked earnings check must log on failure so earnings-gate bypasses are visible"
+    )
+    # Ensure the word 'pass' doesn't appear alone after the except
+    lines = [l.strip() for l in src.splitlines()]
+    for i, line in enumerate(lines):
+        if line.startswith("except Exception") and i + 1 < len(lines):
+            next_line = lines[i + 1]
+            assert next_line != "pass", (
+                "NewsGate.is_blocked must not use bare except: pass on earnings check failure"
+            )
+
+run("news_gate: is_blocked earnings check logs on failure (not bare pass)", t_news_gate_earnings_check_logs_on_failure)
+
+
+def t_news_gate_audit_logs_on_failure():
+    """news_gate._audit() must log audit recording failures — silent audit failures
+    create invisible SEBI compliance gaps."""
+    import inspect
+    import news_gate as _ng
+    src = inspect.getsource(_ng.NewsGate._audit)
+    assert "logger" in src, (
+        "NewsGate._audit must log when audit recording fails so SEBI compliance gaps are visible"
+    )
+    lines = [l.strip() for l in src.splitlines()]
+    for i, line in enumerate(lines):
+        if line.startswith("except Exception") and i + 1 < len(lines):
+            next_line = lines[i + 1]
+            assert next_line != "pass", (
+                "NewsGate._audit must not use bare except: pass"
+            )
+
+run("news_gate: _audit logs on failure (not bare pass)", t_news_gate_audit_logs_on_failure)
+
+
+# ══════════════════════════════════════════════════════════════════════════
 # FINAL SUMMARY
 # ══════════════════════════════════════════════════════════════════════════
 failed = summary()

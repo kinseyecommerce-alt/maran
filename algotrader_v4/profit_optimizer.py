@@ -139,8 +139,8 @@ def phase1_optimise(verbose: bool = True) -> dict[str, dict]:
                                     lookback_days=settings.bt_lookback_days,
                                     n_folds=settings.bt_wf_folds)
                     combo_scores.append(_score(r))
-                except Exception:
-                    pass
+                except Exception as exc:
+                    logger.debug("Phase 1: backtest failed for {} [{}] — skipping: {}", sym, strategy, exc)
 
             _restore_settings(strategy, orig)
 

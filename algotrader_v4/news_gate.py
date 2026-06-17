@@ -39,8 +39,8 @@ class NewsGate:
                 from alt_data import alt_data_engine
                 if alt_data_engine.is_earnings_period(sym):
                     return True, "earnings_period"
-            except Exception:
-                pass
+            except Exception as exc:
+                logger.debug("NewsGate: earnings check failed for {}: {}", sym, exc)
             with self._lock:
                 entry = self._blocked.get(sym)
                 if entry is None:
@@ -103,8 +103,8 @@ class NewsGate:
                     subject = str(ann.get("subject") or ann.get("desc") or "")
                     if self._score_text(subject) < -1.0:
                         self.block(sym, f"NSE: {subject[:80]}")
-                except Exception:
-                    pass
+                except Exception as exc:
+                    logger.debug("NewsGate: announcement parse error: {}", exc)
         except Exception as exc:
             logger.debug("NewsGate.refresh error (non-critical): {}", exc)
 
@@ -137,8 +137,8 @@ class NewsGate:
                 price=0.0, signal_source="news_gate",
                 regime="N/A", decision=event, reason=detail, algo_id="NEWS_GATE",
             )
-        except Exception:
-            pass
+        except Exception as exc:
+            logger.debug("NewsGate: audit record failed: {}", exc)
 
 
 news_gate = NewsGate()
