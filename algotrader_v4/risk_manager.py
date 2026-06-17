@@ -190,11 +190,14 @@ def compute_tx_costs(
 
 # Capital bucket mapping: agent name → trading-type bucket
 _AGENT_TO_BUCKET: dict[str, str] = {
-    "intraday": "intraday",
-    "scalping": "intraday",   # scalping shares the equity intraday pool
-    "swing":    "swing",
-    "options":  "options",
-    "futures":  "futures",
+    "intraday":       "intraday",
+    "scalping":       "intraday",   # scalping shares the equity intraday pool
+    "mean_reversion": "intraday",   # equity MIS intraday agents share the intraday pool
+    "momentum":       "intraday",
+    "pairs":          "intraday",
+    "swing":          "swing",
+    "options":        "options",
+    "futures":        "futures",
 }
 
 _BUCKET_PCT_ATTR: dict[str, str] = {
@@ -206,11 +209,14 @@ _BUCKET_PCT_ATTR: dict[str, str] = {
 
 # Max-positions config attr per agent; None = lot-based (options/futures), no per-symbol split
 _AGENT_MAX_POS: dict[str, str | None] = {
-    "intraday": "max_intraday_positions",
-    "scalping": "max_scalping_positions",
-    "swing":    "max_swing_positions",
-    "options":  None,
-    "futures":  None,
+    "intraday":       "max_intraday_positions",
+    "scalping":       "max_scalping_positions",
+    "swing":          "max_swing_positions",
+    "mean_reversion": "max_intraday_positions",  # share intraday slot budget
+    "momentum":       "max_intraday_positions",
+    "pairs":          "max_intraday_positions",
+    "options":        None,  # lot-based: use full options bucket
+    "futures":        None,  # lot-based: use full futures bucket
 }
 
 
