@@ -407,14 +407,11 @@ class AtomicBracketEngine:
         bracket = self._find_by_symbol_strategy(pos.symbol, pos.strategy)
         if not bracket: return
         if level == 2:
-            bracket.status    = BracketStatus.TARGET_HIT
-            bracket.gross_pnl = (ltp - bracket.entry_price) * bracket.quantity * (1 if bracket.side == "BUY" else -1)
-            bracket.tx_cost   = compute_round_trip_cost(bracket.symbol, bracket.quantity,
-                                                        bracket.entry_price, bracket.product)
-            bracket.net_pnl   = round(bracket.gross_pnl - bracket.tx_cost, 2)
-            bracket.pnl       = bracket.net_pnl
-            bracket.closed_at = time.time()
             exit_side = "SELL" if bracket.side == "BUY" else "BUY"
+            gross_pnl = (ltp - bracket.entry_price) * bracket.quantity * (1 if bracket.side == "BUY" else -1)
+            tx_cost   = compute_round_trip_cost(bracket.symbol, bracket.quantity,
+                                                bracket.entry_price, bracket.product)
+            net_pnl   = round(gross_pnl - tx_cost, 2)
             try:
                 _loop = asyncio.get_running_loop()
                 await _loop.run_in_executor(None, lambda: kite_client.place_order(
@@ -427,7 +424,31 @@ class AtomicBracketEngine:
                             None, lambda: kite_client.cancel_order(bracket.sl_order_id))
                     except Exception: pass
             except Exception as exc:
-                logger.error("Target exit failed: {}", exc)
+                # Exit order failed — SL-M is still active, position is protected.
+                # Abort cleanup: guard held, TSL registered, trade unrecorded.
+                # The existing SL-M will close the position when price hits SL.
+                logger.error(
+                    "Bracket {} — T2 exit FAILED for {} ({}) — SL-M still active, "
+                    "aborting cleanup: {}",
+                    bracket.bracket_id, bracket.symbol, bracket.strategy, exc)
+                from agents.base_agent import send_telegram
+                try:
+                    await send_telegram(
+                        f"⚠️ <b>T2 exit FAILED</b> for {bracket.symbol} "
+                        f"({bracket.strategy})\n"
+                        f"SL-M still active — position protected. "
+                        f"Will close on SL trigger.\nError: {exc}"
+                    )
+                except Exception:
+                    pass
+                await self._broadcast_update(bracket)
+                return
+            bracket.status    = BracketStatus.TARGET_HIT
+            bracket.gross_pnl = gross_pnl
+            bracket.tx_cost   = tx_cost
+            bracket.net_pnl   = net_pnl
+            bracket.pnl       = net_pnl
+            bracket.closed_at = time.time()
             order_guard.release_order(bracket.symbol, bracket.strategy, bracket.side, bracket.net_pnl)
             risk_manager.record_trade(bracket.net_pnl)
             risk_manager.position_closed()

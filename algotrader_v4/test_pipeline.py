@@ -1706,6 +1706,50 @@ async def run_async():
     await arun("bracket summary() has total key",          t_bracket_summary())
     await arun("bracket active_only filter works",         t_bracket_active_filter())
 
+    # ── T2 exit-failure regression (PR #46) ───────────────────────────────
+    async def t_bracket_t2_exit_failure_guard():
+        """When the T2 MARKET exit order fails the bracket must stay ACTIVE
+        and the guard/trade-recorder/TSL must NOT be released.
+        """
+        from atomic_bracket import AtomicBracketEngine, BracketStatus, BracketOrder
+        from trailing_sl_engine import PositionSL, SLStatus, TrailingSLEngine
+        from unittest.mock import patch
+
+        abe = AtomicBracketEngine()
+        # Inject an ACTIVE bracket directly — bypasses full execute() flow
+        b = BracketOrder(
+            bracket_id="BRK-REGTEST", strategy="intraday", symbol="REGSTOCK",
+            exchange="NSE", side="BUY", product="MIS", signal_price=100.0,
+            entry_price=100.0, sl_price=98.0, trail_sl=98.0,
+            target_1=103.0, target_2=105.0, quantity=10,
+            entry_order_id="ORD-REG", sl_order_id="SL-REG",
+            status=BracketStatus.ACTIVE,
+        )
+        abe._brackets["BRK-REGTEST"] = b
+
+        pos = PositionSL(
+            symbol="REGSTOCK", strategy="intraday", side="BUY",
+            entry_price=100.0, quantity=10, order_id="BRK-REGTEST",
+            current_sl=98.0, best_price=105.0, status=SLStatus.ACTIVE,
+        )
+
+        released = []
+        recorded = []
+
+        from atomic_bracket import order_guard as _og, risk_manager as _rm, trailing_sl_engine as _tsl
+        with patch.object(_og, "release_order", side_effect=lambda *a, **kw: released.append(a)), \
+             patch.object(_rm, "record_trade",  side_effect=lambda *a, **kw: recorded.append(a)), \
+             patch.object(_tsl, "deregister",   side_effect=lambda *a, **kw: None), \
+             patch("kite_client.kite_client.place_order", side_effect=RuntimeError("broker down")):
+            await abe._on_tsl_target_hit(pos, 105.0, 2)
+
+        assert b.status == BracketStatus.ACTIVE, \
+            f"bracket must stay ACTIVE after failed exit, got {b.status}"
+        assert not released, "order_guard.release_order must NOT be called after failed exit"
+        assert not recorded, "risk_manager.record_trade must NOT be called after failed exit"
+
+    await arun("bracket: T2 exit failure keeps bracket ACTIVE, guard held", t_bracket_t2_exit_failure_guard())
+
 asyncio.run(run_async())
 
 
