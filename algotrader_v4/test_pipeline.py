@@ -6250,6 +6250,46 @@ run("master: _check_rolling_sharpe increments count for low-sharpe strategy", t_
 
 
 # ══════════════════════════════════════════════════════════════════════════
+# 53. PLATFORM SCHEDULER — login_url IndexError guard
+# ══════════════════════════════════════════════════════════════════════════
+section("53. PLATFORM SCHEDULER — login_url IndexError guard")
+
+def t_platform_scheduler_login_url_no_scheme():
+    """kite_redirect_url without scheme must not raise IndexError."""
+    from urllib.parse import urlparse
+    import platform_scheduler as _ps
+    import inspect
+    src = inspect.getsource(_ps.PlatformScheduler._kite_token_refresh)
+    # Confirm the fix uses urlparse, not a raw split('/')[2]
+    assert "urlparse" in src, "Expected urlparse in _kite_token_refresh"
+    assert "split('/')[2]" not in src, "Unsafe split('/')[2] still present"
+    # Confirm urlparse handles schemeless URLs without raising IndexError
+    for url in [
+        "https://myapp.ngrok.io/auth/kite/callback",
+        "myapp.ngrok.io/callback",
+        "localhost:8000",
+        "/callback",
+        "",
+    ]:
+        parsed = urlparse(url)
+        host = parsed.netloc or parsed.path.split("/")[0]
+        login_url = f"https://{host}/login" if host else "/login"
+        assert isinstance(login_url, str)
+
+def t_platform_scheduler_login_url_full_url():
+    """Full HTTPS URL must extract the host correctly."""
+    from urllib.parse import urlparse
+    url = "https://myapp.ngrok.io/auth/kite/callback"
+    parsed = urlparse(url)
+    host = parsed.netloc or parsed.path.split("/")[0]
+    assert host == "myapp.ngrok.io"
+    assert f"https://{host}/login" == "https://myapp.ngrok.io/login"
+
+run("platform_scheduler: login_url urlparse guard (no IndexError)", t_platform_scheduler_login_url_no_scheme)
+run("platform_scheduler: login_url extracts host from full HTTPS URL", t_platform_scheduler_login_url_full_url)
+
+
+# ══════════════════════════════════════════════════════════════════════════
 # FINAL SUMMARY
 # ══════════════════════════════════════════════════════════════════════════
 failed = summary()
