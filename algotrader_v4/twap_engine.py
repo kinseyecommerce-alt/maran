@@ -81,14 +81,18 @@ class TWAPEngine:
                 continue
 
             try:
-                order_id = kite_client.place_order(
-                    tradingsymbol=symbol,
-                    exchange=exchange,
-                    transaction_type=action,
-                    quantity=chunk,
-                    order_type="MARKET",
-                    product=product,
-                    tag=tag,
+                # run_in_executor: place_order can block 100ms-15s on HTTP + retries;
+                # a sync call here would freeze every agent's tick loop for that duration.
+                order_id = await asyncio.get_running_loop().run_in_executor(
+                    None, lambda: kite_client.place_order(
+                        tradingsymbol=symbol,
+                        exchange=exchange,
+                        transaction_type=action,
+                        quantity=chunk,
+                        order_type="MARKET",
+                        product=product,
+                        tag=tag,
+                    )
                 )
                 order_ids.append(order_id)
                 logger.info("[TWAP] {} slice {}/{}: qty={} id={}", symbol, i, n_slices, chunk, order_id)
