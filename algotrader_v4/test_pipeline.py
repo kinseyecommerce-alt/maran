@@ -6845,6 +6845,75 @@ def t_twap_execute_does_not_block_loop():
 run("twap_engine: place_order runs in executor thread, not event loop", t_twap_execute_does_not_block_loop)
 
 
+# ─────────────────────────────────────────────────────────────────────────────
+section("64. NOTIFIER — smtplib.SMTP missing timeout causes indefinite hang")
+# ─────────────────────────────────────────────────────────────────────────────
+# Bug: smtplib.SMTP(host, port) with no timeout parameter uses the OS default
+# (~75 s on Linux). If the SMTP server is unreachable, send_email blocks for
+# over a minute, freezing every thread that calls notifier.send().
+# Fix: pass timeout=10 so the socket raises socket.timeout after 10 seconds.
+
+def t_notifier_smtp_constructor_has_timeout():
+    """smtplib.SMTP must be constructed with an explicit timeout argument."""
+    import inspect
+    from notifier import Notifier
+
+    src = inspect.getsource(Notifier.send_email)
+    assert "timeout=10" in src, (
+        "Notifier.send_email must pass timeout=10 to smtplib.SMTP() to prevent "
+        "indefinite hang (≈75 s) when the SMTP server is unreachable"
+    )
+
+run("notifier: smtplib.SMTP constructed with explicit timeout=10", t_notifier_smtp_constructor_has_timeout)
+
+
+def t_notifier_send_email_raises_on_no_credentials():
+    """send_email raises ValueError when smtp_user or alert_email is missing."""
+    from unittest.mock import patch
+    from notifier import Notifier
+
+    n = Notifier()
+    with patch("notifier.settings") as ms:
+        ms.smtp_host = "smtp.gmail.com"
+        ms.smtp_port = 587
+        ms.smtp_user = ""          # empty → should raise
+        ms.smtp_pass = "secret"
+        ms.alert_email = "dest@example.com"
+        try:
+            n.send_email("subject", "body")
+            assert False, "Expected ValueError for missing smtp_user"
+        except ValueError:
+            pass
+
+run("notifier: send_email raises ValueError when smtp credentials missing", t_notifier_send_email_raises_on_no_credentials)
+
+
+def t_notifier_send_swallows_smtp_timeout():
+    """send() swallows socket.timeout from SMTP without raising to caller."""
+    import socket
+    from unittest.mock import patch, MagicMock
+    from notifier import Notifier
+
+    n = Notifier()
+
+    def raise_timeout(*args, **kwargs):
+        raise socket.timeout("timed out")
+
+    with patch("notifier.settings") as ms, \
+         patch("notifier.smtplib.SMTP", side_effect=raise_timeout):
+        ms.alert_email = "dest@example.com"
+        ms.smtp_user = "user@example.com"
+        ms.smtp_pass = "pass"
+        ms.smtp_host = "smtp.example.com"
+        ms.smtp_port = 587
+        ms.telegram_bot_token = ""
+        ms.telegram_chat_id = ""
+        # Must not raise — Notifier.send swallows all exceptions
+        n.send("test subject", "test body")
+
+run("notifier: send() swallows socket.timeout from unreachable SMTP server", t_notifier_send_swallows_smtp_timeout)
+
+
 # ══════════════════════════════════════════════════════════════════════════
 # FINAL SUMMARY
 # ══════════════════════════════════════════════════════════════════════════
