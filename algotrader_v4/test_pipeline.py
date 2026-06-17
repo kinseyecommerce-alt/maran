@@ -6613,6 +6613,66 @@ run("symbol_scanner: _score_all uses get_running_loop not get_event_loop", t_sym
 
 
 # ══════════════════════════════════════════════════════════════════════════
+# 60. BACKTEST ENGINE — profit_factor all-win + dead ann_return
+# ══════════════════════════════════════════════════════════════════════════
+section("60. BACKTEST ENGINE — profit_factor all-win + dead ann_return")
+
+def t_backtest_profit_factor_all_win():
+    """profit_factor must be 999.0 (capped infinity) when all trades are winners."""
+    from backtest_engine import BacktestEngine
+
+    eng = BacktestEngine()
+    # Synthesise all-win trades
+    all_win_trades = [
+        {"entry": 100.0, "exit": 103.0, "pnl": 300.0, "net_pnl": 280.0, "cost": 20.0,
+         "bars": 5, "exit_reason": "TGT"}
+        for _ in range(10)
+    ]
+    result = eng._compute_metrics("TEST", "intraday", all_win_trades)
+    assert result.profit_factor == 999.0, (
+        f"profit_factor for all-win trades must be 999.0 (capped infinity), "
+        f"got {result.profit_factor}"
+    )
+
+run("backtest_engine: profit_factor == 999.0 when all trades are winners", t_backtest_profit_factor_all_win)
+
+
+def t_backtest_profit_factor_no_trades_is_zero():
+    """profit_factor must be 0.0 when there are no wins and no losses."""
+    from backtest_engine import BacktestEngine, BacktestResult
+
+    eng = BacktestEngine()
+    # _compute_metrics returns early for empty trades, but we can test via
+    # a single losing trade (gross_profit == 0, gross_loss > 0)
+    losing_trades = [
+        {"entry": 100.0, "exit": 98.0, "pnl": -200.0, "net_pnl": -220.0, "cost": 20.0,
+         "bars": 3, "exit_reason": "SL"}
+        for _ in range(5)
+    ]
+    result = eng._compute_metrics("TEST", "intraday", losing_trades)
+    assert result.profit_factor == 0.0, (
+        f"profit_factor with no wins must be 0.0, got {result.profit_factor}"
+    )
+
+run("backtest_engine: profit_factor == 0.0 when there are no wins", t_backtest_profit_factor_no_trades_is_zero)
+
+
+def t_backtest_compute_metrics_no_dead_ann_return():
+    """_compute_metrics must not compute ann_return twice (dead code removed)."""
+    import inspect
+    from backtest_engine import BacktestEngine
+
+    src = inspect.getsource(BacktestEngine._compute_metrics)
+    # Count occurrences of 'ann_return =' — should be exactly 1 (the final assignment)
+    occurrences = src.count("ann_return =")
+    assert occurrences == 1, (
+        f"_compute_metrics should assign ann_return exactly once, found {occurrences} assignments"
+    )
+
+run("backtest_engine: _compute_metrics has no duplicate ann_return assignment", t_backtest_compute_metrics_no_dead_ann_return)
+
+
+# ══════════════════════════════════════════════════════════════════════════
 # FINAL SUMMARY
 # ══════════════════════════════════════════════════════════════════════════
 failed = summary()
