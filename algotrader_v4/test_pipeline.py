@@ -5357,6 +5357,41 @@ run("auto_login: ready=False when kite_redirect_url missing",      t_auto_login_
 
 
 # ══════════════════════════════════════════════════════════════════════════
+# 36. ALERT NOTIFICATIONS WIRED
+# ══════════════════════════════════════════════════════════════════════════
+
+def t_kill_switch_endpoint_fires_notifier():
+    import main as _m
+    import inspect
+    src = inspect.getsource(_m.trigger_kill_switch)
+    assert "notifier" in src or "send_kill_switch_alert" in src, \
+        "kill switch endpoint must fire notifier alert"
+
+def t_risk_manager_daily_loss_fires_notifier():
+    import risk_manager as _rm
+    import inspect
+    src = inspect.getsource(_rm.RiskManager.check_before_order)
+    assert "notifier" in src, "pre_trade_checks must fire notifier on daily loss breach"
+
+def t_risk_manager_50pct_warning_fires_notifier():
+    import risk_manager as _rm
+    import inspect
+    src = inspect.getsource(_rm.RiskManager.record_trade)
+    assert "notifier" in src, "record_trade must fire notifier at 50% loss threshold"
+
+def t_daily_loss_alert_fires_only_on_first_breach():
+    import risk_manager as _rm
+    import inspect
+    src = inspect.getsource(_rm.RiskManager.check_before_order)
+    assert "first_breach" in src, "daily loss alert must use first_breach guard to avoid spam"
+
+run("alerts: kill switch endpoint fires notifier",              t_kill_switch_endpoint_fires_notifier)
+run("alerts: risk manager daily loss fires notifier",           t_risk_manager_daily_loss_fires_notifier)
+run("alerts: risk manager 50% warning fires notifier",          t_risk_manager_50pct_warning_fires_notifier)
+run("alerts: daily loss alert only fires on first breach",      t_daily_loss_alert_fires_only_on_first_breach)
+
+
+# ══════════════════════════════════════════════════════════════════════════
 # FINAL SUMMARY
 # ══════════════════════════════════════════════════════════════════════════
 failed = summary()

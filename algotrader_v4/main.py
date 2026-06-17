@@ -1860,6 +1860,13 @@ async def trigger_kill_switch(reason: str = "Manual kill switch"):
     sebi_compliance.trigger_kill_switch(reason)
     from n8n_bridge import notify as _n8n
     asyncio.create_task(_n8n("system", {"type": "kill_switch", "reason": reason}))
+    async def _alert():
+        try:
+            from notifier import notifier as _notifier
+            await asyncio.to_thread(_notifier.send_kill_switch_alert, reason)
+        except Exception:
+            pass
+    asyncio.create_task(_alert())
     return {"status": "KILLED", "reason": reason}
 
 @app.post("/sebi/resume", tags=["SEBI Compliance"])
