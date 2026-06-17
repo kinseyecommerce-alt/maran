@@ -5431,6 +5431,42 @@ run("eod: daily summary fires even when no positions to close",  t_daily_summary
 
 
 # ══════════════════════════════════════════════════════════════════════════
+# 38. READINESS — AUTO_START CHECK
+# ══════════════════════════════════════════════════════════════════════════
+
+def t_readiness_includes_auto_start_configured():
+    import main as _m
+    import inspect
+    src = inspect.getsource(_m.readiness)
+    assert "auto_start_configured" in src, \
+        "/readiness must include auto_start_configured check"
+
+def t_readiness_auto_start_false_when_empty():
+    from config import settings as s
+    orig = s.auto_start_strategies
+    try:
+        s.auto_start_strategies = ""
+        result = bool(s.auto_start_strategies)
+        assert not result, "auto_start_configured must be False when auto_start_strategies is empty"
+    finally:
+        s.auto_start_strategies = orig
+
+def t_readiness_auto_start_true_when_set():
+    from config import settings as s
+    orig = s.auto_start_strategies
+    try:
+        s.auto_start_strategies = "intraday,scalping"
+        result = bool(s.auto_start_strategies)
+        assert result, "auto_start_configured must be True when auto_start_strategies is set"
+    finally:
+        s.auto_start_strategies = orig
+
+run("readiness: includes auto_start_configured check",          t_readiness_includes_auto_start_configured)
+run("readiness: auto_start_configured False when empty",        t_readiness_auto_start_false_when_empty)
+run("readiness: auto_start_configured True when set",           t_readiness_auto_start_true_when_set)
+
+
+# ══════════════════════════════════════════════════════════════════════════
 # FINAL SUMMARY
 # ══════════════════════════════════════════════════════════════════════════
 failed = summary()
