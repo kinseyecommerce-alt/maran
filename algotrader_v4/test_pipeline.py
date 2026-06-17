@@ -5392,6 +5392,45 @@ run("alerts: daily loss alert only fires on first breach",      t_daily_loss_ale
 
 
 # ══════════════════════════════════════════════════════════════════════════
+# 37. EOD DAILY SUMMARY
+# ══════════════════════════════════════════════════════════════════════════
+
+def t_squareoff_fires_daily_summary():
+    import master_agent_v5 as _m
+    import inspect
+    src = inspect.getsource(_m.MasterAgent._auto_squareoff)
+    assert "send_daily_summary" in src, "_auto_squareoff must call send_daily_summary"
+
+def t_daily_summary_uses_risk_manager_pnl():
+    import master_agent_v5 as _m
+    import inspect
+    src = inspect.getsource(_m.MasterAgent._auto_squareoff)
+    assert "daily_realised_pnl" in src, "daily summary must use risk_manager.daily_realised_pnl"
+
+def t_daily_summary_fires_even_without_positions():
+    import master_agent_v5 as _m
+    import inspect
+    src = inspect.getsource(_m.MasterAgent._auto_squareoff)
+    lines = src.splitlines()
+    # The summary try-block must start after the `if ids:` block closes.
+    # Find the line index of `if ids:` and of `send_daily_summary`.
+    ids_idx = next((i for i, l in enumerate(lines) if "if ids:" in l), None)
+    sum_idx = next((i for i, l in enumerate(lines) if "send_daily_summary" in l), None)
+    assert ids_idx is not None, "if ids: block not found"
+    assert sum_idx is not None, "send_daily_summary not found"
+    # The try: that contains send_daily_summary must be at same or lesser indent than `if ids:`
+    try_idx = next((i for i in range(sum_idx - 1, ids_idx, -1) if lines[i].lstrip().startswith("try:")), None)
+    assert try_idx is not None, "try: block containing send_daily_summary not found"
+    try_indent = len(lines[try_idx]) - len(lines[try_idx].lstrip())
+    ids_indent = len(lines[ids_idx]) - len(lines[ids_idx].lstrip())
+    assert try_indent <= ids_indent, "send_daily_summary try-block must not be inside `if ids:`"
+
+run("eod: squareoff job fires send_daily_summary",              t_squareoff_fires_daily_summary)
+run("eod: daily summary uses risk_manager.daily_realised_pnl",  t_daily_summary_uses_risk_manager_pnl)
+run("eod: daily summary fires even when no positions to close",  t_daily_summary_fires_even_without_positions)
+
+
+# ══════════════════════════════════════════════════════════════════════════
 # FINAL SUMMARY
 # ══════════════════════════════════════════════════════════════════════════
 failed = summary()
