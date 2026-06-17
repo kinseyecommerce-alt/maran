@@ -96,7 +96,7 @@ class TWAPExecutor:
         loop: asyncio.AbstractEventLoop | None = None,
     ) -> list[str]:
         """TWAP: equal qty per slice. Falls back to single order when disabled or qty too small."""
-        loop = loop or asyncio.get_event_loop()
+        loop = loop or asyncio.get_running_loop()
         if not settings.use_twap or qty < _threshold():
             logger.debug("TWAP bypassed (use_twap={} qty={} threshold={}), single order",
                          settings.use_twap, qty, _threshold())
@@ -127,7 +127,7 @@ class TWAPExecutor:
         loop: asyncio.AbstractEventLoop | None = None,
     ) -> list[str]:
         """VWAP: qty per slice proportional to volume_profile weights (uniform if None)."""
-        loop = loop or asyncio.get_event_loop()
+        loop = loop or asyncio.get_running_loop()
         n = settings.twap_slices
         dur = _duration()
 

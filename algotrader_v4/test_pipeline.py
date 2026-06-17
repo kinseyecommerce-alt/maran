@@ -7379,6 +7379,30 @@ run("atomic_bracket: cancel_order failure on T2 target exit logs warning", t_ato
 
 
 # ══════════════════════════════════════════════════════════════════════════
+# 73. TWAP EXECUTOR — deprecated get_event_loop in async place_twap/place_vwap
+# ══════════════════════════════════════════════════════════════════════════
+section("73. TWAP EXECUTOR — deprecated get_event_loop in async place_twap/place_vwap")
+
+def t_twap_executor_no_get_event_loop():
+    """place_twap() and place_vwap() must not call get_event_loop() inside async defs."""
+    import inspect
+    from twap_executor import TWAPExecutor
+
+    for method_name in ("place_twap", "place_vwap"):
+        src = inspect.getsource(getattr(TWAPExecutor, method_name))
+        assert "get_event_loop()" not in src, (
+            f"TWAPExecutor.{method_name}() must not call asyncio.get_event_loop() "
+            f"inside an async function — use asyncio.get_running_loop() "
+            f"(get_event_loop() is deprecated in Python 3.10+ inside coroutines)"
+        )
+        assert "get_running_loop()" in src or "loop" in src, (
+            f"TWAPExecutor.{method_name}() must obtain the event loop via get_running_loop()"
+        )
+
+run("twap_executor: place_twap/place_vwap use get_running_loop not get_event_loop", t_twap_executor_no_get_event_loop)
+
+
+# ══════════════════════════════════════════════════════════════════════════
 # FINAL SUMMARY
 # ══════════════════════════════════════════════════════════════════════════
 failed = summary()
