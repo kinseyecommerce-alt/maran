@@ -6557,6 +6557,62 @@ run("broker_router: clear_secondaries does not raise during concurrent read", t_
 
 
 # ══════════════════════════════════════════════════════════════════════════
+# 59. SYMBOL SCANNER — shared SymbolScore mutation + get_running_loop
+# ══════════════════════════════════════════════════════════════════════════
+section("59. SYMBOL SCANNER — shared SymbolScore mutation + get_running_loop")
+
+def t_symbol_scanner_score_not_shared_between_strategies():
+    """_select_for_strategy must not mutate the shared scores dict object."""
+    import copy, inspect
+    from symbol_scanner import SymbolScanner, SymbolScore, CRITERIA
+
+    scanner = SymbolScanner()
+    # Build a minimal shared scores dict with one symbol in two strategies
+    sym = "RELIANCE"
+    shared_sc = SymbolScore(
+        symbol=sym, exchange="NSE",
+        avg_volume=1_500_000, atr_pct=1.5, rsi=50, adx=30,
+        ema9=2400, ema21=2380, ltp=2420, trend_direction="UP",
+        liquidity_score=70, trend_score=80, momentum_score=60, volatility_score=90,
+    )
+    scores = {sym: shared_sc}
+
+    # Run select for intraday — mutates strategy/selected on the copy
+    _, _ = scanner._select_for_strategy("intraday", CRITERIA["intraday"], scores)
+
+    # The original shared_sc must be unchanged
+    assert shared_sc.strategy == "", (
+        f"_select_for_strategy must not mutate shared SymbolScore.strategy "
+        f"— got '{shared_sc.strategy}'"
+    )
+    assert shared_sc.selected is False, (
+        "_select_for_strategy must not mutate shared SymbolScore.selected"
+    )
+    assert shared_sc.total_score == 0.0, (
+        "_select_for_strategy must not mutate shared SymbolScore.total_score"
+    )
+
+run("symbol_scanner: _select_for_strategy does not mutate shared SymbolScore", t_symbol_scanner_score_not_shared_between_strategies)
+
+
+def t_symbol_scanner_uses_get_running_loop():
+    """_score_all must use get_running_loop(), not deprecated get_event_loop()."""
+    import inspect
+    from symbol_scanner import SymbolScanner
+
+    src = inspect.getsource(SymbolScanner._score_all)
+    assert "get_event_loop()" not in src, (
+        "_score_all must not call asyncio.get_event_loop() — "
+        "use asyncio.get_running_loop() inside async code"
+    )
+    assert "get_running_loop()" in src, (
+        "_score_all must call asyncio.get_running_loop() for run_in_executor"
+    )
+
+run("symbol_scanner: _score_all uses get_running_loop not get_event_loop", t_symbol_scanner_uses_get_running_loop)
+
+
+# ══════════════════════════════════════════════════════════════════════════
 # FINAL SUMMARY
 # ══════════════════════════════════════════════════════════════════════════
 failed = summary()

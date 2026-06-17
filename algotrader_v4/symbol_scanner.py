@@ -20,6 +20,7 @@ Also callable on demand via POST /symbols/refresh.
 from __future__ import annotations
 
 import asyncio
+import copy
 from dataclasses import dataclass, field
 from datetime import datetime, time
 from pathlib import Path
@@ -391,7 +392,7 @@ class SymbolScanner:
             async with sem:
                 try:
                     sc = await asyncio.wait_for(
-                        asyncio.get_event_loop().run_in_executor(None, self._score_symbol, sym),
+                        asyncio.get_running_loop().run_in_executor(None, self._score_symbol, sym),
                         timeout=12.0,
                     )
                 except asyncio.TimeoutError:
@@ -524,10 +525,13 @@ class SymbolScanner:
         for sym in crit.universe:
             sc = scores.get(sym)
             if not sc:
-                sc = SymbolScore(symbol=sym, reject_reason="No data")
-                candidates.append(sc)
+                candidates.append(SymbolScore(symbol=sym, reject_reason="No data"))
                 continue
 
+            # Shallow-copy: the shared scores dict is reused across all strategies.
+            # Mutations (strategy, selected, reject_reason, total_score) must not
+            # bleed between strategies for the same symbol.
+            sc = copy.copy(sc)
             sc.strategy = strategy
 
             # Hard filters
