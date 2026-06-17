@@ -1062,6 +1062,20 @@ async def multi_leg_order(req: MultiLegRequest):
         except Exception as exc:
             logger.error("Multi-leg leg failed {}: {}", sym, exc)
             errors.append(f"{sym}: {exc}")
+            # Roll back already-placed legs to avoid an unhedged position on the exchange
+            for placed_oid in order_ids:
+                try:
+                    kite_client.cancel_order(order_id=placed_oid)
+                    logger.info("Multi-leg rollback: cancelled {}", placed_oid)
+                except Exception as _ce:
+                    logger.error("Multi-leg rollback cancel {} failed: {}", placed_oid, _ce)
+            return {
+                "status":      "failed",
+                "order_ids":   [],
+                "errors":      errors,
+                "legs_placed": 0,
+                "legs_total":  len(req.legs),
+            }
     return {
         "status":   "ok" if not errors else "partial",
         "order_ids": order_ids,

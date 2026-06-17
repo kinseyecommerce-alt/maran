@@ -174,8 +174,8 @@ class SEBICompliance:
                 _ip = _ip.strip()
                 if _ip:
                     self._whitelisted_ips.add(_ip)
-        except Exception:
-            pass
+        except Exception as exc:
+            logger.warning("[SEBI] could not load whitelisted IPs from config: {}", exc)
 
         # Reg 3: order-to-trade ratio (orders placed vs orders executed)
         self._orders_placed:   int = 0

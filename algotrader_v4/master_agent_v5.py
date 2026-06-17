@@ -285,7 +285,7 @@ class MasterAgent:
             try:
                 if tick_engine.ws_broadcast:
                     import asyncio
-                    asyncio.create_task(tick_engine.ws_broadcast({
+                    _bcast = asyncio.create_task(tick_engine.ws_broadcast({
                         "event":      "black_swan_detected",
                         "phase":      "FALLING",
                         "regime":     regime.value,
@@ -294,6 +294,11 @@ class MasterAgent:
                                           regime_detector._vix_history[-1]
                                           if regime_detector._vix_history else 0), 2),
                     }))
+                    _bcast.add_done_callback(
+                        lambda t: logger.warning("[master] BLACK_SWAN broadcast failed: {}",
+                                                 t.exception())
+                        if not t.cancelled() and t.exception() is not None else None
+                    )
             except Exception as _e:
                 logger.warning("[master] BLACK SWAN broadcast failed: {}", _e)
             asyncio.create_task(send_telegram(
@@ -311,10 +316,15 @@ class MasterAgent:
             self._apply_regime_plan(regime, plan)
             try:
                 if tick_engine.ws_broadcast:
-                    asyncio.create_task(tick_engine.ws_broadcast({
+                    _bcast2 = asyncio.create_task(tick_engine.ws_broadcast({
                         "event":      "black_swan_cleared",
                         "new_regime": regime.value,
                     }))
+                    _bcast2.add_done_callback(
+                        lambda t: logger.warning("[master] BLACK_SWAN_CLEARED broadcast failed: {}",
+                                                 t.exception())
+                        if not t.cancelled() and t.exception() is not None else None
+                    )
             except Exception:
                 pass
 

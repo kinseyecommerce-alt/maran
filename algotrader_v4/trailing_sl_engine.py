@@ -641,7 +641,13 @@ class TrailingSLEngine:
                         continue
                     _task = loop.create_task(_cb(pos, old_sl, "BLACK_SWAN_TIGHTEN"))
                     _TIGHTEN_TASKS.add(_task)
-                    _task.add_done_callback(_TIGHTEN_TASKS.discard)
+                    def _handle_done(t: _asyncio.Task, _sym=pos.symbol) -> None:
+                        _TIGHTEN_TASKS.discard(t)
+                        if not t.cancelled() and t.exception() is not None:
+                            logger.warning(
+                                "[TSL] BLACK_SWAN_TIGHTEN callback failed for {}: {}",
+                                _sym, t.exception())
+                    _task.add_done_callback(_handle_done)
         return count
 
     def all_positions(self) -> list[dict]:

@@ -7787,6 +7787,263 @@ run("gamma_scalp: build_gex_profile(spot=-1) returns without error", t_gamma_sca
 
 
 # ══════════════════════════════════════════════════════════════════════════
+# 82. BASE AGENT — mirror_entry fire-and-forget (no error handling)
+# ══════════════════════════════════════════════════════════════════════════
+section("82. BASE AGENT — mirror_entry must be wrapped in a logged async task")
+
+def t_base_agent_mirror_uses_create_task():
+    """The multi-broker mirror call must be wrapped in asyncio.create_task()
+    with exception handling, not raw run_in_executor() whose future is
+    discarded — silent failures leave brokers out of sync."""
+    import inspect
+    from agents.base_agent import BaseAgent
+
+    src = inspect.getsource(BaseAgent._place_orders)
+    assert ("asyncio.create_task" in src and "_mirror_to_secondaries" in src), (
+        "BaseAgent._place_orders must wrap mirror_entry in create_task(_mirror_to_secondaries()) "
+        "so exceptions are caught and logged instead of silently swallowed"
+    )
+
+run("base_agent: mirror_entry wrapped in error-handled create_task", t_base_agent_mirror_uses_create_task)
+
+
+# ══════════════════════════════════════════════════════════════════════════
+# 83. BASE AGENT — missing timeout on kite_client.positions() call
+# ══════════════════════════════════════════════════════════════════════════
+section("83. BASE AGENT — kite_client.positions() must have asyncio.wait_for timeout")
+
+def t_base_agent_positions_timeout():
+    """Without asyncio.wait_for, a hung kite_client.positions() call blocks
+    the entire tick-loop indefinitely, freezing all agents."""
+    import inspect
+    from agents.base_agent import BaseAgent
+
+    src = inspect.getsource(BaseAgent._run_loop)
+    assert "wait_for" in src, (
+        "BaseAgent._run_loop must use asyncio.wait_for(..., timeout=5.0) around "
+        "kite_client.positions() — a hung broker call otherwise deadlocks the tick loop"
+    )
+
+run("base_agent: asyncio.wait_for(kite_client.positions, timeout=5.0) present", t_base_agent_positions_timeout)
+
+
+# ══════════════════════════════════════════════════════════════════════════
+# 84. TRAILING SL ENGINE — tighten_all tasks have no exception handler
+# ══════════════════════════════════════════════════════════════════════════
+section("84. TRAILING SL ENGINE — BLACK_SWAN tighten tasks must log exceptions")
+
+def t_tsl_tighten_tasks_log_exceptions():
+    """If a TSL callback raises during BLACK_SWAN (e.g. broker unreachable),
+    the task dies silently leaving the SL-M order at the old price on the exchange.
+    The done_callback must log the exception."""
+    import inspect
+    from trailing_sl_engine import TrailingSLEngine
+
+    src = inspect.getsource(TrailingSLEngine.tighten_all)
+    assert ("t.exception()" in src or "exception()" in src), (
+        "TrailingSLEngine.tighten_all must check t.exception() in the task done_callback "
+        "so failures to update SL-M on the broker are logged and visible"
+    )
+
+run("trailing_sl_engine: tighten_all done_callback checks task exception()", t_tsl_tighten_tasks_log_exceptions)
+
+
+# ══════════════════════════════════════════════════════════════════════════
+# 85. MASTER AGENT — BLACK_SWAN broadcast task has no error handler
+# ══════════════════════════════════════════════════════════════════════════
+section("85. MASTER AGENT V5 — BLACK_SWAN ws_broadcast task must log failures")
+
+def t_master_black_swan_broadcast_has_handler():
+    """asyncio.create_task(ws_broadcast(...)) during BLACK_SWAN must have a
+    done_callback that logs exceptions — otherwise dashboard misses the alert."""
+    import inspect
+    import master_agent_v5 as _mv5
+
+    src = inspect.getsource(_mv5.MasterAgent._master_review)
+    assert ("_bcast" in src and "add_done_callback" in src), (
+        "MasterAgent._master_review must attach add_done_callback to the BLACK_SWAN "
+        "broadcast task to log failures; silent loss of the alert desynchronises the dashboard"
+    )
+
+run("master_agent_v5: BLACK_SWAN broadcast task has add_done_callback", t_master_black_swan_broadcast_has_handler)
+
+
+# ══════════════════════════════════════════════════════════════════════════
+# 86. MAIN — multi-leg order partial failure must rollback placed legs
+# ══════════════════════════════════════════════════════════════════════════
+section("86. MAIN — multi-leg endpoint must cancel placed legs on partial failure")
+
+def t_main_multileg_rollback_on_failure():
+    """If leg N fails after legs 1..N-1 succeeded, the endpoint must cancel
+    the placed legs to prevent an unhedged position on the exchange."""
+    import inspect
+    import main as _main
+
+    src = inspect.getsource(_main.multi_leg_order)
+    assert "cancel_order" in src and "rollback" in src.lower(), (
+        "multi_leg_order must cancel already-placed legs when a later leg fails "
+        "to avoid leaving an unhedged position on the exchange"
+    )
+
+run("main: place_multi_leg_order cancels placed legs on partial failure", t_main_multileg_rollback_on_failure)
+
+
+# ══════════════════════════════════════════════════════════════════════════
+# 87. TRADE MEMORY — blocking file I/O inside async record_trade
+# ══════════════════════════════════════════════════════════════════════════
+section("87. TRADE MEMORY — record_trade must use asyncio.to_thread for file I/O")
+
+def t_trade_memory_uses_to_thread():
+    """record_trade() is async. Writing to MEMORY_FILE synchronously blocks
+    the event loop. Must use asyncio.to_thread() to offload the file write."""
+    import inspect
+    import trade_memory as _tm
+
+    src = inspect.getsource(_tm.record_trade)
+    assert "asyncio.to_thread" in src, (
+        "trade_memory.record_trade must wrap file I/O in asyncio.to_thread(); "
+        "synchronous file writes block the event loop and delay order processing"
+    )
+
+run("trade_memory: record_trade uses asyncio.to_thread for file writes", t_trade_memory_uses_to_thread)
+
+
+# ══════════════════════════════════════════════════════════════════════════
+# 88. UPSTOX BROKER — unsynchronized paper order/position state
+# ══════════════════════════════════════════════════════════════════════════
+section("88. UPSTOX BROKER — paper orders/positions must be guarded by a lock")
+
+def t_upstox_broker_has_paper_lock():
+    """UpstoxBroker._paper_orders and _paper_positions are accessed from tick
+    engine threads and the event loop concurrently. Without a lock the lists
+    can be corrupted (lost updates, IndexError)."""
+    from brokers.upstox_broker import UpstoxBroker
+    broker = UpstoxBroker()
+    assert hasattr(broker, "_paper_lock"), (
+        "UpstoxBroker must have a _paper_lock (threading.Lock) to guard concurrent "
+        "access to _paper_orders and _paper_positions"
+    )
+
+run("upstox_broker: _paper_lock attribute exists", t_upstox_broker_has_paper_lock)
+
+
+def t_upstox_broker_orders_uses_lock():
+    """orders() in PAPER mode must return under the lock."""
+    import inspect
+    from brokers.upstox_broker import UpstoxBroker
+    src = inspect.getsource(UpstoxBroker.orders)
+    assert "_paper_lock" in src, (
+        "UpstoxBroker.orders() must acquire _paper_lock before reading _paper_orders"
+    )
+
+run("upstox_broker: orders() acquires _paper_lock", t_upstox_broker_orders_uses_lock)
+
+
+# ══════════════════════════════════════════════════════════════════════════
+# 89. SEBI COMPLIANCE — silent exception swallow in IP whitelist init
+# ══════════════════════════════════════════════════════════════════════════
+section("89. SEBI COMPLIANCE — IP whitelist init must log exceptions")
+
+def t_sebi_compliance_ip_whitelist_logs_exception():
+    """If whitelist parsing fails silently, _whitelisted_ips stays empty,
+    making is_ip_allowed() return True for all IPs — a security bypass."""
+    import inspect
+    from sebi_compliance import SEBICompliance
+
+    src = inspect.getsource(SEBICompliance.__init__)
+    # Verify the except clause now logs (not bare pass)
+    assert ("logger.warning" in src or "logger.error" in src), (
+        "SEBICompliance.__init__ IP whitelist except must log the exception; "
+        "silent failure leaves _whitelisted_ips empty → is_ip_allowed() allows everyone"
+    )
+
+run("sebi_compliance: IP whitelist parse exception is logged not silently swallowed", t_sebi_compliance_ip_whitelist_logs_exception)
+
+
+# ══════════════════════════════════════════════════════════════════════════
+# 90. ATOMIC BRACKET — _broadcast_update silent swallow hides WS failures
+# ══════════════════════════════════════════════════════════════════════════
+section("90. ATOMIC BRACKET — _broadcast_update must log ws_broadcast exceptions")
+
+def t_atomic_bracket_broadcast_logs_exception():
+    """Silent except: pass on ws_broadcast hides connection drops; operators
+    can't distinguish a closed socket from a working one."""
+    import inspect
+    from atomic_bracket import AtomicBracketEngine
+
+    src = inspect.getsource(AtomicBracketEngine._broadcast_update)
+    assert "pass" not in src.split("except")[-1].split("\n")[0], (
+        "_broadcast_update must not bare-pass on ws_broadcast exception; "
+        "use logger.debug to retain observability"
+    )
+
+run("atomic_bracket: _broadcast_update logs exceptions instead of bare pass", t_atomic_bracket_broadcast_logs_exception)
+
+
+# ══════════════════════════════════════════════════════════════════════════
+# 91. ADMIN PORTAL — file handle leak after subprocess.Popen
+# ══════════════════════════════════════════════════════════════════════════
+section("91. ADMIN PORTAL — log_file must be closed after Popen")
+
+def t_admin_portal_log_file_closed():
+    """After Popen inherits the log_file fd, the parent must close its copy
+    to avoid accumulating open file descriptors on each /api/{user}/start call."""
+    from pathlib import Path
+    src = Path("/home/user/maran/algotrader_v4/admin/portal.py").read_text()
+    popen_pos = src.find("Popen(")
+    close_pos  = src.find("log_file.close()")
+    assert close_pos > popen_pos, (
+        "admin/portal.py api_start must call log_file.close() after subprocess.Popen(); "
+        "each call leaks one file descriptor without it"
+    )
+
+run("admin/portal: log_file.close() called after Popen", t_admin_portal_log_file_closed)
+
+
+# ══════════════════════════════════════════════════════════════════════════
+# 92. ADMIN PROVISION — file handle leak after subprocess.Popen
+# ══════════════════════════════════════════════════════════════════════════
+section("92. ADMIN PROVISION — log_file must be closed after Popen")
+
+def t_admin_provision_log_file_closed():
+    """Same pattern as admin/portal — parent must close its log_file copy."""
+    import inspect
+    import admin.provision as _prov
+
+    src = inspect.getsource(_prov.cmd_start)
+    popen_pos = src.find("Popen(")
+    close_pos  = src.find("log_file.close()")
+    assert close_pos > popen_pos, (
+        "admin/provision.cmd_start must call log_file.close() after Popen(); "
+        "leaks accumulate with each user start command"
+    )
+
+run("admin/provision: log_file.close() called after Popen", t_admin_provision_log_file_closed)
+
+
+# ══════════════════════════════════════════════════════════════════════════
+# 93. ML SIGNAL FILTER — _encode race condition without lock
+# ══════════════════════════════════════════════════════════════════════════
+section("93. ML SIGNAL FILTER — _encode must hold the lock to prevent TOCTOU race")
+
+def t_ml_signal_filter_encode_uses_lock():
+    """_encode() is called from _build_features() which is called outside the
+    lock in filter_signal(). Two concurrent calls can assign the same integer
+    index to different categories, corrupting feature encoding."""
+    import inspect
+    from ml_signal_filter import MLSignalFilter
+
+    src = inspect.getsource(MLSignalFilter._encode)
+    assert "_lock" in src or "self._lock" in src, (
+        "MLSignalFilter._encode must acquire self._lock; "
+        "called without lock from _build_features(), allowing two threads to assign "
+        "the same encoder index to different category values"
+    )
+
+run("ml_signal_filter: _encode acquires self._lock for thread-safe check-then-set", t_ml_signal_filter_encode_uses_lock)
+
+
+# ══════════════════════════════════════════════════════════════════════════
 # FINAL SUMMARY
 # ══════════════════════════════════════════════════════════════════════════
 failed = summary()

@@ -190,10 +190,12 @@ async def record_trade(
             "lesson":       lesson,
         }
 
-        with MEMORY_FILE.open("a", encoding="utf-8") as fh:
-            fh.write(json.dumps(entry) + "\n")
+        def _write_and_trim(_entry: dict) -> None:
+            with MEMORY_FILE.open("a", encoding="utf-8") as fh:
+                fh.write(json.dumps(_entry) + "\n")
+            _trim_file_to_max_entries()
 
-        _trim_file_to_max_entries()
+        await asyncio.to_thread(_write_and_trim, entry)
 
         logger.info(
             "[memory] {} {} {} {:.2f}% | {}", outcome, action, symbol, float(pnl_pct), insight

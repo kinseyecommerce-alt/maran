@@ -13,6 +13,7 @@ Upstox API v2 endpoints used:
 """
 from __future__ import annotations
 
+import threading
 import uuid
 from datetime import datetime
 from typing import Any, Optional
@@ -97,6 +98,7 @@ class UpstoxBroker(BaseBroker):
         self._access_token: str = settings.upstox_access_token or ""
         self._paper_orders:    list[dict] = []
         self._paper_positions: list[dict] = []
+        self._paper_lock = threading.Lock()
 
     # ── Auth ─────────────────────────────────────────────────────────────────
 
@@ -310,11 +312,12 @@ class UpstoxBroker(BaseBroker):
         trigger_price: float = 0.0,
     ) -> str:
         if settings.trading_mode == "PAPER":
-            for o in self._paper_orders:
-                if o["order_id"] == order_id:
-                    if price:         o["price"]         = price
-                    if quantity:      o["quantity"]       = quantity
-                    if trigger_price: o["trigger_price"]  = trigger_price
+            with self._paper_lock:
+                for o in self._paper_orders:
+                    if o["order_id"] == order_id:
+                        if price:         o["price"]         = price
+                        if quantity:      o["quantity"]       = quantity
+                        if trigger_price: o["trigger_price"]  = trigger_price
             return order_id
 
         payload: dict = {"order_id": order_id}
@@ -327,9 +330,10 @@ class UpstoxBroker(BaseBroker):
 
     def cancel_order(self, order_id: str) -> str:
         if settings.trading_mode == "PAPER":
-            for o in self._paper_orders:
-                if o["order_id"] == order_id:
-                    o["status"] = "CANCELLED"
+            with self._paper_lock:
+                for o in self._paper_orders:
+                    if o["order_id"] == order_id:
+                        o["status"] = "CANCELLED"
             return order_id
 
         self._delete("/order/cancel", params={"order_id": order_id})
@@ -359,7 +363,8 @@ class UpstoxBroker(BaseBroker):
 
     def orders(self) -> list[dict]:
         if settings.trading_mode == "PAPER":
-            return self._paper_orders
+            with self._paper_lock:
+                return list(self._paper_orders)
 
         try:
             data = self._get("/order/retrieve-all")
@@ -371,7 +376,9 @@ class UpstoxBroker(BaseBroker):
 
     def positions(self) -> dict:
         if settings.trading_mode == "PAPER":
-            return {"net": self._paper_positions, "day": self._paper_positions}
+            with self._paper_lock:
+                snap = list(self._paper_positions)
+            return {"net": snap, "day": snap}
 
         try:
             data = self._get("/portfolio/short-term-positions")
@@ -489,9 +496,10 @@ class UpstoxBroker(BaseBroker):
             "tag":              tag,
             "placed_at":        datetime.now().isoformat(),
         }
-        self._paper_orders.append(record)
-        if status == "COMPLETE":
-            self._update_paper_position(record)
+        with self._paper_lock:
+            self._paper_orders.append(record)
+            if status == "COMPLETE":
+                self._update_paper_position(record)
         logger.info(
             "[Upstox PAPER] {} {} {} qty={} @ ₹{} | id={}",
             transaction_type, tradingsymbol, order_type, quantity, price, order_id,
@@ -526,32 +534,34 @@ class UpstoxBroker(BaseBroker):
 
     def check_paper_triggers(self, symbol: str, ltp: float) -> None:
         """Check pending SL/SL-M paper orders for *symbol*."""
-        for order in self._paper_orders:
-            if order["tradingsymbol"] != symbol:
-                continue
-            if order["status"] != "TRIGGER PENDING":
-                continue
-            tp = order.get("trigger_price", 0.0)
-            if tp <= 0:
-                continue
-            triggered = False
-            if order["transaction_type"] == "SELL" and ltp <= tp:
-                triggered = True
-            elif order["transaction_type"] == "BUY" and ltp >= tp:
-                triggered = True
-            if triggered:
-                order["status"] = "COMPLETE"
-                order["price"]  = ltp
-                self._update_paper_position(order)
-                logger.info(
-                    "[Upstox PAPER] Trigger hit — {} {} {} qty={} trigger=₹{} fill=₹{}",
-                    order["transaction_type"], symbol,
-                    order["order_type"], order["quantity"], tp, ltp,
-                )
+        with self._paper_lock:
+            for order in self._paper_orders:
+                if order["tradingsymbol"] != symbol:
+                    continue
+                if order["status"] != "TRIGGER PENDING":
+                    continue
+                tp = order.get("trigger_price", 0.0)
+                if tp <= 0:
+                    continue
+                triggered = False
+                if order["transaction_type"] == "SELL" and ltp <= tp:
+                    triggered = True
+                elif order["transaction_type"] == "BUY" and ltp >= tp:
+                    triggered = True
+                if triggered:
+                    order["status"] = "COMPLETE"
+                    order["price"]  = ltp
+                    self._update_paper_position(order)
+                    logger.info(
+                        "[Upstox PAPER] Trigger hit — {} {} {} qty={} trigger=₹{} fill=₹{}",
+                        order["transaction_type"], symbol,
+                        order["order_type"], order["quantity"], tp, ltp,
+                    )
 
     def update_paper_pnl(self, symbol: str, ltp: float) -> None:
         """Update last_price and P&L for every paper position matching *symbol*."""
-        for pos in self._paper_positions:
-            if pos["tradingsymbol"] == symbol:
-                pos["last_price"] = ltp
-                pos["pnl"] = round((ltp - pos["average_price"]) * pos["quantity"], 2)
+        with self._paper_lock:
+            for pos in self._paper_positions:
+                if pos["tradingsymbol"] == symbol:
+                    pos["last_price"] = ltp
+                    pos["pnl"] = round((ltp - pos["average_price"]) * pos["quantity"], 2)

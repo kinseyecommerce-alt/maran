@@ -180,9 +180,10 @@ class MLSignalFilter:
 
     def _encode(self, category: str, value: str) -> int:
         key = f"{category}:{value}"
-        if key not in self._encoder:
-            self._encoder[key] = len(self._encoder)
-        return self._encoder[key]
+        with self._lock:
+            if key not in self._encoder:
+                self._encoder[key] = len(self._encoder)
+            return self._encoder[key]
 
     def _build_features(
         self,

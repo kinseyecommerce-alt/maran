@@ -199,6 +199,7 @@ def cmd_start(username: str) -> None:
         stdout=log_file,
         stderr=log_file,
     )
+    log_file.close()  # child inherited the fd; parent's copy can be freed
 
     print(f"⏳  Starting {username} on port {port} (PID {proc.pid}) ...")
     if _health_check(port):

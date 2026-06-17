@@ -507,7 +507,8 @@ class AtomicBracketEngine:
     async def _broadcast_update(self, bracket: BracketOrder) -> None:
         if self.ws_broadcast:
             try: await self.ws_broadcast({"event": "bracket_update", "bracket": bracket.to_dict()})
-            except Exception: pass
+            except Exception as _exc:
+                logger.debug("[Bracket] ws_broadcast failed: {}", _exc)
 
     def all_brackets(self, active_only: bool = False) -> list[dict]:
         brackets = list(self._brackets.values())

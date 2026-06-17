@@ -679,8 +679,9 @@ class BaseAgent(ABC):
                         _sf = round(_sf * _evt["size_factor"], 3)
 
                     from correlation_guard import check as _corr_check
-                    _positions_data = await asyncio.get_running_loop().run_in_executor(
-                        None, kite_client.positions
+                    _positions_data = await asyncio.wait_for(
+                        asyncio.get_running_loop().run_in_executor(None, kite_client.positions),
+                        timeout=5.0,
                     )
                     _open_syms = [
                         p["tradingsymbol"] for p in _positions_data.get("net", [])
@@ -1278,7 +1279,7 @@ class BaseAgent(ABC):
 
         # Mirror to secondary broker(s) if multi-broker is enabled
         if settings.enable_multi_broker and broker_router.has_secondaries:
-            loop.run_in_executor(None, lambda: broker_router.mirror_entry(
+            _mirror_kwargs = dict(
                 primary_order_id=str(order_id),
                 tradingsymbol=trade_sym,
                 exchange=exch,
@@ -1287,7 +1288,14 @@ class BaseAgent(ABC):
                 product=signal.get("product", self.product),
                 sl_trigger=signal.get("stop_loss", risk_manager.sl_price(ltp, action)),
                 agent_tag=f"Agent-{self.name}",
-            ))
+            )
+            async def _mirror_to_secondaries(_kw=_mirror_kwargs) -> None:
+                try:
+                    await loop.run_in_executor(None, lambda: broker_router.mirror_entry(**_kw))
+                except Exception as _exc:
+                    logger.warning("[{}] mirror_entry to secondary broker failed: {}",
+                                   self.name, _exc)
+            asyncio.create_task(_mirror_to_secondaries())
 
         return order_id, sl_order_id, qty
 
