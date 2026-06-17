@@ -1755,6 +1755,19 @@
           </button>
         </div>
 
+        <!-- System Readiness -->
+        <div class="card section-gap" id="readiness-card">
+          <div class="card-title"><i data-lucide="shield-check"></i> System Readiness
+            <button class="btn btn-sm" style="margin-left:auto;padding:3px 10px;font-size:12px" onclick="fetchReadiness()">
+              <i data-lucide="refresh-cw"></i> Refresh
+            </button>
+          </div>
+          <div id="readiness-banner" style="display:none;padding:8px 12px;border-radius:6px;margin-bottom:10px;font-weight:600;font-size:13px"></div>
+          <div id="readiness-checks" style="display:grid;grid-template-columns:repeat(auto-fill,minmax(220px,1fr));gap:8px">
+            <div style="color:var(--fg3);font-size:13px">Loading…</div>
+          </div>
+        </div>
+
       </div><!-- /tab-botcontrol -->
 
 
@@ -2903,6 +2916,8 @@ function switchTab(name) {
   }
   // Load regime history chart when analytics tab opens
   if (name === 'analytics') fetchRegimeHistory();
+  // Refresh readiness when bot control tab opens
+  if (name === 'botcontrol') fetchReadiness();
   // Refresh broker statuses and friend accounts when settings tab opens
   if (name === 'settings') {
     fetchKiteStatus();
@@ -4686,6 +4701,40 @@ async function fetchHealth() {
   } catch {}
 }
 
+async function fetchReadiness() {
+  try {
+    const d = await fetch('/readiness').then(r => r.json());
+    if (!d) return;
+    const banner = document.getElementById('readiness-banner');
+    banner.style.display = 'block';
+    if (d.ready_for_live) {
+      banner.style.background = 'rgba(63,185,80,.15)';
+      banner.style.color = '#3fb950';
+      banner.style.border = '1px solid rgba(63,185,80,.3)';
+      banner.textContent = `✓ Ready for LIVE trading  ·  Mode: ${d.mode}  ·  Tick: ${d.tick_interval_ms}ms`;
+    } else {
+      banner.style.background = 'rgba(248,81,73,.12)';
+      banner.style.color = '#f85149';
+      banner.style.border = '1px solid rgba(248,81,73,.3)';
+      banner.textContent = `✗ Not ready for LIVE  ·  Missing: ${(d.missing||[]).join(', ') || 'unknown'}`;
+    }
+    const labels = {
+      kite_api_key: 'Kite API Key', kite_api_secret: 'Kite API Secret',
+      kite_access_token: 'Kite Access Token', kite_initialised: 'Kite Initialised',
+      anthropic_api_key: 'Anthropic API Key', jwt_secret_key: 'JWT Secret',
+      telegram_bot: 'Telegram Bot', auto_login_ready: 'Auto-Login (TOTP)',
+      auto_start_configured: 'Auto-Start Strategies',
+    };
+    const grid = document.getElementById('readiness-checks');
+    grid.innerHTML = Object.entries(d.checks || {}).map(([k, v]) => `
+      <div style="display:flex;align-items:center;gap:8px;padding:7px 10px;
+                  background:var(--surface2);border-radius:6px;font-size:13px">
+        <span style="font-size:15px">${v ? '✅' : '❌'}</span>
+        <span style="color:${v ? 'var(--text)' : '#f85149'}">${labels[k] || k}</span>
+      </div>`).join('');
+  } catch {}
+}
+
 async function fetchAdaptive() {
   try {
     const d = await api('GET', '/adaptive/status');
@@ -5002,6 +5051,7 @@ async function init() {
 
   // Initial fast load
   await fetchHealth();
+  await fetchReadiness();
   await pollAll();
   appendPnlHistory();
 
