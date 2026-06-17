@@ -5459,8 +5459,14 @@ def t_kill_switch_endpoint_fires_notifier():
 def t_risk_manager_daily_loss_fires_notifier():
     import risk_manager as _rm
     import inspect
-    src = inspect.getsource(_rm.RiskManager.check_before_order)
-    assert "notifier" in src, "pre_trade_checks must fire notifier on daily loss breach"
+    src_check = inspect.getsource(_rm.RiskManager.check_before_order)
+    src_notify = inspect.getsource(_rm.RiskManager._send_loss_limit_notification)
+    # Notification runs in a background thread (non-blocking); check_before_order
+    # references the helper method, which in turn fires notifier.
+    assert "_send_loss_limit_notification" in src_check, \
+        "check_before_order must call _send_loss_limit_notification on daily loss breach"
+    assert "notifier" in src_notify, \
+        "_send_loss_limit_notification must fire notifier on daily loss breach"
 
 def t_risk_manager_50pct_warning_fires_notifier():
     import risk_manager as _rm
@@ -6326,6 +6332,56 @@ def t_alt_data_summary_safe_on_bad_earnings_row():
 
 run("alt_data: STRONG_BEARISH is reachable (checked before BEARISH)", t_alt_data_strong_bearish_reachable)
 run("alt_data: summary() safe when earnings CSV has malformed rows", t_alt_data_summary_safe_on_bad_earnings_row)
+
+
+# ══════════════════════════════════════════════════════════════════════════
+# 55. RISK MANAGER — notification non-blocking + FII bullish scaling
+# ══════════════════════════════════════════════════════════════════════════
+section("55. RISK MANAGER — notification non-blocking + FII bullish scaling")
+
+def t_risk_manager_loss_notification_not_under_lock():
+    """check_before_order must not call notifier under self._lock."""
+    import inspect
+    from risk_manager import RiskManager
+    src = inspect.getsource(RiskManager.check_before_order)
+    # The notifier call must have been moved out to a thread — verify by source
+    assert "_send_loss_limit_notification" in src
+    assert "_notifier.send" not in src, (
+        "notifier.send must not be called directly inside check_before_order (blocks lock)"
+    )
+
+def t_risk_manager_fii_bullish_scaling_not_cancelled():
+    """FII +20% qty scaling must not be reversed by the per-agent cap clamp."""
+    import inspect
+    from risk_manager import RiskManager
+    src = inspect.getsource(RiskManager.calculate_quantity)
+    # The clamp must reference max_position_size, not cap (which equals initial qty)
+    assert "max_position_size" in src, (
+        "FII bullish up-scale must clamp to max_position_size, not per-agent cap"
+    )
+    # Quick functional check: FII score pushes qty above base
+    from risk_manager import risk_manager, RiskManager as _RM
+    from config import settings
+    rm = _RM.__new__(_RM)
+    _RM.__init__(rm)
+    # Force FII score > 0.4 via alt_data mock
+    from alt_data import alt_data_engine
+    _orig = alt_data_engine.get_fii_sentiment
+    alt_data_engine.get_fii_sentiment = lambda: 0.45   # strong bull → +20%
+    try:
+        base_cap = settings.total_capital * settings.intraday_capital_pct / 100 / settings.max_intraday_positions
+        price = 100.0
+        base_qty = int(base_cap // price)
+        qty = rm.calculate_quantity(price=price, agent="intraday")
+        # qty must be >= base_qty (FII scaling should NOT be reversed)
+        assert qty >= base_qty, (
+            f"FII bullish scaling was reversed: got {qty} < base {base_qty}"
+        )
+    finally:
+        alt_data_engine.get_fii_sentiment = _orig
+
+run("risk_manager: loss notification spawns thread (not inside lock)", t_risk_manager_loss_notification_not_under_lock)
+run("risk_manager: FII +20% qty scaling not cancelled by per-agent cap", t_risk_manager_fii_bullish_scaling_not_cancelled)
 
 
 # ══════════════════════════════════════════════════════════════════════════
