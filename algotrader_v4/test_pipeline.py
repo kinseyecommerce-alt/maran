@@ -6041,6 +6041,61 @@ run("main: platform_scheduler.stop() is awaited in on_shutdown", t_platform_sche
 
 
 # ══════════════════════════════════════════════════════════════════════════
+# 50. SEBI COMPLIANCE — reset_kill_switch clears risk_manager.is_trading_halted
+# ══════════════════════════════════════════════════════════════════════════
+
+def t_reset_kill_switch_clears_rm_halt():
+    """
+    trigger_kill_switch sets risk_manager.is_trading_halted = True.
+    reset_kill_switch must also set it back to False so check_before_order()
+    unblocks immediately — not just at EOD daily reset.
+    """
+    from sebi_compliance import SEBICompliance, KillSwitchState
+    from risk_manager import RiskManager
+    from config import settings as _cfg
+
+    rm = RiskManager()
+    sc = SEBICompliance(restore_state=False)
+    import risk_manager as _rm_mod
+    original_singleton = _rm_mod.risk_manager
+    # Blank the reset secret temporarily so PAPER mode allows reset without a secret
+    original_secret = _cfg.kill_switch_reset_secret
+    _rm_mod.risk_manager = rm
+    _cfg.kill_switch_reset_secret = ""
+    try:
+        # Step 1: trigger kill switch — should halt the risk manager
+        sc.trigger_kill_switch("test halt")
+        assert sc._state == KillSwitchState.KILLED
+        assert rm.is_trading_halted is True, "trigger_kill_switch must set is_trading_halted=True"
+
+        # Step 2: reset kill switch — should also clear the risk manager halt
+        ok, msg = sc.reset_kill_switch(secret="")  # PAPER mode, no secret required
+        assert ok, f"reset_kill_switch failed: {msg}"
+        assert sc._state == KillSwitchState.ACTIVE
+        assert rm.is_trading_halted is False, (
+            "reset_kill_switch must set is_trading_halted=False so orders are not "
+            "permanently blocked after an intraday kill-switch reset"
+        )
+    finally:
+        _rm_mod.risk_manager = original_singleton
+        _cfg.kill_switch_reset_secret = original_secret
+
+
+def t_reset_kill_switch_source_clears_halt():
+    """Source-code guard: reset_kill_switch must set risk_manager.is_trading_halted=False."""
+    import inspect
+    import sebi_compliance as _sc
+    src = inspect.getsource(_sc.SEBICompliance.reset_kill_switch)
+    assert "is_trading_halted = False" in src, (
+        "reset_kill_switch must reset risk_manager.is_trading_halted to False"
+    )
+
+
+run("sebi: reset_kill_switch clears risk_manager.is_trading_halted", t_reset_kill_switch_clears_rm_halt)
+run("sebi: reset_kill_switch source sets is_trading_halted=False", t_reset_kill_switch_source_clears_halt)
+
+
+# ══════════════════════════════════════════════════════════════════════════
 # FINAL SUMMARY
 # ══════════════════════════════════════════════════════════════════════════
 failed = summary()
