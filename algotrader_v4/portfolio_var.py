@@ -22,6 +22,8 @@ class PortfolioVaR:
                 closes = df[col].dropna().values.astype(float)
                 if len(closes) < 2:
                     continue
+                if (closes <= 0).any():
+                    continue
                 rets = np.diff(closes) / closes[:-1]
                 result[sym] = rets
             except Exception:

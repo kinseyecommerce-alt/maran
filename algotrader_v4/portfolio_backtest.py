@@ -165,6 +165,8 @@ class PortfolioBacktest:
 
         if common_idx is None or len(common_idx) < 20:
             return [], [], 0, 0.0
+        if total_capital <= 0:
+            return [], [], 0, 0.0
 
         sl_pct   = params["sl_pct"] / 100
         tgt_pct  = params["target_pct"] / 100
@@ -326,6 +328,8 @@ class PortfolioBacktest:
         max_concurrent: int,
         util_avg: float,
     ) -> PortfolioResult:
+        if total_capital <= 0:
+            total_capital = 1.0
         if not trades:
             return PortfolioResult(
                 symbols=symbols, strategy=strategy,

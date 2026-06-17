@@ -7514,6 +7514,173 @@ run("truedata_client: is_connected checks stale-tick timestamp not just _connect
 
 
 # ══════════════════════════════════════════════════════════════════════════
+# 77. AGENT CAPITAL ALLOCATOR — _apply_locked called outside lock scope
+# ══════════════════════════════════════════════════════════════════════════
+section("77. AGENT CAPITAL ALLOCATOR — _apply_locked race condition in load()")
+
+def t_allocator_apply_locked_inside_lock():
+    """load() must call _apply_locked() inside the with self._lock block, not after
+    it. Calling it after the lock is released creates a race where another thread
+    can interleave between the state update and its application to settings."""
+    import inspect
+    from agent_capital_allocator import AgentCapitalAllocator
+
+    src = inspect.getsource(AgentCapitalAllocator.load)
+    # The fix: _apply_locked() must appear inside the with self._lock: indentation
+    # We verify this structurally: the line after "with self._lock:" block should
+    # not be the first dedented line before _apply_locked.
+    lines = src.splitlines()
+    in_lock = False
+    apply_locked_indent = None
+    lock_indent = None
+    for line in lines:
+        stripped = line.lstrip()
+        indent = len(line) - len(stripped)
+        if "with self._lock:" in line:
+            in_lock = True
+            lock_indent = indent
+            continue
+        if in_lock and stripped and indent <= lock_indent:
+            # We exited the lock block
+            in_lock = False
+        if "_apply_locked()" in line:
+            apply_locked_indent = indent
+            assert in_lock, (
+                "_apply_locked() is called OUTSIDE the with self._lock: block in "
+                "AgentCapitalAllocator.load() — race condition: another thread can "
+                "modify settings between the state update and its application"
+            )
+            break
+    assert apply_locked_indent is not None, "_apply_locked() not found in load() source"
+
+run("agent_capital_allocator: _apply_locked called inside lock scope in load()", t_allocator_apply_locked_inside_lock)
+
+
+def t_allocator_apply_locked_docstring():
+    """_apply_locked() docstring (or name convention) indicates caller must hold lock."""
+    import inspect
+    from agent_capital_allocator import AgentCapitalAllocator
+    src = inspect.getsource(AgentCapitalAllocator._apply_locked)
+    # Method name itself encodes the contract; just verify it exists and is callable
+    assert callable(AgentCapitalAllocator._apply_locked), "_apply_locked must be callable"
+    # Verify it accesses self._overrides (i.e. the shared state it is supposed to apply)
+    assert "_overrides" in src or "override" in src, (
+        "_apply_locked should reference _overrides to apply weight overrides to settings"
+    )
+
+run("agent_capital_allocator: _apply_locked references overrides (applies shared state)", t_allocator_apply_locked_docstring)
+
+
+# ══════════════════════════════════════════════════════════════════════════
+# 78. PORTFOLIO VAR — zero close price produces inf returns
+# ══════════════════════════════════════════════════════════════════════════
+section("78. PORTFOLIO VAR — zero-price guard prevents inf returns propagating into VaR")
+
+def t_portfolio_var_zero_price_skipped():
+    """_fetch_returns must skip symbols whose close series contains a zero price.
+    Without the guard, np.diff(closes)/closes[:-1] on a zero produces inf,
+    which corrupts VaR/CVaR calculations for the entire portfolio."""
+    import inspect
+    from portfolio_var import PortfolioVaR
+
+    src = inspect.getsource(PortfolioVaR._fetch_returns)
+    assert "(closes <= 0)" in src or "closes <= 0" in src, (
+        "portfolio_var._fetch_returns must guard against zero/negative close prices "
+        "before computing returns; np.diff(closes)/closes[:-1] with a zero entry "
+        "produces inf which propagates into VaR/CVaR"
+    )
+
+run("portfolio_var: _fetch_returns skips symbols with zero close prices", t_portfolio_var_zero_price_skipped)
+
+
+def t_portfolio_var_zero_price_no_inf():
+    """Compute returns on a series containing a zero — must not appear in result."""
+    import numpy as np
+    import pandas as pd
+    from unittest.mock import patch, MagicMock
+    from portfolio_var import PortfolioVaR
+
+    engine = PortfolioVaR()
+
+    zero_series = pd.Series([100.0, 0.0, 100.0], name="close")
+    mock_df = pd.DataFrame({"close": zero_series})
+
+    fake_yf = MagicMock()
+    fake_yf.historical.return_value = mock_df
+
+    import portfolio_var as _pvar_mod
+    with patch.object(_pvar_mod, "_yf", fake_yf):
+        result = engine._fetch_returns(["ZERO_SYM"])
+
+    # Symbol with zero price must be absent from result (skipped, not inf)
+    assert "ZERO_SYM" not in result or not np.any(np.isinf(result.get("ZERO_SYM", []))), (
+        "Returns for a symbol with a zero close price must not contain inf values"
+    )
+
+run("portfolio_var: zero-price symbol returns no inf values in _fetch_returns", t_portfolio_var_zero_price_no_inf)
+
+
+# ══════════════════════════════════════════════════════════════════════════
+# 79. PORTFOLIO BACKTEST — zero total_capital guard prevents ZeroDivisionError
+# ══════════════════════════════════════════════════════════════════════════
+section("79. PORTFOLIO BACKTEST — zero total_capital guard in simulate and _compute_metrics")
+
+def t_portfolio_backtest_zero_capital_simulate():
+    """_simulate_portfolio must return early when total_capital <= 0 to avoid
+    ZeroDivisionError at: deployed / total_capital and total_net_pnl / total_capital."""
+    import inspect
+    from portfolio_backtest import PortfolioBacktest
+
+    src = inspect.getsource(PortfolioBacktest._simulate_portfolio)
+    assert "total_capital <= 0" in src or "total_capital == 0" in src, (
+        "_simulate_portfolio must guard against total_capital <= 0 before the bar loop; "
+        "line 'deployed / total_capital' raises ZeroDivisionError when capital is 0"
+    )
+
+run("portfolio_backtest: _simulate_portfolio guards against zero total_capital", t_portfolio_backtest_zero_capital_simulate)
+
+
+def t_portfolio_backtest_zero_capital_compute_metrics():
+    """_compute_metrics must guard against total_capital <= 0 to prevent
+    ZeroDivisionError at ann_return = total_net_pnl / total_capital."""
+    import inspect
+    from portfolio_backtest import PortfolioBacktest
+
+    src = inspect.getsource(PortfolioBacktest._compute_metrics)
+    assert "total_capital <= 0" in src or "total_capital == 0" in src, (
+        "_compute_metrics must guard against total_capital <= 0; "
+        "'total_net_pnl / total_capital' raises ZeroDivisionError when capital is 0"
+    )
+
+run("portfolio_backtest: _compute_metrics guards against zero total_capital", t_portfolio_backtest_zero_capital_compute_metrics)
+
+
+def t_portfolio_backtest_zero_capital_no_crash():
+    """simulate() with total_capital=0 must not raise ZeroDivisionError."""
+    import pandas as pd
+    import numpy as np
+    from portfolio_backtest import PortfolioBacktest
+
+    rng = np.random.default_rng(42)
+    idx = pd.date_range("2024-01-01", periods=60, freq="D")
+    prices = 100 + rng.standard_normal(60).cumsum()
+    df = pd.DataFrame({"open": prices, "high": prices * 1.01, "low": prices * 0.99,
+                       "close": prices, "volume": 1_000_000}, index=idx)
+    signals = pd.Series(0, index=idx)
+    bt = PortfolioBacktest()
+    try:
+        result = bt.simulate({"RELIANCE": df}, total_capital=0,
+                             precomputed_signals={"RELIANCE": signals})
+    except ZeroDivisionError:
+        raise AssertionError(
+            "simulate() raised ZeroDivisionError with total_capital=0 — "
+            "must return an empty PortfolioResult instead"
+        )
+
+run("portfolio_backtest: simulate(total_capital=0) returns empty result without crash", t_portfolio_backtest_zero_capital_no_crash)
+
+
+# ══════════════════════════════════════════════════════════════════════════
 # FINAL SUMMARY
 # ══════════════════════════════════════════════════════════════════════════
 failed = summary()

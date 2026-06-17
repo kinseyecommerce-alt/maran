@@ -77,8 +77,8 @@ class AgentCapitalAllocator:
             with self._lock:
                 self._overrides = {k: float(v) for k, v in data.get("overrides", {}).items()}
                 self._baselines = {k: float(v) for k, v in data.get("baselines", {}).items()}
-            # Apply restored overrides to settings immediately
-            self._apply_locked()
+                # Apply restored overrides to settings inside the lock
+                self._apply_locked()
             logger.info("[Allocator] restored capital weights: {}", self._overrides)
         except Exception as exc:
             logger.warning("[Allocator] load failed (non-critical): {}", exc)
