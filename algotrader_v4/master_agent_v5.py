@@ -474,7 +474,7 @@ class MasterAgent:
             logger.info("[master] NSE holiday — squareoff skipped")
             return
 
-        ids = kite_client.squareoff_all_positions()
+        ids = await asyncio.to_thread(kite_client.squareoff_all_positions)
         if ids:
             await send_telegram(f"<b>Auto square-off</b>\n{len(ids)} positions closed")
             from n8n_bridge import notify as _n8n
@@ -565,10 +565,11 @@ class MasterAgent:
         try:
             from state_store import cleanup_old_data, vacuum_db
             keep = int(getattr(settings, "db_keep_days", 90))
-            removed = await asyncio.get_event_loop().run_in_executor(
+            _loop = asyncio.get_running_loop()
+            removed = await _loop.run_in_executor(
                 None, lambda: cleanup_old_data(keep_days=keep)
             )
-            await asyncio.get_event_loop().run_in_executor(None, vacuum_db)
+            await _loop.run_in_executor(None, vacuum_db)
             logger.info(
                 "[master] Weekly DB cleanup done — removed {} positions, {} trades, {} daily_pnl rows",
                 removed["positions"], removed["trades"], removed["daily_pnl"],

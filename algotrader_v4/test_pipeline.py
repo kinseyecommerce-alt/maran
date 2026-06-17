@@ -7122,6 +7122,66 @@ def t_risk_record_trade_threshold_uses_local_snapshot():
 run("risk_manager: record_trade uses locked new_pnl snapshot for threshold check (no race)", t_risk_record_trade_threshold_uses_local_snapshot)
 
 
+# ─────────────────────────────────────────────────────────────────────────────
+section("68. SEBI + MASTER — pos size cap on 0, blocking squareoff, get_event_loop")
+# ─────────────────────────────────────────────────────────────────────────────
+
+def t_sebi_max_position_size_zero_means_no_cap():
+    """max_position_size=0 must skip the cap check, not impose a ₹1 cap."""
+    import inspect
+    from sebi_compliance import SEBICompliance
+
+    src = inspect.getsource(SEBICompliance.pre_order_check)
+    # The old bug: max(settings.max_position_size, 1.0) → ₹1 cap when setting is 0
+    assert "max(settings.max_position_size, 1.0)" not in src, (
+        "max(max_position_size, 1.0) turns max_position_size=0 into a ₹1 cap, "
+        "blocking every order. Use 'if config_cap > 0 and order_value > config_cap:'"
+    )
+    # The fix: skip the check entirely when setting is 0
+    assert "config_cap > 0" in src, (
+        "pre_order_check must skip the position size cap check when "
+        "max_position_size=0 (means 'no cap configured')"
+    )
+
+run("sebi_compliance: max_position_size=0 skips cap check (not ₹1 cap)", t_sebi_max_position_size_zero_means_no_cap)
+
+
+def t_master_weekly_cleanup_uses_running_loop():
+    """_weekly_db_cleanup must use get_running_loop(), not deprecated get_event_loop()."""
+    import inspect
+    from master_agent_v5 import MasterAgent
+
+    src = inspect.getsource(MasterAgent._weekly_db_cleanup)
+    assert "get_event_loop()" not in src, (
+        "_weekly_db_cleanup must not use asyncio.get_event_loop() inside an async def — "
+        "deprecated in Python 3.10+; use asyncio.get_running_loop()"
+    )
+    assert "get_running_loop()" in src
+
+run("master_agent: _weekly_db_cleanup uses get_running_loop()", t_master_weekly_cleanup_uses_running_loop)
+
+
+def t_master_auto_squareoff_not_blocking():
+    """_auto_squareoff must not call squareoff_all_positions() synchronously."""
+    import inspect
+    from master_agent_v5 import MasterAgent
+
+    src = inspect.getsource(MasterAgent._auto_squareoff)
+    # The bug: kite_client.squareoff_all_positions() called directly, blocks event loop
+    # The fix: await asyncio.to_thread(kite_client.squareoff_all_positions)
+    assert "= kite_client.squareoff_all_positions()" not in src, (
+        "_auto_squareoff must not call squareoff_all_positions() synchronously in an "
+        "async def — HTTP retries can block the event loop for 30+ seconds. "
+        "Use: await asyncio.to_thread(kite_client.squareoff_all_positions)"
+    )
+    assert "to_thread" in src or "run_in_executor" in src, (
+        "_auto_squareoff must wrap squareoff_all_positions() in asyncio.to_thread() "
+        "or run_in_executor() to avoid blocking the event loop"
+    )
+
+run("master_agent: _auto_squareoff uses asyncio.to_thread for blocking squareoff call", t_master_auto_squareoff_not_blocking)
+
+
 # ══════════════════════════════════════════════════════════════════════════
 # FINAL SUMMARY
 # ══════════════════════════════════════════════════════════════════════════

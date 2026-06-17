@@ -411,8 +411,10 @@ class SEBICompliance:
                                    quantity, order_type, price_at_signal,
                                    signal_source, regime, "REJECTED", reason, algo_id)
                 return False, algo_id, reason
-            config_cap = max(settings.max_position_size, 1.0)
-            if order_value > config_cap:
+            config_cap = settings.max_position_size
+            # 0 means "no cap configured" — skip the check; max(cap, 1.0) would
+            # accidentally set a ₹1 limit and reject every order.
+            if config_cap > 0 and order_value > config_cap:
                 reason = (f"Order value ₹{order_value:,.0f} exceeds configured "
                           f"max_position_size ₹{config_cap:,.0f}")
                 self._record_audit(strategy, symbol, exchange, transaction_type,
