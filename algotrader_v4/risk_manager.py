@@ -243,7 +243,18 @@ class RiskManager:
 
             ok, msg = self._check_daily_loss()
             if not ok:
+                first_breach = not self.is_trading_halted
                 self.is_trading_halted = True
+                if first_breach:
+                    try:
+                        from notifier import notifier as _notifier
+                        _notifier.send(
+                            subject=f"Daily loss limit ₹{settings.max_daily_loss:.0f} hit",
+                            body=f"Trading halted. Current P&L: ₹{self.daily_realised_pnl:.0f}",
+                            level="CRITICAL",
+                        )
+                    except Exception:
+                        pass
                 return False, msg
 
             if transaction_type == "BUY":
@@ -524,17 +535,27 @@ class RiskManager:
         max_loss = settings.max_daily_loss or 0
         if max_loss > 0:
             threshold = -0.5 * max_loss
-            if self.daily_realised_pnl < threshold <= prev_pnl and self.ws_broadcast is not None:
-                import asyncio
-                payload = {
-                    "event": "risk_alert",
-                    "type":  "daily_loss_50pct",
-                    "pnl":   self.daily_realised_pnl,
-                }
+            if self.daily_realised_pnl < threshold <= prev_pnl:
+                if self.ws_broadcast is not None:
+                    import asyncio
+                    payload = {
+                        "event": "risk_alert",
+                        "type":  "daily_loss_50pct",
+                        "pnl":   self.daily_realised_pnl,
+                    }
+                    try:
+                        loop = asyncio.get_running_loop()
+                        loop.create_task(self.ws_broadcast(payload))
+                    except RuntimeError:
+                        pass
                 try:
-                    loop = asyncio.get_running_loop()
-                    loop.create_task(self.ws_broadcast(payload))
-                except RuntimeError:
+                    from notifier import notifier as _notifier
+                    _notifier.send(
+                        subject=f"50% daily loss warning — ₹{self.daily_realised_pnl:.0f}",
+                        body=f"Daily loss has crossed 50% of the ₹{max_loss:.0f} limit.",
+                        level="WARNING",
+                    )
+                except Exception:
                     pass
 
     def position_opened(self) -> None:
