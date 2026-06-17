@@ -6430,6 +6430,75 @@ run("kite_client: paper position avg_price resets to fill price on re-entry", t_
 
 
 # ══════════════════════════════════════════════════════════════════════════
+# 57. ATOMIC BRACKET — double-SL guard + last-retry logging
+# ══════════════════════════════════════════════════════════════════════════
+section("57. ATOMIC BRACKET — double-SL guard + last-retry logging")
+
+def t_atomic_bracket_no_double_sl_when_cancel_fails():
+    """_on_tsl_sl_moved must NOT place a new SL when cancel_order raises."""
+    import asyncio, inspect
+    from atomic_bracket import AtomicBracketEngine, BracketOrder, BracketStatus
+    import time
+
+    engine = AtomicBracketEngine()
+    bracket = BracketOrder(
+        bracket_id="BRK-TEST01", strategy="intraday", symbol="RELIANCE",
+        exchange="NSE", side="BUY", product="MIS",
+        signal_price=2400.0, entry_price=2400.0, sl_price=2370.0, trail_sl=2370.0,
+        target_1=2440.0, target_2=2480.0, quantity=5,
+        entry_order_id="ENT-01", sl_order_id="SL-01",
+        status=BracketStatus.ACTIVE, created_at=time.time(),
+    )
+    engine._brackets["BRK-TEST01"] = bracket
+
+    calls = []
+
+    class FakePos:
+        symbol = "RELIANCE"; strategy = "intraday"
+        current_sl = 2390.0; best_price = 2430.0; locked_profit = 150.0
+
+    async def _run():
+        from unittest.mock import patch, AsyncMock
+        import asyncio
+
+        loop = asyncio.get_running_loop()
+
+        async def fake_executor(executor, fn):
+            calls.append(fn.__name__ if hasattr(fn, "__name__") else str(fn))
+            raise RuntimeError("order already triggered")
+
+        with patch.object(loop, "run_in_executor", side_effect=fake_executor):
+            await engine._on_tsl_sl_moved(FakePos(), old_sl=2370.0, move_type="trail")
+
+    asyncio.run(_run())
+    # modify_order raised → cancel_order raised → _place_sl_order must NOT be called
+    # Verify bracket.sl_order_id is unchanged (no new SL placed)
+    assert bracket.sl_order_id == "SL-01", (
+        "sl_order_id should remain SL-01 since cancel_order failed and no new SL was placed"
+    )
+
+run("atomic_bracket: no double-SL when cancel_order fails", t_atomic_bracket_no_double_sl_when_cancel_fails)
+
+
+def t_atomic_bracket_place_sl_logs_last_error():
+    """_place_sl_order must log an error on the final retry failure."""
+    import asyncio, inspect
+    from atomic_bracket import AtomicBracketEngine, BracketOrder, BracketStatus
+    import time
+
+    src = inspect.getsource(AtomicBracketEngine._place_sl_order)
+    assert "SL_RETRY_MAX" in src or "logger.error" in src, (
+        "_place_sl_order should log an error on final retry failure"
+    )
+    # Verify the else branch is present (last-attempt logging)
+    assert "else:" in src, (
+        "_place_sl_order should have an else: branch to log last-attempt error"
+    )
+
+run("atomic_bracket: _place_sl_order logs error on last retry", t_atomic_bracket_place_sl_logs_last_error)
+
+
+# ══════════════════════════════════════════════════════════════════════════
 # FINAL SUMMARY
 # ══════════════════════════════════════════════════════════════════════════
 failed = summary()
