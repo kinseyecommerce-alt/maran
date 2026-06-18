@@ -588,10 +588,9 @@ class IntradayAgent(BaseAgent):
             # Trend + MACD double reversal
             if ind.trend == "DOWN" and ind.macd_hist < 0:
                 return True, "Trend reversal exit"
-            # 3-bar close below EMA9 — momentum lost
-            if ind.ema9 and len(getattr(pos, '_recent_closes', [])) == 0:
-                if ltp < ind.ema9 and ind.macd_hist < 0 and ind.rsi_14 < 45:
-                    return True, "EMA9 breakdown exit"
+            # EMA9 breakdown with momentum + RSI confirmation
+            if ind.ema9 and ltp < ind.ema9 and ind.macd_hist < 0 and ind.rsi_14 < 45:
+                return True, "EMA9 breakdown exit"
         else:
             sl_price = entry + sl_dist
             profit   = entry - ltp

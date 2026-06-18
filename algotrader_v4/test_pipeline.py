@@ -9031,6 +9031,86 @@ run("truedata_client: socket.getdefaulttimeout() unchanged after _get_td (no cre
 
 
 # ══════════════════════════════════════════════════════════════════════════
+# 109. STRATEGY AGENTS — exit logic correctness
+# ══════════════════════════════════════════════════════════════════════════
+section("109. STRATEGY AGENTS — exit logic correctness")
+
+
+def t_intraday_ema9_breakdown_exit_fires_on_conditions():
+    """should_exit_position must return True when ltp < ema9, macd_hist < 0, rsi_14 < 45."""
+    from agents.strategy_agents import IntradayAgent
+    from tick_engine import LiveIndicators
+
+    agent = IntradayAgent()
+    ltp = 1480.0
+    entry = 1520.0
+    ind = LiveIndicators(
+        symbol="RELIANCE", ltp=ltp, bid=ltp - 0.5, ask=ltp + 0.5,
+        ema9=1510.0, ema21=1505.0, ema50=1490.0, ema200=1450.0,
+        vwap=1505.0, rsi_14=42.0, rsi_7=40.0,
+        macd=0.0, macd_signal=0.5, macd_hist=-0.8,
+        bb_upper=1540.0, bb_lower=1460.0, bb_mid=1500.0,
+        atr_14=15.0, volume_ratio=1.5, obv=1e6,
+        trend="DOWN", momentum="DOWN", volatility="NORMAL",
+        supertrend_dir="DOWN",
+        spread=1.0, day_high=1545.0, day_low=1475.0, day_open=1510.0,
+        change_pct=-2.6,
+    )
+    pos = {"tradingsymbol": "RELIANCE", "quantity": 10, "average_price": entry}
+    should_exit, reason = agent.should_exit_position(pos, ind)
+    assert should_exit, (
+        f"EMA9 breakdown exit should fire when ltp={ltp} < ema9={ind.ema9}, "
+        f"macd_hist={ind.macd_hist} < 0, rsi_14={ind.rsi_14} < 45. "
+        f"Got: should_exit={should_exit}, reason={reason!r}"
+    )
+
+
+def t_intraday_ema9_breakdown_no_false_fire_above_ema9():
+    """should_exit_position must NOT trigger EMA9 breakdown when ltp > ema9."""
+    from agents.strategy_agents import IntradayAgent
+    from tick_engine import LiveIndicators
+
+    agent = IntradayAgent()
+    ltp = 1530.0
+    entry = 1520.0
+    ind = LiveIndicators(
+        symbol="RELIANCE", ltp=ltp, bid=ltp - 0.5, ask=ltp + 0.5,
+        ema9=1510.0, ema21=1505.0, ema50=1490.0, ema200=1450.0,
+        vwap=1505.0, rsi_14=42.0, rsi_7=40.0,
+        macd=0.0, macd_signal=0.5, macd_hist=-0.8,
+        bb_upper=1540.0, bb_lower=1460.0, bb_mid=1500.0,
+        atr_14=15.0, volume_ratio=1.5, obv=1e6,
+        trend="UP", momentum="UP", volatility="NORMAL",
+        supertrend_dir="UP",
+        spread=1.0, day_high=1545.0, day_low=1475.0, day_open=1510.0,
+        change_pct=0.7,
+    )
+    pos = {"tradingsymbol": "RELIANCE", "quantity": 10, "average_price": entry}
+    should_exit, reason = agent.should_exit_position(pos, ind)
+    # ltp > ema9 → EMA9 breakdown must not fire
+    assert reason != "EMA9 breakdown exit", (
+        f"EMA9 breakdown must not fire when ltp={ltp} > ema9={ind.ema9}. "
+        f"Got reason={reason!r}"
+    )
+
+
+def t_intraday_ema9_exit_no_dead_code_guard():
+    """should_exit_position must not contain dead getattr(_recent_closes) guard."""
+    import inspect
+    from agents.strategy_agents import IntradayAgent
+    src = inspect.getsource(IntradayAgent.should_exit_position)
+    assert "_recent_closes" not in src, (
+        "Dead code found: 'getattr(pos, \"_recent_closes\", [])' will always return [] "
+        "for a dict pos — the '3-bar' guard was permanently True and has been removed"
+    )
+
+
+run("intraday: EMA9 breakdown exit fires with strong momentum/RSI breakdown",      t_intraday_ema9_breakdown_exit_fires_on_conditions)
+run("intraday: EMA9 breakdown does NOT fire when ltp > ema9 (no false positive)",  t_intraday_ema9_breakdown_no_false_fire_above_ema9)
+run("intraday: dead-code getattr(_recent_closes) guard is absent from source",     t_intraday_ema9_exit_no_dead_code_guard)
+
+
+# ══════════════════════════════════════════════════════════════════════════
 # FINAL SUMMARY
 # ══════════════════════════════════════════════════════════════════════════
 failed = summary()
