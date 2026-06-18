@@ -88,7 +88,7 @@ class AgentCapitalAllocator:
         try:
             from state_store import set_kv
             with self._lock:
-                payload = {"overrides": self._overrides, "baselines": self._baselines}
+                payload = {"overrides": dict(self._overrides), "baselines": dict(self._baselines)}
             set_kv(_KV_KEY, json.dumps(payload))
         except Exception as exc:
             logger.warning("[Allocator] save failed (non-critical): {}", exc)

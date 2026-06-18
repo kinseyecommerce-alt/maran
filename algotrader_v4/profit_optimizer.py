@@ -46,10 +46,12 @@ _OUT_DIR.mkdir(parents=True, exist_ok=True)
 _ENGINE = BacktestEngine()
 
 # ── Symbols with confirmed simulation data ─────────────────────────────────
-_SYMBOLS = [
-    d for d in os.listdir("logs/historical_data")
-    if (Path("logs/historical_data") / d / "15m.csv").exists()
-][:10]   # top 10 to keep runtime reasonable
+_HIST_BASE = Path("logs/historical_data")
+_SYMBOLS = (
+    [d for d in os.listdir(_HIST_BASE)
+     if (_HIST_BASE / d / "15m.csv").exists()][:10]
+    if _HIST_BASE.exists() else []
+)
 
 # ── Parameter grids per strategy ─────────────────────────────────────────────
 _GRIDS: dict[str, dict[str, list]] = {

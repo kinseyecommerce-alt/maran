@@ -14,14 +14,12 @@ GATE_THRESHOLDS: dict[str, dict] = {
     "intraday":       {"win_rate": 55, "sharpe": 1.0,  "drawdown": 15, "min_trades": 20, "pf": 1.2},
     "swing":          {"win_rate": 52, "sharpe": 0.9,  "drawdown": 18, "min_trades": 15, "pf": 1.15},
     "futures":        {"win_rate": 53, "sharpe": 0.95, "drawdown": 16, "min_trades": 18, "pf": 1.2},
-    "options":        {"win_rate": 40, "sharpe": 0.8,  "drawdown": 30, "min_trades": 12, "pf": 1.5},
+    "options":        {"win_rate": 50, "sharpe": 0.9,  "drawdown": 20, "min_trades": 15, "pf": 1.3},
     "iron_condor":    {"win_rate": 60, "sharpe": 1.0,  "drawdown": 20, "min_trades": 10, "pf": 1.3},
     "short_straddle": {"win_rate": 58, "sharpe": 0.9,  "drawdown": 25, "min_trades": 10, "pf": 1.25},
     "orb":            {"win_rate": 55, "sharpe": 1.0,  "drawdown": 15, "min_trades": 20, "pf": 1.2},
     "vwap_reversion": {"win_rate": 58, "sharpe": 1.0,  "drawdown": 12, "min_trades": 25, "pf": 1.3},
-    # live-agent strategy aliases
     "scalping":       {"win_rate": 55, "sharpe": 0.9,  "drawdown": 10, "min_trades": 30, "pf": 1.15},
-    "options":            {"win_rate": 50, "sharpe": 0.9,  "drawdown": 20, "min_trades": 15, "pf": 1.3},
 }
 
 # ── Per-strategy configuration (SL %, target %, product, hold) ────────────
@@ -29,13 +27,12 @@ STRATEGY_CONFIG: dict[str, dict] = {
     "intraday":       {"sl": 1.5,  "t1": 3.0,  "t2": 5.0,  "product": "MIS",  "hold_bars": 30},
     "swing":          {"sl": 2.0,  "t1": 5.0,  "t2": 8.0,  "product": "CNC",  "hold_bars": 10},
     "futures":        {"sl": 1.5,  "t1": 3.0,  "t2": 5.0,  "product": "NRML", "hold_bars": 20},
-    "options":        {"sl": 30.0, "t1": 60.0, "t2": 100.0,"product": "NRML", "hold_bars": 5},
+    "options":        {"sl": 25.0, "t1": 50.0, "t2": 80.0, "product": "NRML", "hold_bars": 3},
     "iron_condor":    {"sl": 50.0, "t1": 30.0, "t2": 50.0, "product": "NRML", "hold_bars": 7},
     "short_straddle": {"sl": 40.0, "t1": 35.0, "t2": 60.0, "product": "NRML", "hold_bars": 7},
     "orb":            {"sl": 1.0,  "t1": 2.0,  "t2": 3.5,  "product": "MIS",  "hold_bars": 10},
     "vwap_reversion": {"sl": 0.8,  "t1": 1.5,  "t2": 2.5,  "product": "MIS",  "hold_bars": 8},
     "scalping":       {"sl": 0.5,  "t1": 1.0,  "t2": 1.8,  "product": "MIS",  "hold_bars": 5},
-    "options":            {"sl": 25.0, "t1": 50.0, "t2": 80.0, "product": "NRML", "hold_bars": 3},
 }
 
 

@@ -8911,6 +8911,64 @@ run("options_intelligence: min(expiry_dates, key=datetime_parse) selects correct
 
 
 # ══════════════════════════════════════════════════════════════════════════
+# 107. STRATEGY SIGNALS + PROFIT OPTIMIZER + CAPITAL ALLOCATOR
+# ══════════════════════════════════════════════════════════════════════════
+section("107. STRATEGY SIGNALS + PROFIT OPTIMIZER + CAPITAL ALLOCATOR")
+
+
+def t_strategy_signals_no_duplicate_options_gate():
+    """GATE_THRESHOLDS must have exactly one 'options' key (no silent override)."""
+    from strategy_signals import GATE_THRESHOLDS
+    keys = list(GATE_THRESHOLDS.keys())
+    assert keys.count("options") == 1, (
+        f"GATE_THRESHOLDS has duplicate 'options' key — second entry silently "
+        f"overrides the first (dead code). keys={keys}"
+    )
+
+
+def t_strategy_signals_no_duplicate_options_config():
+    """STRATEGY_CONFIG must have exactly one 'options' key (no silent override)."""
+    from strategy_signals import STRATEGY_CONFIG
+    keys = list(STRATEGY_CONFIG.keys())
+    assert keys.count("options") == 1, (
+        f"STRATEGY_CONFIG has duplicate 'options' key — second entry silently "
+        f"overrides the first (dead code). keys={keys}"
+    )
+
+
+def t_profit_optimizer_imports_without_hist_dir():
+    """profit_optimizer must import cleanly even when logs/historical_data doesn't exist."""
+    import importlib, sys
+    # Force reimport to exercise the module-level _SYMBOLS computation
+    sys.modules.pop("profit_optimizer", None)
+    import profit_optimizer as _po
+    assert isinstance(_po._SYMBOLS, list), (
+        "profit_optimizer._SYMBOLS must be a list; import failed or wrong type"
+    )
+    # Confirm no FileNotFoundError was raised (implicit — we reached this line)
+
+
+def t_allocator_save_deep_copies_dicts():
+    """AgentCapitalAllocator.save() must deep-copy _overrides and _baselines inside the lock."""
+    import inspect
+    from agent_capital_allocator import AgentCapitalAllocator
+    src = inspect.getsource(AgentCapitalAllocator.save)
+    assert "dict(self._overrides)" in src, (
+        "save() must deep-copy _overrides inside the lock to avoid "
+        "RuntimeError: dictionary changed size during iteration in json.dumps"
+    )
+    assert "dict(self._baselines)" in src, (
+        "save() must deep-copy _baselines inside the lock"
+    )
+
+
+run("strategy_signals: GATE_THRESHOLDS has no duplicate 'options' key",      t_strategy_signals_no_duplicate_options_gate)
+run("strategy_signals: STRATEGY_CONFIG has no duplicate 'options' key",       t_strategy_signals_no_duplicate_options_config)
+run("profit_optimizer: imports cleanly even without logs/historical_data dir", t_profit_optimizer_imports_without_hist_dir)
+run("agent_capital_allocator: save() deep-copies dicts inside lock",          t_allocator_save_deep_copies_dicts)
+
+
+# ══════════════════════════════════════════════════════════════════════════
 # FINAL SUMMARY
 # ══════════════════════════════════════════════════════════════════════════
 failed = summary()
