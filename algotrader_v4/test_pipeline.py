@@ -8814,6 +8814,53 @@ def t_tick_replayer_volume_sum_correct():
 run("tick_replayer: bar volume = sum of per-tick deltas (450 = 100+200+150)", t_tick_replayer_volume_sum_correct)
 
 
+section("105. HISTORICAL_LEARNER + SIMULATION SCRIPTS — STALE PATH + MIN_ADX BUG")
+
+
+def t_historical_learner_min_adx_correct():
+    """historical_learner._run_one seeds AdaptiveParams with min_adx=20.0, NOT
+    float(gate.get('win_rate', 55)) / 5 = 11.0 (the same formula that was wrong
+    in adaptive_engine._init_params before section 103 fixed it)."""
+    import inspect, historical_learner as _hl
+    src = inspect.getsource(_hl._run_one)
+    # The wrong formula divides by 5 to produce 11.0 — must not be present
+    assert "/ 5" not in src or "win_rate" not in src, (
+        "historical_learner._run_one must use min_adx=20.0, not win_rate/5 "
+        "(produces 11.0 instead of 20.0)"
+    )
+    # The correct value must appear
+    assert "min_adx=20.0" in src, (
+        "historical_learner._run_one must use min_adx=20.0 explicitly"
+    )
+
+
+run("historical_learner: _run_one uses min_adx=20.0 not win_rate/5", t_historical_learner_min_adx_correct)
+
+
+def t_simulation_scripts_no_hardcoded_jag_path():
+    """paper_trade_sim.py, phase4_trade_lifecycle.py, phase5_intelligence.py,
+    phase6_resilience.py must not contain the hardcoded /home/user/JAG path —
+    that path does not exist on the deployment machine and causes ImportError
+    when the scripts are run."""
+    from pathlib import Path
+    scripts = [
+        "paper_trade_sim.py",
+        "phase4_trade_lifecycle.py",
+        "phase5_intelligence.py",
+        "phase6_resilience.py",
+    ]
+    base = Path(__file__).parent
+    for script in scripts:
+        src = (base / script).read_text()
+        assert "/home/user/JAG" not in src, (
+            f"{script} still contains hardcoded /home/user/JAG path — "
+            "replace with os.path.dirname(os.path.abspath(__file__))"
+        )
+
+
+run("simulation scripts: no hardcoded /home/user/JAG path", t_simulation_scripts_no_hardcoded_jag_path)
+
+
 # ══════════════════════════════════════════════════════════════════════════
 # FINAL SUMMARY
 # ══════════════════════════════════════════════════════════════════════════

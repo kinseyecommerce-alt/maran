@@ -89,7 +89,7 @@ async def _run_one(symbol: str, strategy: str, sem: asyncio.Semaphore,
                     avg_loss_pct=result.avg_loss_pct if hasattr(result, "avg_loss_pct") else cfg.get("sl", 1.5) * 0.7,
                     min_rsi=45.0 if result.win_rate >= 55 else 48.0,
                     max_rsi=67.0 if result.win_rate >= 55 else 63.0,
-                    min_adx=float(gate.get("win_rate", 55)) / 5,
+                    min_adx=20.0,
                     status="ACTIVE" if result.passed else "CAUTIOUS",
                 )
                 adaptive_engine._params[params_key] = new_params

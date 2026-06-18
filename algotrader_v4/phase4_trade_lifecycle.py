@@ -4,7 +4,7 @@ Tests the full pipeline without the server.
 """
 import sys
 import os
-sys.path.insert(0, '/home/user/JAG/algotrader_v4')
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from datetime import datetime, time
 from dataclasses import dataclass, field

@@ -3,8 +3,8 @@ paper_trade_sim.py
 Full paper trading simulation across 5 symbols and all 4 agents.
 Runs the complete pipeline: signal → risk check → order guard → SEBI check → paper order.
 """
-import sys
-sys.path.insert(0, '/home/user/JAG/algotrader_v4')
+import sys, os
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from datetime import datetime, time, timedelta
 from collections import defaultdict

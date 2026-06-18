@@ -6,8 +6,8 @@ Phase 6: Error Handling / Resilience Tests
 4. Risk manager blocks when daily loss limit exceeded
 5. Order guard blocks duplicate positions
 """
-import sys
-sys.path.insert(0, '/home/user/JAG/algotrader_v4')
+import sys, os
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from datetime import datetime
 
