@@ -9110,6 +9110,86 @@ run("intraday: EMA9 breakdown does NOT fire when ltp > ema9 (no false positive)"
 run("intraday: dead-code getattr(_recent_closes) guard is absent from source",     t_intraday_ema9_exit_no_dead_code_guard)
 
 
+# ──────────────────────────────────────────────────────────────────────────
+# 110. TICK ENGINE — NaN indicator sanitization
+# ──────────────────────────────────────────────────────────────────────────
+section("110. TICK ENGINE — NaN indicator sanitization")
+
+def t_sanitize_ind_replaces_nan_ema9_with_zero():
+    """_sanitize_ind must replace NaN ema9 with 0.0 (the field default)."""
+    import math
+    from tick_engine import LiveIndicators, _sanitize_ind
+    ind = LiveIndicators(symbol="TEST")
+    ind.ema9 = float("nan")
+    _sanitize_ind(ind)
+    assert not math.isnan(ind.ema9), "_sanitize_ind left NaN in ema9"
+    assert ind.ema9 == 0.0, f"expected 0.0, got {ind.ema9}"
+
+def t_sanitize_ind_replaces_nan_rsi_with_default_50():
+    """_sanitize_ind must replace NaN rsi_14 with 50.0 (the field default)."""
+    import math
+    from tick_engine import LiveIndicators, _sanitize_ind
+    ind = LiveIndicators(symbol="TEST")
+    ind.rsi_14 = float("nan")
+    _sanitize_ind(ind)
+    assert not math.isnan(ind.rsi_14), "_sanitize_ind left NaN in rsi_14"
+    assert ind.rsi_14 == 50.0, f"expected 50.0 (field default), got {ind.rsi_14}"
+
+def t_sanitize_ind_nan_ema9_becomes_falsy():
+    """After _sanitize_ind, NaN ema9 becomes 0.0 which is falsy — guards work correctly."""
+    import math
+    from tick_engine import LiveIndicators, _sanitize_ind
+    ind = LiveIndicators(symbol="TEST")
+    ind.ema9  = float("nan")
+    ind.ema21 = float("nan")
+    _sanitize_ind(ind)
+    # 0.0 is falsy → ``if ind.ema9 and ind.ema21`` correctly skips trend label
+    assert not ind.ema9,  "sanitised ema9 should be falsy (0.0)"
+    assert not ind.ema21, "sanitised ema21 should be falsy (0.0)"
+
+def t_sanitize_ind_preserves_valid_floats():
+    """_sanitize_ind must NOT change non-NaN float fields."""
+    from tick_engine import LiveIndicators, _sanitize_ind
+    ind = LiveIndicators(symbol="TEST")
+    ind.ema9   = 250.5
+    ind.rsi_14 = 62.3
+    ind.atr_14 = 3.7
+    _sanitize_ind(ind)
+    assert ind.ema9   == 250.5, "valid ema9 must not be altered"
+    assert ind.rsi_14 == 62.3,  "valid rsi_14 must not be altered"
+    assert ind.atr_14 == 3.7,   "valid atr_14 must not be altered"
+
+def t_compute_returns_no_nan_with_minimal_dataframe():
+    """IndicatorCalc.compute must not return NaN fields even on a tiny (5-row) dataframe."""
+    import math
+    import pandas as pd
+    import numpy as np
+    from tick_engine import IndicatorCalc, Tick
+    prices = [100.0, 101.0, 100.5, 102.0, 101.5]
+    df = pd.DataFrame({
+        "close":  prices,
+        "high":   [p + 0.5 for p in prices],
+        "low":    [p - 0.5 for p in prices],
+        "volume": [1000] * 5,
+    })
+    from datetime import datetime as _dt
+    tick = Tick(symbol="TEST", ltp=101.5, bid=101.4, ask=101.6, volume=5000,
+                change=1.5, change_pct=1.5, high=102.0, low=100.0, open=100.0,
+                timestamp=_dt.now())
+    ind = IndicatorCalc.compute("TEST", tick, df)
+    nan_fields = [
+        f for f in vars(ind)
+        if isinstance(getattr(ind, f), float) and math.isnan(getattr(ind, f))
+    ]
+    assert not nan_fields, f"IndicatorCalc.compute returned NaN in fields: {nan_fields}"
+
+run("tick engine: _sanitize_ind replaces NaN ema9 with 0.0",                      t_sanitize_ind_replaces_nan_ema9_with_zero)
+run("tick engine: _sanitize_ind replaces NaN rsi_14 with 50.0 (field default)",   t_sanitize_ind_replaces_nan_rsi_with_default_50)
+run("tick engine: sanitised NaN ema9/ema21 become 0.0 (falsy) — guard works",     t_sanitize_ind_nan_ema9_becomes_falsy)
+run("tick engine: _sanitize_ind preserves valid non-NaN floats unchanged",         t_sanitize_ind_preserves_valid_floats)
+run("tick engine: IndicatorCalc.compute returns no NaN fields on 5-row dataframe", t_compute_returns_no_nan_with_minimal_dataframe)
+
+
 # ══════════════════════════════════════════════════════════════════════════
 # FINAL SUMMARY
 # ══════════════════════════════════════════════════════════════════════════

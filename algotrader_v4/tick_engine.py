@@ -21,7 +21,8 @@ from __future__ import annotations
 import asyncio
 import time
 from collections import deque
-from dataclasses import dataclass, field, replace
+import math
+from dataclasses import dataclass, field, fields as dc_fields, replace, MISSING as dataclass_MISSING
 from datetime import datetime, timedelta
 from threading import Lock
 from typing import Callable, Optional
@@ -372,6 +373,20 @@ def _ichimoku(high: pd.Series, low: pd.Series) -> tuple[float, float, float, flo
 
 # ── Indicator calculator ──────────────────────────────────────────────────────
 
+def _sanitize_ind(ind: LiveIndicators) -> None:
+    """Replace any NaN floats (ta.* edge-case output) with each field's declared default.
+
+    NaN is truthy in Python, so ``if ind.ema9:`` silently passes when ema9 is NaN,
+    allowing NaN to reach ws_broadcast (non-standard JSON) and quantity math
+    (``int(NaN)`` → OverflowError). Sanitising here keeps all downstream code clean.
+    """
+    for f in dc_fields(ind):
+        v = getattr(ind, f.name)
+        if isinstance(v, float) and math.isnan(v):
+            safe = f.default if f.default is not dataclass_MISSING else 0.0
+            setattr(ind, f.name, safe)
+
+
 class IndicatorCalc:
 
     @staticmethod
@@ -480,6 +495,10 @@ class IndicatorCalc:
 
         except Exception as exc:
             logger.debug("Indicator compute error {}: {}", sym, exc)
+
+        # Sanitize NaN before derived-label checks: NaN is truthy so ``if ind.ema9``
+        # would silently pass, and downstream math (int(NaN)) would OverflowError.
+        _sanitize_ind(ind)
 
         # Derived labels
         ltp = tick.ltp
