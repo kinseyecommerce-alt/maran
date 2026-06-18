@@ -27,6 +27,7 @@ import argparse
 import itertools
 import json
 import os
+import threading
 import time
 from copy import deepcopy
 from datetime import datetime
@@ -44,6 +45,10 @@ _REGIME_F  = _OUT_DIR / "regime_config.json"
 _OUT_DIR.mkdir(parents=True, exist_ok=True)
 
 _ENGINE = BacktestEngine()
+
+# Serializes settings mutations during optimization — prevents two concurrent
+# phase1 runs from interleaving their _patch_settings / _restore_settings calls.
+_opt_lock = threading.Lock()
 
 # ── Symbols with confirmed simulation data ─────────────────────────────────
 _HIST_BASE = Path("logs/historical_data")
@@ -129,9 +134,11 @@ def phase1_optimise(verbose: bool = True) -> dict[str, dict]:
 
         for combo in combos:
             params = dict(zip(keys, combo))
-            # Temporarily patch settings
-            orig = {k: getattr(settings, _attr_name(strategy, k), None) for k in keys}
-            _patch_settings(strategy, params)
+            with _opt_lock:
+                # Temporarily patch settings — lock prevents concurrent optimization
+                # runs from interleaving patch/restore and corrupting live settings.
+                orig = {k: getattr(settings, _attr_name(strategy, k), None) for k in keys}
+                _patch_settings(strategy, params)
 
             combo_scores = []
             for sym in symbols:
@@ -143,7 +150,8 @@ def phase1_optimise(verbose: bool = True) -> dict[str, dict]:
                 except Exception as exc:
                     logger.debug("Phase 1: backtest failed for {} [{}] — skipping: {}", sym, strategy, exc)
 
-            _restore_settings(strategy, orig)
+            with _opt_lock:
+                _restore_settings(strategy, orig)
 
             if not combo_scores:
                 continue

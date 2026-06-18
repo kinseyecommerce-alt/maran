@@ -74,45 +74,52 @@ class TWAPEngine:
 
         order_ids: list[str] = []
 
-        for i in range(1, n_slices + 1):
-            # Last slice absorbs the remainder so total always equals qty
-            chunk = base_chunk + (remainder if i == n_slices else 0)
-            if chunk <= 0:
-                logger.debug("[TWAP] {} slice {}/{}: chunk=0, skipping", symbol, i, n_slices)
-                continue
+        try:
+            for i in range(1, n_slices + 1):
+                # Last slice absorbs the remainder so total always equals qty
+                chunk = base_chunk + (remainder if i == n_slices else 0)
+                if chunk <= 0:
+                    logger.debug("[TWAP] {} slice {}/{}: chunk=0, skipping", symbol, i, n_slices)
+                    continue
 
-            try:
-                # run_in_executor: place_order can block 100ms-15s on HTTP + retries;
-                # a sync call here would freeze every agent's tick loop for that duration.
-                # wait_for caps worst-case at 30s so a hung slice doesn't stall the loop.
-                order_id = await asyncio.wait_for(
-                    asyncio.get_running_loop().run_in_executor(
-                        None, lambda: kite_client.place_order(
-                            tradingsymbol=symbol,
-                            exchange=exchange,
-                            transaction_type=action,
-                            quantity=chunk,
-                            order_type="MARKET",
-                            product=product,
-                            tag=tag,
-                        )
-                    ),
-                    timeout=30.0,
-                )
-                order_ids.append(order_id)
-                logger.info("[TWAP] {} slice {}/{}: qty={} id={}", symbol, i, n_slices, chunk, order_id)
-                if on_fill is not None:
-                    try:
-                        on_fill(order_id, chunk)
-                    except Exception as cb_exc:
-                        logger.warning("[TWAP] on_fill callback error: {}", cb_exc)
-            except Exception as exc:
-                logger.warning("[TWAP] {} slice {}/{} FAILED (qty={}) — continuing: {}",
-                               symbol, i, n_slices, chunk, exc)
+                try:
+                    # run_in_executor: place_order can block 100ms-15s on HTTP + retries;
+                    # a sync call here would freeze every agent's tick loop for that duration.
+                    # wait_for caps worst-case at 30s so a hung slice doesn't stall the loop.
+                    order_id = await asyncio.wait_for(
+                        asyncio.get_running_loop().run_in_executor(
+                            None, lambda: kite_client.place_order(
+                                tradingsymbol=symbol,
+                                exchange=exchange,
+                                transaction_type=action,
+                                quantity=chunk,
+                                order_type="MARKET",
+                                product=product,
+                                tag=tag,
+                            )
+                        ),
+                        timeout=30.0,
+                    )
+                    order_ids.append(order_id)
+                    logger.info("[TWAP] {} slice {}/{}: qty={} id={}", symbol, i, n_slices, chunk, order_id)
+                    if on_fill is not None:
+                        try:
+                            on_fill(order_id, chunk)
+                        except Exception as cb_exc:
+                            logger.warning("[TWAP] on_fill callback error: {}", cb_exc)
+                except Exception as exc:
+                    logger.warning("[TWAP] {} slice {}/{} FAILED (qty={}) — continuing: {}",
+                                   symbol, i, n_slices, chunk, exc)
 
-            # Sleep between slices, but not after the very last one
-            if i < n_slices:
-                await asyncio.sleep(interval)
+                # Sleep between slices, but not after the very last one
+                if i < n_slices:
+                    await asyncio.sleep(interval)
+        except asyncio.CancelledError:
+            logger.warning(
+                "[TWAP] {} cancelled after {}/{} slices — {} orders already placed: {}",
+                symbol, len(order_ids), n_slices, len(order_ids), order_ids,
+            )
+            raise   # propagate so the caller's task is properly cancelled
 
         logger.info("[TWAP] {} complete: {}/{} slices placed, total_qty={} order_ids={}",
                     symbol, len(order_ids), n_slices, qty, order_ids)

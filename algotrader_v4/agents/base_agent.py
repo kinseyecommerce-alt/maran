@@ -216,7 +216,7 @@ def _setup_tsl_callbacks() -> None:
         # Notify ML filter for online retraining
         try:
             from ml_signal_filter import ml_signal_filter as _mlf
-            _mlf.record_outcome({}, pnl > 0)
+            _mlf.record_outcome(pnl > 0)
         except Exception:
             pass
 

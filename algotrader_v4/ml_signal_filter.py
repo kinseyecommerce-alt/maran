@@ -75,8 +75,8 @@ class MLSignalFilter:
             logger.debug("[MLFilter] inference error: {}", exc)
             return True, 0.5
 
-    def record_outcome(self, features: dict, won: bool) -> None:
-        """Call after a trade closes to feed the training buffer."""
+    def record_outcome(self, won: bool) -> None:
+        """Call after a trade closes to trigger retraining from SQLite trade history."""
         try:
             from state_store import state_store as _ss
             _ss  # just verify import works

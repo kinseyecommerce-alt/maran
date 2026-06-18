@@ -11146,6 +11146,137 @@ run("greeks_engine: days_to_next_expiry returns 7 on expiry day (not 1)",       
 
 
 # ══════════════════════════════════════════════════════════════════════════
+# 15. BATCH 15 — platform_scheduler / twap_engine / twap_executor /
+#     ml_signal_filter / base_agent / profit_optimizer / adaptive_engine
+# ══════════════════════════════════════════════════════════════════════════
+
+def t_platform_scheduler_profile_in_executor():
+    import inspect, platform_scheduler as ps
+    src = inspect.getsource(ps.PlatformScheduler._auto_start_bot)
+    assert "run_in_executor" in src and "kite_client.profile" in src, (
+        "_auto_start must wrap kite_client.profile() in run_in_executor — "
+        "profile() is a blocking HTTP call that stalls the async event loop for up to 15s"
+    )
+
+def t_platform_scheduler_master_start_in_thread():
+    import inspect, platform_scheduler as ps
+    src = inspect.getsource(ps.PlatformScheduler._auto_start_bot)
+    assert "asyncio.to_thread" in src and "master.start" in src, (
+        "_auto_start must wrap master.start() in asyncio.to_thread — "
+        "master.start() is synchronous and blocks the event loop during strategy warmup"
+    )
+
+def t_twap_engine_cancelled_error_propagated():
+    import inspect, twap_engine as te
+    src = inspect.getsource(te.TWAPEngine.execute)
+    assert "CancelledError" in src, (
+        "execute() must catch CancelledError and re-raise it after logging partial state — "
+        "without this, mid-TWAP cancellation leaves order tracking in an inconsistent state"
+    )
+    assert "raise" in src, "execute() must re-raise CancelledError after logging"
+
+def t_twap_executor_start_lock_exists():
+    import inspect, twap_executor as te
+    src = inspect.getsource(te.TWAPExecutor.__init__)
+    assert "_start_lock" in src, (
+        "TWAPExecutor.__init__ must initialise _start_lock — used to prevent TOCTOU race "
+        "where two concurrent callers both pass the 'already in progress' check"
+    )
+
+def t_twap_executor_place_twap_uses_lock():
+    import inspect, twap_executor as te
+    src = inspect.getsource(te.TWAPExecutor.place_twap)
+    assert "_get_lock" in src or "_start_lock" in src, (
+        "place_twap() must acquire the start lock around the check-then-set — "
+        "bare 'if symbol in self._active' followed by 'self._active[symbol] = order' "
+        "is a TOCTOU race under concurrent async calls"
+    )
+
+def t_twap_executor_place_vwap_uses_lock():
+    import inspect, twap_executor as te
+    src = inspect.getsource(te.TWAPExecutor.place_vwap)
+    assert "_get_lock" in src or "_start_lock" in src, (
+        "place_vwap() must acquire the start lock around the check-then-set"
+    )
+
+def t_ml_signal_filter_record_outcome_no_features_param():
+    import inspect, ml_signal_filter as mlf
+    src = inspect.getsource(mlf.MLSignalFilter.record_outcome)
+    assert "features" not in src or "def record_outcome(self, won:" in src, (
+        "record_outcome() must not have a 'features' parameter — the parameter was dead "
+        "code: callers passed features thinking they'd be stored, but they were silently "
+        "discarded; retrain reads from SQLite directly"
+    )
+
+def t_base_agent_record_outcome_no_empty_dict():
+    import inspect
+    import agents.base_agent as ba
+    src = inspect.getsource(ba)
+    assert "record_outcome({}, " not in src, (
+        "base_agent must not pass empty dict {} to record_outcome() — "
+        "that parameter no longer exists; call record_outcome(pnl > 0) instead"
+    )
+
+def t_profit_optimizer_settings_lock_exists():
+    import inspect, profit_optimizer as po
+    src = inspect.getsource(po)
+    assert "_opt_lock" in src, (
+        "profit_optimizer must define _opt_lock (threading.Lock) to serialize "
+        "settings mutations during phase1 combo testing"
+    )
+
+def t_profit_optimizer_phase1_uses_lock():
+    import inspect, profit_optimizer as po
+    src = inspect.getsource(po.phase1_optimise)
+    assert "_opt_lock" in src, (
+        "phase1_optimise must acquire _opt_lock around _patch_settings/_restore_settings — "
+        "without serialization, two concurrent optimization runs interleave mutations "
+        "and leave settings permanently corrupted"
+    )
+
+def t_adaptive_engine_has_lock():
+    import inspect, adaptive_engine as ae
+    src = inspect.getsource(ae.AdaptiveLearningEngine.__init__)
+    assert "_lock" in src and "threading.Lock" in src, (
+        "AdaptiveLearningEngine.__init__ must create self._lock = threading.Lock() — "
+        "without it, concurrent access from APScheduler thread and async event loop "
+        "can race on _params reads/writes"
+    )
+
+def t_adaptive_engine_record_trade_uses_lock():
+    import inspect, adaptive_engine as ae
+    src = inspect.getsource(ae.AdaptiveLearningEngine.record_trade)
+    assert "with self._lock:" in src, (
+        "record_trade() must hold self._lock for the entire _params mutation sequence — "
+        "partial locking (just the init check) still allows races on regime_performance "
+        "and adaptation_count updates"
+    )
+
+def t_adaptive_engine_nightly_review_uses_lock():
+    import inspect, adaptive_engine as ae
+    src = inspect.getsource(ae.AdaptiveLearningEngine.nightly_review)
+    assert "self._lock" in src or "_lock" in src, (
+        "nightly_review() must take a snapshot of _params under self._lock — "
+        "bare list(self._params.items()) is not atomic if record_trade runs concurrently"
+    )
+
+
+run("platform_scheduler: profile() wrapped in run_in_executor (not blocking event loop)", t_platform_scheduler_profile_in_executor)
+run("platform_scheduler: master.start() wrapped in asyncio.to_thread (not blocking)",    t_platform_scheduler_master_start_in_thread)
+run("twap_engine: execute() catches CancelledError and logs partial state before re-raise", t_twap_engine_cancelled_error_propagated)
+run("twap_executor: __init__ creates _start_lock for TOCTOU-safe check-then-set",       t_twap_executor_start_lock_exists)
+run("twap_executor: place_twap() acquires lock around check-then-set",                   t_twap_executor_place_twap_uses_lock)
+run("twap_executor: place_vwap() acquires lock around check-then-set",                   t_twap_executor_place_vwap_uses_lock)
+run("ml_signal_filter: record_outcome() drops dead 'features' parameter",                t_ml_signal_filter_record_outcome_no_features_param)
+run("base_agent: record_outcome call no longer passes empty dict {}",                    t_base_agent_record_outcome_no_empty_dict)
+run("profit_optimizer: _opt_lock (threading.Lock) serializes settings mutations",        t_profit_optimizer_settings_lock_exists)
+run("profit_optimizer: phase1_optimise acquires _opt_lock for patch/restore",            t_profit_optimizer_phase1_uses_lock)
+run("adaptive_engine: __init__ creates self._lock (threading.Lock)",                     t_adaptive_engine_has_lock)
+run("adaptive_engine: record_trade() holds self._lock for full _params mutation",        t_adaptive_engine_record_trade_uses_lock)
+run("adaptive_engine: nightly_review() snapshots _params under self._lock",              t_adaptive_engine_nightly_review_uses_lock)
+
+
+# ══════════════════════════════════════════════════════════════════════════
 # FINAL SUMMARY
 # ══════════════════════════════════════════════════════════════════════════
 failed = summary()

@@ -166,9 +166,9 @@ class PlatformScheduler:
             logger.info("[platform] Bot already running — auto-start skipped")
             return
 
-        # Verify Kite is authenticated
+        # Verify Kite is authenticated (profile() is a blocking HTTP call)
         try:
-            kite_client.profile()
+            await asyncio.get_running_loop().run_in_executor(None, kite_client.profile)
         except Exception as exc:
             logger.error("[platform] Kite not authenticated — auto-start aborted: {}", exc)
             await send_telegram(
@@ -202,7 +202,7 @@ class PlatformScheduler:
             return
 
         try:
-            report = master.start(strategies, watchlist)
+            report = await asyncio.to_thread(master.start, strategies, watchlist)
             lines = [f"🚀 <b>Bot auto-started</b> | Mode: {settings.trading_mode}"]
             for strat, data in report.items():
                 lines.append(f"  {strat}: {data['approved']}/{data['total']} symbols approved")

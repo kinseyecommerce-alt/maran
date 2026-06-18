@@ -41,6 +41,7 @@ from __future__ import annotations
 import asyncio
 import json
 import math
+import threading
 import time
 from collections import deque
 from dataclasses import dataclass, field, asdict, fields as dc_fields
@@ -142,6 +143,7 @@ class AdaptiveLearningEngine:
         self._rebacktest_queue: list[dict] = []
         self.backtests_skipped: int = 0
         self.backtests_run:     int = 0
+        self._lock = threading.Lock()   # protects _params from concurrent reads/writes
         import os as _os_ae
         self._store = Path(_os_ae.environ.get("ADAPTIVE_DATA_DIR", "logs/adaptive"))
         self._store.mkdir(parents=True, exist_ok=True)
@@ -150,25 +152,26 @@ class AdaptiveLearningEngine:
 
     def record_trade(self, trade: TradeRecord) -> None:
         key = f"{trade.strategy}::{trade.symbol}"
-        if key not in self._params:
-            self._params[key] = self._init_params(trade.strategy, trade.symbol)
-        if key not in self._trades:
-            self._trades[key] = deque(maxlen=self.ROLLING_WINDOW)
-        self._trades[key].append(trade)
-        params = self._params[key]
-        trades_list = list(self._trades[key])
-        self._update_rolling_metrics(params, trades_list)
-        regime = trade.regime
-        if regime not in params.regime_performance:
-            params.regime_performance[regime] = {"wins": 0, "total": 0}
-        params.regime_performance[regime]["total"] += 1
-        if trade.won:
-            params.regime_performance[regime]["wins"] += 1
-        if len(trades_list) >= self.MIN_TRADES_ADAPT:
-            self._adapt_parameters(params, trades_list, trade.strategy)
-        self._check_health(params, trade.strategy)
-        params.last_updated = datetime.now().isoformat()
-        params.adaptation_count += 1
+        with self._lock:
+            if key not in self._params:
+                self._params[key] = self._init_params(trade.strategy, trade.symbol)
+            if key not in self._trades:
+                self._trades[key] = deque(maxlen=self.ROLLING_WINDOW)
+            self._trades[key].append(trade)
+            params = self._params[key]
+            trades_list = list(self._trades[key])
+            self._update_rolling_metrics(params, trades_list)
+            regime = trade.regime
+            if regime not in params.regime_performance:
+                params.regime_performance[regime] = {"wins": 0, "total": 0}
+            params.regime_performance[regime]["total"] += 1
+            if trade.won:
+                params.regime_performance[regime]["wins"] += 1
+            if len(trades_list) >= self.MIN_TRADES_ADAPT:
+                self._adapt_parameters(params, trades_list, trade.strategy)
+            self._check_health(params, trade.strategy)
+            params.last_updated = datetime.now().isoformat()
+            params.adaptation_count += 1
         logger.info("Adapt [{}::{}] WR={:.0f}% size={:.2f} sl={:.1f}% → {}",
             trade.strategy, trade.symbol, params.win_rate_20 * 100,
             params.size_factor, params.sl_pct, params.status)
@@ -240,7 +243,9 @@ class AdaptiveLearningEngine:
         report = {"date": date.today().isoformat(), "strategies_ok": [],
                   "strategies_adapt": [], "strategies_retire": [],
                   "rebacktest_needed": [], "vix": current_vix, "regime_changed": regime_changed}
-        for key, params in list(self._params.items()):  # list() snapshot — safe if on_regime_change fires from a scheduler thread
+        with self._lock:
+            params_snapshot = list(self._params.items())
+        for key, params in params_snapshot:
             strategy, symbol = key.split("::", maxsplit=1)
             gate = GATE_THRESHOLDS.get(strategy, {})
             gate_wr = gate.get("win_rate", 55) / 100
