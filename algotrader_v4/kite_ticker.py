@@ -81,10 +81,12 @@ class KiteTicker:
             api_key=settings.kite_api_key,
             access_token=settings.kite_access_token,
         )
-        self._kws.on_ticks   = self._on_ticks
-        self._kws.on_connect = self._on_connect
-        self._kws.on_error   = self._on_error
-        self._kws.on_close   = self._on_close
+        self._kws.on_ticks       = self._on_ticks
+        self._kws.on_connect     = self._on_connect
+        self._kws.on_error       = self._on_error
+        self._kws.on_close       = self._on_close
+        self._kws.on_reconnect   = self._on_reconnect
+        self._kws.on_noreconnect = self._on_noreconnect
         self._kws.connect(threaded=True)
         logger.info("[KiteTicker] WebSocket connecting…")
 
@@ -123,6 +125,14 @@ class KiteTicker:
     def _on_close(self, ws, code, reason) -> None:
         self._connected = False
         logger.warning("[KiteTicker] Closed {}: {}", code, reason)
+
+    def _on_reconnect(self, ws, attempts_count) -> None:
+        logger.warning("[KiteTicker] Reconnecting… attempt {}", attempts_count)
+        self.reset_volume_baseline()
+
+    def _on_noreconnect(self, ws) -> None:
+        self._connected = False
+        logger.error("[KiteTicker] WebSocket exhausted reconnect attempts — feed is dead")
 
     def _on_ticks(self, ws, ticks: list[dict]) -> None:
         if not self._callback or not self._loop:
@@ -179,8 +189,8 @@ class KiteTicker:
             # Discarding the future without this means _process_tick crashes
             # are invisible — ticks are dropped with no log entry.
             _fut.add_done_callback(
-                lambda f: logger.error(
-                    "[KiteTicker] tick callback raised for {}: {}", sym, f.exception()
+                lambda f, _sym=sym: logger.error(
+                    "[KiteTicker] tick callback raised for {}: {}", _sym, f.exception()
                 ) if not f.cancelled() and f.exception() else None
             )
 

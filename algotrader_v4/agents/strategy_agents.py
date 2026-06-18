@@ -1312,7 +1312,10 @@ class OptionsAgent(BaseAgent):
         # 10. Theta efficiency (0-1): buy options with low daily decay relative to premium
         try:
             import math as _m
-            iv_f = max((ind.atr_14 / ltp) if ltp > 0 else 0.015, 0.10)
+            from options_intelligence import get_cached as _get_oc
+            _oc  = _get_oc(sym)
+            iv_f = ((_oc.atm_iv / 100.0) if _oc and _oc.atm_iv and _oc.atm_iv > 1.0 else 0.20)
+            iv_f = max(iv_f, 0.05)
             dte  = self._days_to_expiry()
             if dte >= 1:
                 T_val = dte / 365.0
@@ -1564,7 +1567,7 @@ class OptionsAgent(BaseAgent):
 
         qty = lot_size
         if settings.use_kelly_sizing and sf < 1.0:
-            qty = max(lot_size, int(lot_size * sf))
+            qty = max(1, int(lot_size * sf))
 
         if order_guard.is_symbol_active_anywhere(underlying):
             return
@@ -2307,7 +2310,7 @@ class ScalpingAgent(BaseAgent):
         now = now_ist()
         t   = now.time().replace(tzinfo=None)
 
-        if not ind.ema9:
+        if not ind.ema9 or ind.ema9 != ind.ema9:
             return "HOLD", None
 
         # Scalping requires 1-minute precision — skip higher timeframe bars
@@ -3264,6 +3267,7 @@ class FuturesAgent(BaseAgent):
         if not is_long and ind.depth_imbalance < 0.38:          b += 1
 
         # 7. FII/DII institutional sentiment ≥ 0.3
+        fii = None
         try:
             fii = alt_data_engine.get_fii_sentiment()
             if is_long  and fii >= 0.3:                         b += 1
@@ -3301,11 +3305,9 @@ class FuturesAgent(BaseAgent):
             if bw > 2.0:                                         b += 1
 
         # 13. FII very strong conviction (>0.5) gets extra bonus (0-1)
-        try:
+        if fii is not None:
             if is_long  and fii >= 0.5:                         b += 1
             if not is_long and fii <= -0.5:                     b += 1
-        except Exception:
-            pass
 
         # 14. Wall clear in signal direction (no L2 wall blocking) (already gated, bonus) (0-1)
         if is_long  and not ind.wall_above:                     b += 1
@@ -4057,7 +4059,7 @@ class MomentumAgent(BaseAgent):
             # doesn't manufacture false crosses against stale values.
             self._update_state(sym, ind, ltp)
             return "HOLD", None
-        if not ind.ema9:
+        if not ind.ema9 or ind.ema9 != ind.ema9:
             return "HOLD", None
 
         best_score, best_action, best_pattern = -1, "", ""
@@ -4522,6 +4524,7 @@ class PairsAgent(BaseAgent):
         ltp = snap.tick.ltp
 
         best_score, best_action, best_signal = -1, "HOLD", None
+        best_cool_key = None
 
         for pair in self.PAIRS:
             a, b = pair
@@ -4539,7 +4542,7 @@ class PairsAgent(BaseAgent):
 
             ratios = list(self._ratios[pair])
             mean   = sum(ratios) / len(ratios)
-            std    = (sum((r - mean) ** 2 for r in ratios) / len(ratios)) ** 0.5
+            std    = (sum((r - mean) ** 2 for r in ratios) / (len(ratios) - 1)) ** 0.5
             if std <= 1e-8:
                 continue
 
@@ -4570,7 +4573,6 @@ class PairsAgent(BaseAgent):
             last_cool = self._cool_ts.get(cool_key)
             if last_cool and (now - last_cool).total_seconds() < settings.cooldown_pairs:
                 continue
-            self._cool_ts[cool_key] = now
 
             ctx   = self._ctx_bonus(action, ind, zscore)
             total = base_score + ctx
@@ -4583,8 +4585,9 @@ class PairsAgent(BaseAgent):
             tgt_pct = max(atr * self.TGT_ATR / ltp * 100, settings.tgt_pct_pairs)
 
             if total > best_score:
-                best_score  = total
-                best_action = action
+                best_score    = total
+                best_action   = action
+                best_cool_key = cool_key
                 best_signal = {
                     "side":          "LONG" if action == "BUY" else "SHORT",
                     "pair":          f"{a}/{b}",
@@ -4601,6 +4604,8 @@ class PairsAgent(BaseAgent):
 
         if best_score < settings.min_score_pairs or best_action == "HOLD":
             return "HOLD", None
+        if best_cool_key:
+            self._cool_ts[best_cool_key] = now
         return best_action, best_signal
 
     def should_exit_position(self, pos: dict, ind: LiveIndicators) -> tuple[bool, str]:

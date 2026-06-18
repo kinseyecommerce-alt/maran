@@ -7,10 +7,11 @@ from __future__ import annotations
 
 import math
 from dataclasses import dataclass
-from datetime import date, datetime
+from datetime import date, datetime, timedelta, timezone
 from typing import Literal
 
 RISK_FREE_RATE = 0.065          # RBI repo rate proxy
+_IST = timezone(timedelta(hours=5, minutes=30))
 _SQRT2PI = math.sqrt(2 * math.pi)
 
 
@@ -71,7 +72,7 @@ def implied_volatility(
             return sigma
         sigma -= diff / vega_val
         sigma = max(0.001, min(sigma, 20.0))
-    return sigma
+    return float("nan")  # loop exhausted or vega too small — did not converge
 
 
 def calculate_greeks(
@@ -88,7 +89,9 @@ def calculate_greeks(
     If atm_iv is provided the vol surface model is used to derive a
     strike-specific IV (with put-skew) instead of Newton-Raphson on market_price.
     """
-    today = datetime.now().date()
+    if spot <= 0 or strike <= 0:
+        raise ValueError(f"Invalid spot/strike: {spot}/{strike}")
+    today = datetime.now(_IST).date()
     cal_days = (expiry - today).days
     T = max(cal_days / 365.0, 0.5 / 365.0)   # min 12h
 
@@ -206,7 +209,7 @@ def select_strike_by_delta(
 
 def days_to_next_expiry(option_type_day: str = "thursday") -> int:
     """Return calendar days to next weekly NSE expiry (Thursday=NIFTY)."""
-    today = datetime.now().date()
+    today = datetime.now(_IST).date()
     day_map = {"monday": 0, "tuesday": 1, "wednesday": 2,
                "thursday": 3, "friday": 4, "saturday": 5, "sunday": 6}
     target = day_map.get(option_type_day.lower(), 3)

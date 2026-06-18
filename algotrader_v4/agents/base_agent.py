@@ -6,6 +6,7 @@ from the TickEngine queue. Strategies evaluate on every live tick.
 from __future__ import annotations
 
 import asyncio
+import math
 import time as _time_mod
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
@@ -175,7 +176,7 @@ def _setup_tsl_callbacks() -> None:
         try:
             from pattern_monitor import pattern_monitor as _pm
             _denom = pos.entry_price * pos.quantity
-            if _denom:
+            if _denom and math.isfinite(_denom):
                 _pm.record(pos.strategy, (entry or {}).get("pattern", ""),
                            pnl / _denom * 100.0)
         except Exception:
@@ -1096,6 +1097,9 @@ class BaseAgent(ABC):
             raise RuntimeError("sebi_denied")
 
         sl          = signal.get("stop_loss", risk_manager.sl_price(ltp, action))
+        if not sl or sl <= 0:
+            order_guard.release_claim(sym, self.name, action)
+            raise RuntimeError("invalid_sl")
         product     = signal.get("product", self.product)
         sl_side     = "SELL" if action == "BUY" else "BUY"
         use_limit   = getattr(settings, "use_limit_orders", False)

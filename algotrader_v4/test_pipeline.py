@@ -9683,6 +9683,247 @@ def t_signal_aggregator_recent_signals_trims_expired():
         "recent_signals must write trimmed active list back to self._signals[key]"
     )
 
+
+# ══════════════════════════════════════════════════════════════════════════
+# 114. BATCH 5 — greeks/macro/market_data/strategy/base/kite_ticker/options_flow
+# ══════════════════════════════════════════════════════════════════════════
+
+def t_greeks_spot_zero_raises():
+    """calculate_greeks must raise ValueError when spot=0 (prevents ZeroDivisionError in gamma)."""
+    import pytest
+    from datetime import date, timedelta
+    import greeks_engine as _ge
+    future_date = date.today() + timedelta(days=7)
+    try:
+        _ge.calculate_greeks(spot=0, strike=22000, expiry=future_date, option_type="CE",
+                             market_price=100.0)
+        assert False, "Expected ValueError for spot=0"
+    except ValueError:
+        pass
+
+def t_greeks_strike_zero_raises():
+    """calculate_greeks must raise ValueError when strike=0."""
+    from datetime import date, timedelta
+    import greeks_engine as _ge
+    future_date = date.today() + timedelta(days=7)
+    try:
+        _ge.calculate_greeks(spot=22000, strike=0, expiry=future_date, option_type="CE",
+                             market_price=100.0)
+        assert False, "Expected ValueError for strike=0"
+    except ValueError:
+        pass
+
+def t_greeks_iv_solver_returns_nan_on_exhaustion():
+    """implied_volatility must return NaN (not a bad sigma) when Newton-Raphson exhausts iterations."""
+    import math
+    import greeks_engine as _ge
+    # Deeply in-the-money call: intrinsic > market_price forces NaN return path
+    iv = _ge.implied_volatility(market_price=0.01, S=22000, K=1000, T=0.02, r=0.065, opt="CE")
+    assert math.isnan(iv), f"Expected NaN for impossible IV input, got {iv}"
+
+def t_greeks_ist_constant_defined():
+    """greeks_engine must define _IST timezone constant to avoid UTC vs IST date mismatch."""
+    import greeks_engine as _ge
+    assert hasattr(_ge, "_IST"), "greeks_engine must have module-level _IST timezone constant"
+    from datetime import timezone, timedelta
+    expected_offset = timedelta(hours=5, minutes=30)
+    assert _ge._IST.utcoffset(None) == expected_offset, "_IST must be UTC+5:30"
+
+def t_macro_signals_multiindex_column_handling():
+    """_fetch_ticker_last_two must flatten MultiIndex columns before accessing 'Close'."""
+    import inspect
+    import macro_signals as _ms
+    src = inspect.getsource(_ms._fetch_ticker_last_two)
+    assert "MultiIndex" in src, (
+        "_fetch_ticker_last_two must handle pd.MultiIndex columns from yfinance"
+    )
+    assert "get_level_values" in src, (
+        "_fetch_ticker_last_two must call get_level_values(0) to flatten MultiIndex"
+    )
+
+def t_market_data_fast_info_attribute_access():
+    """current_price must use info.last_price (attribute access) not info.get('last_price')."""
+    import inspect
+    import market_data as _md
+    src = inspect.getsource(_md.YFinanceClient.current_price)
+    assert "info.last_price" in src, (
+        "current_price must access fast_info.last_price as attribute, "
+        "not info.get('last_price') which returns None (wrong key format)"
+    )
+    assert "info.get(\"last_price\")" not in src, (
+        "current_price must NOT use info.get('last_price') — wrong key, always returns None"
+    )
+
+def t_strategy_futures_fii_scope_init():
+    """FuturesAgent._ctx_bonus must initialize fii=None before try block (BUG-1)."""
+    import inspect
+    from agents.strategy_agents import FuturesAgent
+    src = inspect.getsource(FuturesAgent._ctx_bonus)
+    assert "fii = None" in src, (
+        "FuturesAgent._ctx_bonus must initialize fii=None before the try block "
+        "so item 13 can check 'if fii is not None' without NameError risk"
+    )
+
+def t_strategy_futures_fii_item13_no_try_except():
+    """FuturesAgent._ctx_bonus item 13 must use 'if fii is not None' not try/except NameError."""
+    import inspect
+    from agents.strategy_agents import FuturesAgent
+    src = inspect.getsource(FuturesAgent._ctx_bonus)
+    assert "if fii is not None:" in src, (
+        "FuturesAgent._ctx_bonus item 13 must guard with 'if fii is not None' "
+        "instead of relying on NameError caught by bare except"
+    )
+
+def t_options_agent_theta_uses_options_intelligence():
+    """OptionsAgent._ctx_bonus theta efficiency must use options_intelligence IV, not ATR/LTP."""
+    import inspect
+    from agents.strategy_agents import OptionsAgent
+    src = inspect.getsource(OptionsAgent._ctx_bonus)
+    assert "options_intelligence" in src, (
+        "OptionsAgent._ctx_bonus must import options_intelligence to get real ATM IV "
+        "for theta efficiency calculation (ATR/LTP ratio was always floored at 0.10)"
+    )
+    assert "atr_14 / ltp" not in src or "atm_iv" in src, (
+        "OptionsAgent._ctx_bonus must use actual ATM IV for theta efficiency, "
+        "not the ATR/LTP ratio which always evaluates to the 0.10 floor"
+    )
+
+def t_options_agent_kelly_sizing_min_one():
+    """OptionsAgent Kelly sizing must use max(1, ...) not max(lot_size, ...) (BUG-4)."""
+    import inspect
+    from agents.strategy_agents import OptionsAgent
+    src = inspect.getsource(OptionsAgent._try_enter)
+    assert "max(1, int(lot_size * sf))" in src, (
+        "OptionsAgent._try_enter Kelly sizing must use max(1, int(lot_size * sf)), "
+        "not max(lot_size, int(lot_size * sf)) which always returns lot_size (disabling Kelly)"
+    )
+
+def t_pairs_agent_sample_std():
+    """PairsAgent must use sample std (divide by N-1) not population std (divide by N)."""
+    import inspect
+    from agents.strategy_agents import PairsAgent
+    src = inspect.getsource(PairsAgent.evaluate_tick)
+    assert "len(ratios) - 1" in src, (
+        "PairsAgent z-score std must divide by (N-1) for sample std, "
+        "not N (population std) which inflates z-scores by ~2.6%"
+    )
+
+def t_pairs_agent_cooldown_deferred_to_after_min_score():
+    """PairsAgent cooldown must only be set after final min_score check, not during selection."""
+    import inspect
+    from agents.strategy_agents import PairsAgent
+    src = inspect.getsource(PairsAgent.evaluate_tick)
+    # Verify best_cool_key pattern is present (deferred cooldown)
+    assert "best_cool_key" in src, (
+        "PairsAgent evaluate_tick must track best_cool_key and set cooldown only "
+        "after the final min_score_pairs check passes (not during pair selection)"
+    )
+    # Verify cooldown is set near the return, not immediately in the loop
+    lines = src.split("\n")
+    cool_set_lines = [i for i, l in enumerate(lines) if "self._cool_ts[best_cool_key] = now" in l]
+    return_lines   = [i for i, l in enumerate(lines) if "return best_action, best_signal" in l]
+    assert cool_set_lines, "must have 'self._cool_ts[best_cool_key] = now'"
+    assert return_lines,   "must have 'return best_action, best_signal'"
+    assert cool_set_lines[-1] < return_lines[-1], (
+        "cooldown must be set after min_score check, just before the return"
+    )
+
+def t_base_agent_pattern_monitor_nan_guard():
+    """_on_sl_hit closure must use math.isfinite guard for pattern_monitor denom."""
+    import inspect
+    import agents.base_agent as _ba
+    # _on_sl_hit is a closure inside _setup_tsl_callbacks
+    src = inspect.getsource(_ba._setup_tsl_callbacks)
+    assert "math.isfinite" in src, (
+        "base_agent._on_sl_hit (closure in _setup_tsl_callbacks) must use math.isfinite(_denom) "
+        "so NaN entry_price * quantity doesn't corrupt pattern_monitor (bool(NaN) is True)"
+    )
+
+def t_base_agent_invalid_sl_guard():
+    """_place_orders must raise RuntimeError('invalid_sl') when sl <= 0 before placing SL-M."""
+    import inspect
+    import agents.base_agent as _ba
+    src = inspect.getsource(_ba.BaseAgent._place_orders)
+    assert "invalid_sl" in src, (
+        "base_agent._place_orders must raise RuntimeError('invalid_sl') when sl <= 0 "
+        "to prevent zero-trigger SL-M orders from being placed"
+    )
+
+def t_base_agent_math_imported():
+    """base_agent must import math at module level (required for isfinite guard)."""
+    import inspect
+    import agents.base_agent as _ba
+    src = inspect.getsource(_ba)
+    lines = src.split("\n")
+    # Find first import math line (must be at module level, not inside a function)
+    import_lines = [l.strip() for l in lines[:50] if l.strip() == "import math"]
+    assert import_lines, "base_agent must have 'import math' at module level"
+
+def t_kite_ticker_reconnect_callbacks_registered():
+    """KiteTicker.start must register on_reconnect and on_noreconnect callbacks."""
+    import inspect
+    import kite_ticker as _kt
+    src = inspect.getsource(_kt.KiteTicker.start)
+    assert "on_reconnect" in src, (
+        "KiteTicker.start must register on_reconnect callback "
+        "so reconnect attempts are visible in logs"
+    )
+    assert "on_noreconnect" in src, (
+        "KiteTicker.start must register on_noreconnect callback "
+        "so feed-dead state is logged and not silently ignored"
+    )
+
+def t_kite_ticker_lambda_closure_fixed():
+    """KiteTicker._on_ticks done_callback must capture sym via default arg (_sym=sym)."""
+    import inspect
+    import kite_ticker as _kt
+    src = inspect.getsource(_kt.KiteTicker._on_ticks)
+    assert "_sym=sym" in src, (
+        "KiteTicker._on_ticks add_done_callback lambda must use '_sym=sym' default arg "
+        "to capture current sym value (lambda f: ... sym ... captures by reference — "
+        "all callbacks log the last-seen sym, not the one at callback registration time)"
+    )
+
+def t_options_flow_iv_history_daily_reset():
+    """options_flow._iv_history must reset on day change to prevent unbounded growth."""
+    import inspect
+    import options_flow as _of
+    src = inspect.getsource(_of.analyze_flow)
+    assert "_iv_history_date" in src, (
+        "analyze_flow must check _iv_history_date and clear _iv_history on day change"
+    )
+    assert "_iv_history.clear()" in src, (
+        "analyze_flow must call _iv_history.clear() when the date changes "
+        "to prevent unbounded memory growth across multi-day sessions"
+    )
+
+def t_options_flow_iv_history_date_initialized():
+    """options_flow must initialize _iv_history_date at module level."""
+    import options_flow as _of
+    assert hasattr(_of, "_iv_history_date"), (
+        "options_flow must have module-level _iv_history_date to track last reset date"
+    )
+
+run("greeks_engine: calculate_greeks raises ValueError when spot=0 (prevents ZeroDivisionError)", t_greeks_spot_zero_raises)
+run("greeks_engine: calculate_greeks raises ValueError when strike=0",                           t_greeks_strike_zero_raises)
+run("greeks_engine: implied_volatility returns NaN on loop exhaustion (not bad sigma)",          t_greeks_iv_solver_returns_nan_on_exhaustion)
+run("greeks_engine: _IST timezone constant defined for UTC vs IST fix",                          t_greeks_ist_constant_defined)
+run("macro_signals: _fetch_ticker_last_two handles pd.MultiIndex columns from yfinance",         t_macro_signals_multiindex_column_handling)
+run("market_data: current_price uses info.last_price attribute (not wrong dict key)",            t_market_data_fast_info_attribute_access)
+run("strategy_agents: FuturesAgent._ctx_bonus initializes fii=None before try block",           t_strategy_futures_fii_scope_init)
+run("strategy_agents: FuturesAgent._ctx_bonus item 13 uses if-fii-is-not-None guard",          t_strategy_futures_fii_item13_no_try_except)
+run("strategy_agents: OptionsAgent._ctx_bonus theta efficiency uses options_intelligence IV",    t_options_agent_theta_uses_options_intelligence)
+run("strategy_agents: OptionsAgent Kelly sizing uses max(1, ...) not max(lot_size, ...)",        t_options_agent_kelly_sizing_min_one)
+run("strategy_agents: PairsAgent z-score uses sample std (N-1) not population std (N)",         t_pairs_agent_sample_std)
+run("strategy_agents: PairsAgent cooldown deferred to after min_score_pairs check",             t_pairs_agent_cooldown_deferred_to_after_min_score)
+run("base_agent: _on_sl_hit pattern_monitor uses math.isfinite guard against NaN denom",        t_base_agent_pattern_monitor_nan_guard)
+run("base_agent: _try_enter raises RuntimeError('invalid_sl') when sl <= 0",                    t_base_agent_invalid_sl_guard)
+run("base_agent: math imported at module level",                                                 t_base_agent_math_imported)
+run("kite_ticker: start() registers on_reconnect and on_noreconnect callbacks",                  t_kite_ticker_reconnect_callbacks_registered)
+run("kite_ticker: _on_ticks lambda closure captures sym via _sym=sym default arg",              t_kite_ticker_lambda_closure_fixed)
+run("options_flow: analyze_flow resets _iv_history on day change (bounded memory)",             t_options_flow_iv_history_daily_reset)
+run("options_flow: _iv_history_date initialized at module level",                               t_options_flow_iv_history_date_initialized)
+
 run("broker_router: squareoff_all_secondaries retains tracking for failed brokers",      t_broker_router_squareoff_retains_failed_broker_entries)
 run("broker_router: squareoff_all_secondaries only clears when all brokers succeed",     t_broker_router_squareoff_only_clears_when_all_succeed)
 run("broker_router: mirror_entry guards against duplicate primary_order_id",             t_broker_router_duplicate_primary_order_id_guard)

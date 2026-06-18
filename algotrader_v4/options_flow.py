@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import time
 from dataclasses import dataclass, field
+from datetime import date as _date
 from typing import Literal, Optional
 
 from loguru import logger
@@ -44,8 +45,9 @@ class OptionsFlow:
     updated_at:      float = field(default_factory=time.time)
 
 
-_cache:      dict[str, OptionsFlow] = {}
-_iv_history: dict[str, dict[str, list[float]]] = {}   # sym → "strike_CE" → [iv, ...]
+_cache:            dict[str, OptionsFlow] = {}
+_iv_history:       dict[str, dict[str, list[float]]] = {}   # sym → "strike_CE" → [iv, ...]
+_iv_history_date:  _date = _date.today()
 
 
 def get_cached_flow(symbol: str) -> Optional[OptionsFlow]:
@@ -58,7 +60,12 @@ def analyze_flow(symbol: str, chain: list[dict], spot: float) -> OptionsFlow:
     Analyze option chain for unusual flow.
     chain items: {strike, CE:{oi, volume, iv, ltp}, PE:{oi, volume, iv, ltp}}
     """
+    global _iv_history, _iv_history_date
     symbol = symbol.upper()
+    today = _date.today()
+    if today != _iv_history_date:
+        _iv_history.clear()
+        _iv_history_date = today
     unusual_calls: list[dict] = []
     unusual_puts:  list[dict] = []
     blocks:        list[dict] = []

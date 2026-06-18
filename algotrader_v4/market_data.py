@@ -153,7 +153,8 @@ class NSEClient:
             if exc.response.status_code in (401, 403):
                 self._session_ok = False
             return None
-        except Exception:
+        except Exception as exc:
+            logger.debug("NSE GET {} failed: {}", url, exc)
             return None
 
     async def quote_equity(self, symbol: str) -> Optional[Quote]:
@@ -300,7 +301,7 @@ class YFinanceClient:
         ticker = self._ticker(symbol, exchange)
         try:
             info = yf.Ticker(ticker).fast_info
-            return float(info.get("last_price") or info.get("regularMarketPrice") or 0)
+            return float(info.last_price or info.previous_close or 0)
         except Exception:
             return 0.0
 
