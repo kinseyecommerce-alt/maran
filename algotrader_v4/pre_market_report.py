@@ -19,6 +19,7 @@ from loguru import logger
 
 from config import settings
 from agents.base_agent import send_telegram
+from ist_clock import now_ist as _now_ist
 from market_data import nse_client
 
 
@@ -222,7 +223,7 @@ def _build_claude_payload(
     sector_data: dict,
 ) -> str:
     """Construct the user message for Claude from collected data."""
-    now_ist = datetime.now().strftime("%Y-%m-%d %H:%M IST")
+    now_ist = _now_ist().strftime("%Y-%m-%d %H:%M IST")
 
     # Global futures
     global_cues = []
@@ -338,7 +339,7 @@ def _format_telegram(
     fiidii: Optional[dict],
     sector_data: dict,
 ) -> str:
-    now_ist = datetime.now().strftime("%d %b %Y, %H:%M IST")
+    now_ist = _now_ist().strftime("%d %b %Y, %H:%M IST")
     sentiment    = analysis.get("sentiment", "neutral").capitalize()
     confidence   = analysis.get("sentiment_confidence", 0)
     summary      = analysis.get("summary", "")
@@ -508,5 +509,5 @@ async def generate_pre_market_report() -> dict:
         "india_data":  india_data,
         "fiidii":      fiidii,
         "sector_data": sector_data,
-        "generated_at": datetime.now().isoformat(),
+        "generated_at": _now_ist().isoformat(),
     }
