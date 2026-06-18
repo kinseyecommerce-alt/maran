@@ -431,25 +431,32 @@ class MasterAgent:
             }
 
         # Phase 3D: Rolling Sharpe alert — warn if a strategy's rolling Sharpe is degrading
-        asyncio.create_task(self._check_rolling_sharpe())
+        def _log_task_exc(t: asyncio.Task) -> None:
+            exc = t.exception()
+            if exc:
+                logger.error("[master] background task {} raised: {}", t.get_name(), exc)
+        _t = asyncio.create_task(self._check_rolling_sharpe(), name="rolling_sharpe")
+        _t.add_done_callback(_log_task_exc)
 
         summary = self.last_directives.get("summary", "")
         if summary:
-            asyncio.create_task(send_telegram(
+            _tg = asyncio.create_task(send_telegram(
                 f"<b>Regime: {regime.value}</b>\n"
                 f"Active: {', '.join(plan.active)}\n"
                 f"Paused: {', '.join(plan.paused) or 'none'}\n"
                 f"Size:   {int(plan.size_factor * 100)}%\n{summary}"
-            ))
+            ), name="regime_telegram")
+            _tg.add_done_callback(_log_task_exc)
             from n8n_bridge import notify as _n8n
-            asyncio.create_task(_n8n("regime_change", {
+            _tn = asyncio.create_task(_n8n("regime_change", {
                 "regime":      regime.value,
                 "active":      plan.active,
                 "paused":      plan.paused,
                 "size_factor": plan.size_factor,
                 "reasoning":   plan.reasoning[:120],
                 "signals":     sigs.to_dict() if sigs else {},
-            }))
+            }), name="regime_n8n")
+            _tn.add_done_callback(_log_task_exc)
 
     async def _check_rolling_sharpe(self) -> None:
         """Phase 3D: Alert when a strategy's rolling Sharpe drops below threshold for 3 cycles."""
@@ -702,13 +709,17 @@ class MasterAgent:
             if regime_name:
                 apply_optimised_config(regime=regime_name)
         except Exception as exc:
-            logger.warning("[master] profit_optimizer apply failed (non-critical): {}", exc)
+            logger.error("[master] profit_optimizer apply failed: {}", exc)
+            asyncio.create_task(send_telegram(f"⚠️ <b>profit_optimizer failed</b>\n{exc}"),
+                                name="optimizer_alert")
 
         # Log opportunity alert if present
         alert = d.get("opportunity_alert")
         if alert and alert not in (None, "null", ""):
             logger.info("[master] 💡 Opportunity: {}", alert)
-            asyncio.create_task(send_telegram(f"💡 <b>Opportunity Alert</b>\n{alert}"))
+            _to = asyncio.create_task(send_telegram(f"💡 <b>Opportunity Alert</b>\n{alert}"),
+                                      name="opportunity_alert")
+            _to.add_done_callback(lambda t: logger.error("[master] opportunity_alert task raised: {}", t.exception()) if t.exception() else None)
 
     def get_status(self) -> dict:
         return {

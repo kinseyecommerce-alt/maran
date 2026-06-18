@@ -10072,6 +10072,126 @@ run("signal_aggregator: recent_signals writes back trimmed list (no memory leak)
 
 
 # ══════════════════════════════════════════════════════════════════════════
+# 116. BATCH 7 — state_store, master_agent_v5, twap_engine, tick_engine,
+#      claude_trade_gate, platform_scheduler, symbol_scanner
+# ══════════════════════════════════════════════════════════════════════════
+
+def t_state_store_sharpe_sqrt_clamped():
+    """state_store: Sharpe std uses math.sqrt(max(var, 0.0)) to prevent ValueError."""
+    import inspect
+    import state_store as _ss
+    src = inspect.getsource(_ss.get_performance_report)
+    assert "math.sqrt(max(var, 0.0))" in src, (
+        "get_performance_report must use math.sqrt(max(var, 0.0)) not math.sqrt(var) — "
+        "near-zero negative floats (from floating-point rounding) would raise ValueError"
+    )
+
+def t_master_agent_rolling_sharpe_task_done_callback():
+    """master_agent_v5: _check_rolling_sharpe task must have a done_callback for error surfacing."""
+    import inspect
+    import master_agent_v5 as _ma
+    src = inspect.getsource(_ma.MasterAgent._master_review)
+    assert "add_done_callback" in src, (
+        "asyncio.create_task(self._check_rolling_sharpe()) must have .add_done_callback "
+        "so exceptions in the background task are not silently swallowed"
+    )
+
+def t_master_agent_profit_optimizer_escalated():
+    """master_agent_v5: profit_optimizer failure should log as ERROR (not WARNING)."""
+    import inspect
+    import master_agent_v5 as _ma
+    src = inspect.getsource(_ma.MasterAgent._apply_directives)
+    assert "logger.error" in src and "profit_optimizer" in src, (
+        "_apply_directives must escalate profit_optimizer failure to logger.error "
+        "so it surfaces in production log monitoring"
+    )
+
+def t_twap_engine_wait_for_timeout():
+    """twap_engine: place_order executor call must be wrapped in asyncio.wait_for."""
+    import inspect
+    import twap_engine as _te
+    src = inspect.getsource(_te.TWAPEngine.execute)
+    assert "asyncio.wait_for" in src, (
+        "TWAPEngine.execute must wrap run_in_executor with asyncio.wait_for(timeout=30.0) "
+        "to cap worst-case latency — a hung Kite HTTP call freezes all agent tick loops"
+    )
+
+def t_twap_engine_zero_chunk_logged():
+    """twap_engine: zero-qty chunk skip should emit a debug log."""
+    import inspect
+    import twap_engine as _te
+    src = inspect.getsource(_te.TWAPEngine.execute)
+    assert "logger.debug" in src and ("chunk=0" in src or "chunk <= 0" in src), (
+        "TWAPEngine.execute should log when a chunk=0 slice is skipped "
+        "to make slice-count mismatches visible in debug logs"
+    )
+
+def t_tick_engine_ltp_moved_nan_guard():
+    """tick_engine: _ltp_moved_pct must guard against NaN _cached_ltp."""
+    import inspect
+    import tick_engine as _te
+    src = inspect.getsource(_te.TickEngine._process_tick)
+    assert "math.isnan(_cached_ltp)" in src or "isnan" in src, (
+        "tick_engine._process_tick must guard _cached_ltp for NaN before dividing — "
+        "float('nan') is truthy so 'if _cached_ltp' passes NaN, causing NaN % computation"
+    )
+
+def t_claude_gate_breaker_lock_exists():
+    """claude_trade_gate: circuit breaker globals must be protected by an asyncio.Lock."""
+    import inspect
+    import claude_trade_gate as _cg
+    # Check that _breaker_lock exists in the module
+    assert hasattr(_cg, "_breaker_lock"), (
+        "claude_trade_gate must define _breaker_lock = asyncio.Lock() to guard "
+        "_consec_failures and _breaker_until from concurrent async callers"
+    )
+
+def t_claude_gate_lock_used_in_assess():
+    """claude_trade_gate: assess() must acquire _breaker_lock before mutating breaker state."""
+    import inspect
+    import claude_trade_gate as _cg
+    src = inspect.getsource(_cg.assess)
+    assert "_breaker_lock" in src, (
+        "claude_trade_gate.assess must use async with _breaker_lock: "
+        "when resetting _consec_failures or calling _record_gate_failure"
+    )
+
+def t_platform_scheduler_options_overlap_guard():
+    """platform_scheduler: _options_cache_refresh must guard against overlapping calls."""
+    import inspect
+    import platform_scheduler as _ps
+    src = inspect.getsource(_ps.PlatformScheduler._options_cache_refresh)
+    assert "_options_refresh_running" in src, (
+        "_options_cache_refresh must set a running flag to skip overlapping invocations — "
+        "APScheduler does not prevent concurrent job executions by default"
+    )
+
+def t_symbol_scanner_ema_nan_guard():
+    """symbol_scanner: trend_direction assignment must guard EMA values for NaN."""
+    import inspect
+    import symbol_scanner as _sc
+    src = inspect.getsource(_sc.SymbolScanner._score_symbol)
+    # NaN identity check: x == x is False only for NaN
+    assert ("ema9 == sc.ema9" in src or "ema21 == sc.ema21" in src or
+            "isnan" in src or "ema9 and sc.ema9 == sc.ema9" in src), (
+        "symbol_scanner._score_symbol trend_direction check must guard EMA values for NaN "
+        "using identity check (x == x) or math.isnan — EMAIndicator can return NaN "
+        "for insufficient data and NaN is truthy"
+    )
+
+run("state_store: get_performance_summary uses math.sqrt(max(var, 0)) to prevent ValueError", t_state_store_sharpe_sqrt_clamped)
+run("master_agent_v5: _check_rolling_sharpe task has done_callback for error surfacing",      t_master_agent_rolling_sharpe_task_done_callback)
+run("master_agent_v5: profit_optimizer failure escalated to logger.error",                    t_master_agent_profit_optimizer_escalated)
+run("twap_engine: execute wraps run_in_executor in asyncio.wait_for(timeout=30)",             t_twap_engine_wait_for_timeout)
+run("twap_engine: zero-chunk slice skip emits a debug log",                                   t_twap_engine_zero_chunk_logged)
+run("tick_engine: _ltp_moved_pct guards _cached_ltp for NaN before dividing",                t_tick_engine_ltp_moved_nan_guard)
+run("claude_trade_gate: _breaker_lock asyncio.Lock defined at module level",                  t_claude_gate_breaker_lock_exists)
+run("claude_trade_gate: assess() acquires _breaker_lock before mutating breaker state",       t_claude_gate_lock_used_in_assess)
+run("platform_scheduler: _options_cache_refresh guards against overlapping invocations",      t_platform_scheduler_options_overlap_guard)
+run("symbol_scanner: trend_direction EMA check guards against NaN values",                    t_symbol_scanner_ema_nan_guard)
+
+
+# ══════════════════════════════════════════════════════════════════════════
 # FINAL SUMMARY
 # ══════════════════════════════════════════════════════════════════════════
 failed = summary()

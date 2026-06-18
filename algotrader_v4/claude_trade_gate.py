@@ -310,9 +310,12 @@ _BREAKER_THRESHOLD    = 5
 _BREAKER_COOLDOWN_SEC = 120.0
 _consec_failures: int   = 0
 _breaker_until:   float = 0.0
+_breaker_lock = asyncio.Lock()
 
 
 def _record_gate_failure() -> None:
+    # Synchronous update guarded by a module-level flag; async callers must
+    # acquire _breaker_lock before mutating _consec_failures / _breaker_until.
     global _consec_failures, _breaker_until
     _consec_failures += 1
     if _consec_failures >= _BREAKER_THRESHOLD:
@@ -370,7 +373,8 @@ async def assess(snap, action: str, signal: dict, strategy: str) -> GateDecision
             logger.warning("[gate] {} timeout — retrying once", snap.symbol)
             resp = await _call()
         latency = int((asyncio.get_running_loop().time() - t0) * 1000)
-        _consec_failures = 0
+        async with _breaker_lock:
+            _consec_failures = 0
 
         # FIX 4: wrap response parsing so any unexpected format falls back safely
         try:
@@ -409,11 +413,13 @@ async def assess(snap, action: str, signal: dict, strategy: str) -> GateDecision
         return decision
 
     except asyncio.TimeoutError:
-        _record_gate_failure()
+        async with _breaker_lock:
+            _record_gate_failure()
         logger.warning("[gate] {} timeout (after retry) — allowing trade with reduced size", snap.symbol)
         return _ALLOW_ON_ERROR
     except Exception as exc:
-        _record_gate_failure()
+        async with _breaker_lock:
+            _record_gate_failure()
         logger.warning("[gate] {} API error ({}) — allowing trade with reduced size", snap.symbol, exc)
         return _ALLOW_ON_ERROR
 

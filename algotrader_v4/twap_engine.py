@@ -78,21 +78,26 @@ class TWAPEngine:
             # Last slice absorbs the remainder so total always equals qty
             chunk = base_chunk + (remainder if i == n_slices else 0)
             if chunk <= 0:
+                logger.debug("[TWAP] {} slice {}/{}: chunk=0, skipping", symbol, i, n_slices)
                 continue
 
             try:
                 # run_in_executor: place_order can block 100ms-15s on HTTP + retries;
                 # a sync call here would freeze every agent's tick loop for that duration.
-                order_id = await asyncio.get_running_loop().run_in_executor(
-                    None, lambda: kite_client.place_order(
-                        tradingsymbol=symbol,
-                        exchange=exchange,
-                        transaction_type=action,
-                        quantity=chunk,
-                        order_type="MARKET",
-                        product=product,
-                        tag=tag,
-                    )
+                # wait_for caps worst-case at 30s so a hung slice doesn't stall the loop.
+                order_id = await asyncio.wait_for(
+                    asyncio.get_running_loop().run_in_executor(
+                        None, lambda: kite_client.place_order(
+                            tradingsymbol=symbol,
+                            exchange=exchange,
+                            transaction_type=action,
+                            quantity=chunk,
+                            order_type="MARKET",
+                            product=product,
+                            tag=tag,
+                        )
+                    ),
+                    timeout=30.0,
                 )
                 order_ids.append(order_id)
                 logger.info("[TWAP] {} slice {}/{}: qty={} id={}", symbol, i, n_slices, chunk, order_id)

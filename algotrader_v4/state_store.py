@@ -637,7 +637,7 @@ def get_performance_report(
         n    = len(daily_vals)
         mean = sum(daily_vals) / n
         var  = sum((x - mean) ** 2 for x in daily_vals) / n
-        std  = math.sqrt(var)
+        std  = math.sqrt(max(var, 0.0))
         if std > 0:
             sharpe = round((mean / std) * math.sqrt(252), 2)
 

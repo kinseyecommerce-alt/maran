@@ -22,6 +22,7 @@ class PlatformScheduler:
     def __init__(self) -> None:
         self._sched = AsyncIOScheduler(timezone="Asia/Kolkata")
         self._token_ok = False
+        self._options_refresh_running = False
 
     def start(self) -> None:
         if not settings.kite_api_key:
@@ -106,9 +107,13 @@ class PlatformScheduler:
 
     async def _options_cache_refresh(self) -> None:
         """Refresh options IV cache every 5 minutes during market hours."""
+        if self._options_refresh_running:
+            logger.debug("[platform] Options cache refresh already running — skipping overlap")
+            return
         from market_data import is_market_open
         if not is_market_open():
             return
+        self._options_refresh_running = True
         try:
             from tick_engine import tick_engine
             from options_intelligence import update_cache
@@ -117,6 +122,8 @@ class PlatformScheduler:
                 await update_cache(symbols[:20])  # limit to top 20 to avoid rate limits
         except Exception as exc:
             logger.debug("[platform] Options cache refresh: {}", exc)
+        finally:
+            self._options_refresh_running = False
 
     async def _kite_token_refresh(self) -> None:
         logger.info("[platform] Kite token refresh starting…")

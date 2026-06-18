@@ -778,7 +778,8 @@ class TickEngine:
         # only meaningful at candle close; intra-candle recomputes add noise, not edge.
         _n_candles = len(df)
         _cached_ltp = self._ind_cache_ltp.get(symbol, 0.0)
-        _ltp_moved_pct = abs(tick.ltp - _cached_ltp) / _cached_ltp * 100 if _cached_ltp else 100.0
+        _ltp_moved_pct = (abs(tick.ltp - _cached_ltp) / _cached_ltp * 100
+                          if _cached_ltp and not math.isnan(_cached_ltp) else 100.0)
         if (_n_candles == self._ind_cache_count.get(symbol, -1)
                 and _ltp_moved_pct < 0.05
                 and symbol in self._ind_cache):
