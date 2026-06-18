@@ -412,7 +412,7 @@ class BacktestEngine:
             result.oos_trades    = len(oos_pnls)
             if len(oos_pnls) >= 2:
                 arr = np.array(oos_pnls, dtype=float)
-                std = float(arr.std())
+                std = float(arr.std(ddof=1))  # sample std — population std inflates Sharpe on small OOS folds
                 if std > 0:
                     result.oos_sharpe = round(
                         float(arr.mean()) / std * math.sqrt(len(arr)), 2
@@ -488,7 +488,8 @@ class BacktestEngine:
             atr    = ta.volatility.AverageTrueRange(high, low, close, 14).average_true_range()
             atr_ma = atr.rolling(30).mean()
             for i in range(30, n - 1):
-                iv_proxy = (atr.iloc[i] / atr_ma.iloc[i] * 50) if atr_ma.iloc[i] else 50
+                _atr_ma_i = float(atr_ma.iloc[i])
+                iv_proxy = (float(atr.iloc[i]) / _atr_ma_i * 50) if (math.isfinite(_atr_ma_i) and _atr_ma_i != 0) else 50
                 if iv_proxy < 40 and rsi.iloc[i] < 40:
                     signals.iloc[i + 1] = 1
                 elif iv_proxy < 40 and rsi.iloc[i] > 60:
@@ -641,8 +642,8 @@ class BacktestEngine:
         avg_loss  = float(np.mean([abs(l) for l in losses])) if losses else 0.0
 
         pnl_arr = np.array(pnls)
-        if len(pnl_arr) > 1 and pnl_arr.std() > 0:
-            sharpe = float((pnl_arr.mean() / pnl_arr.std()) * math.sqrt(len(pnls)))
+        if len(pnl_arr) > 1 and pnl_arr.std(ddof=1) > 0:
+            sharpe = float((pnl_arr.mean() / pnl_arr.std(ddof=1)) * math.sqrt(len(pnls)))
         else:
             sharpe = 0.0
 
@@ -651,7 +652,8 @@ class BacktestEngine:
         peak       = np.maximum.accumulate(cum_arr)
         drawdown   = peak - cum_arr
         max_dd     = float(np.max(drawdown)) if len(drawdown) else 0.0
-        max_dd_pct = (max_dd / max(abs(peak.max()), 1)) * 100 if peak.max() != 0 else 0.0
+        denom = max(abs(float(peak.max())), abs(float(cum_arr.min())), 1.0)
+        max_dd_pct = (max_dd / denom) * 100
 
         gross_profit = sum(wins)              if wins   else 0.0
         gross_loss   = sum(abs(l) for l in losses) if losses else 0.0

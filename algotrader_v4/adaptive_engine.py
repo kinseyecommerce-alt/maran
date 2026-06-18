@@ -241,7 +241,7 @@ class AdaptiveLearningEngine:
                   "strategies_adapt": [], "strategies_retire": [],
                   "rebacktest_needed": [], "vix": current_vix, "regime_changed": regime_changed}
         for key, params in list(self._params.items()):  # list() snapshot — safe if on_regime_change fires from a scheduler thread
-            strategy, symbol = key.split("::")
+            strategy, symbol = key.split("::", maxsplit=1)
             gate = GATE_THRESHOLDS.get(strategy, {})
             gate_wr = gate.get("win_rate", 55) / 100
             if regime_changed:
@@ -267,13 +267,13 @@ class AdaptiveLearningEngine:
         volatile_regime = new_regime in ("BEAR_VOLATILE", "HIGH_VOLATILE")
         bear_regime     = new_regime in ("BEAR_TREND", "BEAR_VOLATILE")
         for key, params in list(self._params.items()):  # list() snapshot safe for concurrent callers
-            strategy, symbol = key.split("::")
+            strategy, symbol = key.split("::", maxsplit=1)
             if volatile_regime:
                 params.size_factor = min(params.size_factor, 0.5)
                 params.sl_pct = round(params.sl_pct * 1.2, 2)
             if bear_regime and "swing" in strategy:
                 params.status = "CAUTIOUS"
-                params.size_factor = 0.0
+                params.size_factor = 0.25  # floor matches _adapt_parameters minimum; 0.0 causes zero-qty orders
             if new_regime == "BULL_TREND" and old_regime != "BULL_TREND":
                 params.size_factor = max(0.75, params.size_factor)
             if strategy in ("iron_condor", "short_straddle") and volatile_regime:
@@ -366,7 +366,7 @@ class AdaptiveLearningEngine:
                 data = json.load(f)
             _valid = {f.name for f in dc_fields(AdaptiveParams)} - {"strategy", "symbol"}
             for key, d in data.items():
-                strategy, symbol = key.split("::")
+                strategy, symbol = key.split("::", maxsplit=1)
                 filtered = {k: v for k, v in d.items() if k in _valid}
                 self._params[key] = AdaptiveParams(strategy=strategy, symbol=symbol, **filtered)
             logger.info("Loaded {} adaptive param sets", len(self._params))

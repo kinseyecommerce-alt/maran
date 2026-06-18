@@ -10192,6 +10192,245 @@ run("symbol_scanner: trend_direction EMA check guards against NaN values",      
 
 
 # ══════════════════════════════════════════════════════════════════════════
+# 117. BATCH 8 — portfolio, ml_signal, adaptive_engine, backtest_engine,
+#      risk_manager, kite_client, market_regime, correlation_guard,
+#      profit_optimizer, trade_memory
+# ══════════════════════════════════════════════════════════════════════════
+
+def t_portfolio_optimizer_neg_sharpe_no_return_guard():
+    """portfolio_optimizer: neg_sharpe must not return 0.0 when port_return is negative."""
+    import inspect
+    import portfolio_optimizer as _po
+    src = inspect.getsource(_po.PortfolioOptimizer.optimize)
+    assert "port_return <= 0" not in src, (
+        "neg_sharpe must NOT short-circuit on negative port_return — returning 0.0 when "
+        "all signals are negative makes all weight vectors indistinguishable for the optimizer"
+    )
+
+def t_portfolio_optimizer_sector_cap_single_symbol():
+    """portfolio_optimizer: sector cap constraint must apply to ALL sectors, including single-symbol ones."""
+    import inspect
+    import portfolio_optimizer as _po
+    src = inspect.getsource(_po.PortfolioOptimizer.optimize)
+    assert "len(idx) > 1" not in src, (
+        "Sector cap must be enforced for all sectors regardless of size — "
+        "single-symbol sectors were previously skipped allowing >35% allocation"
+    )
+
+def t_portfolio_var_cvar_uses_sorted_tail():
+    """portfolio_var: CVaR must use sorted tail (not np.quantile equality filter)."""
+    import inspect
+    import portfolio_var as _pv
+    src = inspect.getsource(_pv.PortfolioVaR.compute)
+    assert "np.sort(portfolio_rets)" in src, (
+        "CVaR must use sorted tail: sorted_rets[:cutoff] where cutoff=ceil(0.01*n) "
+        "— quantile equality filter includes too many values in flat-market conditions"
+    )
+
+def t_portfolio_var_min_three_closes():
+    """portfolio_var: must require >= 3 closes (not 2) to ensure at least 2 returns for ddof=1."""
+    import inspect
+    import portfolio_var as _pv
+    src = inspect.getsource(_pv.PortfolioVaR._fetch_returns)
+    assert "len(closes) < 3" in src, (
+        "_fetch_returns must require len(closes) >= 3 — with only 2 closes there is "
+        "1 return, sigma=0, and VaR reduces to -mu*notional (misleadingly low risk)"
+    )
+
+def t_portfolio_backtest_available_capital_clamped():
+    """portfolio_backtest: available_capital must be clamped to total_capital after exits."""
+    import inspect
+    import portfolio_backtest as _pb
+    src = inspect.getsource(_pb.PortfolioBacktest._simulate_portfolio)
+    assert "min(available_capital, total_capital)" in src, (
+        "available_capital must be clamped to total_capital after exits "
+        "to prevent float drift from inflating capital beyond what was allocated"
+    )
+
+def t_portfolio_backtest_sharpe_normalized():
+    """portfolio_backtest: Sharpe must be computed on per-trade returns (not raw rupee PnL)."""
+    import inspect
+    import portfolio_backtest as _pb
+    src = inspect.getsource(_pb.PortfolioBacktest._compute_metrics)
+    assert "capital_per_trade" in src or "ret_arr" in src, (
+        "Sharpe must normalize trade PnL by capital_per_trade to produce a return-based ratio "
+        "— raw rupee PnL inflates Sharpe proportional to position size, making runs incomparable"
+    )
+
+def t_ml_signal_filter_encoder_snapshot_under_lock():
+    """ml_signal_filter: encoder must be snapshotted under lock before disk write."""
+    import inspect
+    import ml_signal_filter as _mlf
+    src = inspect.getsource(_mlf.MLSignalFilter._retrain)
+    assert "enc_snapshot" in src, (
+        "_retrain must snapshot self._encoder under self._lock before calling pickle.dump — "
+        "writing self._encoder outside the lock races with inference threads mutating _encoder"
+    )
+
+def t_ml_signal_scorer_dropna_handles_label_nan():
+    """ml_signal_scorer: label NaN at last row must be handled by dropna, not iloc[:-1]."""
+    import inspect
+    import ml_signal_scorer as _mls
+    src = inspect.getsource(_mls.MLSignalScorer.train)
+    assert "iloc[:-1]" not in src, (
+        "train must not use iloc[:-1] after dropna — label is now kept as bool "
+        "with NaN at last row so dropna() removes it; iloc[:-1] incorrectly removes valid data"
+    )
+
+def t_adaptive_engine_split_maxsplit():
+    """adaptive_engine: key.split('::') must use maxsplit=1 to handle :: in symbol names."""
+    import inspect
+    import adaptive_engine as _ae
+    for fn in [_ae.AdaptiveLearningEngine.summary, _ae.AdaptiveLearningEngine._load_state]:
+        src = inspect.getsource(fn)
+        if 'split("::")' in src:
+            assert 'split("::", maxsplit=1)' in src, (
+                f"All key.split('::') calls in {fn.__name__} must use maxsplit=1 "
+                "to avoid ValueError when symbol/strategy name contains '::'")
+
+def t_adaptive_engine_size_factor_floor():
+    """adaptive_engine: bear-regime swing size_factor must be floored at 0.25 (not 0.0)."""
+    import inspect
+    import adaptive_engine as _ae
+    src = inspect.getsource(_ae.AdaptiveLearningEngine.on_regime_change)
+    assert "size_factor = 0.0" not in src, (
+        "size_factor = 0.0 in bear regime causes zero-qty orders — must be 0.25 (documented minimum)"
+    )
+
+def t_risk_manager_kelly_avg_loss_abs():
+    """risk_manager: kelly_fraction must abs() avg_loss_pct before computing R ratio."""
+    import inspect
+    import risk_manager as _rm
+    src = inspect.getsource(_rm.RiskManager.kelly_fraction)
+    assert "abs(getattr(params" in src or "abs(getattr" in src, (
+        "kelly_fraction must use abs(avg_loss_pct) — avg_loss_pct is stored as a negative number; "
+        "max(negative, 0.01) = 0.01 inflates R ratio to ~150x, pinning Kelly at 1.5 always"
+    )
+
+def t_backtest_engine_oos_sharpe_ddof1():
+    """backtest_engine: OOS Sharpe must use sample std (ddof=1), not population std."""
+    import inspect
+    import backtest_engine as _be
+    src = inspect.getsource(_be.BacktestEngine._walk_forward_run)
+    assert "arr.std(ddof=1)" in src, (
+        "OOS Sharpe must use arr.std(ddof=1) — population std (ddof=0) inflates Sharpe "
+        "by up to 8% for small OOS fold sizes (n=15-30 trades)"
+    )
+
+def t_kite_client_double_fill_guard():
+    """kite_client: paper fill must use _paper_filled_ids to prevent double-fill race."""
+    import inspect
+    import kite_client as _kc
+    # Check that KiteClient has the _paper_filled_ids instance variable
+    src = inspect.getsource(_kc.KiteClient.__init__)
+    assert "_paper_filled_ids" in src, (
+        "KiteClient.__init__ must define _paper_filled_ids set to guard against double-filling "
+        "the same order (update_paper_pnl calls _update_paper_position outside _paper_orders_lock)"
+    )
+
+def t_kite_client_positions_cached_lock():
+    """kite_client: positions_cached must hold _pos_cache_lock to prevent duplicate REST calls."""
+    import inspect
+    import kite_client as _kc
+    src = inspect.getsource(_kc.KiteClient.positions_cached)
+    assert "_pos_cache_lock" in src, (
+        "positions_cached must acquire _pos_cache_lock to prevent TOCTOU race — "
+        "two threads both bypassing the cache will fire 2× the intended REST calls"
+    )
+
+def t_market_regime_ad_no_nonlocal():
+    """market_regime: A/D breadth must collect via return values, not nonlocal shared counters."""
+    import inspect
+    import market_regime as _mr
+    src = inspect.getsource(_mr.MarketRegimeDetector._collect_breadth)
+    assert "nonlocal adv" not in src, (
+        "_collect_breadth must not use 'nonlocal adv, dec' — concurrent asyncio coroutines "
+        "interleave at await points, causing lost updates to shared counters"
+    )
+
+def t_market_regime_sector_zero_guard():
+    """market_regime: _collect_sectors must guard against zero prior-day close before dividing."""
+    import inspect
+    import market_regime as _mr
+    src = inspect.getsource(_mr.MarketRegimeDetector._collect_sectors)
+    assert "prev == 0" in src or "if prev" in src, (
+        "_collect_sectors must guard df[cc].iloc[-2] == 0 before division — "
+        "newly-listed or circuit-broken indices can have zero prior close"
+    )
+
+def t_correlation_guard_matrix_lock():
+    """correlation_guard: _corr_matrix must be updated under _matrix_lock."""
+    import inspect
+    import correlation_guard as _cg
+    assert hasattr(_cg, "_matrix_lock"), (
+        "correlation_guard must define _matrix_lock = threading.Lock() to guard "
+        "_corr_matrix replacement from concurrent request/update threads"
+    )
+
+def t_profit_optimizer_target_pct_attr():
+    """profit_optimizer: target_pct must map to tgt_pct_{strategy}, not target_pct_{strategy}."""
+    import inspect
+    import profit_optimizer as _po
+    src = inspect.getsource(_po._attr_name)
+    assert "tgt_pct_" in src or '"target_pct"' in src, (
+        "_attr_name must map 'target_pct' → 'tgt_pct_{strategy}' — "
+        "the replace('pct','pct_') pattern produces 'target_pct_intraday' which doesn't exist in Settings"
+    )
+
+def t_profit_optimizer_save_params_atomic():
+    """profit_optimizer: _save_params must use atomic rename (tmp → final)."""
+    import inspect
+    import profit_optimizer as _po
+    src = inspect.getsource(_po._save_params)
+    assert ".replace(_PARAMS_F)" in src or "tmp.replace" in src, (
+        "_save_params must write to a temp file then atomically rename it — "
+        "direct open('w') truncates the file immediately, risking corruption on crash"
+    )
+
+def t_trade_memory_trim_lock():
+    """trade_memory: _write_and_trim must hold _trim_lock to serialize concurrent appends."""
+    import inspect
+    import trade_memory as _tm
+    src = inspect.getsource(_tm.record_trade)
+    assert "_trim_lock" in src, (
+        "record_trade._write_and_trim must acquire _trim_lock before append+trim — "
+        "concurrent trades calling asyncio.to_thread(_write_and_trim) race on the file"
+    )
+
+def t_trade_memory_trim_atomic_write():
+    """trade_memory: _trim_file_to_max_entries must use atomic temp-file write."""
+    import inspect
+    import trade_memory as _tm
+    src = inspect.getsource(_tm._trim_file_to_max_entries)
+    assert "tmp.replace(MEMORY_FILE)" in src or ".replace(MEMORY_FILE)" in src, (
+        "_trim_file_to_max_entries must write to a temp file then rename — "
+        "write_text() truncates immediately and risks empty file on crash"
+    )
+
+run("portfolio_optimizer: neg_sharpe does not return 0 when port_return is negative",          t_portfolio_optimizer_neg_sharpe_no_return_guard)
+run("portfolio_optimizer: sector cap enforced for all sectors (including single-symbol)",       t_portfolio_optimizer_sector_cap_single_symbol)
+run("portfolio_var: CVaR uses sorted tail (not np.quantile equality filter)",                  t_portfolio_var_cvar_uses_sorted_tail)
+run("portfolio_var: requires >= 3 closes for at least 2 returns (ddof=1 std valid)",           t_portfolio_var_min_three_closes)
+run("portfolio_backtest: available_capital clamped to total_capital after exits",              t_portfolio_backtest_available_capital_clamped)
+run("portfolio_backtest: Sharpe normalized by capital_per_trade (not raw rupee PnL)",          t_portfolio_backtest_sharpe_normalized)
+run("ml_signal_filter: encoder snapshotted under lock before pickle.dump",                     t_ml_signal_filter_encoder_snapshot_under_lock)
+run("ml_signal_scorer: iloc[:-1] removed — dropna handles label NaN at last row",             t_ml_signal_scorer_dropna_handles_label_nan)
+run("adaptive_engine: key.split('::') uses maxsplit=1 everywhere",                            t_adaptive_engine_split_maxsplit)
+run("adaptive_engine: bear-regime swing size_factor >= 0.25 (not 0.0)",                       t_adaptive_engine_size_factor_floor)
+run("risk_manager: kelly_fraction uses abs(avg_loss_pct) for correct R ratio",                t_risk_manager_kelly_avg_loss_abs)
+run("backtest_engine: OOS Sharpe uses sample std ddof=1 (not population ddof=0)",             t_backtest_engine_oos_sharpe_ddof1)
+run("kite_client: paper fills guarded by _paper_filled_ids to prevent double-fill race",      t_kite_client_double_fill_guard)
+run("kite_client: positions_cached acquires _pos_cache_lock (TOCTOU guard)",                  t_kite_client_positions_cached_lock)
+run("market_regime: A/D breadth uses return values not nonlocal shared counters",             t_market_regime_ad_no_nonlocal)
+run("market_regime: _collect_sectors guards prior-close == 0 before division",                t_market_regime_sector_zero_guard)
+run("correlation_guard: _matrix_lock guards _corr_matrix replacement atomically",             t_correlation_guard_matrix_lock)
+run("profit_optimizer: _attr_name maps 'target_pct' → 'tgt_pct_{strategy}'",                 t_profit_optimizer_target_pct_attr)
+run("profit_optimizer: _save_params uses atomic rename (tmp → final)",                        t_profit_optimizer_save_params_atomic)
+run("trade_memory: _write_and_trim holds _trim_lock to serialize concurrent appends",         t_trade_memory_trim_lock)
+run("trade_memory: _trim_file_to_max_entries uses atomic temp-file rename",                   t_trade_memory_trim_atomic_write)
+
+
+# ══════════════════════════════════════════════════════════════════════════
 # FINAL SUMMARY
 # ══════════════════════════════════════════════════════════════════════════
 failed = summary()

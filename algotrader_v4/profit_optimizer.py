@@ -175,9 +175,18 @@ def phase1_optimise(verbose: bool = True) -> dict[str, dict]:
     return best_params
 
 
+def _attr_name(strategy: str, k: str) -> str:
+    """Map optimizer param key to Settings attribute name."""
+    if k == "target_pct":
+        return f"tgt_pct_{strategy}"
+    if "pct" in k:
+        return f"{k.replace('pct', 'pct_')}{strategy}"
+    return f"{k}_{strategy}"
+
+
 def _patch_settings(strategy: str, params: dict) -> None:
     for k, v in params.items():
-        attr = f"{k.replace('pct', 'pct_')}{strategy}"
+        attr = _attr_name(strategy, k)
         if hasattr(settings, attr):
             setattr(settings, attr, v)
         elif k == "min_score":
@@ -190,7 +199,7 @@ def _restore_settings(strategy: str, orig: dict) -> None:
     for k, v in orig.items():
         if v is None:
             continue
-        attr = f"{k.replace('pct', 'pct_')}{strategy}"
+        attr = _attr_name(strategy, k)
         if hasattr(settings, attr):
             setattr(settings, attr, v)
         elif k == "min_score":
@@ -397,7 +406,7 @@ def apply_optimised_config(regime: str | None = None) -> dict:
             applied["claude_gate_threshold"] = t
             for strategy, overrides in regime_data.get("strategy_overrides", {}).items():
                 for k, v in overrides.items():
-                    attr = f"{k.replace('pct', 'pct_')}{strategy}" if "pct" in k else f"{k}_{strategy}"
+                    attr = _attr_name(strategy, k)
                     if hasattr(settings, attr):
                         setattr(settings, attr, v)
                         applied[attr] = v
@@ -411,7 +420,7 @@ def apply_optimised_config(regime: str | None = None) -> dict:
             for k, v in params.items():
                 if k in ("avg_score",):
                     continue
-                attr = f"{k.replace('pct', 'pct_')}{strategy}" if "pct" in k else f"{k}_{strategy}"
+                attr = _attr_name(strategy, k)
                 if hasattr(settings, attr):
                     setattr(settings, attr, v)
                     applied[attr] = v
@@ -430,12 +439,17 @@ def apply_optimised_config(regime: str | None = None) -> dict:
 def _save_params(phase: str, data: dict) -> None:
     existing: dict = {}
     if _PARAMS_F.exists():
-        with open(_PARAMS_F) as f:
-            existing = json.load(f)
+        try:
+            with open(_PARAMS_F) as f:
+                existing = json.load(f)
+        except (json.JSONDecodeError, OSError):
+            logger.warning("[optimizer] corrupt params file — starting fresh")
     existing[phase] = data
     existing["updated_at"] = datetime.now().isoformat()
-    with open(_PARAMS_F, "w") as f:
+    tmp = _PARAMS_F.with_suffix(".tmp")
+    with open(tmp, "w") as f:
         json.dump(existing, f, indent=2)
+    tmp.replace(_PARAMS_F)   # atomic rename on Linux
 
 
 # ─────────────────────────────────────────────────────────────────────────────

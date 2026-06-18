@@ -428,26 +428,26 @@ class MarketRegimeDetector:
             from symbol_scanner import NIFTY_50
             loop = asyncio.get_running_loop()
 
-            adv = 0; dec = 0
             # Sample 20 stocks to keep it fast
             sample = NIFTY_50[:20]
 
-            async def check_one(sym):
-                nonlocal adv, dec
+            async def check_one(sym) -> int:
+                """Return +1 for advance, -1 for decline, 0 for no data."""
                 try:
                     df = await loop.run_in_executor(
                         None, lambda s=sym: yf_client.historical(s,"NSE","1d","5d")
                     )
                     if df.empty or len(df) < 2:
-                        return
-                    if float(df["close"].iloc[-1]) > float(df["close"].iloc[-2]):
-                        adv += 1
-                    else:
-                        dec += 1
+                        return 0
+                    return 1 if float(df["close"].iloc[-1]) > float(df["close"].iloc[-2]) else -1
                 except Exception:
-                    pass
+                    return 0
 
-            await asyncio.gather(*[check_one(s) for s in sample], return_exceptions=True)
+            # Gather return values instead of mutating shared nonlocal counters —
+            # concurrent coroutines interleave at each await, causing lost updates
+            outcomes = await asyncio.gather(*[check_one(sym) for sym in sample], return_exceptions=True)
+            adv = sum(1 for r in outcomes if r == 1)
+            dec = sum(1 for r in outcomes if r == -1)
 
             s.advance_count  = adv
             s.decline_count  = dec
@@ -471,7 +471,10 @@ class MarketRegimeDetector:
                         return
                     cols = df.columns.get_level_values(0) if isinstance(df.columns, pd.MultiIndex) else df.columns
                     cc = "Close" if "Close" in cols else "close"
-                    pct = float((df[cc].iloc[-1] - df[cc].iloc[-2]) / df[cc].iloc[-2] * 100)
+                    prev = float(df[cc].iloc[-2])
+                    if prev == 0:
+                        return
+                    pct = float((df[cc].iloc[-1] - prev) / prev * 100)
                     sector_chg[name] = round(pct, 2)
                 except Exception:
                     pass

@@ -137,9 +137,10 @@ class MLSignalFilter:
             clf.fit(X, y)
             with self._lock:
                 self._model = clf
+                enc_snapshot = dict(self._encoder)   # snapshot under lock before disk write
             _MODEL_PATH.parent.mkdir(parents=True, exist_ok=True)
             with open(_MODEL_PATH, "wb") as f:
-                pickle.dump((clf, self._encoder), f)
+                pickle.dump((clf, enc_snapshot), f)
             wins = sum(y)
             logger.info("[MLFilter] retrained on {} trades | win rate {:.0f}%",
                         len(y), 100 * wins / max(len(y), 1))

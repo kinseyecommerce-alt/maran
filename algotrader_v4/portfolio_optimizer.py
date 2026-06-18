@@ -218,7 +218,7 @@ class PortfolioOptimizer:
         def neg_sharpe(w: np.ndarray) -> float:
             port_return = float(np.dot(w, returns))
             port_var    = float(np.dot(w ** 2, vols ** 2))   # diagonal covariance
-            if port_var <= 0 or port_return <= 0:
+            if port_var <= 0:
                 return 0.0
             return -port_return / (port_var ** 0.5)
 
@@ -238,14 +238,14 @@ class PortfolioOptimizer:
             },
         ]
 
-        # Per-sector: sum of weights in each sector ≤ sector_cap
+        # Per-sector: sum of weights in each sector ≤ sector_cap (enforced for all sectors,
+        # including single-symbol sectors — a sector with one symbol can still consume > 35%)
         unique_sectors = set(sectors)
         for sec in unique_sectors:
             idx = [i for i, s in enumerate(sectors) if s == sec]
-            if len(idx) > 1:
-                def _sec_constraint(w, ix=idx, cap=sector_cap):
-                    return cap - float(w[ix].sum())
-                constraints.append({"type": "ineq", "fun": _sec_constraint})
+            def _sec_constraint(w, ix=idx, cap=sector_cap):
+                return cap - float(w[ix].sum())
+            constraints.append({"type": "ineq", "fun": _sec_constraint})
 
         bounds = [(0.0, max_per_sym) for _ in range(n)]
 

@@ -20,7 +20,7 @@ class PortfolioVaR:
                 if col not in df.columns:
                     continue
                 closes = df[col].dropna().values.astype(float)
-                if len(closes) < 2:
+                if len(closes) < 3:   # need ≥2 returns for meaningful std (ddof=1)
                     continue
                 if (closes <= 0).any():
                     continue
@@ -68,8 +68,11 @@ class PortfolioVaR:
         var_95 = -(mu + z95 * sigma) * total_notional
         var_99 = -(mu + z99 * sigma) * total_notional
 
-        threshold_99 = float(np.quantile(portfolio_rets, 0.01))
-        tail = portfolio_rets[portfolio_rets <= threshold_99]
+        # CVaR: use sorted tail (bottom ceil(1%) observations) — np.quantile equality
+        # comparison can include too many values in flat-market conditions
+        sorted_rets = np.sort(portfolio_rets)
+        cutoff = max(1, int(np.ceil(0.01 * len(sorted_rets))))
+        tail = sorted_rets[:cutoff]
         cvar_99 = (-float(tail.mean()) * total_notional) if len(tail) > 0 else var_99
 
         return {

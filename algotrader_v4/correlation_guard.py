@@ -13,6 +13,7 @@ Decision thresholds:
 from __future__ import annotations
 
 import asyncio
+import threading
 from itertools import combinations
 from typing import Optional
 
@@ -25,6 +26,7 @@ from loguru import logger
 # ── Module-level correlation matrix cache ─────────────────────────────────────
 # Rows and columns are NSE symbol names (without .NS suffix).
 _corr_matrix: pd.DataFrame = pd.DataFrame()
+_matrix_lock = threading.Lock()   # guards _corr_matrix replacement from concurrent threads
 
 # Tracks whether the matrix has ever been successfully populated
 _matrix_ready: bool = False
@@ -136,8 +138,9 @@ async def refresh_matrix(symbols: list[str]) -> None:
     try:
         returns = closes.pct_change().dropna(how="all")
         matrix  = returns.corr()
-        _corr_matrix = matrix
-        _matrix_ready = True
+        with _matrix_lock:
+            _corr_matrix = matrix
+            _matrix_ready = True
         logger.info(
             "correlation_guard: matrix refreshed — {}×{} (symbols: {})",
             matrix.shape[0],

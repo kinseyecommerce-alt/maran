@@ -140,12 +140,14 @@ class KiteClient:
         self._kite: Optional[KiteConnect] = None
         self._paper_orders:    dict[str, dict] = {}   # order_id → order dict (O(1) lookup)
         self._paper_orders_lock: Lock = Lock()
+        self._paper_filled_ids: set[str] = set()     # guard against double-fill race
         self._paper_positions: list[dict] = []
         self._paper_positions_lock: Lock = Lock()
         self._instruments_cache: dict[str, list[dict]] = {}
         self._pos_cache: dict = {}
         self._pos_cache_ts: float = 0.0
         self._pos_cache_ttl: float = 0.5   # 0.5s TTL — keeps sector/count checks fresh for scalping agents
+        self._pos_cache_lock: Lock = Lock()
         self._paper_ltp: dict[str, float] = {}        # sym → last known LTP for MARKET fill price
 
     # ── Auth ───────────────────────────────────────────────────────────────
@@ -278,14 +280,16 @@ class KiteClient:
         return _with_retry(self.kite.positions, label="positions")
 
     def positions_cached(self) -> dict:
-        """Return cached positions (TTL=2s) to avoid per-trade REST round-trips."""
+        """Return cached positions (TTL=0.5s) to avoid per-trade REST round-trips."""
         import time as _time
         now = _time.monotonic()
-        if now - self._pos_cache_ts < self._pos_cache_ttl and self._pos_cache:
-            return self._pos_cache
+        with self._pos_cache_lock:
+            if now - self._pos_cache_ts < self._pos_cache_ttl and self._pos_cache:
+                return self._pos_cache
         result = self.positions()
-        self._pos_cache = result
-        self._pos_cache_ts = now
+        with self._pos_cache_lock:
+            self._pos_cache = result
+            self._pos_cache_ts = now
         return result
 
     def profile(self) -> dict:
@@ -840,13 +844,17 @@ class KiteClient:
                 )
                 if not triggered:
                     continue
-                # CAS: only fill if still TRIGGER PENDING (not cancelled meanwhile)
+                # CAS: only fill if still TRIGGER PENDING — snapshot under lock prevents double-fill race
                 with self._paper_orders_lock:
                     if order["status"] != "TRIGGER PENDING":
                         continue
+                    if order["order_id"] in self._paper_filled_ids:
+                        continue
                     order["status"] = "COMPLETE"
                     order["price"]  = ltp  # filled at market after trigger
-                self._update_paper_position(order)
+                    self._paper_filled_ids.add(order["order_id"])
+                    order_copy = dict(order)
+                self._update_paper_position(order_copy)
                 logger.info("[PAPER] Trigger hit — {} {} {} qty={} trigger=₹{} fill=₹{}",
                             order["transaction_type"], symbol,
                             order["order_type"], order["quantity"], tp, ltp)
@@ -861,14 +869,18 @@ class KiteClient:
                 )
                 if not crossed:
                     continue
-                # CAS: only fill if still OPEN (not cancelled/modified meanwhile)
+                # CAS: only fill if still OPEN — snapshot under lock prevents double-fill race
                 with self._paper_orders_lock:
                     if order["status"] != "OPEN":
+                        continue
+                    if order["order_id"] in self._paper_filled_ids:
                         continue
                     order["status"]        = "COMPLETE"
                     order["price"]         = limit_px   # LIMIT fills at limit price
                     order["average_price"] = limit_px
-                self._update_paper_position(order)
+                    self._paper_filled_ids.add(order["order_id"])
+                    order_copy = dict(order)
+                self._update_paper_position(order_copy)
                 logger.info("[PAPER] LIMIT fill — {} {} qty={} limit=₹{} ltp=₹{}",
                             order["transaction_type"], symbol,
                             order["quantity"], limit_px, ltp)

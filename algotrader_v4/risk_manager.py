@@ -474,7 +474,7 @@ class RiskManager:
                 return 1.0
             W       = getattr(params, "win_rate_20", 0.5)
             avg_win = getattr(params, "avg_win_pct", 1.0)
-            avg_loss = getattr(params, "avg_loss_pct", 1.0)
+            avg_loss = abs(getattr(params, "avg_loss_pct", 1.0))   # stored as negative, need magnitude
             R       = avg_win / max(avg_loss, 0.01)
             kelly   = W - (1 - W) / max(R, 0.1)
             return max(0.25, min(1.5, kelly / 2.0))
@@ -566,11 +566,13 @@ class RiskManager:
                     payload = {
                         "event": "risk_alert",
                         "type":  "daily_loss_50pct",
-                        "pnl":   self.daily_realised_pnl,
+                        "pnl":   new_pnl,   # use captured value; reading daily_realised_pnl here is a race
                     }
                     try:
                         loop = asyncio.get_running_loop()
-                        loop.create_task(self.ws_broadcast(payload))
+                        t = loop.create_task(self.ws_broadcast(payload))
+                        t.add_done_callback(lambda _t: _t.exception() and logger.warning(
+                            "[RiskManager] ws_broadcast error: {}", _t.exception()))
                     except RuntimeError:
                         pass
                 try:

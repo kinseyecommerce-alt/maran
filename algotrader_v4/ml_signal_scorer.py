@@ -80,8 +80,9 @@ class MLSignalScorer:
         bb_lower = bb_obj.bollinger_lband()
         atr14 = ta.volatility.AverageTrueRange(high=high, low=low, close=close, window=14).average_true_range()
 
-        # Label: 1 if next-day close > today * 1.002
-        label = (close.shift(-1) > close * 1.002).astype(int)
+        # Label: 1 if next-day close > today * 1.002 (keep as bool so NaN at last row
+        # propagates through to feat_df and dropna() removes it correctly)
+        label = close.shift(-1) > close * 1.002
 
         # Features must match _features_from_snap (same 12, same order):
         #  1. EMA9/EMA21 ratio  2. price vs VWAP  3. RSI-14  4. MACD-hist/ATR
@@ -110,8 +111,9 @@ class MLSignalScorer:
         })
 
         feat_df["label"] = label
+        # dropna() now removes both NaN features AND the last-row NaN label (from shift(-1))
         feat_df = feat_df.replace([np.inf, -np.inf], np.nan).dropna()
-        feat_df = feat_df.iloc[:-1]  # drop last row (no label)
+        # No iloc[:-1] needed: dropna already removed the last row's NaN label
 
         X = feat_df.drop(columns=["label"]).values.astype(float)
         y = feat_df["label"].values.astype(int)

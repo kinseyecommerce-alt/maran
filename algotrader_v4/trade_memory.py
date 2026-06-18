@@ -9,6 +9,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import threading
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Optional
@@ -117,14 +118,18 @@ def _extract_field(trade_record: Any, *keys: str, default: Any = None) -> Any:
     return default
 
 
+_trim_lock = threading.Lock()
+
+
 def _trim_file_to_max_entries() -> None:
-    """Keep only the last MAX_ENTRIES lines in MEMORY_FILE."""
+    """Keep only the last MAX_ENTRIES lines in MEMORY_FILE. Caller must hold _trim_lock."""
     try:
         lines = MEMORY_FILE.read_text(encoding="utf-8").splitlines()
         if len(lines) > MAX_ENTRIES:
-            MEMORY_FILE.write_text(
-                "\n".join(lines[-MAX_ENTRIES:]) + "\n", encoding="utf-8"
-            )
+            content = "\n".join(lines[-MAX_ENTRIES:]) + "\n"
+            tmp = MEMORY_FILE.with_suffix(".tmp")
+            tmp.write_text(content, encoding="utf-8")
+            tmp.replace(MEMORY_FILE)   # atomic rename — safe on crash mid-write
     except Exception as exc:
         logger.debug("[memory] trim error: {}", exc)
 
@@ -191,9 +196,10 @@ async def record_trade(
         }
 
         def _write_and_trim(_entry: dict) -> None:
-            with MEMORY_FILE.open("a", encoding="utf-8") as fh:
-                fh.write(json.dumps(_entry) + "\n")
-            _trim_file_to_max_entries()
+            with _trim_lock:   # serialize append+trim so concurrent trades don't corrupt the file
+                with MEMORY_FILE.open("a", encoding="utf-8") as fh:
+                    fh.write(json.dumps(_entry) + "\n")
+                _trim_file_to_max_entries()
 
         await asyncio.to_thread(_write_and_trim, entry)
 

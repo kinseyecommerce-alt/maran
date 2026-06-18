@@ -237,6 +237,8 @@ class PortfolioBacktest:
 
             for sym in exited:
                 del open_positions[sym]
+            # Clamp: float drift can push available_capital above total_capital
+            available_capital = min(available_capital, total_capital)
 
             # ── Step 2: process entries ────────────────────────────────────
             for sym in symbols:
@@ -346,8 +348,10 @@ class PortfolioBacktest:
         win_rate = len(wins) / len(pnls) * 100 if pnls else 0.0
 
         arr = np.array(pnls, dtype=float)
-        if len(arr) > 1 and arr.std() > 0:
-            sharpe = float(arr.mean() / arr.std() * math.sqrt(len(arr)))
+        capital_per_trade = total_capital / max(max_open_positions, 1)
+        ret_arr = arr / max(capital_per_trade, 1.0)   # convert to per-trade return
+        if len(ret_arr) > 1 and ret_arr.std(ddof=1) > 0:
+            sharpe = float(ret_arr.mean() / ret_arr.std(ddof=1))
         else:
             sharpe = 0.0
 
@@ -357,7 +361,7 @@ class PortfolioBacktest:
         dd   = peak - cum
         max_dd = float(np.max(dd)) if len(dd) else 0.0
         peak_max = float(peak.max()) if len(peak) else 0.0
-        max_dd_pct = (max_dd / max(abs(peak_max), total_capital * 0.001)) * 100 if peak_max != 0 else 0.0
+        max_dd_pct = (max_dd / total_capital) * 100 if total_capital > 0 else 0.0
 
         n_trades  = max(len(pnls), 1)
         ann_factor = min(252.0 / max(n_trades / 5, 1), 4.0)
