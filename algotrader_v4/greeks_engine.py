@@ -214,7 +214,7 @@ def days_to_next_expiry(option_type_day: str = "thursday") -> int:
                "thursday": 3, "friday": 4, "saturday": 5, "sunday": 6}
     target = day_map.get(option_type_day.lower(), 3)
     days_ahead = (target - today.weekday()) % 7
-    return max(days_ahead, 1)
+    return days_ahead if days_ahead > 0 else 7
 
 
 # ── NSE contract-symbol parser ────────────────────────────────────────────────

@@ -143,11 +143,12 @@ class TWAPExecutor:
             n = len(volume_profile)
 
         interval = dur / n if n > 1 else 0.0
+        import math
         assigned, qty_list = 0, []
         for i, w in enumerate(volume_profile):
-            s = max(1, round(qty * w)) if i < n - 1 else max(0, qty - assigned)
+            s = math.floor(qty * w) if i < n - 1 else max(0, qty - assigned)
             qty_list.append(s)
-            assigned += s if i < n - 1 else 0
+            assigned += s
 
         if symbol in self._active and not self._active[symbol].done:
             raise RuntimeError(f"VWAP already in progress for {symbol}")

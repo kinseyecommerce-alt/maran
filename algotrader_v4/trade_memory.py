@@ -7,6 +7,7 @@ Knowledge is fed back to the trade gate as institutional memory.
 from __future__ import annotations
 
 import asyncio
+import html as _html
 import json
 import os
 import threading
@@ -22,7 +23,7 @@ from agents.base_agent import send_telegram
 
 
 # ── Storage ───────────────────────────────────────────────────────────────────
-MEMORY_FILE = Path("logs/trade_memory.jsonl")
+MEMORY_FILE = Path(__file__).parent / "logs" / "trade_memory.jsonl"
 MAX_ENTRIES = 500
 
 
@@ -247,13 +248,15 @@ async def _haiku_analyse(
     try:
         resp = await asyncio.wait_for(
             _get_client().messages.create(
-                model="claude-haiku-4-5-20251001",
+                model="claude-haiku-4-5",
                 max_tokens=200,
                 messages=[{"role": "user", "content": prompt}],
             ),
             timeout=8.0,
         )
-        raw = resp.content[0].text.strip().lstrip("```json").rstrip("```").strip()
+        raw = resp.content[0].text.strip()
+        if raw.startswith("```"):
+            raw = raw.split("\n", 1)[-1].rsplit("```", 1)[0].strip()
         d   = json.loads(raw)
         return d.get("insight", "No insight"), d.get("lesson", "No lesson")
     except asyncio.TimeoutError:
@@ -375,7 +378,7 @@ async def weekly_synthesis() -> str:
 
         msg = (
             "<b>Weekly Trade Memory Synthesis</b>\n\n"
-            f"{synthesis}\n\n"
+            f"{_html.escape(synthesis)}\n\n"
             f"<i>Based on {len(entries)} trades — {datetime.now().strftime('%Y-%m-%d')}</i>"
         )
         await send_telegram(msg)

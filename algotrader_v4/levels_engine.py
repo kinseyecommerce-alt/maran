@@ -121,11 +121,13 @@ def get_levels(symbol: str) -> dict:
     try:
         from tick_engine import tick_engine  # local import avoids circular dependency
         snap = tick_engine.all_latest().get(symbol, {})
-        vwap = snap.get("vwap")
-        atr  = snap.get("atr_14")
+        vwap    = snap.get("vwap")
+        atr_pct = snap.get("atr_pct")   # ATR as % of price (tick_engine key)
+        ltp_val = snap.get("ltp")
         if vwap and vwap > 0:
             result["vwap"] = round(vwap, 2)
-        if vwap and vwap > 0 and atr and atr > 0:
+        if vwap and vwap > 0 and atr_pct and ltp_val and ltp_val > 0:
+            atr = atr_pct / 100.0 * ltp_val   # convert % to absolute points
             result["atr"]           = round(atr, 2)
             result["vwap_upper_1"]  = round(vwap + atr, 2)
             result["vwap_lower_1"]  = round(vwap - atr, 2)

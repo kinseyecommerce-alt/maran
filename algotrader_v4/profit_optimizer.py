@@ -130,8 +130,7 @@ def phase1_optimise(verbose: bool = True) -> dict[str, dict]:
         for combo in combos:
             params = dict(zip(keys, combo))
             # Temporarily patch settings
-            orig = {k: getattr(settings, f"{k.replace('pct','pct_')}{strategy}", None)
-                    for k in keys}
+            orig = {k: getattr(settings, _attr_name(strategy, k), None) for k in keys}
             _patch_settings(strategy, params)
 
             combo_scores = []

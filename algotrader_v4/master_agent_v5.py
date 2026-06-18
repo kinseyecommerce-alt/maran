@@ -32,6 +32,16 @@ from agents.strategy_agents import ALL_AGENTS
 from bot_state import is_agent_enabled
 from portfolio_optimizer import portfolio_optimizer
 
+# Fire-and-forget helper: keeps a strong ref to the task so the GC doesn't
+# cancel it before it completes (bare create_task loses the ref immediately).
+_bg_tasks: set[asyncio.Task] = set()
+
+def _fire(coro) -> asyncio.Task:
+    t = asyncio.create_task(coro)
+    _bg_tasks.add(t)
+    t.add_done_callback(_bg_tasks.discard)
+    return t
+
 
 MASTER_PROMPT = """You are the MASTER TRADING INTELLIGENCE for an NSE/BSE algorithmic trading system.
 You have FULL situational awareness: regime, market breadth, sector rotation, FII/DII flows,
@@ -230,12 +240,12 @@ class MasterAgent:
                                  day_of_week="sun", id="weekly_db_cleanup")
         self._scheduler.start()
         logger.info("[master_v5] started — tick-driven 1s")
-        asyncio.create_task(send_telegram(
+        _fire(send_telegram(
             f"<b>AlgoTrader Pro v5</b> started\nMode: {settings.trading_mode} | Tick: 1s\n"
             + "\n".join(f"  {s}: {r['approved']}/{r['total']} symbols" for s, r in report.items())
         ))
         from n8n_bridge import notify as _n8n
-        asyncio.create_task(_n8n("system", {"type": "bot_started", "mode": settings.trading_mode}))
+        _fire(_n8n("system", {"type": "bot_started", "mode": settings.trading_mode}))
         return report
 
     async def stop(self) -> None:
@@ -249,7 +259,7 @@ class MasterAgent:
             pass
         await send_telegram("<b>AlgoTrader Pro v5 stopped</b>")
         from n8n_bridge import notify as _n8n
-        asyncio.create_task(_n8n("system", {"type": "bot_stopped"}))
+        _fire(_n8n("system", {"type": "bot_stopped"}))
 
     # ── Scheduled jobs ─────────────────────────────────────────────────────────
 
@@ -307,7 +317,7 @@ class MasterAgent:
                     )
             except Exception as _e:
                 logger.warning("[master] BLACK SWAN broadcast failed: {}", _e)
-            asyncio.create_task(send_telegram(
+            _fire(send_telegram(
                 "<b>⚡ BLACK SWAN DETECTED</b>\nEmergency regime dispatch. "
                 "TSL tightened. Opportunity agents active.\n"
                 f"VIX z-score: {regime_detector._vix_zscore(regime_detector._vix_history[-1] if regime_detector._vix_history else 0):.2f}"
@@ -485,7 +495,7 @@ class MasterAgent:
                             f"Trades: {data.get('adaptation_count', 0)}"
                         )
                         logger.warning("[master] {}", msg.replace("<b>", "").replace("</b>", ""))
-                        asyncio.create_task(send_telegram(msg))
+                        _fire(send_telegram(msg))
                 else:
                     self._rolling_sharpe_below_count[key] = 0
         except Exception as exc:
@@ -501,7 +511,7 @@ class MasterAgent:
         if ids:
             await send_telegram(f"<b>Auto square-off</b>\n{len(ids)} positions closed")
             from n8n_bridge import notify as _n8n
-            asyncio.create_task(_n8n("system", {"type": "squareoff", "positions_closed": len(ids)}))
+            _fire(_n8n("system", {"type": "squareoff", "positions_closed": len(ids)}))
 
         # Daily summary — fire regardless of whether positions were open
         try:
@@ -531,13 +541,13 @@ class MasterAgent:
         holiday_note = " (NSE holiday — no trading today)" if is_nse_holiday(now_ist().date()) else ""
         await send_telegram(f"<b>New trading day</b> — counters reset{holiday_note}")
         from n8n_bridge import notify as _n8n
-        asyncio.create_task(_n8n("system", {"type": "daily_reset"}))
+        _fire(_n8n("system", {"type": "daily_reset"}))
 
     async def _nightly_adaptive(self) -> None:
         try:
-            current_vix    = regime_detector.current_signals.vix if regime_detector.current_signals else 14.0
+            current_vix    = regime_detector.current_signals.india_vix if regime_detector.current_signals else 14.0
             regime_changed = regime_detector.history and len(regime_detector.history) >= 2 and \
-                             regime_detector.history[-1] != regime_detector.history[-2]
+                             regime_detector.history[-1]["regime"] != regime_detector.history[-2]["regime"]
             report = await adaptive_engine.nightly_review(current_vix, regime_changed)
             logger.info("[master] Nightly adaptive review: {} ok, {} adapt, {} retire",
                         len(report["strategies_ok"]),
@@ -710,16 +720,13 @@ class MasterAgent:
                 apply_optimised_config(regime=regime_name)
         except Exception as exc:
             logger.error("[master] profit_optimizer apply failed: {}", exc)
-            asyncio.create_task(send_telegram(f"⚠️ <b>profit_optimizer failed</b>\n{exc}"),
-                                name="optimizer_alert")
+            _fire(send_telegram(f"⚠️ <b>profit_optimizer failed</b>\n{exc}"))
 
         # Log opportunity alert if present
         alert = d.get("opportunity_alert")
         if alert and alert not in (None, "null", ""):
             logger.info("[master] 💡 Opportunity: {}", alert)
-            _to = asyncio.create_task(send_telegram(f"💡 <b>Opportunity Alert</b>\n{alert}"),
-                                      name="opportunity_alert")
-            _to.add_done_callback(lambda t: logger.error("[master] opportunity_alert task raised: {}", t.exception()) if t.exception() else None)
+            _fire(send_telegram(f"💡 <b>Opportunity Alert</b>\n{alert}"))
 
     def get_status(self) -> dict:
         return {

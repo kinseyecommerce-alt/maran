@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import asyncio
 import copy
+import math
 from dataclasses import dataclass, field
 from datetime import datetime, time
 from pathlib import Path
@@ -455,6 +456,8 @@ class SymbolScanner:
                 atr = ta.volatility.AverageTrueRange(high, low, close, 14) \
                         .average_true_range().iloc[-1]
                 sc.atr_pct = (atr / sc.ltp * 100) if sc.ltp > 0 else 0
+                if not math.isfinite(sc.atr_pct):
+                    return None   # NaN/Inf ATR: insufficient price variance — skip symbol
 
             # ── EMA ────────────────────────────────────────────────────
             if n >= 9:
@@ -475,11 +478,12 @@ class SymbolScanner:
             # ── ADX ────────────────────────────────────────────────────
             if n >= 14:
                 sc.adx = float(ta.trend.ADXIndicator(high, low, close, 14).adx().iloc[-1])
+                if not math.isfinite(sc.adx):
+                    sc.adx = 0.0   # treat unknown trend strength as zero (filtered out)
 
             # ── Component scores ──────────────────────────────────────
 
             # Liquidity (0–100): rank by log volume
-            import math
             vol_log = math.log(sc.avg_volume + 1)
             sc.liquidity_score = min(100, vol_log / 16 * 100)  # 16 ≈ log(10M)
 

@@ -219,7 +219,7 @@ class PortfolioOptimizer:
             port_return = float(np.dot(w, returns))
             port_var    = float(np.dot(w ** 2, vols ** 2))   # diagonal covariance
             if port_var <= 0:
-                return 0.0
+                return 1e6
             return -port_return / (port_var ** 0.5)
 
         # ── Constraints ────────────────────────────────────────────────────────

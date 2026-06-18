@@ -310,7 +310,13 @@ _BREAKER_THRESHOLD    = 5
 _BREAKER_COOLDOWN_SEC = 120.0
 _consec_failures: int   = 0
 _breaker_until:   float = 0.0
-_breaker_lock = asyncio.Lock()
+_breaker_lock: Optional[asyncio.Lock] = None
+
+def _get_breaker_lock() -> asyncio.Lock:
+    global _breaker_lock
+    if _breaker_lock is None:
+        _breaker_lock = asyncio.Lock()
+    return _breaker_lock
 
 
 def _record_gate_failure() -> None:
@@ -358,7 +364,7 @@ async def assess(snap, action: str, signal: dict, strategy: str) -> GateDecision
             return await asyncio.wait_for(
                 _get_client().messages.create(
                     model=settings.claude_gate_model,
-                    max_tokens=settings.gate_thinking_budget + 1024,
+                    max_tokens=(settings.gate_thinking_budget + 1024) if settings.use_extended_thinking else 1024,
                     system=[{"type": "text", "text": _SYSTEM_PROMPT, "cache_control": {"type": "ephemeral"}}],
                     messages=[{"role": "user", "content": _UNTRUSTED_FIELDS_NOTE + json.dumps(ctx)}],
                     **extra,
@@ -373,13 +379,15 @@ async def assess(snap, action: str, signal: dict, strategy: str) -> GateDecision
             logger.warning("[gate] {} timeout — retrying once", snap.symbol)
             resp = await _call()
         latency = int((asyncio.get_running_loop().time() - t0) * 1000)
-        async with _breaker_lock:
+        async with _get_breaker_lock():
             _consec_failures = 0
 
         # FIX 4: wrap response parsing so any unexpected format falls back safely
         try:
             text_block = next(b for b in resp.content if b.type == "text")
-            raw = text_block.text.strip().lstrip("```json").rstrip("```").strip()
+            raw = text_block.text.strip()
+            if raw.startswith("```"):
+                raw = raw.split("\n", 1)[-1].rsplit("```", 1)[0].strip()
             d   = json.loads(raw)
 
             conf   = int(d.get("confidence", 60))
@@ -413,12 +421,12 @@ async def assess(snap, action: str, signal: dict, strategy: str) -> GateDecision
         return decision
 
     except asyncio.TimeoutError:
-        async with _breaker_lock:
+        async with _get_breaker_lock():
             _record_gate_failure()
         logger.warning("[gate] {} timeout (after retry) — allowing trade with reduced size", snap.symbol)
         return _ALLOW_ON_ERROR
     except Exception as exc:
-        async with _breaker_lock:
+        async with _get_breaker_lock():
             _record_gate_failure()
         logger.warning("[gate] {} API error ({}) — allowing trade with reduced size", snap.symbol, exc)
         return _ALLOW_ON_ERROR

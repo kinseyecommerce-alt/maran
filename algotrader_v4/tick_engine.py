@@ -843,7 +843,7 @@ class TickEngine:
             except Exception:
                 pass
 
-        for name, q in self._subscribers.items():
+        for name, q in list(self._subscribers.items()):
             try:
                 q.put_nowait(snap)
             except asyncio.QueueFull:
@@ -918,7 +918,7 @@ class TickEngine:
 
             # ── WS health check: fall back to REST if WS disconnected > 3s ──
             if self._use_ws and self._kite_ticker is not None:
-                ws_connected = getattr(self._kite_ticker, "is_connected", True)
+                ws_connected = getattr(self._kite_ticker, "is_connected", False)
                 # is_connected may be a property or a bool; resolve it
                 if callable(ws_connected):
                     ws_connected = ws_connected()

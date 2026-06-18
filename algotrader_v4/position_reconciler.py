@@ -188,7 +188,22 @@ class PositionReconciler:
         with _tsl_sl_orders_lock:
             _tsl_sl_orders.pop(pos["order_id"], None)
         try:
-            order_guard.release_order(pos["symbol"], pos["strategy"], pos["side"], pnl=0.0)
+            tsl_pos = pos.get("_ref")
+            entry_px = getattr(tsl_pos, "entry_price", 0.0) if tsl_pos else 0.0
+            estimated_pnl = 0.0
+            if entry_px > 0:
+                try:
+                    from tick_engine import tick_engine as _te
+                    ltp = (_te.all_latest().get(trade_sym) or {}).get("ltp") or 0.0
+                except Exception:
+                    ltp = 0.0
+                if ltp > 0:
+                    side_sign = 1 if pos["side"] == "BUY" else -1
+                    estimated_pnl = (ltp - entry_px) * expected * side_sign
+                else:
+                    logger.warning(
+                        "[Reconciler] no ltp for {} — daily loss tracking may be inaccurate", trade_sym)
+            order_guard.release_order(pos["symbol"], pos["strategy"], pos["side"], pnl=estimated_pnl)
         except Exception as exc:
             logger.warning("[Reconciler] guard release failed for {}: {}",
                            pos["symbol"], exc)

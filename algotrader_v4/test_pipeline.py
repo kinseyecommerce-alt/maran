@@ -10927,6 +10927,225 @@ run("historical_learner: learn() uses ensure_future not create_task (no orphan t
 
 
 # ══════════════════════════════════════════════════════════════════════════
+# 14. BATCH 14 — auth / trade_memory / twap_executor / god_mode /
+#     master_agent_v5 / portfolio_var / profit_optimizer / portfolio_optimizer /
+#     iv_surface / levels_engine / ml_signal_filter / tick_engine /
+#     symbol_scanner / position_reconciler / greeks_engine
+# ══════════════════════════════════════════════════════════════════════════
+
+def t_auth_create_token_uses_timezone_utc():
+    import inspect, auth
+    src = inspect.getsource(auth.create_token)
+    assert "datetime.utcnow" not in src, (
+        "create_token must use datetime.now(timezone.utc) — utcnow() is deprecated and "
+        "returns a naive datetime that python-jose may reject with strict TZ checks"
+    )
+    assert "timezone.utc" in src, "create_token must use timezone.utc"
+
+def t_auth_weak_key_warning():
+    import inspect, auth
+    src = inspect.getsource(auth.create_token)
+    assert "jwt_secret_key" in src and "warning" in src.lower(), (
+        "create_token must warn when jwt_secret_key is missing or weak (<32 chars)"
+    )
+
+def t_trade_memory_model_id_not_dated():
+    import inspect, trade_memory as tm
+    src = inspect.getsource(tm._haiku_analyse)
+    assert "claude-haiku-4-5-20251001" not in src, (
+        "_haiku_analyse must not use retired date-suffixed model ID 'claude-haiku-4-5-20251001' — "
+        "use durable alias 'claude-haiku-4-5'"
+    )
+
+def t_twap_executor_vwap_uses_floor():
+    import inspect, twap_executor as te
+    src = inspect.getsource(te.TWAPExecutor.place_vwap)
+    assert "math.floor" in src, (
+        "place_vwap() must use math.floor for intermediate slice quantities so the last "
+        "slice carries the remainder without going negative"
+    )
+    assert "max(1, round(" not in src, (
+        "place_vwap() must not use round() for intermediate slices — rounding up accumulates "
+        "and can produce a negative last slice"
+    )
+
+def t_god_mode_enable_uses_list_snapshot():
+    import inspect, god_mode as gm
+    src = inspect.getsource(gm.GodModeManager.enable)
+    assert "list(bot_state._agent_enabled)" in src, (
+        "GodModeManager.enable() must snapshot bot_state._agent_enabled with list() before "
+        "iterating to prevent RuntimeError if another coroutine modifies the dict"
+    )
+
+def t_master_agent_india_vix_attribute():
+    import inspect, master_agent_v5 as mv5
+    src = inspect.getsource(mv5.MasterAgent._nightly_adaptive)
+    assert ".vix " not in src and "current_signals.vix" not in src, (
+        "_nightly_adaptive must not access .vix — RegimeSignals has no 'vix' attribute; "
+        "use .india_vix"
+    )
+    assert "india_vix" in src, "_nightly_adaptive must access .india_vix"
+
+def t_master_agent_regime_changed_compares_key():
+    import inspect, master_agent_v5 as mv5
+    src = inspect.getsource(mv5.MasterAgent._nightly_adaptive)
+    assert '["regime"]' in src or "['regime']" in src, (
+        "regime_changed comparison must compare history[-1]['regime'] vs history[-2]['regime'] — "
+        "comparing full dicts always returns True because timestamps differ"
+    )
+
+def t_master_agent_fire_helper_exists():
+    import master_agent_v5 as mv5
+    assert hasattr(mv5, "_fire"), "master_agent_v5 must export _fire() helper for GC-safe tasks"
+    assert hasattr(mv5, "_bg_tasks"), "master_agent_v5 must export _bg_tasks set"
+
+def t_master_agent_no_bare_create_task():
+    import inspect, master_agent_v5 as mv5, re
+    src = inspect.getsource(mv5.MasterAgent)
+    # Bare calls: lines where asyncio.create_task( appears but NOT as RHS of assignment
+    # (e.g. `_t = asyncio.create_task(` is fine; bare `asyncio.create_task(` is not)
+    bare = [line for line in src.splitlines()
+            if "asyncio.create_task(" in line and "= asyncio.create_task(" not in line]
+    assert len(bare) == 0, (
+        f"MasterAgent has {len(bare)} bare asyncio.create_task() call(s) — "
+        f"replace with _fire() to prevent GC cancellation of fire-and-forget tasks:\n"
+        + "\n".join(bare)
+    )
+
+def t_portfolio_var_single_day_guard():
+    import inspect, portfolio_var as pv
+    src = inspect.getsource(pv.PortfolioVaR.compute)
+    assert "len(portfolio_rets) < 2" in src, (
+        "compute() must guard against single-day history before calling .std(ddof=1) — "
+        "ddof=1 on a 1-element array returns NaN, producing zero VaR"
+    )
+
+def t_profit_optimizer_backup_uses_attr_name():
+    import inspect, profit_optimizer as po
+    src = inspect.getsource(po.phase1_optimise)
+    assert "_attr_name(strategy, k)" in src, (
+        "phase1_optimise backup dict must use _attr_name(strategy, k) to correctly "
+        "map 'target_pct' → 'tgt_pct_{strategy}' and avoid failing to restore settings"
+    )
+    assert "k.replace('pct','pct_')" not in src, (
+        "phase1_optimise must not use the k.replace pattern — it produces wrong attr "
+        "names for 'target_pct' and 'min_score', leaving settings permanently corrupted"
+    )
+
+def t_portfolio_optimizer_zero_var_returns_large():
+    import inspect, portfolio_optimizer as po
+    src = inspect.getsource(po.PortfolioOptimizer._mv_optimize)
+    assert "return 1e6" in src or "return 1_000_000" in src, (
+        "neg_sharpe() must return a large positive value (1e6) when port_var<=0 "
+        "so SLSQP treats the zero-weight vector as infeasible, not a local optimum"
+    )
+    assert "return 0.0" not in src, (
+        "neg_sharpe() must not return 0.0 on zero variance — this makes SLSQP "
+        "converge to an empty allocation, silently dropping all signals"
+    )
+
+def t_iv_surface_gex_zero_iv_not_inflated():
+    import inspect, iv_surface as ivs
+    src = inspect.getsource(ivs.build_surface)
+    assert "or 25" not in src, (
+        "GEX calculation must not fall back to iv=25 for missing/zero IV — "
+        "this inflates GEX for deep-OTM options that have no quoted IV; use 'or 0'"
+    )
+    assert "or 0) / 100" in src or ".get(\"iv\") or 0" in src, (
+        "GEX must default to iv=0 for missing IV values"
+    )
+
+def t_levels_engine_uses_atr_pct_key():
+    import inspect, levels_engine as le
+    src = inspect.getsource(le.get_levels)
+    assert "atr_14" not in src, (
+        "get_levels() must not use key 'atr_14' — tick_engine stores ATR under 'atr_pct'; "
+        "'atr_14' never exists, so VWAP bands are always missing"
+    )
+    assert "atr_pct" in src, "get_levels() must look up 'atr_pct' from tick_engine"
+    assert "ltp_val" in src or "ltp" in src, (
+        "get_levels() must convert atr_pct to absolute ATR using ltp"
+    )
+
+def t_ml_signal_filter_model_ref_inside_lock():
+    import inspect, ml_signal_filter as mlf
+    src = inspect.getsource(mlf.MLSignalFilter.filter_signal)
+    assert "m = self._model" in src or "model = self._model" in src, (
+        "filter_signal() must capture self._model reference inside the lock "
+        "so a concurrent retrain cannot swap the model between check and use"
+    )
+
+def t_tick_engine_subscriber_list_snapshot():
+    import inspect, tick_engine as te
+    src = inspect.getsource(te.TickEngine._process_tick)
+    assert "list(self._subscribers.items())" in src, (
+        "_process_tick must iterate list(self._subscribers.items()) snapshot — "
+        "bare dict iteration raises RuntimeError if APScheduler modifies "
+        "subscribers concurrently after an await"
+    )
+
+def t_tick_engine_is_connected_default_false():
+    import inspect, tick_engine as te
+    src = inspect.getsource(te.TickEngine._poll_loop)
+    assert '"is_connected", False' in src or "'is_connected', False" in src, (
+        "WS health-check must use getattr(ticker, 'is_connected', False) — "
+        "default True suppresses the REST fallback when the property is missing"
+    )
+
+def t_symbol_scanner_nan_atr_returns_none():
+    import inspect, symbol_scanner as ss
+    src = inspect.getsource(ss.SymbolScanner._score_symbol)
+    assert "math.isfinite(sc.atr_pct)" in src, (
+        "_score_symbol must guard NaN ATR with math.isfinite() — "
+        "NaN bypasses ATR filters, passes scoring phase with undefined volatility"
+    )
+
+def t_position_reconciler_external_pnl_not_zero():
+    import inspect, position_reconciler as pr
+    src = inspect.getsource(pr.PositionReconciler._handle_full_external_exit)
+    assert "entry_px" in src or "entry_price" in src, (
+        "_handle_full_external_exit must compute estimated P&L from entry price — "
+        "pnl=0.0 causes external SL-hits to be invisible to the daily loss limit"
+    )
+    assert "pnl=0.0" not in src, (
+        "_handle_full_external_exit must not hard-code pnl=0.0 in release_order call"
+    )
+
+def t_greeks_engine_expiry_day_returns_7():
+    import inspect, greeks_engine as ge
+    src = inspect.getsource(ge.days_to_next_expiry)
+    assert "max(days_ahead, 1)" not in src, (
+        "days_to_next_expiry must not clamp to 1 on expiry day — "
+        "on Thursday the next expiry is 7 days away, not 1 day away"
+    )
+    assert "7" in src, (
+        "days_to_next_expiry must return 7 when days_ahead==0 (expiry day itself)"
+    )
+
+
+run("auth: create_token uses timezone.utc (not deprecated utcnow)",                      t_auth_create_token_uses_timezone_utc)
+run("auth: create_token warns when JWT_SECRET_KEY is missing or weak",                   t_auth_weak_key_warning)
+run("trade_memory: store_insight uses durable model alias (not date-suffixed)",          t_trade_memory_model_id_not_dated)
+run("twap_executor: vwap() uses math.floor for intermediate slices (not round)",         t_twap_executor_vwap_uses_floor)
+run("god_mode: enable() iterates list() snapshot of _agent_enabled dict",                t_god_mode_enable_uses_list_snapshot)
+run("master_agent_v5: _nightly_adaptive uses .india_vix (not .vix)",                    t_master_agent_india_vix_attribute)
+run("master_agent_v5: regime_changed compares ['regime'] key not full dict",             t_master_agent_regime_changed_compares_key)
+run("master_agent_v5: _fire() helper and _bg_tasks set exist at module level",           t_master_agent_fire_helper_exists)
+run("master_agent_v5: MasterAgentV5 has no bare asyncio.create_task() calls",           t_master_agent_no_bare_create_task)
+run("portfolio_var: compute() guards single-day history before ddof=1 std()",           t_portfolio_var_single_day_guard)
+run("profit_optimizer: phase1_optimise backup uses _attr_name() (not k.replace)",       t_profit_optimizer_backup_uses_attr_name)
+run("portfolio_optimizer: neg_sharpe returns 1e6 (not 0.0) on zero variance",           t_portfolio_optimizer_zero_var_returns_large)
+run("iv_surface: GEX defaults iv=0 (not iv=25) for missing/zero IV options",            t_iv_surface_gex_zero_iv_not_inflated)
+run("levels_engine: get_levels uses 'atr_pct' key + ltp conversion (not 'atr_14')",     t_levels_engine_uses_atr_pct_key)
+run("ml_signal_filter: filter_signal captures model ref inside lock before use",         t_ml_signal_filter_model_ref_inside_lock)
+run("tick_engine: _process_tick iterates list() snapshot of subscribers",                t_tick_engine_subscriber_list_snapshot)
+run("tick_engine: is_connected getattr default is False (not True)",                     t_tick_engine_is_connected_default_false)
+run("symbol_scanner: NaN ATR causes _score_symbol to return None (skip symbol)",         t_symbol_scanner_nan_atr_returns_none)
+run("position_reconciler: external exit estimates P&L from entry_price (not 0.0)",       t_position_reconciler_external_pnl_not_zero)
+run("greeks_engine: days_to_next_expiry returns 7 on expiry day (not 1)",               t_greeks_engine_expiry_day_returns_7)
+
+
+# ══════════════════════════════════════════════════════════════════════════
 # FINAL SUMMARY
 # ══════════════════════════════════════════════════════════════════════════
 failed = summary()

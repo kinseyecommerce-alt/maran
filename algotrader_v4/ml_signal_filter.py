@@ -63,12 +63,13 @@ class MLSignalFilter:
         with self._lock:
             if self._model is None:
                 return True, 0.5
+            m = self._model   # capture reference while holding lock
         try:
             features = self._build_features(
                 rsi, adx, volume_ratio, macd_hist, bb_width,
                 atr_pct, score, session, agent, direction,
             )
-            prob = float(self._model.predict_proba([features])[0][1])
+            prob = float(m.predict_proba([features])[0][1])
             return prob >= min_prob, prob
         except Exception as exc:
             logger.debug("[MLFilter] inference error: {}", exc)

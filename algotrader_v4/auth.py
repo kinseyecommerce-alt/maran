@@ -5,7 +5,7 @@ from __future__ import annotations
 
 import hmac
 import warnings
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Optional
 
 from fastapi import Depends, HTTPException, Request
@@ -50,8 +50,11 @@ def authenticate(username: str, password: str) -> bool:
 
 def create_token(username: str) -> tuple[str, int]:
     """Returns (access_token, expires_in_seconds)."""
+    if not settings.jwt_secret_key or len(settings.jwt_secret_key) < 32:
+        from loguru import logger
+        logger.warning("[auth] JWT_SECRET_KEY is missing or weak (<32 chars) — tokens are insecure")
     expires = timedelta(hours=settings.jwt_expire_hours)
-    expire_dt = datetime.utcnow() + expires
+    expire_dt = datetime.now(timezone.utc) + expires
     token = jwt.encode(
         {"sub": username, "exp": expire_dt},
         settings.jwt_secret_key,

@@ -60,8 +60,11 @@ class PortfolioVaR:
             logger.warning("[PortfolioVaR] portfolio returns contain NaN/Inf — returning zero VaR")
             return {**_zero, "total_notional": round(total_notional, 2), "n_positions": len(active)}
 
+        if len(portfolio_rets) < 2:
+            logger.warning("[PortfolioVaR] insufficient history ({} day) — returning zero VaR", len(portfolio_rets))
+            return {**_zero, "total_notional": round(total_notional, 2), "n_positions": len(active)}
         mu = float(portfolio_rets.mean())
-        sigma = float(portfolio_rets.std(ddof=1)) if len(portfolio_rets) > 1 else 0.0
+        sigma = float(portfolio_rets.std(ddof=1))
 
         z95 = float(_stats.norm.ppf(0.05))
         z99 = float(_stats.norm.ppf(0.01))
