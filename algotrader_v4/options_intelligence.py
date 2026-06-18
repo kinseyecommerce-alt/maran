@@ -191,7 +191,8 @@ def _parse_chain(data: dict) -> Optional[dict]:
         total_ce_oi = sum(
             strikes[k]["CE"]["oi"] for k in sorted_strikes if strikes[k]["CE"]
         )
-        pcr = round(total_pe_oi / total_ce_oi, 3) if total_ce_oi > 0 else 0.0
+        # Return None (not 0.0) when call OI is zero — 0.0 is ambiguous (genuine vs data gap)
+        pcr = round(total_pe_oi / total_ce_oi, 3) if total_ce_oi > 0 else None
 
         # ── Max Pain ──────────────────────────────────────────────────────────
         # For each candidate strike K, compute total pain to all option holders:
@@ -338,10 +339,10 @@ def _parse_truedata_chain(rows: list[dict]) -> Optional[dict]:
         valid_ivs  = [v for v in (ce_iv, pe_iv) if v > 0]
         atm_iv     = round(sum(valid_ivs) / len(valid_ivs), 2) if valid_ivs else 0.0
 
-        # PCR
+        # PCR — None when call OI is zero (ambiguous: genuine vs data gap)
         total_pe_oi = sum(strikes[k]["PE"]["oi"] for k in sorted_strikes if strikes[k]["PE"])
         total_ce_oi = sum(strikes[k]["CE"]["oi"] for k in sorted_strikes if strikes[k]["CE"])
-        pcr = round(total_pe_oi / total_ce_oi, 3) if total_ce_oi > 0 else 0.0
+        pcr = round(total_pe_oi / total_ce_oi, 3) if total_ce_oi > 0 else None
 
         max_pain_strike = _compute_max_pain(strikes, sorted_strikes)
 
@@ -354,6 +355,10 @@ def _parse_truedata_chain(rows: list[dict]) -> Optional[dict]:
                                        "oi_change": entry["oi_change"]})
         oi_buildup = sorted(oi_changes, key=lambda x: abs(x["oi_change"]), reverse=True)[:3]
 
+        logger.debug(
+            "[options_intel] TrueData spot_price estimated from median strike {}; "
+            "no underlying feed — greeks may be imprecise", atm_strike
+        )
         return {
             "spot_price":  round(atm_strike, 2),   # best estimate without underlying feed
             "atm_strike":  atm_strike,

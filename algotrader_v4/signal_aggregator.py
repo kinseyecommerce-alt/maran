@@ -39,8 +39,7 @@ class SignalAggregator:
             self._signals[key] = active
 
             unique_agents = {a for a, s, ts in active}
-            if len(unique_agents) >= CONSENSUS_MIN_AGENTS:
-                agents_str = ", ".join(sorted(unique_agents))
+            if len(unique_agents) >= max(CONSENSUS_MIN_AGENTS, 2):
                 return CONSENSUS_BOOST
         return 0.0
 
@@ -58,7 +57,7 @@ class SignalAggregator:
             active = [(a, s, ts) for a, s, ts in self._signals.get(key, []) if ts > window]
             self._signals[key] = active  # trim expired entries
             unique_agents = {a for a, s, ts in active}
-            return CONSENSUS_BOOST if len(unique_agents) >= CONSENSUS_MIN_AGENTS else 0.0
+            return CONSENSUS_BOOST if len(unique_agents) >= max(CONSENSUS_MIN_AGENTS, 2) else 0.0
 
     def recent_signals(self, symbol: str | None = None) -> list[dict]:
         """Return all active signals for dashboard/debug."""
@@ -78,7 +77,7 @@ class SignalAggregator:
                         "direction": direction,
                         "agents": [a for a, s, ts in active],
                         "scores": [s for a, s, ts in active],
-                        "consensus": len({a for a, s, ts in active}) >= CONSENSUS_MIN_AGENTS,
+                        "consensus": len({a for a, s, ts in active}) >= max(CONSENSUS_MIN_AGENTS, 2),
                     })
         return out
 
