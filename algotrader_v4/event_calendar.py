@@ -128,6 +128,7 @@ async def refresh_calendar() -> None:
     """
     logger.info("[events] refreshing event calendar...")
     try:
+        _event_cache.clear()
         await asyncio.gather(
             _fetch_corporate_actions(),
             _fetch_event_calendar(),

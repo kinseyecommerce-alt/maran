@@ -51,12 +51,15 @@ def _load_iv_history() -> dict[str, list[dict]]:
 
 
 def _save_iv_history(history: dict[str, list[dict]]) -> None:
-    """Persist IV history to disk. Silent on failure."""
+    """Persist IV history to disk atomically. Silent on failure."""
+    tmp = _IV_HIST_FILE.with_suffix(".tmp")
     try:
-        with _IV_HIST_FILE.open("w") as fh:
+        with tmp.open("w") as fh:
             json.dump(history, fh)
+        tmp.replace(_IV_HIST_FILE)
     except Exception as exc:
         logger.debug("[options_intel] iv_history save failed: {}", exc)
+        tmp.unlink(missing_ok=True)
 
 
 def _append_iv_history(symbol: str, atm_iv: float) -> None:

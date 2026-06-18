@@ -9419,6 +9419,293 @@ run("portfolio_optimizer: uses single _latest dict for atomic allocation snapsho
 run("portfolio_optimizer: should_trade reads _latest once for consistent snapshot",      t_portfolio_optimizer_should_trade_reads_latest_once)
 
 
+# 113. BATCH 4 — BROKER ROUTER / EVENT CALENDAR / HISTORICAL LEARNER /
+#               SIGNAL ENGINE / TICK RECORDER / KITE LOGIN / NSE SIM /
+#               PRE-MARKET / OPTIONS INTEL / SIGNAL AGGREGATOR
+
+section("113. BATCH 4 — MULTI-MODULE PRODUCTION BUG FIXES")
+
+def t_broker_router_squareoff_retains_failed_broker_entries():
+    """squareoff_all_secondaries must keep tracking entries for brokers that failed."""
+    import inspect
+    from broker_router import BrokerRouter
+    src = inspect.getsource(BrokerRouter.squareoff_all_secondaries)
+    assert "failed_brokers" in src, (
+        "squareoff_all_secondaries must track which brokers failed"
+    )
+    assert "if not failed_brokers" in src, (
+        "squareoff_all_secondaries must only clear() when all brokers succeeded"
+    )
+
+def t_broker_router_squareoff_only_clears_when_all_succeed():
+    """squareoff_all_secondaries must not clear orphaned entries for failed brokers."""
+    from broker_router import BrokerRouter
+
+    class GoodBroker:
+        def squareoff_all_positions(self): pass
+
+    class BadBroker:
+        def squareoff_all_positions(self): raise RuntimeError("network down")
+
+    router = BrokerRouter()
+    router._secondaries = [("good", GoodBroker()), ("bad", BadBroker())]
+    router._secondary_orders["order-1"] = {
+        "good": {"entry_id": "g1", "sl_id": "g2", "symbol": "TCS",
+                 "sl_side": "SELL", "product": "MIS", "exchange": "NSE"},
+        "bad":  {"entry_id": "b1", "sl_id": "b2", "symbol": "TCS",
+                 "sl_side": "SELL", "product": "MIS", "exchange": "NSE"},
+    }
+    router.squareoff_all_secondaries()
+    # "bad" broker failed — its entry must still be tracked
+    remaining = router._secondary_orders.get("order-1", {})
+    assert "bad" in remaining, (
+        "Failed broker 'bad' must remain in _secondary_orders for reconciliation"
+    )
+    assert "good" not in remaining, (
+        "Succeeded broker 'good' must be removed from _secondary_orders"
+    )
+
+def t_broker_router_duplicate_primary_order_id_guard():
+    """mirror_entry must not overwrite existing primary_order_id tracking entry."""
+    import inspect
+    from broker_router import BrokerRouter
+    src = inspect.getsource(BrokerRouter.mirror_entry)
+    assert "primary_order_id in self._secondary_orders" in src, (
+        "mirror_entry must guard against duplicate primary_order_id to prevent overwriting"
+    )
+
+def t_event_calendar_refresh_clears_stale_entries():
+    """refresh_calendar must call _event_cache.clear() before fetching new data."""
+    import inspect
+    import event_calendar as _ec
+    src = inspect.getsource(_ec.refresh_calendar)
+    assert "_event_cache.clear()" in src, (
+        "refresh_calendar must call _event_cache.clear() to prevent duplicate event accumulation"
+    )
+
+def t_event_calendar_clear_before_gather():
+    """_event_cache.clear() must appear before asyncio.gather in refresh_calendar."""
+    import inspect
+    import event_calendar as _ec
+    src = inspect.getsource(_ec.refresh_calendar)
+    clear_pos  = src.find("_event_cache.clear()")
+    gather_pos = src.find("asyncio.gather")
+    assert 0 < clear_pos < gather_pos, (
+        "_event_cache.clear() must run before asyncio.gather in refresh_calendar"
+    )
+
+def t_historical_learner_save_progress_atomic():
+    """_save_progress must use atomic temp-file write pattern."""
+    import inspect
+    import historical_learner as _hl
+    src = inspect.getsource(_hl._save_progress)
+    assert ".tmp" in src, "_save_progress must write to a .tmp file first"
+    assert ".replace(" in src, "_save_progress must use Path.replace() for atomic rename"
+
+def t_historical_learner_save_approved_atomic():
+    """_save_approved must use atomic temp-file write pattern."""
+    import inspect
+    import historical_learner as _hl
+    src = inspect.getsource(_hl._save_approved)
+    assert ".tmp" in src, "_save_approved must write to a .tmp file first"
+    assert ".replace(" in src, "_save_approved must use Path.replace() for atomic rename"
+
+def t_historical_learner_transient_error_done_false():
+    """Exceptions in _run_one must mark progress done=False so --resume retries them."""
+    import inspect
+    import historical_learner as _hl
+    src = inspect.getsource(_hl._run_one)
+    # The except block must use "done": False (not True) for transient errors
+    assert '"done": False' in src, (
+        "_run_one must set done=False on exception so --resume retries the symbol"
+    )
+    # Successful completion must still use "done": True
+    assert '"done": True' in src, (
+        "_run_one must set done=True on successful completion"
+    )
+
+def t_historical_learner_final_telegram_awaited():
+    """Final Telegram notification in learn() must use await, not asyncio.create_task."""
+    import inspect
+    import historical_learner as _hl
+    src = inspect.getsource(_hl.learn)
+    # Find the final notification block (near the end of the function)
+    # After the print statements, it must use "await send_telegram" not "create_task"
+    final_block_pos = src.rfind("await send_telegram")
+    create_task_pos = src.rfind("asyncio.create_task(send_telegram")
+    # Either final block uses await, or create_task is not present at end
+    assert final_block_pos > 0, (
+        "learn() final notification must use 'await send_telegram' to survive asyncio.run() exit"
+    )
+    # create_task for the final notification must not be present after final_block_pos
+    if create_task_pos > 0:
+        assert create_task_pos < final_block_pos, (
+            "The LAST send_telegram call in learn() must use 'await' not 'asyncio.create_task'"
+        )
+
+def t_signal_engine_vol_avg_nan_guard():
+    """signal_engine._compute_indicators must guard vol_avg for NaN before division."""
+    import inspect
+    from signal_engine import SignalEngine
+    src = inspect.getsource(SignalEngine._compute_indicators)
+    assert "pd.isna(vol_avg)" in src, (
+        "_compute_indicators must check pd.isna(vol_avg) — bool(NaN) is True in Python"
+    )
+
+def t_signal_engine_macd_nan_neutral():
+    """signal_engine._compute_indicators must emit Neutral (not SELL) when MACD is NaN."""
+    import inspect
+    from signal_engine import SignalEngine
+    src = inspect.getsource(SignalEngine._compute_indicators)
+    assert "pd.isna(macd_line)" in src, (
+        "_compute_indicators must check pd.isna(macd_line) before comparing MACD cross"
+    )
+    assert '"Neutral"' in src, (
+        "_compute_indicators must emit Neutral when MACD indicators are NaN"
+    )
+
+def t_tick_recorder_batched_commits():
+    """TickRecorder.record must batch commits (not commit every tick)."""
+    import inspect
+    from tick_recorder import TickRecorder
+    src = inspect.getsource(TickRecorder.record)
+    assert "_pending_writes" in src, (
+        "TickRecorder.record must use _pending_writes counter for batched commits"
+    )
+    assert ">= 50" in src or "% 50" in src, (
+        "TickRecorder.record must only commit every 50 ticks, not on every tick"
+    )
+
+def t_tick_recorder_stop_commits_before_close():
+    """TickRecorder.stop must call conn.commit() before conn.close() to flush buffered writes."""
+    import inspect
+    from tick_recorder import TickRecorder
+    src = inspect.getsource(TickRecorder.stop)
+    assert "conn.commit()" in src, (
+        "stop() must call conn.commit() before close() to flush any pending writes"
+    )
+
+def t_tick_recorder_pending_writes_initialized():
+    """TickRecorder.__init__ must initialize _pending_writes to 0."""
+    import inspect
+    from tick_recorder import TickRecorder
+    src = inspect.getsource(TickRecorder.__init__)
+    assert "_pending_writes" in src, (
+        "TickRecorder.__init__ must initialize self._pending_writes for batched commit tracking"
+    )
+
+def t_kite_login_async_lock_present():
+    """refresh_kite_token_async must hold an asyncio.Lock to prevent concurrent login races."""
+    import inspect
+    import kite_auto_login as _kal
+    src = inspect.getsource(_kal.refresh_kite_token_async)
+    assert "_login_lock" in src, (
+        "refresh_kite_token_async must acquire _login_lock to prevent concurrent login races"
+    )
+    module_src = inspect.getsource(_kal)
+    assert "_login_lock = asyncio.Lock()" in module_src, (
+        "kite_auto_login module must define _login_lock = asyncio.Lock()"
+    )
+
+def t_nse_sim_squareoff_outside_sym_loop():
+    """nse_day_simulation squareoff block must be outside the for-sym loop."""
+    import inspect
+    import nse_day_simulation as _sim
+    src = inspect.getsource(_sim.run_simulation)
+    # In the fixed code, the squareoff comment appears and is followed by "for agent_name"
+    # at LOWER indentation than the "for sym in SYMBOLS:" body
+    squareoff_pos = src.find("# Squareoff all open positions at 15:25")
+    sym_loop_pos  = src.find("for sym in SYMBOLS:")
+    assert squareoff_pos > sym_loop_pos, "squareoff block must appear after the for-sym loop"
+    # Check that squareoff is not INSIDE for-sym by verifying indentation
+    # Find the line with squareoff comment and check its leading spaces
+    lines = src.split("\n")
+    sq_line = next((l for l in lines if "# Squareoff all open positions at 15:25" in l), "")
+    sym_line = next((l for l in lines if "for sym in SYMBOLS:" in l), "")
+    sq_indent  = len(sq_line) - len(sq_line.lstrip())
+    sym_indent = len(sym_line) - len(sym_line.lstrip())
+    assert sq_indent <= sym_indent, (
+        f"Squareoff block indent ({sq_indent}) must be <= for-sym indent ({sym_indent}); "
+        "it was incorrectly nested inside the per-symbol loop"
+    )
+
+def t_pre_market_report_gather_return_exceptions_true():
+    """generate_pre_market_report must use return_exceptions=True in asyncio.gather."""
+    import inspect
+    import pre_market_report as _pmr
+    src = inspect.getsource(_pmr.generate_pre_market_report)
+    assert "return_exceptions=True" in src, (
+        "generate_pre_market_report must pass return_exceptions=True to asyncio.gather"
+    )
+    assert "isinstance" in src, (
+        "generate_pre_market_report must check isinstance(result, BaseException) "
+        "and replace with safe defaults"
+    )
+
+def t_options_intel_save_history_atomic():
+    """_save_iv_history must use atomic temp-file write pattern to prevent corruption."""
+    import inspect
+    import options_intelligence as _oi
+    src = inspect.getsource(_oi._save_iv_history)
+    assert ".tmp" in src, "_save_iv_history must write to a .tmp file first"
+    assert ".replace(" in src, "_save_iv_history must use Path.replace() for atomic rename"
+
+def t_signal_aggregator_score_none_guard():
+    """SignalAggregator.register must coerce None score to 0 (not store None in list)."""
+    from signal_aggregator import SignalAggregator
+    agg = SignalAggregator()
+    agg.register("agentA", "RELIANCE", "BUY", score=None)
+    agg.register("agentB", "RELIANCE", "BUY", score=None)
+    sigs = agg.recent_signals("RELIANCE")
+    if sigs:
+        scores = sigs[0].get("scores", [])
+        for s in scores:
+            assert s is not None and isinstance(s, int), (
+                f"score must be int (0), not None — got {s!r}"
+            )
+
+def t_signal_aggregator_get_consensus_boost_trims_expired():
+    """get_consensus_boost must write back filtered (trimmed) active list to _signals."""
+    import inspect
+    from signal_aggregator import SignalAggregator
+    src = inspect.getsource(SignalAggregator.get_consensus_boost)
+    assert "self._signals[key] = active" in src, (
+        "get_consensus_boost must write trimmed active list back to self._signals[key] "
+        "to prevent unbounded memory growth from expired entries"
+    )
+
+def t_signal_aggregator_recent_signals_trims_expired():
+    """recent_signals must write back trimmed active list to prevent unbounded memory growth."""
+    import inspect
+    from signal_aggregator import SignalAggregator
+    src = inspect.getsource(SignalAggregator.recent_signals)
+    assert "self._signals[key] = active" in src, (
+        "recent_signals must write trimmed active list back to self._signals[key]"
+    )
+
+run("broker_router: squareoff_all_secondaries retains tracking for failed brokers",      t_broker_router_squareoff_retains_failed_broker_entries)
+run("broker_router: squareoff_all_secondaries only clears when all brokers succeed",     t_broker_router_squareoff_only_clears_when_all_succeed)
+run("broker_router: mirror_entry guards against duplicate primary_order_id",             t_broker_router_duplicate_primary_order_id_guard)
+run("event_calendar: refresh_calendar clears stale cache before fetching",               t_event_calendar_refresh_clears_stale_entries)
+run("event_calendar: _event_cache.clear() runs before asyncio.gather",                  t_event_calendar_clear_before_gather)
+run("historical_learner: _save_progress uses atomic temp-file write",                   t_historical_learner_save_progress_atomic)
+run("historical_learner: _save_approved uses atomic temp-file write",                   t_historical_learner_save_approved_atomic)
+run("historical_learner: transient exception marks done=False for --resume retry",       t_historical_learner_transient_error_done_false)
+run("historical_learner: final Telegram notification uses await (not create_task)",      t_historical_learner_final_telegram_awaited)
+run("signal_engine: vol_avg NaN guard prevents bool(NaN)=True false positive",          t_signal_engine_vol_avg_nan_guard)
+run("signal_engine: MACD NaN emits Neutral (not spurious SELL)",                        t_signal_engine_macd_nan_neutral)
+run("tick_recorder: record() uses batched commits (every 50 ticks, not per-tick)",       t_tick_recorder_batched_commits)
+run("tick_recorder: stop() calls conn.commit() before close() to flush pending writes",  t_tick_recorder_stop_commits_before_close)
+run("tick_recorder: __init__ initializes _pending_writes counter",                      t_tick_recorder_pending_writes_initialized)
+run("kite_auto_login: refresh_kite_token_async holds asyncio.Lock to prevent race",     t_kite_login_async_lock_present)
+run("nse_day_simulation: squareoff block is outside for-sym loop (not per-symbol)",      t_nse_sim_squareoff_outside_sym_loop)
+run("pre_market_report: generate_pre_market_report uses return_exceptions=True",         t_pre_market_report_gather_return_exceptions_true)
+run("options_intelligence: _save_iv_history uses atomic temp-file write",                t_options_intel_save_history_atomic)
+run("signal_aggregator: register() coerces None score to 0",                            t_signal_aggregator_score_none_guard)
+run("signal_aggregator: get_consensus_boost writes back trimmed list (no memory leak)", t_signal_aggregator_get_consensus_boost_trims_expired)
+run("signal_aggregator: recent_signals writes back trimmed list (no memory leak)",      t_signal_aggregator_recent_signals_trims_expired)
+
+
 # ══════════════════════════════════════════════════════════════════════════
 # FINAL SUMMARY
 # ══════════════════════════════════════════════════════════════════════════

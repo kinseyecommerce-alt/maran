@@ -121,8 +121,12 @@ class SignalEngine:
         macd_obj = ta.trend.MACD(close)
         macd_line = macd_obj.macd().iloc[-1]
         macd_sig_line = macd_obj.macd_signal().iloc[-1]
-        macd_cross = "BUY" if macd_line > macd_sig_line else "SELL"
-        results.append({"name": "MACD", "value": f"{macd_line:.2f} / {macd_sig_line:.2f}", "signal": macd_cross})
+        if pd.isna(macd_line) or pd.isna(macd_sig_line):
+            macd_cross = "Neutral"
+        else:
+            macd_cross = "BUY" if macd_line > macd_sig_line else "SELL"
+        macd_val = f"{macd_line:.2f} / {macd_sig_line:.2f}" if not pd.isna(macd_line) else "N/A"
+        results.append({"name": "MACD", "value": macd_val, "signal": macd_cross})
 
         # EMA 20 & 50
         ema20 = ta.trend.EMAIndicator(close, window=20).ema_indicator().iloc[-1]
@@ -140,7 +144,7 @@ class SignalEngine:
 
         # Volume ratio
         vol_avg = volume.rolling(20).mean().iloc[-1]
-        vol_ratio = volume.iloc[-1] / vol_avg if vol_avg else 1.0
+        vol_ratio = volume.iloc[-1] / vol_avg if (vol_avg and not pd.isna(vol_avg)) else 1.0
         vol_sig = "BUY" if vol_ratio > 1.5 else "Neutral"
         results.append({"name": "Volume", "value": f"{vol_ratio:.1f}x avg", "signal": vol_sig})
 

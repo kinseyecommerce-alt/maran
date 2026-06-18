@@ -513,12 +513,12 @@ def run_simulation(seed: int = 2026, verbose: bool = True) -> tuple[dict, list]:
                     except Exception as exc:
                         loguru.logger.debug("[sim] agent {} error on {} {}: {}", agent_name, sym, ts, exc)
 
-            # Squareoff all open positions at 15:25
-            final_px = {sym: float(sessions[sym][tf_label]["close"].iloc[-1])
-                        for sym in SYMBOLS}
-            sq_ts = datetime.combine(date.today(), time(15, 25))
-            for agent_name, _ in AGENT_CLASSES:
-                tracker_set[agent_name].squareoff_all(final_px, sq_ts)
+        # Squareoff all open positions at 15:25 (after ALL symbols are processed)
+        final_px = {sym: float(sessions[sym][tf_label]["close"].iloc[-1])
+                    for sym in SYMBOLS}
+        sq_ts = datetime.combine(date.today(), time(15, 25))
+        for agent_name, _ in AGENT_CLASSES:
+            tracker_set[agent_name].squareoff_all(final_px, sq_ts)
 
         # Print per-TF signal count
         if verbose:

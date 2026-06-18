@@ -131,7 +131,11 @@ class BrokerRouter:
 
         if broker_details:
             with self._lock:
-                self._secondary_orders[primary_order_id] = broker_details
+                if primary_order_id in self._secondary_orders:
+                    logger.warning("[BrokerRouter] duplicate primary_order_id {} — keeping existing entry",
+                                   primary_order_id)
+                else:
+                    self._secondary_orders[primary_order_id] = broker_details
 
     # ── Mirror exit (target hit / manual squareoff) ───────────────────────
 
@@ -174,6 +178,7 @@ class BrokerRouter:
     def squareoff_all_secondaries(self) -> dict[str, str]:
         """Call squareoff on every secondary broker. Returns {broker: status}."""
         results: dict[str, str] = {}
+        failed_brokers: set[str] = set()
         for name, client in self._secondaries:
             try:
                 client.squareoff_all_positions()
@@ -181,9 +186,20 @@ class BrokerRouter:
                 logger.info("[BrokerRouter] {} squaredoff", name)
             except Exception as exc:
                 results[name] = f"error: {exc}"
+                failed_brokers.add(name)
                 logger.warning("[BrokerRouter] {} squareoff failed: {}", name, exc)
         with self._lock:
-            self._secondary_orders.clear()
+            if not failed_brokers:
+                self._secondary_orders.clear()
+            else:
+                # Keep tracking only for brokers that failed so they can be retried/reconciled
+                for pid in list(self._secondary_orders.keys()):
+                    details = self._secondary_orders[pid]
+                    for broker in list(details.keys()):
+                        if broker not in failed_brokers:
+                            del details[broker]
+                    if not details:
+                        del self._secondary_orders[pid]
         return results
 
     # ── Status ────────────────────────────────────────────────────────────

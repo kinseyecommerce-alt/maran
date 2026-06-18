@@ -20,7 +20,7 @@ class SignalAggregator:
         # key = (symbol, direction) → list of (agent_name, score, timestamp)
         self._signals: dict = defaultdict(list)
 
-    def register(self, agent: str, symbol: str, direction: str, score: int = 0) -> float:
+    def register(self, agent: str, symbol: str, direction: str, score: int | None = 0) -> float:
         """
         Register a signal from an agent. Returns a size boost fraction (0.0–1.0).
         Returns CONSENSUS_BOOST if ≥2 different agents agree within CONSENSUS_WINDOW_SECS.
@@ -28,6 +28,7 @@ class SignalAggregator:
         """
         now = datetime.utcnow()
         key = (symbol, direction)
+        score = int(score) if score is not None else 0
         with self._lock:
             # Expire old entries
             window = now - timedelta(seconds=CONSENSUS_WINDOW_SECS)
@@ -55,6 +56,7 @@ class SignalAggregator:
         window = now - timedelta(seconds=CONSENSUS_WINDOW_SECS)
         with self._lock:
             active = [(a, s, ts) for a, s, ts in self._signals.get(key, []) if ts > window]
+            self._signals[key] = active  # trim expired entries
             unique_agents = {a for a, s, ts in active}
             return CONSENSUS_BOOST if len(unique_agents) >= CONSENSUS_MIN_AGENTS else 0.0
 
@@ -64,10 +66,12 @@ class SignalAggregator:
         window = now - timedelta(seconds=CONSENSUS_WINDOW_SECS)
         out = []
         with self._lock:
-            for (sym, direction), entries in self._signals.items():
+            for key, entries in list(self._signals.items()):
+                sym, direction = key
+                active = [(a, s, ts) for a, s, ts in entries if ts > window]
+                self._signals[key] = active  # trim expired entries
                 if symbol and sym != symbol:
                     continue
-                active = [(a, s, ts) for a, s, ts in entries if ts > window]
                 if active:
                     out.append({
                         "symbol": sym,

@@ -24,6 +24,7 @@ from kite_client import kite_client
 
 
 _CHROMIUM = "/opt/pw-browsers/chromium-1194/chrome-linux/chrome"
+_login_lock = asyncio.Lock()
 
 
 def _extract_request_token(url: str) -> str | None:
@@ -103,4 +104,5 @@ def run_kite_auto_login() -> str:
 
 async def refresh_kite_token_async() -> str:
     """Async wrapper — runs blocking Playwright in a thread pool."""
-    return await asyncio.to_thread(run_kite_auto_login)
+    async with _login_lock:
+        return await asyncio.to_thread(run_kite_auto_login)

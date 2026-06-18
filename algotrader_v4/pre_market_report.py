@@ -453,8 +453,17 @@ async def generate_pre_market_report() -> dict:
         _fetch_india_indices(),
         _fetch_fiidii(),
         _fetch_sector_performance(),
-        return_exceptions=False,
+        return_exceptions=True,
     )
+    # If any coroutine unexpectedly raised, replace with safe defaults
+    if isinstance(global_data, BaseException):
+        global_data = {}
+    if isinstance(india_data, BaseException):
+        india_data = {}
+    if isinstance(fiidii, BaseException):
+        fiidii = None
+    if isinstance(sector_data, BaseException):
+        sector_data = {}
 
     logger.info(
         "[pre_market] data fetched — global={}/{} india={}/{} fiidii={} sectors={}/{}",

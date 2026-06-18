@@ -28,6 +28,7 @@ class TickRecorder:
         self._enabled = False
         self._symbols: set[str] = set()
         self._counts:  dict[str, int] = {}
+        self._pending_writes: int = 0
 
     def _init_db(self) -> sqlite3.Connection:
         self._db_path.parent.mkdir(parents=True, exist_ok=True)
@@ -70,6 +71,7 @@ class TickRecorder:
             conn, self._conn = self._conn, None
         if conn is not None:
             try:
+                conn.commit()
                 conn.close()
             except Exception:
                 pass
@@ -107,7 +109,10 @@ class TickRecorder:
                      getattr(tick, "change_pct", 0.0),
                      ts_str),
                 )
-                self._conn.commit()
+                self._pending_writes += 1
+                if self._pending_writes >= 50:
+                    self._conn.commit()
+                    self._pending_writes = 0
                 self._counts[sym] = self._counts.get(sym, 0) + 1
         except Exception as exc:
             logger.debug("TickRecorder.record failed (non-critical): {}", exc)
