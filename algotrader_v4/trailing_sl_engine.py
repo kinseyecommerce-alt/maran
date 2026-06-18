@@ -473,11 +473,13 @@ class TrailingSLEngine:
                 if pos.side == "BUY":
                     tighter_sl = round(ltp * (1 - cfg.trail_pct / 200), 2)
                     if tighter_sl > pos.current_sl:
+                        old_sl = pos.current_sl  # update for breakeven/trail callback below
                         pos.current_sl = tighter_sl
                         pos.sl_moves  += 1
                 else:
                     tighter_sl = round(ltp * (1 + cfg.trail_pct / 200), 2)
                     if tighter_sl < pos.current_sl:
+                        old_sl = pos.current_sl  # update for breakeven/trail callback below
                         pos.current_sl = tighter_sl
                         pos.sl_moves  += 1
                 logger.info(
@@ -651,10 +653,11 @@ class TrailingSLEngine:
                     _TIGHTEN_TASKS.add(_task)
                     def _handle_done(t: _asyncio.Task, _sym=pos.symbol) -> None:
                         _TIGHTEN_TASKS.discard(t)
-                        if not t.cancelled() and t.exception() is not None:
+                        exc = None if t.cancelled() else t.exception()
+                        if exc is not None:
                             logger.warning(
                                 "[TSL] BLACK_SWAN_TIGHTEN callback failed for {}: {}",
-                                _sym, t.exception())
+                                _sym, exc)
                     _task.add_done_callback(_handle_done)
         return count
 

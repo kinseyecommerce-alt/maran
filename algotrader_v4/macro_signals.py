@@ -171,7 +171,7 @@ class MacroSignals:
         """Trigger a background refresh if data is stale (non-blocking).
         Single-flight: only one refresh thread may run at a time."""
         with self._lock:
-            stale = (time.monotonic() - self._last_refresh) >= self._refresh_interval
+            stale = (time.monotonic() - self._last_success_ts) >= self._refresh_interval
             if not stale or self._refreshing.is_set():
                 return
             self._refreshing.set()  # claimed under the lock — no thread storm

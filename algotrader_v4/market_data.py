@@ -260,10 +260,14 @@ class NSEClient:
 
 
 # ── yfinance historical data ────────────────────────────────────────────
+import threading as _threading
+
+
 class YFinanceClient:
     # In-memory CSV cache: avoids re-reading the same file from disk on every
     # signal-generation call in the tick path. Key: (symbol, timeframe).
     _csv_cache: dict[tuple[str, str], pd.DataFrame] = {}
+    _csv_cache_lock: _threading.Lock = _threading.Lock()
 
     @staticmethod
     def _ticker(symbol: str, exchange: str = "NSE") -> str:
@@ -274,7 +278,8 @@ class YFinanceClient:
         _CACHE_ALIASES = {"60m": "1h", "60min": "1h", "1hour": "1h"}
         _cache_tf = _CACHE_ALIASES.get(interval, interval)
         mem_key = (symbol, _cache_tf)
-        cached = self._csv_cache.get(mem_key)
+        with self._csv_cache_lock:
+            cached = self._csv_cache.get(mem_key)
         if cached is not None:
             return cached.copy()
         _cache = Path(f"logs/historical_data/{symbol}/{_cache_tf}.csv")
@@ -282,7 +287,8 @@ class YFinanceClient:
             df = pd.read_csv(_cache, parse_dates=["date"])
             cols = [c for c in ("date", "open", "high", "low", "close", "volume") if c in df.columns]
             df = df[cols].dropna().sort_values("date").reset_index(drop=True)
-            self._csv_cache[mem_key] = df
+            with self._csv_cache_lock:
+                self._csv_cache[mem_key] = df
             return df.copy()
 
         from config import settings as _s

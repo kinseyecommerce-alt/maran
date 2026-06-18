@@ -106,6 +106,7 @@ class BracketOrder:
     target_1:     float = 0.0
     target_2:     float = 0.0
     quantity:     int   = 0
+    quantity_remaining: int = 0  # set to quantity on registration; decremented on T1 scale-out
     entry_order_id: str = ""
     sl_order_id:    str = ""
     status:        BracketStatus = BracketStatus.PENDING
@@ -191,6 +192,7 @@ class AtomicBracketEngine:
             bracket_id=bracket_id, strategy=strategy, symbol=symbol, exchange=exchange,
             side=side, product=product, signal_price=signal_price, sl_price=stop_loss,
             trail_sl=stop_loss, target_1=target_1, target_2=target_2, quantity=quantity,
+            quantity_remaining=quantity,
             sub_strategy=sub_strategy, trigger_reason=trigger)
         self._brackets[bracket_id] = bracket
         # Atomically claim the symbol slot BEFORE placing the entry — without this
@@ -303,6 +305,7 @@ class AtomicBracketEngine:
 
     async def _place_sl_order(self, bracket: BracketOrder) -> bool:
         sl_side = "SELL" if bracket.side == "BUY" else "BUY"
+        _sl_px = bracket.sl_price  # capture by value before handing off to thread pool
         for attempt in range(1, self.SL_RETRY_MAX + 1):
             try:
                 sl_oid = await asyncio.get_running_loop().run_in_executor(
@@ -310,7 +313,7 @@ class AtomicBracketEngine:
                         tradingsymbol=bracket.symbol, exchange=bracket.exchange,
                         transaction_type=sl_side, quantity=bracket.quantity,
                         order_type="SL-M", product=bracket.product,
-                        trigger_price=bracket.sl_price, tag=f"BRK-{bracket.strategy}-SL"))
+                        trigger_price=_sl_px, tag=f"BRK-{bracket.strategy}-SL"))
                 bracket.sl_order_id = sl_oid
                 return True
             except Exception as exc:
@@ -374,7 +377,7 @@ class AtomicBracketEngine:
                     o = kite_client._paper_orders.get(bracket.sl_order_id)
                     if o and o["status"] == "COMPLETE":
                         sl_already_filled = True
-                if not sl_already_filled:
+                if not sl_already_filled and settings.trading_mode != "PAPER":
                     history = await _loop.run_in_executor(
                         None, lambda: kite_client.order_history(bracket.sl_order_id))
                     for h in reversed(history):
@@ -428,17 +431,22 @@ class AtomicBracketEngine:
     async def _on_tsl_target_hit(self, pos, ltp: float, level: int) -> None:
         bracket = self._find_by_symbol_strategy(pos.symbol, pos.strategy)
         if not bracket: return
+        if level == 1:
+            # Sync quantity_remaining from the TSL position after T1 partial scale-out
+            bracket.quantity_remaining = pos.quantity_remaining
+            return
         if level == 2:
             exit_side = "SELL" if bracket.side == "BUY" else "BUY"
-            gross_pnl = (ltp - bracket.entry_price) * bracket.quantity * (1 if bracket.side == "BUY" else -1)
-            tx_cost   = compute_round_trip_cost(bracket.symbol, bracket.quantity,
+            qty_for_t2 = bracket.quantity_remaining if bracket.quantity_remaining > 0 else bracket.quantity
+            gross_pnl = (ltp - bracket.entry_price) * qty_for_t2 * (1 if bracket.side == "BUY" else -1)
+            tx_cost   = compute_round_trip_cost(bracket.symbol, qty_for_t2,
                                                 bracket.entry_price, bracket.product)
             net_pnl   = round(gross_pnl - tx_cost, 2)
             try:
                 _loop = asyncio.get_running_loop()
                 await _loop.run_in_executor(None, lambda: kite_client.place_order(
                     tradingsymbol=bracket.symbol, exchange=bracket.exchange,
-                    transaction_type=exit_side, quantity=bracket.quantity,
+                    transaction_type=exit_side, quantity=qty_for_t2,
                     order_type="MARKET", product=bracket.product, tag="BRK-TARGET-EXIT"))
                 if bracket.sl_order_id:
                     try:
@@ -514,7 +522,7 @@ class AtomicBracketEngine:
         await self._broadcast_update(bracket)
 
     def _find_by_symbol_strategy(self, symbol: str, strategy: str) -> Optional[BracketOrder]:
-        for b in self._brackets.values():
+        for b in list(self._brackets.values()):
             if b.symbol == symbol and b.strategy == strategy and b.status == BracketStatus.ACTIVE:
                 return b
         return None

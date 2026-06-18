@@ -9755,23 +9755,25 @@ def t_market_data_fast_info_attribute_access():
     )
 
 def t_strategy_futures_fii_scope_init():
-    """FuturesAgent._ctx_bonus must initialize fii=None before try block (BUG-1)."""
+    """FuturesAgent._ctx_bonus must receive fii_sentiment as a parameter (not fetch internally)."""
     import inspect
     from agents.strategy_agents import FuturesAgent
     src = inspect.getsource(FuturesAgent._ctx_bonus)
-    assert "fii = None" in src, (
-        "FuturesAgent._ctx_bonus must initialize fii=None before the try block "
-        "so item 13 can check 'if fii is not None' without NameError risk"
+    assert "fii_sentiment" in src, (
+        "FuturesAgent._ctx_bonus must accept fii_sentiment as a parameter — "
+        "fetching inside _ctx_bonus causes 18+ calls to get_fii_sentiment() per tick "
+        "(once per pattern), risking latency spikes that drop snapshots as stale"
     )
 
 def t_strategy_futures_fii_item13_no_try_except():
-    """FuturesAgent._ctx_bonus item 13 must use 'if fii is not None' not try/except NameError."""
+    """FuturesAgent._ctx_bonus must not fetch FII internally (causes 18x per-tick calls)."""
     import inspect
     from agents.strategy_agents import FuturesAgent
     src = inspect.getsource(FuturesAgent._ctx_bonus)
-    assert "if fii is not None:" in src, (
-        "FuturesAgent._ctx_bonus item 13 must guard with 'if fii is not None' "
-        "instead of relying on NameError caught by bare except"
+    assert "get_fii_sentiment" not in src, (
+        "FuturesAgent._ctx_bonus must NOT call get_fii_sentiment() internally — "
+        "it should use the fii_sentiment parameter passed from evaluate_tick, "
+        "which fetches FII exactly once per tick before the pattern loop"
     )
 
 def t_options_agent_theta_uses_options_intelligence():
@@ -11274,6 +11276,229 @@ run("profit_optimizer: phase1_optimise acquires _opt_lock for patch/restore",   
 run("adaptive_engine: __init__ creates self._lock (threading.Lock)",                     t_adaptive_engine_has_lock)
 run("adaptive_engine: record_trade() holds self._lock for full _params mutation",        t_adaptive_engine_record_trade_uses_lock)
 run("adaptive_engine: nightly_review() snapshots _params under self._lock",              t_adaptive_engine_nightly_review_uses_lock)
+
+
+# ══════════════════════════════════════════════════════════════════════════
+# 16. BATCH 16 — kite_client / signal_aggregator / alt_data / market_data /
+#     macro_signals / risk_manager / main / trailing_sl_engine /
+#     atomic_bracket / strategy_agents
+# ══════════════════════════════════════════════════════════════════════════
+
+def t_kite_client_positions_cached_timestamp_after_call():
+    import inspect, kite_client as kc
+    src = inspect.getsource(kc.KiteClient.positions_cached)
+    lines = src.splitlines()
+    # The cache-store timestamp (_pos_cache_ts = now) must appear AFTER result = self.positions()
+    # (a first `now` for the TTL freshness check is allowed before)
+    result_line = next((i for i, l in enumerate(lines) if "result = self.positions()" in l), None)
+    ts_store_line = next((i for i, l in enumerate(lines) if "_pos_cache_ts = now" in l), None)
+    assert result_line is not None, "positions_cached must have 'result = self.positions()'"
+    assert ts_store_line is not None, "positions_cached must assign '_pos_cache_ts = now'"
+    assert ts_store_line > result_line, (
+        "positions_cached: '_pos_cache_ts = now' must appear AFTER 'result = self.positions()' — "
+        "capturing the timestamp before the blocking call collapses the effective TTL to ~0"
+    )
+
+def t_signal_aggregator_recent_signals_no_empty_list():
+    import inspect, signal_aggregator as sa
+    src = inspect.getsource(sa.SignalAggregator.recent_signals)
+    assert "del self._signals[key]" in src or "del self._signals" in src, (
+        "recent_signals() must delete keys whose entry lists are empty after pruning — "
+        "storing an empty list back causes unbounded memory growth as every symbol "
+        "that ever had a signal accumulates an empty entry"
+    )
+
+def t_alt_data_fii_dii_exception_path_uses_lock():
+    import inspect, alt_data as ad
+    src = inspect.getsource(ad.AltDataEngine.refresh_fii_dii)
+    idx_except = src.find("except Exception")
+    assert idx_except != -1, "refresh_fii_dii must have an except block"
+    after_except = src[idx_except:]
+    assert "with self._lock" in after_except or "_lock" in after_except, (
+        "refresh_fii_dii exception path must read self._fii_dii under self._lock — "
+        "bare 'return self._fii_dii' is a torn-read race when another thread holds the lock"
+    )
+
+def t_market_data_csv_cache_has_lock():
+    import inspect, market_data as md
+    src = inspect.getsource(md.YFinanceClient)
+    assert "_csv_cache_lock" in src, (
+        "YFinanceClient must have a class-level _csv_cache_lock (threading.Lock) — "
+        "_csv_cache is accessed from multiple run_in_executor threads concurrently"
+    )
+
+def t_market_data_csv_cache_reads_under_lock():
+    import inspect, market_data as md
+    src = inspect.getsource(md.YFinanceClient.historical)
+    assert "_csv_cache_lock" in src, (
+        "YFinanceClient.historical must acquire _csv_cache_lock when reading/writing _csv_cache — "
+        "unprotected dict access from multiple threads causes silent data corruption"
+    )
+
+def t_macro_signals_auto_refresh_uses_success_ts():
+    import inspect, macro_signals as ms
+    src = inspect.getsource(ms.MacroSignals._auto_refresh_if_stale)
+    assert "_last_success_ts" in src, (
+        "_auto_refresh_if_stale must check _last_success_ts (not _last_refresh) for staleness — "
+        "using _last_refresh means a failed refresh resets the 300s window, leaving stale data "
+        "with no retry for 5 minutes even though no fresh data was actually obtained"
+    )
+
+def t_risk_manager_calculate_quantity_returns_zero_not_one():
+    import inspect, risk_manager as rm
+    src = inspect.getsource(rm.RiskManager.calculate_quantity_atr)
+    assert "return 0" in src, (
+        "calculate_quantity_atr must return 0 when risk math yields qty=0 — "
+        "max(1, ...) forces a minimum of 1 share even when the risk budget cannot "
+        "afford the SL distance, accepting 10× more risk than configured"
+    )
+    # Verify the final return line does not use max(1, ...)
+    lines = src.splitlines()
+    return_lines = [l.strip() for l in lines if l.strip().startswith("return")]
+    assert not any("max(1," in l for l in return_lines), (
+        "calculate_quantity_atr must NOT use max(1, ...) on any return statement — "
+        "this overrides the skip-trade intent when risk math produces qty=0"
+    )
+
+def t_risk_manager_record_trade_sets_halted():
+    import inspect, risk_manager as rm
+    src = inspect.getsource(rm.RiskManager.record_trade)
+    assert "is_trading_halted" in src, (
+        "record_trade() must set is_trading_halted=True when the daily loss limit is crossed — "
+        "without this, another agent can place one extra order between record_trade() and "
+        "the next check_before_order() where the flag is normally set"
+    )
+
+def t_risk_manager_kelly_fraction_abs_win():
+    import inspect, risk_manager as rm
+    src = inspect.getsource(rm.RiskManager.kelly_fraction)
+    assert "abs(getattr(params, \"avg_win_pct\"" in src or "abs(getattr(params, 'avg_win_pct'" in src, (
+        "kelly_fraction must wrap avg_win_pct in abs() — if the adaptive engine stores a "
+        "negative win_pct (edge case), R becomes negative and Kelly formula explodes"
+    )
+
+def t_risk_manager_record_trade_notifier_in_thread():
+    import inspect, risk_manager as rm
+    src = inspect.getsource(rm.RiskManager.record_trade)
+    assert "Thread" in src or "thread" in src or "daemon" in src, (
+        "record_trade() 50%-loss notifier must run in a daemon thread — "
+        "_notifier.send() is a blocking SMTP/Telegram call that freezes the event loop "
+        "when called from an async path (atomic_bracket._on_tsl_sl_hit → record_trade)"
+    )
+
+def t_main_squareoff_uses_to_thread():
+    import inspect, main
+    src = inspect.getsource(main.squareoff)
+    assert "asyncio.to_thread" in src or "to_thread" in src or "run_in_executor" in src, (
+        "squareoff() route must wrap kite_client.squareoff_all_positions() in asyncio.to_thread — "
+        "squareoff_all_positions() blocks up to 15s (N positions × retries × REST round-trips), "
+        "freezing the entire event loop"
+    )
+
+def t_main_kite_token_refresh_has_timeout():
+    import inspect, main
+    src = inspect.getsource(main.kite_token_refresh)
+    assert "wait_for" in src or "timeout" in src, (
+        "kite_token_refresh must use asyncio.wait_for(..., timeout=...) around the Playwright call — "
+        "without a timeout, a hung Chromium process blocks the endpoint indefinitely"
+    )
+
+def t_main_implementation_shortfall_uses_state_store_path():
+    import inspect, main
+    src = inspect.getsource(main.implementation_shortfall)
+    assert "DB_PATH" in src or "state_store" in src, (
+        "implementation_shortfall must use state_store.DB_PATH instead of hardcoding "
+        "'logs/algotrader.db' — the hardcoded path diverges from the configured DB location "
+        "and breaks when DB_PATH is overridden via env vars"
+    )
+
+def t_trailing_sl_old_sl_updated_after_t1():
+    import inspect, trailing_sl_engine as tsl
+    src = inspect.getsource(tsl.TrailingSLEngine._evaluate_locked)
+    t1_idx = src.find("target1_hit = True")
+    old_sl_after_t1 = src[t1_idx:].find("old_sl = pos.current_sl") if t1_idx != -1 else -1
+    assert t1_idx != -1, "_evaluate_locked must set target1_hit"
+    assert old_sl_after_t1 != -1, (
+        "_evaluate_locked must re-assign old_sl = pos.current_sl after T1 tightens "
+        "pos.current_sl — the breakeven callback below receives the pre-T1 SL otherwise, "
+        "causing the broker SL-M to be modified with the wrong 'from' price"
+    )
+
+def t_trailing_sl_handle_done_captures_exception_once():
+    import inspect, trailing_sl_engine as tsl
+    src = inspect.getsource(tsl.TrailingSLEngine.tighten_all)
+    assert src.count("t.exception()") <= 1, (
+        "tighten_all _handle_done must call t.exception() at most once — "
+        "calling it in the condition AND in the logger.warning is redundant; "
+        "capture the exception in a local variable and log that"
+    )
+
+def t_atomic_bracket_find_uses_list_snapshot():
+    import inspect, atomic_bracket as ab
+    src = inspect.getsource(ab.AtomicBracketEngine._find_by_symbol_strategy)
+    assert "list(" in src, (
+        "_find_by_symbol_strategy must iterate list(self._brackets.values()) — "
+        "a bare .values() view raises RuntimeError if concurrent execute() inserts "
+        "a new bracket while the for-loop is mid-iteration"
+    )
+
+def t_atomic_bracket_sl_price_captured_by_value():
+    import inspect, atomic_bracket as ab
+    src = inspect.getsource(ab.AtomicBracketEngine._place_sl_order)
+    assert "_sl_px" in src or "sl_px" in src, (
+        "_place_sl_order must capture bracket.sl_price in a local variable before the lambda — "
+        "the lambda closure captures 'bracket' by reference; if TSL moves bracket.sl_price "
+        "between lambda creation and thread-pool execution, the SL-M order is placed at "
+        "the wrong (TSL-moved) price"
+    )
+
+def t_atomic_bracket_paper_mode_skips_order_history():
+    import inspect, atomic_bracket as ab
+    src = inspect.getsource(ab.AtomicBracketEngine._on_tsl_sl_hit)
+    assert "trading_mode" in src or "PAPER" in src, (
+        "_on_tsl_sl_hit must guard order_history() with a PAPER-mode check — "
+        "in PAPER mode, kite_client.order_history() makes a live API call that fails "
+        "(no access token), creating a spurious MARKET exit order in _paper_orders"
+    )
+
+def t_atomic_bracket_has_quantity_remaining():
+    import inspect, atomic_bracket as ab
+    src = inspect.getsource(ab.BracketOrder)
+    assert "quantity_remaining" in src, (
+        "BracketOrder must have a quantity_remaining field — "
+        "T2 exit uses bracket.quantity (original) even after T1 partial scale-out "
+        "has reduced the position, overstating P&L and distorting daily_realised_pnl"
+    )
+
+def t_atomic_bracket_t2_uses_quantity_remaining():
+    import inspect, atomic_bracket as ab
+    src = inspect.getsource(ab.AtomicBracketEngine._on_tsl_target_hit)
+    assert "quantity_remaining" in src, (
+        "_on_tsl_target_hit must use quantity_remaining (not bracket.quantity) for T2 P&L — "
+        "after T1 partial scale-out, bracket.quantity still holds the original full size"
+    )
+
+
+run("kite_client: positions_cached captures 'now' AFTER positions() call (not before)",  t_kite_client_positions_cached_timestamp_after_call)
+run("signal_aggregator: recent_signals deletes empty-list keys (no memory leak)",         t_signal_aggregator_recent_signals_no_empty_list)
+run("alt_data: refresh_fii_dii exception path reads _fii_dii under _lock",               t_alt_data_fii_dii_exception_path_uses_lock)
+run("market_data: YFinanceClient has class-level _csv_cache_lock",                        t_market_data_csv_cache_has_lock)
+run("market_data: YFinanceClient.historical acquires _csv_cache_lock",                    t_market_data_csv_cache_reads_under_lock)
+run("macro_signals: _auto_refresh_if_stale checks _last_success_ts (not _last_refresh)",  t_macro_signals_auto_refresh_uses_success_ts)
+run("risk_manager: calculate_quantity returns 0 when risk budget too small (no max(1,))", t_risk_manager_calculate_quantity_returns_zero_not_one)
+run("risk_manager: record_trade sets is_trading_halted when loss limit crossed",          t_risk_manager_record_trade_sets_halted)
+run("risk_manager: kelly_fraction wraps avg_win_pct in abs() (negative edge case)",       t_risk_manager_kelly_fraction_abs_win)
+run("risk_manager: record_trade 50%-loss notifier runs in daemon thread (non-blocking)",  t_risk_manager_record_trade_notifier_in_thread)
+run("main: squareoff() wraps squareoff_all_positions in asyncio.to_thread",               t_main_squareoff_uses_to_thread)
+run("main: kite_token_refresh uses asyncio.wait_for with timeout",                        t_main_kite_token_refresh_has_timeout)
+run("main: implementation_shortfall uses state_store.DB_PATH (not hardcoded path)",       t_main_implementation_shortfall_uses_state_store_path)
+run("trailing_sl_engine: old_sl re-assigned after T1 tighten in _evaluate_locked",       t_trailing_sl_old_sl_updated_after_t1)
+run("trailing_sl_engine: tighten_all _handle_done calls t.exception() at most once",     t_trailing_sl_handle_done_captures_exception_once)
+run("atomic_bracket: _find_by_symbol_strategy iterates list() snapshot (no RuntimeError)", t_atomic_bracket_find_uses_list_snapshot)
+run("atomic_bracket: _place_sl_order captures sl_price by value before thread-pool",     t_atomic_bracket_sl_price_captured_by_value)
+run("atomic_bracket: _on_tsl_sl_hit skips order_history() in PAPER mode",                t_atomic_bracket_paper_mode_skips_order_history)
+run("atomic_bracket: BracketOrder has quantity_remaining field for T1 partial-exit tracking", t_atomic_bracket_has_quantity_remaining)
+run("atomic_bracket: _on_tsl_target_hit T2 uses quantity_remaining not original quantity", t_atomic_bracket_t2_uses_quantity_remaining)
 
 
 # ══════════════════════════════════════════════════════════════════════════

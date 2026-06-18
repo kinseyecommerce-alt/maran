@@ -80,7 +80,10 @@ class SignalAggregator:
             for key, entries in list(self._signals.items()):
                 sym, direction = key
                 active = [(a, s, ts) for a, s, ts in entries if ts > window]
-                self._signals[key] = active  # trim expired entries
+                if active:
+                    self._signals[key] = active
+                elif key in self._signals:
+                    del self._signals[key]
                 if symbol and sym != symbol:
                     continue
                 if active:

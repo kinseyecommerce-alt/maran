@@ -327,7 +327,8 @@ class AltDataEngine:
 
         except Exception as exc:
             logger.debug("FII/DII fetch failed (non-critical): {}", exc)
-            return self._fii_dii   # return last cached value
+            with self._lock:
+                return self._fii_dii
 
     def get_fii_sentiment(self) -> float:
         """

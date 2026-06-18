@@ -732,8 +732,10 @@ async def kite_token_refresh():
         raise HTTPException(400, f"Missing .env settings: {', '.join(missing)}")
     try:
         from kite_auto_login import refresh_kite_token_async
-        token = await refresh_kite_token_async()
+        token = await asyncio.wait_for(refresh_kite_token_async(), timeout=120.0)
         return {"status": "ok", "token_set": bool(token), "message": "Kite token refreshed"}
+    except asyncio.TimeoutError:
+        raise HTTPException(504, "Auto-login timed out after 120 seconds")
     except Exception as e:
         logger.error("Kite auto-login failed: {}", e)
         raise HTTPException(500, f"Auto-login failed: {e}")
@@ -1021,7 +1023,7 @@ async def cancel(order_id: str):
 
 @app.post("/orders/squareoff", tags=["Orders"])
 async def squareoff():
-    ids = kite_client.squareoff_all_positions()
+    ids = await asyncio.to_thread(kite_client.squareoff_all_positions)
     # Clear only active orders/claims — keep daily trade counts and cooldowns
     # intact so a squareoff cannot be used to reset overtrade limits.
     order_guard.clear_active_only()
@@ -2052,7 +2054,7 @@ async def n8n_inbound(request: Request):
         return {"status": "stopped"}
 
     elif action == "squareoff":
-        ids = kite_client.squareoff_all_positions()
+        ids = await asyncio.to_thread(kite_client.squareoff_all_positions)
         return {"status": "ok", "squared_off": len(ids)}
 
     elif action == "start_bot":
@@ -2782,7 +2784,7 @@ async def on_startup():
     # Wire kill-switch → immediate squareoff of all open positions.
     async def _kill_switch_squareoff() -> None:
         try:
-            ids = kite_client.squareoff_all_positions()
+            ids = await asyncio.to_thread(kite_client.squareoff_all_positions)
             # Clear only active orders/claims — preserve trade counts/cooldowns
             # so a kill-switch cycle cannot wipe overtrade counters.
             order_guard.clear_active_only()
@@ -3017,7 +3019,8 @@ async def implementation_shortfall(days: int = 30):
     try:
         import sqlite3
         from pathlib import Path as _P
-        db_path = _P(__file__).parent / "logs" / "algotrader.db"
+        from state_store import DB_PATH as _DB_PATH
+        db_path = _P(_DB_PATH)
         if not db_path.exists():
             return {"trades_analysed": 0, "avg_shortfall_bps": 0.0, "total_shortfall_inr": 0.0}
         con = sqlite3.connect(db_path)

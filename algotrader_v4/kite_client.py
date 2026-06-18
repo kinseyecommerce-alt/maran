@@ -287,6 +287,7 @@ class KiteClient:
             if now - self._pos_cache_ts < self._pos_cache_ttl and self._pos_cache:
                 return self._pos_cache
         result = self.positions()
+        now = _time.monotonic()  # re-capture AFTER the blocking call so TTL is accurate
         with self._pos_cache_lock:
             self._pos_cache = result
             self._pos_cache_ts = now

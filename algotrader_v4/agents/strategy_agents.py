@@ -2969,6 +2969,13 @@ class FuturesAgent(BaseAgent):
         self._update_orb(sym, snap, t)
         self._update_day_range(sym, ltp)
 
+        # Fetch FII sentiment ONCE per tick (not per pattern) to avoid 18× redundant calls
+        try:
+            from alt_data import alt_data_engine as _ad
+            _fii_val = _ad.get_fii_sentiment()
+        except Exception:
+            _fii_val = 0.0
+
         best_score, best_side, best_pattern = -1, "", ""
         patterns = [
             self._pat_ema_trend,
@@ -2997,7 +3004,7 @@ class FuturesAgent(BaseAgent):
                 continue
             if not side:
                 continue
-            total = base + self._ctx_bonus(side, ind, snap)
+            total = base + self._ctx_bonus(side, ind, snap, fii_sentiment=_fii_val)
             if total > best_score:
                 best_score, best_side, best_pattern = total, side, pname
 
@@ -3238,9 +3245,9 @@ class FuturesAgent(BaseAgent):
             return "SHORT", 5, "ICHIMOKU_FUTURES"
         return "", 0, ""
 
-    def _ctx_bonus(self, side: str, ind: LiveIndicators, snap: MarketSnapshot) -> int:
+    def _ctx_bonus(self, side: str, ind: LiveIndicators, snap: MarketSnapshot,
+                   fii_sentiment: float = 0.0) -> int:
         from macro_signals import macro_signals
-        from alt_data import alt_data_engine
         b = 0
         is_long = (side == "LONG")
 
@@ -3266,14 +3273,10 @@ class FuturesAgent(BaseAgent):
         if is_long  and ind.depth_imbalance > 0.62:             b += 1
         if not is_long and ind.depth_imbalance < 0.38:          b += 1
 
-        # 7. FII/DII institutional sentiment ≥ 0.3
-        fii = None
-        try:
-            fii = alt_data_engine.get_fii_sentiment()
-            if is_long  and fii >= 0.3:                         b += 1
-            if not is_long and fii <= -0.3:                     b += 1
-        except Exception:
-            pass
+        # 7. FII/DII institutional sentiment ≥ 0.3 (passed in from evaluate_tick — fetched once per tick)
+        fii = fii_sentiment
+        if is_long  and fii >= 0.3:                             b += 1
+        if not is_long and fii <= -0.3:                         b += 1
 
         # 8. Macro cross-asset alignment
         try:
@@ -3305,9 +3308,8 @@ class FuturesAgent(BaseAgent):
             if bw > 2.0:                                         b += 1
 
         # 13. FII very strong conviction (>0.5) gets extra bonus (0-1)
-        if fii is not None:
-            if is_long  and fii >= 0.5:                         b += 1
-            if not is_long and fii <= -0.5:                     b += 1
+        if is_long  and fii >= 0.5:                             b += 1
+        if not is_long and fii <= -0.5:                         b += 1
 
         # 14. Wall clear in signal direction (no L2 wall blocking) (already gated, bonus) (0-1)
         if is_long  and not ind.wall_above:                     b += 1
