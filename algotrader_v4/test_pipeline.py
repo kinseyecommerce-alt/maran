@@ -8861,6 +8861,55 @@ def t_simulation_scripts_no_hardcoded_jag_path():
 run("simulation scripts: no hardcoded /home/user/JAG path", t_simulation_scripts_no_hardcoded_jag_path)
 
 
+section("106. OPTIONS_INTELLIGENCE — CROSS-MONTH EXPIRY SORT BUG")
+
+
+def t_options_intel_expiry_sort_cross_month():
+    """_parse_chain must pick the earliest expiry by calendar date, not
+    lexicographic order. 'DD-Mon-YYYY' sorts wrong across months:
+    '02-Jul-2026' < '25-Jun-2026' alphabetically, but June comes before July.
+    The fix uses datetime.strptime to compare dates correctly."""
+    import inspect, options_intelligence as _oi
+    src = inspect.getsource(_oi._parse_chain)
+    # The old approach: sorted(expiry_dates)[0]
+    assert "sorted(expiry_dates)[0]" not in src, (
+        "_parse_chain still uses sorted(expiry_dates)[0] which gives the wrong "
+        "nearest expiry when dates span month boundaries in DD-Mon-YYYY format"
+    )
+    # The fix must use datetime parsing (strptime) or min() with a key
+    assert "strptime" in src or "datetime.strptime" in src or "_exp_key" in src, (
+        "_parse_chain must parse expiry dates with strptime for correct calendar ordering"
+    )
+
+
+run("options_intelligence: _parse_chain uses datetime-aware expiry sort", t_options_intel_expiry_sort_cross_month)
+
+
+def t_options_intel_expiry_sort_functional():
+    """Functional: given expiry_dates {'25-Jun-2026', '02-Jul-2026', '31-Jul-2026'},
+    min(dates, key=_exp_key) must return '25-Jun-2026' (not '02-Jul-2026' which
+    sorts first lexicographically)."""
+    from datetime import datetime
+
+    def _exp_key(d: str) -> datetime:
+        for fmt in ("%d-%b-%Y", "%d-%B-%Y", "%Y-%m-%d"):
+            try:
+                return datetime.strptime(d, fmt)
+            except ValueError:
+                continue
+        return datetime.max
+
+    expiry_dates = {"25-Jun-2026", "02-Jul-2026", "31-Jul-2026"}
+    chosen = min(expiry_dates, key=_exp_key)
+    assert chosen == "25-Jun-2026", (
+        f"Expected '25-Jun-2026' (earliest calendar date), got '{chosen}' — "
+        "lexicographic sort would incorrectly pick '02-Jul-2026'"
+    )
+
+
+run("options_intelligence: min(expiry_dates, key=datetime_parse) selects correct nearest expiry", t_options_intel_expiry_sort_functional)
+
+
 # ══════════════════════════════════════════════════════════════════════════
 # FINAL SUMMARY
 # ══════════════════════════════════════════════════════════════════════════

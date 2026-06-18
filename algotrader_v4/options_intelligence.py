@@ -133,9 +133,17 @@ def _parse_chain(data: dict) -> Optional[dict]:
         if not expiry_dates:
             return None
 
-        # "Current" expiry = smallest date string (ISO or DD-Mon-YYYY — sort lexicographically
-        # after normalising; NSE uses "DD-Mon-YYYY" which sorts naturally within same month)
-        current_expiry = sorted(expiry_dates)[0]
+        # NSE uses "DD-Mon-YYYY" format (e.g. "02-Jul-2026"). Lexicographic sort is
+        # WRONG across month boundaries: "02-Jul" < "25-Jun" alphabetically but
+        # 2-Jul is actually LATER than 25-Jun. Parse to datetime for correct ordering.
+        def _exp_key(d: str) -> datetime:
+            for fmt in ("%d-%b-%Y", "%d-%B-%Y", "%Y-%m-%d"):
+                try:
+                    return datetime.strptime(d, fmt)
+                except ValueError:
+                    continue
+            return datetime.max
+        current_expiry = min(expiry_dates, key=_exp_key)
 
         # Build per-strike aggregates for the current expiry only
         strikes: dict[float, dict] = {}
