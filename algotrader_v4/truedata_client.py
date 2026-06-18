@@ -56,18 +56,25 @@ def _get_td():
 
         def _connect():
             import socket as _sock
-            _sock.setdefaulttimeout(4)  # TCP connect must complete within 4s (< fut.result timeout=5s)
+            # Save and restore global timeout — setdefaulttimeout() is process-wide
+            # and would permanently affect Kite WS, NSE API, and all other sockets
+            # if left set after this connection attempt.
+            _old = _sock.getdefaulttimeout()
+            _sock.setdefaulttimeout(4)  # TCP connect must complete within 4s
             try:
                 from truedata_ws.websocket.TD import TD   # v5+
             except ImportError:
                 from truedata_ws.websockets.TD import TD  # v4
-            return TD(
-                settings.truedata_username,
-                settings.truedata_password,
-                live_port=8082,
-                url="push.truedata.in",
-                log_level="ERROR",
-            )
+            try:
+                return TD(
+                    settings.truedata_username,
+                    settings.truedata_password,
+                    live_port=8082,
+                    url="push.truedata.in",
+                    log_level="ERROR",
+                )
+            finally:
+                _sock.setdefaulttimeout(_old)
 
         try:
             pool = _cf.ThreadPoolExecutor(max_workers=1)

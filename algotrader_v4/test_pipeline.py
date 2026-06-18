@@ -8969,6 +8969,68 @@ run("agent_capital_allocator: save() deep-copies dicts inside lock",          t_
 
 
 # ══════════════════════════════════════════════════════════════════════════
+# 108. TRUEDATA CLIENT — socket.setdefaulttimeout restore
+# ══════════════════════════════════════════════════════════════════════════
+section("108. TRUEDATA CLIENT — socket.setdefaulttimeout restore")
+
+
+def t_truedata_connect_saves_old_timeout():
+    """_get_td must save old socket timeout before calling setdefaulttimeout(4)."""
+    import inspect
+    import truedata_client as _tc
+    src = inspect.getsource(_tc._get_td)
+    assert "getdefaulttimeout" in src, (
+        "_connect() inside _get_td() must call socket.getdefaulttimeout() to save "
+        "the old value before overriding the process-global timeout"
+    )
+
+
+def t_truedata_connect_restores_timeout_in_finally():
+    """_get_td must restore the old socket timeout in a finally block."""
+    import inspect
+    import truedata_client as _tc
+    src = inspect.getsource(_tc._get_td)
+    # Both the save and restore must be present; the finally ensures restore
+    # even if TD() raises (bad credentials, network error, etc.)
+    assert "finally" in src, (
+        "_connect() inside _get_td() must use a finally block to guarantee "
+        "socket.setdefaulttimeout(_old) runs even on connection failure"
+    )
+    assert "setdefaulttimeout(_old)" in src, (
+        "_connect() must call socket.setdefaulttimeout(_old) in the finally block "
+        "to restore the process-global timeout after the TrueData connection attempt"
+    )
+
+
+def t_truedata_connect_does_not_leak_timeout():
+    """socket.setdefaulttimeout must be restored after _get_td() with no credentials."""
+    import socket
+    import truedata_client as _tc
+    # Ensure credentials are blank so _connect() short-circuits to sentinel
+    # without actually attempting a network call — but we still verify the
+    # module does not permanently set the process-global timeout.
+    original = socket.getdefaulttimeout()
+    try:
+        # Reset cached instance so _get_td() runs its logic
+        old_inst = _tc._td_instance
+        _tc._td_instance = None
+        _tc._get_td()   # will set sentinel (no credentials) — no socket call made
+    finally:
+        _tc._td_instance = old_inst  # restore cached state
+        restored = socket.getdefaulttimeout()
+    assert restored == original, (
+        f"socket.getdefaulttimeout() changed after _get_td(): "
+        f"was {original!r}, now {restored!r}. "
+        "The process-global timeout must be restored unconditionally."
+    )
+
+
+run("truedata_client: _get_td saves old socket timeout before setdefaulttimeout(4)",     t_truedata_connect_saves_old_timeout)
+run("truedata_client: _get_td restores timeout in finally block",                        t_truedata_connect_restores_timeout_in_finally)
+run("truedata_client: socket.getdefaulttimeout() unchanged after _get_td (no creds)",    t_truedata_connect_does_not_leak_timeout)
+
+
+# ══════════════════════════════════════════════════════════════════════════
 # FINAL SUMMARY
 # ══════════════════════════════════════════════════════════════════════════
 failed = summary()
