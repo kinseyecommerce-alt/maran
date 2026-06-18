@@ -490,7 +490,15 @@ class KiteClient:
                 if isinstance(ots, str):
                     ots = datetime.strptime(ots, "%Y-%m-%d %H:%M:%S")
                 if not isinstance(ots, datetime):
-                    continue   # cannot verify recency — do NOT claim this order
+                    # Timestamp absent or unparseable — accept the match on key
+                    # fields alone (symbol/side/qty/tag/status already specific).
+                    # Skipping would cause a blind retry that duplicates the order.
+                    logger.warning(
+                        "LIVE reconcile: order {} matched but has no parseable "
+                        "timestamp — claiming to prevent duplicate placement",
+                        o.get("order_id"),
+                    )
+                    return str(o.get("order_id")), True
                 ots = ots.replace(tzinfo=_IST) if ots.tzinfo is None else ots.astimezone(_IST)
                 if ots >= cutoff:
                     return str(o.get("order_id")), True
