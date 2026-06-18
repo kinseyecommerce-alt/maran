@@ -252,7 +252,7 @@ class OrderGuard:
                         "order_id": v.order_id,
                         "placed_at": v.placed_at,
                         "pending": v.pending,
-                        "age_sec": int(now - v.placed_at),
+                        "age_sec": max(0, int(now - v.placed_at)),
                         "stale": (v.pending and now - v.placed_at > 30),
                     }
                     for k, v in self._active.items()

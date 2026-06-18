@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import hmac
 import json
+import math
 import os
 import uuid
 from collections import defaultdict
@@ -404,6 +405,12 @@ class SEBICompliance:
             # Reg 4: max order value — BOTH limits enforced independently:
             #   • SEBI guideline hard cap: ₹10 lakh per order (NOT raisable via config)
             #   • configured max_position_size, when smaller
+            if not price_at_signal or math.isnan(price_at_signal) or price_at_signal <= 0:
+                reason = f"Invalid price_at_signal: {price_at_signal}"
+                self._record_audit(strategy, symbol, exchange, transaction_type,
+                                   quantity, order_type, price_at_signal,
+                                   signal_source, regime, "REJECTED", reason, algo_id)
+                return False, algo_id, reason
             order_value = quantity * max(price_at_signal, 1.0)
             if order_value > _SEBI_MAX_ORDER_VALUE:
                 reason = (f"Order value ₹{order_value:,.0f} exceeds SEBI per-order limit "
@@ -587,6 +594,8 @@ class SEBICompliance:
             "kill_switch_active": self._state == KillSwitchState.KILLED,
             "registered_algos":  list(APPROVED_ALGO_IDS.keys()),
             "audit_entries":     today_entries[:200],
+            "total_entries":     len(today_entries),
+            "entries_truncated": len(today_entries) > 200,
             "generated_at":      datetime.datetime.utcnow().isoformat() + "Z",
         }
 

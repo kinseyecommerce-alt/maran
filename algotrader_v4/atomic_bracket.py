@@ -31,6 +31,7 @@ TSL Progression (per trade):
 from __future__ import annotations
 
 import asyncio
+import math
 import time
 import uuid
 from dataclasses import dataclass, field
@@ -231,6 +232,13 @@ class AtomicBracketEngine:
             await self._broadcast_update(bracket)
             return None
         adjusted = _estimate_fill_price(fill_price, side, avg_volume, atr)
+        if math.isnan(adjusted) or adjusted <= 0:
+            logger.error("Bracket {} — invalid fill_price {} after slippage estimate; aborting",
+                         bracket_id, adjusted)
+            order_guard.release_claim(symbol, strategy, side)
+            bracket.status = BracketStatus.FAILED
+            await self._broadcast_update(bracket)
+            return None
         if adjusted != fill_price:
             tier = ("large" if avg_volume > 1_000_000 else "mid" if avg_volume > 200_000 else "small")
             bps  = settings.slippage_bps_override or _SLIPPAGE_BPS[tier]

@@ -9924,6 +9924,130 @@ run("kite_ticker: _on_ticks lambda closure captures sym via _sym=sym default arg
 run("options_flow: analyze_flow resets _iv_history on day change (bounded memory)",             t_options_flow_iv_history_daily_reset)
 run("options_flow: _iv_history_date initialized at module level",                               t_options_flow_iv_history_date_initialized)
 
+
+# ══════════════════════════════════════════════════════════════════════════
+# 115. BATCH 6 — atomic_bracket, sebi_compliance, order_guard, trailing_sl
+# ══════════════════════════════════════════════════════════════════════════
+
+def t_sebi_nan_price_rejected():
+    """pre_order_check must reject NaN price_at_signal before computing order_value."""
+    import inspect
+    import sebi_compliance as _sc
+    src = inspect.getsource(_sc.SEBICompliance.pre_order_check)
+    assert "math.isnan" in src, (
+        "pre_order_check must use math.isnan guard for price_at_signal: "
+        "max(NaN, 1.0) returns 1.0 in Python, bypassing SEBI ₹10L order value check"
+    )
+
+def t_sebi_nan_price_rejects_order():
+    """pre_order_check must return False when price_at_signal is NaN."""
+    import math
+    from sebi_compliance import SEBICompliance
+    sc = SEBICompliance()
+    approved, _, reason = sc.pre_order_check(
+        strategy="intraday", symbol="RELIANCE", exchange="NSE",
+        transaction_type="BUY", quantity=100, order_type="MARKET",
+        price_at_signal=float("nan"), signal_source="test",
+        regime="NEUTRAL",
+    )
+    assert not approved, "NaN price_at_signal must be rejected by pre_order_check"
+    assert "Invalid" in reason, f"Rejection reason must mention 'Invalid', got: {reason}"
+
+def t_sebi_daily_report_has_total_entries():
+    """generate_daily_report must include total_entries and entries_truncated fields."""
+    import inspect
+    import sebi_compliance as _sc
+    src = inspect.getsource(_sc.SEBICompliance.generate_daily_report)
+    assert "total_entries" in src, (
+        "generate_daily_report must include 'total_entries' so callers know when "
+        "the 200-entry limit has truncated the audit trail"
+    )
+    assert "entries_truncated" in src, (
+        "generate_daily_report must include 'entries_truncated' boolean "
+        "for compliance visibility when >200 records exist"
+    )
+
+def t_sebi_math_imported():
+    """sebi_compliance must import math at module level (required for isnan guard)."""
+    import inspect
+    import sebi_compliance as _sc
+    src = inspect.getsource(_sc)
+    lines = src.split("\n")
+    assert any(l.strip() == "import math" for l in lines[:30]), (
+        "sebi_compliance must have 'import math' at module level"
+    )
+
+def t_tsl_compute_trail_sl_best_price_zero():
+    """_compute_trail_sl must return None when best_price <= 0 (prevents sl=0 unprotected position)."""
+    import inspect
+    from trailing_sl_engine import TrailingSLEngine
+    src = inspect.getsource(TrailingSLEngine._compute_trail_sl)
+    assert "best_price <= 0" in src, (
+        "_compute_trail_sl must guard best_price <= 0 and return None, "
+        "not 0.0 — a zero SL triggers an exit on any tick"
+    )
+
+def t_tsl_compute_trail_sl_nan_returns_none():
+    """_compute_trail_sl must return None when computed new_sl is NaN or <= 0."""
+    import inspect
+    from trailing_sl_engine import TrailingSLEngine
+    src = inspect.getsource(TrailingSLEngine._compute_trail_sl)
+    assert "math.isnan(new_sl)" in src, (
+        "_compute_trail_sl must check math.isnan on the computed new_sl "
+        "before returning — NaN SL propagates silently if not caught here"
+    )
+
+def t_tsl_volatility_tightening_has_floor():
+    """Volatility-adaptive tightening must have a minimum trail distance floor."""
+    import inspect
+    from trailing_sl_engine import TrailingSLEngine
+    src = inspect.getsource(TrailingSLEngine._compute_trail_sl)
+    assert "max(trail_dist * 0.70" in src, (
+        "Volatility-adaptive tightening must use max(..., floor) to prevent "
+        "trail_dist from reaching 0 on consecutive high-volatility ticks"
+    )
+
+def t_tsl_status_summary_nan_filter():
+    """status_summary must filter NaN locked_profit values before summing."""
+    import inspect
+    from trailing_sl_engine import TrailingSLEngine
+    src = inspect.getsource(TrailingSLEngine.status_summary)
+    assert "math.isnan" in src, (
+        "status_summary must filter NaN locked_profit (via math.isnan) before sum(), "
+        "otherwise a single NaN position corrupts the entire total_locked value"
+    )
+
+def t_atomic_bracket_nan_fill_price_guard():
+    """atomic bracket must abort execution when fill_price is NaN or <= 0."""
+    import inspect
+    import atomic_bracket as _ab
+    src = inspect.getsource(_ab.AtomicBracketEngine.execute)
+    assert "math.isnan(adjusted)" in src, (
+        "AtomicBracketEngine.execute must check math.isnan(adjusted) after "
+        "_estimate_fill_price: NaN fill price propagates to sl_price and trail_sl"
+    )
+
+def t_order_guard_age_sec_clamped():
+    """order_guard status() must clamp age_sec to max(0, ...) to prevent negative age."""
+    import inspect
+    import order_guard as _og
+    src = inspect.getsource(_og.OrderGuard.status)
+    assert "max(0, int(now - v.placed_at))" in src, (
+        "order_guard.status must clamp age_sec with max(0, ...) "
+        "to handle clock skew / corrupted placed_at timestamps"
+    )
+
+run("sebi_compliance: pre_order_check uses math.isnan guard for price_at_signal",       t_sebi_nan_price_rejected)
+run("sebi_compliance: pre_order_check rejects NaN price_at_signal",                     t_sebi_nan_price_rejects_order)
+run("sebi_compliance: generate_daily_report includes total_entries and entries_truncated", t_sebi_daily_report_has_total_entries)
+run("sebi_compliance: math imported at module level",                                    t_sebi_math_imported)
+run("trailing_sl_engine: _compute_trail_sl returns None when best_price <= 0",          t_tsl_compute_trail_sl_best_price_zero)
+run("trailing_sl_engine: _compute_trail_sl returns None when new_sl is NaN",            t_tsl_compute_trail_sl_nan_returns_none)
+run("trailing_sl_engine: volatility tightening has minimum trail_dist floor",           t_tsl_volatility_tightening_has_floor)
+run("trailing_sl_engine: status_summary filters NaN locked_profit before summing",       t_tsl_status_summary_nan_filter)
+run("atomic_bracket: execute aborts when fill_price is NaN or <= 0",                    t_atomic_bracket_nan_fill_price_guard)
+run("order_guard: status() clamps age_sec to max(0, ...) for clock-skew safety",        t_order_guard_age_sec_clamped)
+
 run("broker_router: squareoff_all_secondaries retains tracking for failed brokers",      t_broker_router_squareoff_retains_failed_broker_entries)
 run("broker_router: squareoff_all_secondaries only clears when all brokers succeed",     t_broker_router_squareoff_only_clears_when_all_succeed)
 run("broker_router: mirror_entry guards against duplicate primary_order_id",             t_broker_router_duplicate_primary_order_id_guard)

@@ -26,6 +26,7 @@ Events emitted (logged + Telegram):
 from __future__ import annotations
 
 import asyncio
+import math
 import time
 from dataclasses import dataclass, field
 from enum import Enum
@@ -558,6 +559,8 @@ class TrailingSLEngine:
     ) -> Optional[float]:
         cfg = pos.cfg
 
+        if pos.best_price <= 0:
+            return None
         if cfg.mode == SLMode.ATR_TRAIL and atr > 0:
             multiplier = cfg.atr_multiplier / 2 if pos.target1_hit else cfg.atr_multiplier
             trail_dist = atr * multiplier
@@ -566,14 +569,18 @@ class TrailingSLEngine:
             pct = cfg.trail_pct / 200 if pos.target1_hit else cfg.trail_pct / 100
             trail_dist = pos.best_price * pct
 
-        # Volatility-adaptive tightening: if ATR has spiked >50% vs entry, tighten by 30%
+        # Volatility-adaptive tightening: if ATR has spiked >50% vs entry, tighten by 30%.
+        # Floor at 0.05 (5 paise) to prevent tightening to zero on extreme vol spikes.
         if pos.atr_at_entry > 0 and atr > pos.atr_at_entry * 1.5:
-            trail_dist *= 0.70
+            trail_dist = max(trail_dist * 0.70, 0.05)
 
         if pos.side == "BUY":
-            return round(pos.best_price - trail_dist, 2)
+            new_sl = round(pos.best_price - trail_dist, 2)
         else:
-            return round(pos.best_price + trail_dist, 2)
+            new_sl = round(pos.best_price + trail_dist, 2)
+        if math.isnan(new_sl) or new_sl <= 0:
+            return None
+        return new_sl
 
     # ── Queries ────────────────────────────────────────────────────────
 
@@ -660,7 +667,8 @@ class TrailingSLEngine:
             active = [p for p in self._positions.values() if p.status == SLStatus.ACTIVE]
             return {
                 "active_count":    len(active),
-                "total_locked":    round(sum(p.locked_profit for p in active), 0),
+                "total_locked":    round(sum(p.locked_profit for p in active
+                                             if not math.isnan(p.locked_profit)), 0),
                 "positions":       [p.to_dict() for p in active],
                 "sl_moves_today":  sum(p.sl_moves for p in self._positions.values()),
             }
