@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import threading
 import time
 from datetime import date, datetime
 from pathlib import Path
@@ -35,6 +36,7 @@ _LOGS_DIR.mkdir(parents=True, exist_ok=True)
 
 _cache: dict[str, dict] = {}   # symbol → {data..., updated_at: float}
 _CACHE_TTL_SEC = 300           # 5 minutes
+_iv_hist_lock = threading.Lock()  # guards iv_history.json read-modify-write
 
 
 # ── IV history I/O ─────────────────────────────────────────────────────────────
@@ -64,6 +66,11 @@ def _save_iv_history(history: dict[str, list[dict]]) -> None:
 
 def _append_iv_history(symbol: str, atm_iv: float) -> None:
     """Append today's ATM IV to the 60-day rolling history for symbol."""
+    with _iv_hist_lock:
+        _append_iv_history_locked(symbol, atm_iv)
+
+
+def _append_iv_history_locked(symbol: str, atm_iv: float) -> None:
     history = _load_iv_history()
     entries = history.get(symbol, [])
     today_str = date.today().isoformat()
@@ -250,11 +257,11 @@ def _compute_max_pain(
         total_pain = 0.0
         for k in sorted_strikes:
             entry = strikes[k]
-            # CE holders lose max(0, candidate - k) * OI  (in-the-money CEs expire worthless)
+            # CE writers pay max(0, candidate - k) per share when CE expires ITM
             if entry["CE"]:
                 ce_oi = entry["CE"]["oi"]
                 total_pain += max(0.0, candidate - k) * ce_oi
-            # PE holders lose max(0, k - candidate) * OI
+            # PE writers pay max(0, k - candidate) per share when PE expires ITM
             if entry["PE"]:
                 pe_oi = entry["PE"]["oi"]
                 total_pain += max(0.0, k - candidate) * pe_oi
@@ -425,8 +432,10 @@ async def get_iv_context(symbol: str) -> dict:
         # Persist today's IV and compute rank/percentile
         if atm_iv > 0:
             _append_iv_history(symbol, atm_iv)
-
-        iv_rank, iv_percentile = _compute_iv_rank_percentile(symbol, atm_iv)
+            iv_rank, iv_percentile = _compute_iv_rank_percentile(symbol, atm_iv)
+        else:
+            # No valid ATM IV — return neutral rather than misleading 0/0
+            iv_rank, iv_percentile = 50.0, 50.0
 
         result = {
             "symbol":        symbol,

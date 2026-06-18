@@ -24,6 +24,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, date
 from enum import Enum
 from pathlib import Path
+import threading
 from threading import Lock
 from typing import Awaitable, Callable, Optional
 
@@ -285,7 +286,7 @@ class SEBICompliance:
                 loop = asyncio.get_running_loop()
                 task = loop.create_task(cb())
                 task.add_done_callback(
-                    lambda t: t.exception() and logger.error(
+                    lambda t: (not t.cancelled() and t.exception()) and logger.error(
                         "SEBI kill-switch squareoff raised: {}", t.exception()
                     )
                 )
@@ -469,15 +470,20 @@ class SEBICompliance:
         )
         today = date.today().isoformat()
         self._audit_log[today].append(rec)
-        # persist to append-only NDJSON file; restrict permissions so only process owner can read
-        try:
-            _AUDIT_LOG_DIR.mkdir(exist_ok=True)
-            log_file = _AUDIT_LOG_DIR / f"sebi_audit_{today}.json"
-            with open(log_file, "a") as fh:
-                fh.write(json.dumps(rec.__dict__) + "\n")
-            os.chmod(log_file, 0o600)
-        except Exception as exc:
-            logger.error("SEBI audit log file write error: {}", exc)
+
+        # Disk write in a daemon thread so file I/O never holds self._lock,
+        # which would block the kill-switch during slow disk operations.
+        def _write() -> None:
+            try:
+                _AUDIT_LOG_DIR.mkdir(exist_ok=True)
+                log_file = _AUDIT_LOG_DIR / f"sebi_audit_{today}.json"
+                with open(log_file, "a") as fh:
+                    fh.write(json.dumps(rec.__dict__) + "\n")
+                os.chmod(log_file, 0o600)
+            except Exception as exc:
+                logger.error("SEBI audit log file write error: {}", exc)
+
+        threading.Thread(target=_write, daemon=True).start()
 
     def _load_audit_from_file(self, date_str: str) -> list[dict]:
         """Load audit records from the on-disk NDJSON file for *date_str*.

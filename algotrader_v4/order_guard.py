@@ -122,9 +122,21 @@ class OrderGuard:
                     self._symbol_owner.pop(symbol, None)
 
     def register_order(self, symbol: str, strategy: str, side: str, order_id: str) -> None:
-        """Legacy direct-register (used by tests and non-claim callers)."""
+        """Legacy direct-register (used by tests and non-claim callers).
+
+        Skips registration when a live (non-pending) claim already exists for the
+        key, preventing double-counting of trades when a prior try_claim() was already
+        promoted via confirm_order().
+        """
         with self._lock:
             key = (symbol, strategy, side)
+            existing = self._active.get(key)
+            if existing and not existing.pending:
+                logger.debug(
+                    "OrderGuard: register_order skipped — active order already exists for {}/{}/{}",
+                    symbol, strategy, side,
+                )
+                return
             self._active[key] = ActiveOrder(symbol=symbol, strategy=strategy, side=side,
                                              order_id=order_id, placed_at=time.time())
             self._trade_count[strategy] += 1

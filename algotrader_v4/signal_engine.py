@@ -113,9 +113,14 @@ class SignalEngine:
         results: list[dict] = []
 
         # RSI
+        # BUG S-1 fix: ta returns NaN when fewer than window candles exist.
+        # NaN comparisons silently return False, masking the data gap.
         rsi = ta.momentum.RSIIndicator(close, window=14).rsi().iloc[-1]
-        rsi_sig = "BUY" if rsi < 40 else "SELL" if rsi > 65 else "Neutral"
-        results.append({"name": "RSI (14)", "value": f"{rsi:.1f}", "signal": rsi_sig})
+        if pd.isna(rsi):
+            results.append({"name": "RSI (14)", "value": "N/A", "signal": "Neutral"})
+        else:
+            rsi_sig = "BUY" if rsi < 40 else "SELL" if rsi > 65 else "Neutral"
+            results.append({"name": "RSI (14)", "value": f"{rsi:.1f}", "signal": rsi_sig})
 
         # MACD
         macd_obj = ta.trend.MACD(close)
@@ -129,35 +134,56 @@ class SignalEngine:
         results.append({"name": "MACD", "value": macd_val, "signal": macd_cross})
 
         # EMA 20 & 50
+        # BUG S-1 fix: EMA-50 requires 50 candles; EMA-20 requires 20.
+        # Missing data produces NaN which silently evaluates chain comparisons as False.
         ema20 = ta.trend.EMAIndicator(close, window=20).ema_indicator().iloc[-1]
         ema50 = ta.trend.EMAIndicator(close, window=50).ema_indicator().iloc[-1]
         ltp   = close.iloc[-1]
-        ema_sig = "BUY" if ltp > ema20 > ema50 else "SELL" if ltp < ema20 < ema50 else "Neutral"
-        results.append({"name": "EMA 20/50", "value": f"{ema20:.0f} / {ema50:.0f}", "signal": ema_sig})
+        if pd.isna(ema20) or pd.isna(ema50):
+            results.append({"name": "EMA 20/50", "value": "N/A", "signal": "Neutral"})
+        else:
+            ema_sig = "BUY" if ltp > ema20 > ema50 else "SELL" if ltp < ema20 < ema50 else "Neutral"
+            results.append({"name": "EMA 20/50", "value": f"{ema20:.0f} / {ema50:.0f}", "signal": ema_sig})
 
         # Bollinger Bands
+        # BUG S-1 fix: BB requires 20 candles; NaN bb_low/bb_high silently
+        # make both comparisons False, always emitting "Neutral" with value "nan–nan".
         bb = ta.volatility.BollingerBands(close, window=20, window_dev=2)
         bb_low  = bb.bollinger_lband().iloc[-1]
         bb_high = bb.bollinger_hband().iloc[-1]
-        bb_sig  = "BUY" if ltp < bb_low else "SELL" if ltp > bb_high else "Neutral"
-        results.append({"name": "Bollinger Bands", "value": f"{bb_low:.0f}–{bb_high:.0f}", "signal": bb_sig})
+        if pd.isna(bb_low) or pd.isna(bb_high):
+            results.append({"name": "Bollinger Bands", "value": "N/A", "signal": "Neutral"})
+        else:
+            bb_sig = "BUY" if ltp < bb_low else "SELL" if ltp > bb_high else "Neutral"
+            results.append({"name": "Bollinger Bands", "value": f"{bb_low:.0f}–{bb_high:.0f}", "signal": bb_sig})
 
         # Volume ratio
-        vol_avg = volume.rolling(20).mean().iloc[-1]
-        vol_ratio = volume.iloc[-1] / vol_avg if (vol_avg and not pd.isna(vol_avg)) else 1.0
-        vol_sig = "BUY" if vol_ratio > 1.5 else "Neutral"
-        results.append({"name": "Volume", "value": f"{vol_ratio:.1f}x avg", "signal": vol_sig})
+        # BUG S-3 fix: volume.iloc[-1] itself can be NaN (missing tick data).
+        # NaN / valid_float = NaN, which renders as "nanx avg" sent to Claude.
+        vol_avg  = volume.rolling(20).mean().iloc[-1]
+        vol_last = volume.iloc[-1]
+        if vol_avg and not pd.isna(vol_avg) and not pd.isna(vol_last):
+            vol_ratio = vol_last / vol_avg
+            vol_sig   = "BUY" if vol_ratio > 1.5 else "Neutral"
+            results.append({"name": "Volume", "value": f"{vol_ratio:.1f}x avg", "signal": vol_sig})
+        else:
+            results.append({"name": "Volume", "value": "N/A", "signal": "Neutral"})
 
         # VWAP (intraday only — meaningful on intraday / 5-min candles)
+        # BUG S-2 fix: NaN VWAP causes "ltp > NaN" → False → always emits "SELL".
+        # Unlike other indicators the ternary had no "Neutral" branch for the else.
         if strategy in ("intraday", "scalping"):
             vwap = ta.volume.VolumeWeightedAveragePrice(high, low, close, volume).volume_weighted_average_price().iloc[-1]
-            vwap_sig = "BUY" if ltp > vwap else "SELL"
-            results.append({"name": "VWAP", "value": f"{vwap:.0f}", "signal": vwap_sig})
+            if pd.isna(vwap):
+                results.append({"name": "VWAP", "value": "N/A", "signal": "Neutral"})
+            else:
+                vwap_sig = "BUY" if ltp > vwap else "SELL"
+                results.append({"name": "VWAP", "value": f"{vwap:.0f}", "signal": vwap_sig})
 
         # ADX (trend strength)
         adx = ta.trend.ADXIndicator(high, low, close, window=14).adx().iloc[-1]
         adx_sig = "BUY" if adx > 25 else "Neutral"
-        results.append({"name": "ADX (14)", "value": f"{adx:.1f}", "signal": adx_sig})
+        results.append({"name": "ADX (14)", "value": f"{adx:.1f}" if not pd.isna(adx) else "N/A", "signal": adx_sig})
 
         return results
 

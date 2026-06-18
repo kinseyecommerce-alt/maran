@@ -77,6 +77,7 @@ class Notifier:
         with smtplib.SMTP(smtp_host, smtp_port, timeout=10) as server:
             server.ehlo()
             server.starttls()
+            server.ehlo()  # required after TLS — server re-advertises AUTH capability
             server.login(smtp_user, smtp_pass)
             server.sendmail(smtp_user, alert_email, msg.as_string())
 
@@ -96,7 +97,9 @@ class Notifier:
             method="POST",
         )
         with urllib.request.urlopen(req, timeout=10) as resp:
-            resp.read()
+            data = json.loads(resp.read().decode())
+        if not data.get("ok"):
+            raise RuntimeError(f"Telegram API error: {data.get('description', 'unknown')}")
 
     def send_daily_summary(
         self,

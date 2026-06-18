@@ -376,6 +376,7 @@ class TrailingSLEngine:
         with self._lock:
             if pos.status != SLStatus.ACTIVE:
                 return
+            current_sl_snap = pos.current_sl  # snapshot under lock — guards against tighten_all() race
 
         cfg = pos.cfg
         old_sl = pos.current_sl
@@ -400,8 +401,8 @@ class TrailingSLEngine:
         profit_pct = pos.current_pnl_pct
 
         # ── 2. Check SL hit ────────────────────────────────────────────
-        sl_hit = (pos.side == "BUY" and ltp <= pos.current_sl) or \
-                 (pos.side == "SELL" and ltp >= pos.current_sl)
+        sl_hit = (pos.side == "BUY" and ltp <= current_sl_snap) or \
+                 (pos.side == "SELL" and ltp >= current_sl_snap)
 
         if sl_hit:
             # Atomically claim ownership of the SL-hit under lock to prevent a
@@ -418,16 +419,16 @@ class TrailingSLEngine:
             if cb_sl_hit:
                 try:
                     await cb_sl_hit(pos, ltp, pnl)
-                except Exception as exc:
-                    logger.error(
-                        "[TSL] callback error for {}: {} — position cleaned up anyway",
-                        pos.symbol, exc
-                    )
-                finally:
-                    pos.status = SLStatus.HIT  # ensure EXITED-equivalent is marked
                     with self._lock:
                         self._positions.pop(pos.order_id, None)
+                except Exception as exc:
+                    logger.error(
+                        "[TSL] SL callback failed for {} — leaving in position list for retry: {}",
+                        pos.symbol, exc
+                    )
+                    pos.status = SLStatus.ACTIVE  # allow re-evaluation on next tick
             else:
+                pos.status = SLStatus.HIT
                 with self._lock:
                     self._positions.pop(pos.order_id, None)
             return

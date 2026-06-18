@@ -8,7 +8,7 @@ This is the "1000 traders watching and agreeing" effect.
 from __future__ import annotations
 import threading
 from collections import defaultdict
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 
 CONSENSUS_WINDOW_SECS = 60    # signals older than this are expired
 CONSENSUS_MIN_AGENTS  = 2     # how many agents must agree
@@ -26,7 +26,11 @@ class SignalAggregator:
         Returns CONSENSUS_BOOST if ≥2 different agents agree within CONSENSUS_WINDOW_SECS.
         Thread-safe — called from asyncio executor threads.
         """
-        now = datetime.utcnow()
+        # BUG A-1 fix: datetime.utcnow() is deprecated (Python 3.12+) and
+        # returns a timezone-naive datetime. The rest of the system uses
+        # timezone-aware datetimes (now_ist()). Mixing naive and aware datetimes
+        # raises TypeError on comparison. Use timezone.utc for UTC-aware timestamps.
+        now = datetime.now(timezone.utc)
         key = (symbol, direction)
         score = int(score) if score is not None else 0
         with self._lock:
@@ -50,18 +54,26 @@ class SignalAggregator:
         0.0 otherwise. Used so all agents on a consensus trade (including the first entrant)
         can apply the boost at entry time.
         """
-        now = datetime.utcnow()
+        now = datetime.now(timezone.utc)  # BUG A-1 fix: timezone-aware UTC
         key = (symbol, direction)
         window = now - timedelta(seconds=CONSENSUS_WINDOW_SECS)
         with self._lock:
-            active = [(a, s, ts) for a, s, ts in self._signals.get(key, []) if ts > window]
-            self._signals[key] = active  # trim expired entries
+            existing = self._signals.get(key, [])
+            active = [(a, s, ts) for a, s, ts in existing if ts > window]
+            # BUG A-2 fix: only write back when there are active signals.
+            # Previously self._signals[key] = active unconditionally created empty-list
+            # entries in the defaultdict for every polled (symbol, direction) pair that
+            # had no signals, causing unbounded memory growth in _signals over time.
+            if active:
+                self._signals[key] = active
+            elif key in self._signals:
+                del self._signals[key]
             unique_agents = {a for a, s, ts in active}
             return CONSENSUS_BOOST if len(unique_agents) >= max(CONSENSUS_MIN_AGENTS, 2) else 0.0
 
     def recent_signals(self, symbol: str | None = None) -> list[dict]:
         """Return all active signals for dashboard/debug."""
-        now = datetime.utcnow()
+        now = datetime.now(timezone.utc)  # BUG A-1 fix: timezone-aware UTC
         window = now - timedelta(seconds=CONSENSUS_WINDOW_SECS)
         out = []
         with self._lock:

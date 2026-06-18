@@ -13,6 +13,7 @@ All public functions are synchronous, cache-backed.
 """
 from __future__ import annotations
 
+import threading
 import time
 from dataclasses import dataclass, field
 from datetime import date as _date
@@ -48,6 +49,7 @@ class OptionsFlow:
 _cache:            dict[str, OptionsFlow] = {}
 _iv_history:       dict[str, dict[str, list[float]]] = {}   # sym → "strike_CE" → [iv, ...]
 _iv_history_date:  _date = _date.today()
+_flow_lock = threading.Lock()   # guards _iv_history, _iv_history_date, and _cache writes
 
 
 def get_cached_flow(symbol: str) -> Optional[OptionsFlow]:
@@ -63,9 +65,10 @@ def analyze_flow(symbol: str, chain: list[dict], spot: float) -> OptionsFlow:
     global _iv_history, _iv_history_date
     symbol = symbol.upper()
     today = _date.today()
-    if today != _iv_history_date:
-        _iv_history.clear()
-        _iv_history_date = today
+    with _flow_lock:
+        if today != _iv_history_date:
+            _iv_history.clear()
+            _iv_history_date = today
     unusual_calls: list[dict] = []
     unusual_puts:  list[dict] = []
     blocks:        list[dict] = []
@@ -83,7 +86,7 @@ def analyze_flow(symbol: str, chain: list[dict], spot: float) -> OptionsFlow:
             leg = row.get(side) or {}
             oi  = int(leg.get("oi", 0) or 0)
             vol = int(leg.get("volume", 0) or 0)
-            iv_raw = float(leg.get("iv", 25) or 25)
+            iv_raw = float(leg.get("iv", 0) or 0)
             iv  = (iv_raw / 100.0) if iv_raw > 1.0 else iv_raw
             ltp = float(leg.get("ltp", 0) or 0)
             oi_chg = int(leg.get("oi_change", 0) or 0)
@@ -106,10 +109,11 @@ def analyze_flow(symbol: str, chain: list[dict], spot: float) -> OptionsFlow:
                 blocks.append(dict(strike=strike, side=side, lots=vol,
                                    ltp=ltp, iv=round(iv * 100, 1)))
 
-            # IV spike
+            # IV spike — only track when IV is valid (skip missing/zero-IV strikes)
             hkey = f"{strike}_{side}"
             hist = sym_hist.setdefault(hkey, [])
-            hist.append(iv)
+            if iv > 0.001:
+                hist.append(iv)
             if len(hist) > 20:
                 hist.pop(0)
             if len(hist) >= 4:

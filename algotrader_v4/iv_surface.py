@@ -6,6 +6,7 @@ All public functions are synchronous.
 """
 from __future__ import annotations
 
+import threading
 import time
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -32,11 +33,13 @@ class SkewData:
 
 
 _cache: dict[str, SkewData] = {}
+_cache_lock = threading.Lock()
 _TTL = 300
 
 
 def get_surface(symbol: str) -> Optional[SkewData]:
-    s = _cache.get(symbol.upper())
+    with _cache_lock:
+        s = _cache.get(symbol.upper())
     return s if (s and time.time() - s.updated_at < _TTL) else None
 
 
@@ -80,13 +83,18 @@ def build_surface(symbol: str, chain: list[dict], spot: float) -> SkewData:
 
     pcr_oi = put_oi_total / max(call_oi_total, 1)
 
+    # Derive strike step from chain's actual spacing (handles BANKNIFTY=100, stocks=5)
+    _all_strikes = sorted(int(float(r.get("strike", 0))) for r in chain if r.get("strike"))
+    _step = (_all_strikes[1] - _all_strikes[0]) if len(_all_strikes) >= 2 else 50
+    _step = max(_step, 1)
+
     # ATM IV
-    atm = int(round(spot / 50) * 50)
+    atm = int(round(spot / _step) * _step)
     atm_iv = smile.get(atm) or _nearest(smile, atm) or 0.25
 
     # 25-delta proxy strikes (~5% OTM)
-    otm5_up  = int(round(spot * 1.05 / 50) * 50)
-    otm5_dn  = int(round(spot * 0.95 / 50) * 50)
+    otm5_up  = int(round(spot * 1.05 / _step) * _step)
+    otm5_dn  = int(round(spot * 0.95 / _step) * _step)
     iv_25c   = call_ivs.get(otm5_up) or _nearest(call_ivs, otm5_up) or atm_iv
     iv_25p   = put_ivs.get(otm5_dn)  or _nearest(put_ivs,  otm5_dn)  or atm_iv
 
@@ -119,7 +127,8 @@ def build_surface(symbol: str, chain: list[dict], spot: float) -> SkewData:
         skew_direction=direction, pcr_oi=round(pcr_oi, 3),
         gex_net=round(gex_net, 2), smile=smile,
     )
-    _cache[symbol.upper()] = sd
+    with _cache_lock:
+        _cache[symbol.upper()] = sd
     return sd
 
 

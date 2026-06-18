@@ -170,6 +170,12 @@ class AtomicBracketEngine:
                       target_2: Optional[float] = None, sub_strategy: str = "",
                       trigger: str = "", avg_volume: float = 0.0,
                       atr: float = 0.0) -> Optional[BracketOrder]:
+        if quantity <= 0:
+            logger.warning(
+                "Bracket SKIP: qty={} for {} {} {} — zero/negative quantity",
+                quantity, strategy, symbol, side,
+            )
+            return None
         bracket_id = f"BRK-{uuid.uuid4().hex[:8].upper()}"
         cfg = TRAIL_CONFIGS.get(strategy, TRAIL_CONFIGS["intraday"])
         entry_est = signal_price

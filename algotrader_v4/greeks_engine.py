@@ -36,7 +36,7 @@ def _n(x: float) -> float:
     return math.exp(-0.5 * x * x) / _SQRT2PI
 
 def _d1d2(S: float, K: float, T: float, r: float, sigma: float) -> tuple[float, float]:
-    if T <= 0 or sigma <= 0:
+    if T <= 0 or sigma <= 0 or S <= 0 or K <= 0:
         return 0.0, 0.0
     d1 = (math.log(S / K) + (r + 0.5 * sigma ** 2) * T) / (sigma * math.sqrt(T))
     return d1, d1 - sigma * math.sqrt(T)

@@ -1127,7 +1127,13 @@ async def gen_signal(req: SignalRequest):
     sym   = _clean_symbol(req.symbol)
     strat = _clean_strategy(req.strategy)
     try:
-        sig = signal_engine.generate(sym, req.exchange, strat)
+        # BUG S-4 fix: signal_engine.generate() makes a synchronous blocking
+        # Claude API call (up to 15 s). Calling it directly from an async route
+        # stalls the entire event loop. Offload to a thread-pool executor.
+        loop = asyncio.get_event_loop()
+        sig = await loop.run_in_executor(
+            None, signal_engine.generate, sym, req.exchange, strat
+        )
         await broadcast({"event": "signal", "symbol": sym, "signal": sig})
         from n8n_bridge import notify as _n8n
         asyncio.create_task(_n8n("signal", {
