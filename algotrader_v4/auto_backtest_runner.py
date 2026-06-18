@@ -293,7 +293,8 @@ def _compute_metrics(symbol, strategy, trades):
     dd_pct = float(np.max(peak - cum)) / max(abs(peak.max()), 1) * 100 if len(cum) else 0
     arr = np.array(pnls)
     sharpe = float(arr.mean() / arr.std() * np.sqrt(len(arr))) if arr.std() > 0 else 0.0
-    pf = sum(wins) / sum(abs(l) for l in losses) if losses else 0.0
+    loss_sum = sum(abs(l) for l in losses)
+    pf = sum(wins) / loss_sum if (losses and loss_sum > 0) else 0.0
     score = (win_rate * 0.35 + min(sharpe, 3) / 3 * 35 + max(0, 100 - dd_pct) * 0.20 + min(pf, 3) / 3 * 10)
     return BacktestResult(
         symbol=symbol, strategy=strategy, passed=False,
@@ -343,11 +344,13 @@ class AutoBacktestRunner:
                 if sym not in self._results: self._results[sym] = {}
                 self._results[sym][strat] = result
 
-        await asyncio.gather(*[run_one(s, st) for s in syms for st in strats], return_exceptions=True)
-        report = self._build_report(strats, time.time() - t0)
-        self._last_report = report
-        self._save_report(report)
-        self._running = False
+        try:
+            await asyncio.gather(*[run_one(s, st) for s in syms for st in strats], return_exceptions=True)
+            report = self._build_report(strats, time.time() - t0)
+            self._last_report = report
+            self._save_report(report)
+        finally:
+            self._running = False
         return report
 
     def _run_single(self, symbol, strategy):

@@ -8658,6 +8658,89 @@ run("nse_day_simulation: agent eval errors are logged not silently swallowed", t
 
 
 # ══════════════════════════════════════════════════════════════════════════
+# 103. AUTO_BACKTEST_RUNNER + ADAPTIVE_ENGINE + CLAUDE_TRADE_GATE FIXES
+# ══════════════════════════════════════════════════════════════════════════
+section("103. AUTO_BACKTEST_RUNNER + ADAPTIVE_ENGINE + CLAUDE_TRADE_GATE FIXES")
+
+
+def t_auto_backtest_profit_factor_guards_zero_loss_sum():
+    """auto_backtest_runner._compute_metrics profit_factor must guard against
+    ZeroDivisionError when all loss P&Ls are exactly 0.0 (range-bound strategies
+    where every 'losing' trade breaks even at 0.0)."""
+    import inspect
+    import auto_backtest_runner as _abr
+    src = inspect.getsource(_abr._compute_metrics)
+    assert "loss_sum" in src and "loss_sum > 0" in src, (
+        "_compute_metrics must guard profit_factor divisor: "
+        "loss_sum > 0, not just 'if losses'"
+    )
+
+
+run("auto_backtest_runner: profit_factor guards zero loss_sum (not just empty list)", t_auto_backtest_profit_factor_guards_zero_loss_sum)
+
+
+def t_auto_backtest_pf_zerodiv():
+    """_compute_metrics with all-zero loss values must return pf=0.0 not raise."""
+    import auto_backtest_runner as _abr
+    trades = [{"pnl": 10.0}, {"pnl": -0.0}, {"pnl": 5.0}, {"pnl": -0.0}, {"pnl": 8.0}]
+    r = _abr._compute_metrics("TEST", "intraday", trades)
+    assert r.profit_factor == 0.0, (
+        f"profit_factor with all-zero losses must be 0.0, got {r.profit_factor}"
+    )
+
+
+run("auto_backtest_runner: _compute_metrics does not ZeroDivisionError on all-zero losses", t_auto_backtest_pf_zerodiv)
+
+
+def t_auto_backtest_running_flag_reset_on_exception():
+    """AutoBacktestRunner.run_all must reset _running=False even if _build_report
+    or _save_report raises — a stuck flag permanently blocks future runs."""
+    import inspect
+    import auto_backtest_runner as _abr
+    src = inspect.getsource(_abr.AutoBacktestRunner.run_all)
+    assert "finally" in src and "_running = False" in src, (
+        "run_all must reset _running in a finally block so exceptions don't "
+        "permanently lock the backtest pipeline"
+    )
+
+
+run("auto_backtest_runner: run_all resets _running flag in finally block", t_auto_backtest_running_flag_reset_on_exception)
+
+
+def t_adaptive_engine_min_adx_not_win_rate_formula():
+    """adaptive_engine._init_params used win_rate/5 for min_adx, producing 11.0
+    instead of the correct ADX threshold of 20.0. Must now be a fixed 20.0."""
+    import inspect
+    import adaptive_engine as _ae
+    src = inspect.getsource(_ae.AdaptiveLearningEngine._init_params)
+    assert 'min_adx=20.0' in src, (
+        "_init_params must set min_adx=20.0, not win_rate/5 which gave 11.0"
+    )
+    assert "win_rate" not in src.split("min_adx")[1].split(",")[0], (
+        "_init_params must not derive min_adx from win_rate"
+    )
+
+
+run("adaptive_engine: _init_params uses correct min_adx=20.0 not win_rate/5", t_adaptive_engine_min_adx_not_win_rate_formula)
+
+
+def t_claude_trade_gate_news_fetch_uses_to_thread():
+    """claude_trade_gate.assess() pre-warms the news_sentinel cache via
+    asyncio.to_thread before _build_context() reads it, so the blocking urlopen
+    never runs on the event loop (up to 3s per feed × 2 feeds = 6s freeze)."""
+    import inspect
+    import claude_trade_gate as _ctg
+    src = inspect.getsource(_ctg.assess)
+    assert "asyncio.to_thread" in src and "get_headlines" in src, (
+        "claude_trade_gate.assess must pre-warm news cache via asyncio.to_thread "
+        "so _build_context's sync read is always a cache hit"
+    )
+
+
+run("claude_trade_gate: news_sentinel fetch runs in thread (not blocking event loop)", t_claude_trade_gate_news_fetch_uses_to_thread)
+
+
+# ══════════════════════════════════════════════════════════════════════════
 # FINAL SUMMARY
 # ══════════════════════════════════════════════════════════════════════════
 failed = summary()

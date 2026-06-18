@@ -322,7 +322,7 @@ class AdaptiveLearningEngine:
             sl_pct=cfg.get("sl", 1.5), target_pct=cfg.get("t1", 3.0),
             trail_pct=cfg.get("sl", 0.5) * 0.33,
             min_rsi=45.0, max_rsi=67.0,
-            min_adx=float(gate.get("win_rate", 55)) / 5,
+            min_adx=20.0,
         )
 
     def _update_rolling_metrics(self, params: AdaptiveParams, trades: list[TradeRecord]) -> None:

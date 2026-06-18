@@ -337,6 +337,13 @@ async def assess(snap, action: str, signal: dict, strategy: str) -> GateDecision
                             reason="Gate circuit breaker open — reduced size, no AI assessment")
 
     t0 = asyncio.get_running_loop().time()
+    # Pre-warm news cache in a thread so _build_context()'s sync read is a hit,
+    # not a blocking urlopen that would stall the event loop for up to 6 seconds.
+    try:
+        from news_sentinel import news_sentinel as _ns
+        await asyncio.to_thread(_ns.get_headlines, snap.symbol)
+    except Exception:
+        pass
     ctx = _build_context(snap, action, signal, strategy)
 
     try:
