@@ -265,9 +265,13 @@ class UpstoxBroker(BaseBroker):
         upstox_product   = _KITE_PRODUCT_TO_UPSTOX.get(product, "I")
         upstox_otype     = _KITE_OTYPE_TO_UPSTOX.get(order_type, "MKT")
 
-        # Upstox instrument_key format: "NSE_EQ|{isin}" or "NSE_EQ|{symbol}"
-        # For simplicity, use exchange|symbol format — caller should pass correct key
+        # Upstox instrument_key format: "NSE_EQ|{isin}" — symbol-based keys are invalid in LIVE mode
         instrument_key = f"{exchange}_{self._segment(exchange)}|{tradingsymbol}"
+        if settings.trading_mode != "PAPER":
+            logger.warning(
+                "[Upstox] instrument_key '{}' uses symbol name — Upstox requires ISIN-based keys in LIVE mode",
+                instrument_key
+            )
 
         payload: dict = {
             "quantity":        quantity,
@@ -416,7 +420,7 @@ class UpstoxBroker(BaseBroker):
         if settings.trading_mode == "PAPER":
             return {
                 "equity": {
-                    "available": {"live_balance": settings.max_position_size * 5}
+                    "available": {"live_balance": (settings.max_position_size or 10_000_000) * 5}
                 }
             }
 

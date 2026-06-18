@@ -94,7 +94,7 @@ def check(snap, action: str) -> MTFResult:
 
     candles = getattr(snap, "candles_1min", [])
     if not candles:
-        return MTFResult(aligned=True, score=3)  # no data → don't block
+        return MTFResult(aligned=True, score=0)  # no data → don't block, but don't boost
 
     try:
         df_1m = _candles_to_df(candles[-90:])  # last 90 min
@@ -130,5 +130,5 @@ def check(snap, action: str) -> MTFResult:
         return MTFResult(aligned=aligned, score=score, tf_1m=t_1m, tf_5m=t_5m, tf_15m=t_15m)
 
     except Exception as exc:
-        logger.debug("[mtf] {} check error: {} — not blocking", snap.symbol, exc)
+        logger.warning("[mtf] {} check error: {} — not blocking", snap.symbol, exc)
         return MTFResult(aligned=True, score=0)

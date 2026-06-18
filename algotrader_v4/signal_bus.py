@@ -101,7 +101,7 @@ class SignalBus:
             try:
                 cb(evt)
             except Exception as exc:
-                logger.debug("[SignalBus] subscriber error: {}", exc)
+                logger.warning("[SignalBus] subscriber error: {}", exc, exc_info=True)
 
     # ── Subscribe / unsubscribe ────────────────────────────────────────
     def subscribe(self, callback: Callable[[BusEvent], None]) -> None:
@@ -144,8 +144,8 @@ class SignalBus:
         n = len(agreeing)
         if n == 0:
             return 0.0
-        # Linear scale: 1 other agent → max_boost/2, ≥2 → max_boost
-        boost = min(max_boost, max_boost * n / 2.0)
+        # Linear scale: 1 other agent → max_boost/3, ≥3 → max_boost
+        boost = min(max_boost, max_boost * n / 3.0)
         return round(boost, 3)
 
     def recent(self, symbol: Optional[str] = None, limit: int = 50) -> list[dict]:

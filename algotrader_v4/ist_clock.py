@@ -24,7 +24,11 @@ NSE_HOLIDAYS: frozenset[date] = frozenset({
     date(2026, 4,  3),   # Good Friday
     date(2026, 4, 14),   # Dr. Ambedkar Jayanti
     date(2026, 5,  1),   # Maharashtra Day
+    date(2026, 6,  8),   # Eid ul-Adha (estimated — verify against NSE circular)
+    date(2026, 8, 26),   # Janmashtami
     date(2026, 10, 2),   # Gandhi Jayanti
+    date(2026, 10, 22),  # Dussehra
+    date(2026, 10, 30),  # Diwali (estimated — verify against NSE circular)
     date(2026, 12, 25),  # Christmas
 })
 

@@ -33,6 +33,7 @@ class TickRecorder:
     def _init_db(self) -> sqlite3.Connection:
         self._db_path.parent.mkdir(parents=True, exist_ok=True)
         conn = sqlite3.connect(str(self._db_path), check_same_thread=False)
+        conn.execute("PRAGMA journal_mode=WAL")
         conn.execute("""
             CREATE TABLE IF NOT EXISTS ticks (
                 id          INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -46,7 +47,7 @@ class TickRecorder:
                 open        REAL,
                 change_pct  REAL,
                 tick_ts     TEXT,
-                recorded_at TEXT    DEFAULT (datetime('now','localtime'))
+                recorded_at TEXT    DEFAULT (datetime('now'))
             )
         """)
         conn.execute("CREATE INDEX IF NOT EXISTS idx_ticks_symbol ON ticks(symbol)")

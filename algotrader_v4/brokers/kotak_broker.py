@@ -82,8 +82,15 @@ def _kotak_order_to_kite(o: dict) -> dict:
 
 
 def _kotak_pos_to_kite(p: dict) -> dict:
-    qty = int(p.get("flBuyQty", 0)) - int(p.get("flSellQty", 0))
-    avg = float(p.get("buyAmt", 0)) / max(int(p.get("flBuyQty", 1)), 1)
+    qty      = int(p.get("flBuyQty", 0)) - int(p.get("flSellQty", 0))
+    buy_qty  = int(p.get("flBuyQty",  0))
+    sell_qty = int(p.get("flSellQty", 0))
+    if buy_qty > 0:
+        avg = float(p.get("buyAmt", 0)) / buy_qty
+    elif sell_qty > 0:
+        avg = float(p.get("sellAmt", 0)) / sell_qty
+    else:
+        avg = 0.0
     return {
         "tradingsymbol": p.get("trdSym", p.get("sym", "")),
         "exchange":      _KOTAK_TO_EXCHANGE.get(p.get("exSeg", "nse_cm"), "NSE"),
@@ -244,6 +251,9 @@ class KotakBroker(BaseBroker):
         except httpx.HTTPStatusError as exc:
             logger.error("[Kotak] PUT {} → {} {}", path, exc.response.status_code, exc.response.text[:200])
             raise
+        except Exception as exc:
+            logger.error("[Kotak] PUT {} error: {}", path, exc)
+            raise
 
     def _delete(self, path: str, params: dict) -> dict:
         try:
@@ -255,6 +265,9 @@ class KotakBroker(BaseBroker):
             return resp.json()
         except httpx.HTTPStatusError as exc:
             logger.error("[Kotak] DELETE {} → {} {}", path, exc.response.status_code, exc.response.text[:200])
+            raise
+        except Exception as exc:
+            logger.error("[Kotak] DELETE {} error: {}", path, exc)
             raise
 
     # ── Orders ────────────────────────────────────────────────────────────────

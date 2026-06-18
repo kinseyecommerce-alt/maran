@@ -146,11 +146,12 @@ class BrokerRouter:
         """
         with self._lock:
             details = self._secondary_orders.pop(primary_order_id, None)
+            secondaries_snapshot = list(self._secondaries)
 
         if not details:
             return
 
-        broker_map = {n: c for n, c in self._secondaries}
+        broker_map = {n: c for n, c in secondaries_snapshot}
         for broker_name, info in details.items():
             client = broker_map.get(broker_name)
             if not client:
@@ -177,9 +178,11 @@ class BrokerRouter:
 
     def squareoff_all_secondaries(self) -> dict[str, str]:
         """Call squareoff on every secondary broker. Returns {broker: status}."""
+        with self._lock:
+            secondaries_snapshot = list(self._secondaries)
         results: dict[str, str] = {}
         failed_brokers: set[str] = set()
-        for name, client in self._secondaries:
+        for name, client in secondaries_snapshot:
             try:
                 client.squareoff_all_positions()
                 results[name] = "ok"

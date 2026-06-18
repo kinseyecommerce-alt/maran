@@ -13,6 +13,8 @@ import threading
 from pathlib import Path
 from typing import Optional
 
+from loguru import logger
+
 import os as _os_ka
 _STORE_PATH = Path(_os_ka.environ.get("KITE_ACCOUNTS_FILE",
                                       str(Path(__file__).parent / "kite_accounts.json")))
@@ -81,8 +83,14 @@ def _load() -> None:
 
 
 def _save() -> None:
-    stored = {name: _encrypt_fields(acc) for name, acc in _accounts.items()}
-    _STORE_PATH.write_text(json.dumps(stored, indent=2))
+    try:
+        stored = {name: _encrypt_fields(acc) for name, acc in _accounts.items()}
+        tmp = _STORE_PATH.with_suffix(".tmp")
+        tmp.write_text(json.dumps(stored, indent=2))
+        tmp.replace(_STORE_PATH)
+    except Exception as exc:
+        logger.error("[kite_accounts] CRITICAL: failed to persist accounts: {}", exc)
+        raise
 
 
 def _mask(key: str) -> str:

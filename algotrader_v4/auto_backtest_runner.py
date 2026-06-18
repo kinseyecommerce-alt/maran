@@ -331,6 +331,7 @@ class AutoBacktestRunner:
     async def run_all(self, strategies=None, symbols=None) -> BatchReport:
         if self._running:
             return self._last_report
+        self._results = {}
         self._running = True
         t0 = time.time()
         strats = strategies or list(SIGNAL_REGISTRY_LOCAL.keys())

@@ -150,12 +150,15 @@ async def learn(symbols: list[str], strategies: list[str],
     print(f"  Concurrency: {concurrency} | Resume: {resume}")
     print(f"{'═'*60}\n")
 
+    # Collect telegram tasks to await at end (fire-and-forget loses messages on loop shutdown)
+    _tg_tasks: list = []
+
     # Notify start
-    asyncio.create_task(send_telegram(
+    _tg_tasks.append(asyncio.ensure_future(send_telegram(
         f"🧠 <b>Historical Learning Started</b>\n"
         f"{len(symbols)} Nifty-100 symbols × {len(strategies)} strategies\n"
         f"Expected time: ~{total//concurrency//6} min"
-    ))
+    )))
 
     tasks = []
     for symbol in symbols:
@@ -195,10 +198,10 @@ async def learn(symbols: list[str], strategies: list[str],
         if pct >= milestone_pct + 25:
             milestone_pct = (pct // 25) * 25
             pass_counts = {s: len(v) for s, v in approved.items()}
-            asyncio.create_task(send_telegram(
+            _tg_tasks.append(asyncio.ensure_future(send_telegram(
                 f"🧠 Learning {milestone_pct}% done ({done}/{total})\n"
                 + "\n".join(f"  {s}: {n} approved" for s, n in pass_counts.items())
-            ))
+            )))
 
     # Final save
     _save_progress(progress)
@@ -227,6 +230,9 @@ async def learn(symbols: list[str], strategies: list[str],
         + "\n".join(f"  {s}: {n} symbols approved" for s, n in pass_counts.items()) +
         f"\n\nSet SKIP_STARTUP_BACKTEST=true to use pre-learned params."
     )
+    # Flush any pending milestone notifications
+    if _tg_tasks:
+        await asyncio.gather(*_tg_tasks, return_exceptions=True)
 
 
 def main() -> None:

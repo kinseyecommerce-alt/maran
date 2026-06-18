@@ -10690,6 +10690,243 @@ run("main: startup create_task calls have done_callbacks (error surfacing)",    
 
 
 # ══════════════════════════════════════════════════════════════════════════
+# 13. BATCH 13 — signal_bus / multi_timeframe / l2_fill_model / tick_recorder /
+#     tick_replayer / broker_router / kite_accounts / ist_clock /
+#     event_calendar / auto_backtest_runner / startup / news_sentinel / brokers
+# ══════════════════════════════════════════════════════════════════════════
+
+def t_signal_bus_subscriber_warning():
+    import inspect, signal_bus as sb
+    src = inspect.getsource(sb.SignalBus.publish)
+    assert "logger.warning" in src and "subscriber error" in src, (
+        "SignalBus.publish must log subscriber exceptions at WARNING level"
+    )
+
+def t_signal_bus_boost_scale_n3():
+    import inspect, signal_bus as sb
+    src = inspect.getsource(sb.SignalBus.consensus_boost)
+    assert "n / 3.0" in src, (
+        "consensus_boost must scale linearly at n/3 so ≥3 agents give max_boost (not n/2)"
+    )
+
+def t_multi_timeframe_empty_candles_score_zero():
+    import multi_timeframe as mtf
+    class _Snap:
+        symbol = "TEST"
+        candles_1min = []
+    r = mtf.check(_Snap(), "BUY")
+    assert r.score == 0, (
+        f"Empty candle list must return score=0 (no-data neutrality), got {r.score}"
+    )
+    assert r.aligned is True, "Must still be aligned=True (don't block)"
+
+def t_multi_timeframe_exception_warning():
+    import inspect, multi_timeframe as mtf
+    src = inspect.getsource(mtf.check)
+    assert "logger.warning" in src and "not blocking" in src, (
+        "multi_timeframe.check must log calculation errors at WARNING (not DEBUG)"
+    )
+
+def t_l2_fill_model_nan_ltp_guard():
+    import math, l2_fill_model as l2
+    est = l2.estimate_fill("BUY", 10, [], [], float("nan"))
+    assert est.fill_prob == 1.0 and est.slippage_bps == 0.0, (
+        "estimate_fill must return neutral (1.0, 0.0) when ltp is NaN"
+    )
+    assert not math.isnan(est.slippage_bps), "slippage_bps must not be NaN"
+
+def t_l2_fill_model_import_math():
+    import inspect, l2_fill_model as l2
+    src = inspect.getsource(l2)
+    assert "import math" in src, "l2_fill_model must import math for isnan guard"
+
+def t_tick_recorder_wal_mode():
+    import inspect, tick_recorder as tr
+    src = inspect.getsource(tr.TickRecorder._init_db)
+    assert "PRAGMA journal_mode=WAL" in src, (
+        "_init_db must enable WAL mode to reduce tick loss on process crash"
+    )
+
+def t_tick_recorder_utc_timestamps():
+    import inspect, tick_recorder as tr
+    src = inspect.getsource(tr.TickRecorder._init_db)
+    assert "datetime('now','localtime')" not in src, (
+        "recorded_at default must use UTC datetime('now'), not localtime"
+    )
+
+def t_tick_replayer_end_date_separator():
+    import inspect, tick_replayer as tr
+    src = inspect.getsource(tr.TickReplayer.has_data)
+    assert "T23:59:59.999999" in src, (
+        "has_data end filter must use T separator to match ISO timestamps from tick_recorder"
+    )
+    src2 = inspect.getsource(tr.TickReplayer.replay_to_ohlcv)
+    assert "T23:59:59.999999" in src2, (
+        "replay_to_ohlcv end filter must use T separator to match ISO timestamps"
+    )
+
+def t_tick_replayer_dropped_row_warning():
+    import inspect, tick_replayer as tr
+    src = inspect.getsource(tr.TickReplayer.replay_to_ohlcv)
+    assert "logger.warning" in src and "unparseable timestamps" in src, (
+        "replay_to_ohlcv must warn when NaT rows are dropped after to_datetime coerce"
+    )
+
+def t_broker_router_mirror_exit_snapshot_under_lock():
+    import inspect, broker_router as br
+    src = inspect.getsource(br.BrokerRouter.mirror_exit)
+    # snapshot must be taken inside the lock block (before broker_map = ...)
+    lock_idx = src.index("with self._lock:")
+    snapshot_idx = src.index("secondaries_snapshot")
+    broker_map_idx = src.index("broker_map = ")
+    assert snapshot_idx < broker_map_idx, (
+        "secondaries_snapshot must be captured before broker_map is built"
+    )
+    assert snapshot_idx > lock_idx, (
+        "secondaries_snapshot must be captured inside the lock"
+    )
+
+def t_broker_router_squareoff_snapshot():
+    import inspect, broker_router as br
+    src = inspect.getsource(br.BrokerRouter.squareoff_all_secondaries)
+    assert "secondaries_snapshot" in src, (
+        "squareoff_all_secondaries must iterate a snapshot of _secondaries taken under lock"
+    )
+
+def t_kite_accounts_atomic_save():
+    import inspect, kite_accounts as ka
+    src = inspect.getsource(ka._save)
+    assert ".with_suffix(\".tmp\")" in src, (
+        "_save must write to a .tmp file before atomically replacing the target"
+    )
+    assert ".replace(" in src, (
+        "_save must use .replace() for atomic rename"
+    )
+
+def t_kite_accounts_save_logs_error():
+    import inspect, kite_accounts as ka
+    src = inspect.getsource(ka._save)
+    assert "logger.error" in src, (
+        "_save must log errors before re-raising so credential persistence failures surface"
+    )
+
+def t_ist_clock_missing_holidays():
+    from ist_clock import NSE_HOLIDAYS
+    from datetime import date
+    assert date(2026, 8, 26) in NSE_HOLIDAYS, "Janmashtami 2026-08-26 must be in NSE_HOLIDAYS"
+    assert date(2026, 10, 22) in NSE_HOLIDAYS, "Dussehra 2026-10-22 must be in NSE_HOLIDAYS"
+    assert date(2026, 10, 30) in NSE_HOLIDAYS, "Diwali 2026-10-30 must be in NSE_HOLIDAYS"
+
+def t_event_calendar_same_day_midnight_events():
+    import inspect, event_calendar as ec
+    src = inspect.getsource(ec.get_event_risk)
+    assert "-1.0 <= delta_hours" not in src, (
+        "get_event_risk must not use -1.0 lower bound — same-day events stored at midnight "
+        "would have delta_hours≈-9 and be invisible"
+    )
+    assert "max(0.0, min_hours)" in src, (
+        "hours must be clamped to 0.0 for past same-day events so risk thresholds apply correctly"
+    )
+
+def t_auto_backtest_runner_results_cleared():
+    import inspect, auto_backtest_runner as abr
+    src = inspect.getsource(abr.AutoBacktestRunner.run_all)
+    assert "self._results = {}" in src, (
+        "run_all must clear _results at the start of each run to prevent stale results accumulation"
+    )
+
+def t_startup_model_id_not_date_suffixed():
+    import inspect, startup
+    src = inspect.getsource(startup) if hasattr(startup, '__file__') else open('startup.py').read()
+    assert "claude-haiku-4-5-20251001" not in src, (
+        "startup.py must not use date-suffixed model ID — use 'claude-haiku-4-5' durable alias"
+    )
+
+def t_news_sentinel_bounded_read():
+    import inspect, news_sentinel as ns
+    src = inspect.getsource(ns.NewsSentinel._fetch_headlines)
+    assert "512 * 1024" in src or "512*1024" in src, (
+        "_fetch_headlines must cap RSS body read at 512KB to prevent OOM from large feeds"
+    )
+
+def t_news_sentinel_cache_lock():
+    import inspect, news_sentinel as ns
+    src = inspect.getsource(ns.NewsSentinel.get_headlines)
+    assert "_cache_lock" in src, (
+        "get_headlines must use _cache_lock to prevent concurrent duplicate fetches"
+    )
+
+def t_kotak_broker_put_logs_exception():
+    import inspect
+    import brokers.kotak_broker as kb
+    src = inspect.getsource(kb.KotakBroker._put)
+    assert src.count("except Exception") >= 1, (
+        "_put must catch generic Exception (not only HTTPStatusError) and log it"
+    )
+
+def t_kotak_broker_delete_logs_exception():
+    import inspect
+    import brokers.kotak_broker as kb
+    src = inspect.getsource(kb.KotakBroker._delete)
+    assert src.count("except Exception") >= 1, (
+        "_delete must catch generic Exception (not only HTTPStatusError) and log it"
+    )
+
+def t_kotak_broker_short_avg_price():
+    import inspect
+    import brokers.kotak_broker as kb
+    src = inspect.getsource(kb._kotak_pos_to_kite)
+    assert "flSellQty" in src and "sellAmt" in src, (
+        "_kotak_pos_to_kite must compute avg from sellAmt/flSellQty for short-only positions"
+    )
+    assert "/ max(int" not in src or "buy_qty" in src, (
+        "must not use the old single-division formula that always gave 0 for short positions"
+    )
+
+def t_upstox_broker_instrument_key_warning():
+    import inspect
+    import brokers.upstox_broker as ub
+    src = inspect.getsource(ub.UpstoxBroker.place_order)
+    assert "logger.warning" in src and "instrument_key" in src, (
+        "place_order must warn in LIVE mode that symbol-based instrument_key is invalid for Upstox"
+    )
+
+def t_historical_learner_no_fire_and_forget():
+    import inspect, historical_learner as hl
+    src = inspect.getsource(hl.learn)
+    assert "asyncio.create_task" not in src, (
+        "learn() must not use create_task for Telegram notifications — "
+        "tasks are silently lost when the event loop shuts down"
+    )
+
+run("signal_bus: subscriber exceptions logged at WARNING (not DEBUG)",                    t_signal_bus_subscriber_warning)
+run("signal_bus: consensus_boost scale uses n/3 so ≥3 agents gives max_boost",           t_signal_bus_boost_scale_n3)
+run("multi_timeframe: empty candle list returns score=0 (not score=3)",                   t_multi_timeframe_empty_candles_score_zero)
+run("multi_timeframe: calculation exceptions logged at WARNING (not DEBUG)",              t_multi_timeframe_exception_warning)
+run("l2_fill_model: NaN ltp returns neutral fill estimate (not NaN slippage_bps)",        t_l2_fill_model_nan_ltp_guard)
+run("l2_fill_model: imports math for isnan guard",                                        t_l2_fill_model_import_math)
+run("tick_recorder: _init_db enables WAL mode for crash safety",                         t_tick_recorder_wal_mode)
+run("tick_recorder: recorded_at uses UTC datetime('now') not localtime",                  t_tick_recorder_utc_timestamps)
+run("tick_replayer: has_data end filter uses T23:59:59.999999 (ISO T separator)",         t_tick_replayer_end_date_separator)
+run("tick_replayer: replay_to_ohlcv warns on dropped NaT rows",                          t_tick_replayer_dropped_row_warning)
+run("broker_router: mirror_exit captures secondaries_snapshot under lock",                t_broker_router_mirror_exit_snapshot_under_lock)
+run("broker_router: squareoff_all_secondaries iterates a locked snapshot",                t_broker_router_squareoff_snapshot)
+run("kite_accounts: _save uses atomic .tmp → rename pattern",                            t_kite_accounts_atomic_save)
+run("kite_accounts: _save logs error before re-raising on write failure",                 t_kite_accounts_save_logs_error)
+run("ist_clock: NSE_HOLIDAYS includes missing 2026 dates (Janmashtami/Dussehra/Diwali)", t_ist_clock_missing_holidays)
+run("event_calendar: get_event_risk finds same-day midnight-stored events",              t_event_calendar_same_day_midnight_events)
+run("auto_backtest_runner: run_all clears _results at start (no stale accumulation)",    t_auto_backtest_runner_results_cleared)
+run("startup: model ID uses durable alias (not retired date-suffixed ID)",               t_startup_model_id_not_date_suffixed)
+run("news_sentinel: RSS body read capped at 512KB (OOM guard)",                          t_news_sentinel_bounded_read)
+run("news_sentinel: get_headlines uses _cache_lock (thread-safe concurrent access)",     t_news_sentinel_cache_lock)
+run("kotak_broker: _put logs generic exceptions before re-raising",                      t_kotak_broker_put_logs_exception)
+run("kotak_broker: _delete logs generic exceptions before re-raising",                   t_kotak_broker_delete_logs_exception)
+run("kotak_broker: short-only positions use sellAmt/flSellQty for avg price",           t_kotak_broker_short_avg_price)
+run("upstox_broker: place_order warns about invalid instrument_key in LIVE mode",        t_upstox_broker_instrument_key_warning)
+run("historical_learner: learn() uses ensure_future not create_task (no orphan tasks)",  t_historical_learner_no_fire_and_forget)
+
+
+# ══════════════════════════════════════════════════════════════════════════
 # FINAL SUMMARY
 # ══════════════════════════════════════════════════════════════════════════
 failed = summary()
