@@ -8538,6 +8538,126 @@ run("correlation_guard: get_correlation logs on lookup failure (not silent retur
 
 
 # ══════════════════════════════════════════════════════════════════════════
+# 102. PAPER ORDER PLACEMENT BUGS — FILL PRICE + SILENT EXCEPTIONS
+# ══════════════════════════════════════════════════════════════════════════
+section("102. PAPER ORDER PLACEMENT BUGS — FILL PRICE + SILENT EXCEPTIONS")
+
+
+def t_paper_place_market_log_uses_fill_price():
+    """_paper_place() must log fill_price, not the raw price param.
+    MARKET orders pass price=0.0; logging price would show ₹0.0 for every trade."""
+    import inspect
+    import kite_client as _kc
+    src = inspect.getsource(_kc.KiteClient._paper_place)
+    # Find the logger.info block and capture the full argument span
+    lines = src.splitlines()
+    in_log_block = False
+    log_block = []
+    for line in lines:
+        stripped = line.strip()
+        if 'logger.info' in stripped and '[PAPER]' in stripped:
+            in_log_block = True
+        if in_log_block:
+            log_block.append(stripped)
+            if stripped.endswith(")"):
+                break
+    assert log_block, "_paper_place must have a logger.info [PAPER] line"
+    combined = " ".join(log_block)
+    assert "fill_price" in combined and "price," not in combined.replace("fill_price,", ""), (
+        f"_paper_place log must use fill_price, not raw price — got: {combined}"
+    )
+
+
+run("kite_client: _paper_place logs fill_price not raw price param", t_paper_place_market_log_uses_fill_price)
+
+
+def t_paper_place_market_fill_uses_ltp_not_hardcoded():
+    """_paper_place() MARKET fill price uses _paper_ltp; when populated, order
+    fills at the real LTP — not the ₹100 hardcoded fallback."""
+    import kite_client as _kc
+    kc = _kc.KiteClient.__new__(_kc.KiteClient)
+    import threading
+    kc._paper_orders = {}
+    kc._paper_orders_lock = threading.Lock()
+    kc._paper_positions = []
+    kc._paper_positions_lock = threading.Lock()
+    kc._paper_ltp = {"RELIANCE": 2500.0}
+    import uuid as _uuid
+    import time as _t
+    oid = kc._paper_place(
+        tradingsymbol="RELIANCE", exchange="NSE", transaction_type="BUY",
+        quantity=1, order_type="MARKET", product="MIS",
+        price=0.0, trigger_price=0.0, tag="TEST",
+    )
+    rec = kc._paper_orders[oid]
+    assert rec["price"] == 2500.0, (
+        f"MARKET order must fill at _paper_ltp (2500.0), got {rec['price']}"
+    )
+    assert rec["average_price"] == 2500.0, (
+        f"MARKET average_price must be 2500.0, got {rec['average_price']}"
+    )
+
+
+run("kite_client: PAPER MARKET order fills at _paper_ltp when available", t_paper_place_market_fill_uses_ltp_not_hardcoded)
+
+
+def t_base_agent_passes_ltp_as_price_for_market_orders():
+    """base_agent._place_orders passes ltp as price for MARKET entries so PAPER
+    mode has a real fill price fallback instead of ₹0 → ₹100 default."""
+    import inspect
+    import agents.base_agent as _ba
+    src = inspect.getsource(_ba.BaseAgent._place_orders)
+    # The MARKET branch must set entry_px to ltp, not 0.0
+    assert "entry_px   = limit_px if use_limit else ltp" in src or \
+           "entry_px = limit_px if use_limit else ltp" in src, (
+        "base_agent._place_orders must pass ltp as price for MARKET orders "
+        "(not 0.0) so PAPER mode can use it as fill price hint"
+    )
+
+
+run("base_agent: _place_orders passes ltp as MARKET price hint for PAPER mode", t_base_agent_passes_ltp_as_price_for_market_orders)
+
+
+def t_atomic_bracket_passes_signal_price_for_market_entry():
+    """atomic_bracket.execute passes signal_price as price for MARKET entries so
+    PAPER mode has a realistic fill price when _paper_ltp is not yet populated."""
+    import inspect
+    import atomic_bracket as _ab
+    src = inspect.getsource(_ab.AtomicBracketEngine.execute)
+    assert "signal_price" in src and "price=bracket.signal_price" in src, (
+        "AtomicBracketEngine.execute must pass price=bracket.signal_price "
+        "for MARKET entry so PAPER mode fill price is not ₹100"
+    )
+
+
+run("atomic_bracket: execute passes signal_price as MARKET price hint for PAPER mode", t_atomic_bracket_passes_signal_price_for_market_entry)
+
+
+def t_nse_day_simulation_agent_errors_logged():
+    """nse_day_simulation.run_simulation logs agent evaluation errors instead of
+    silently swallowing them with bare except/pass."""
+    import inspect
+    import nse_day_simulation as _sim
+    src = inspect.getsource(_sim.run_simulation)
+    # Find the except block inside the per-agent evaluation try/except
+    lines = src.splitlines()
+    for i, line in enumerate(lines):
+        stripped = line.strip()
+        if stripped == "except Exception as exc:":
+            # Next non-blank line must NOT be "pass"
+            for j in range(i + 1, min(i + 4, len(lines))):
+                nxt = lines[j].strip()
+                if nxt:
+                    assert nxt != "pass", (
+                        f"nse_day_simulation agent eval except must log, not pass — line {j}: {nxt}"
+                    )
+                    break
+
+
+run("nse_day_simulation: agent eval errors are logged not silently swallowed", t_nse_day_simulation_agent_errors_logged)
+
+
+# ══════════════════════════════════════════════════════════════════════════
 # FINAL SUMMARY
 # ══════════════════════════════════════════════════════════════════════════
 failed = summary()

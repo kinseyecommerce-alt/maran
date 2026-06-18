@@ -1191,7 +1191,7 @@ class BaseAgent(ABC):
                     raise
             else:
                 entry_type = "LIMIT" if use_limit else "MARKET"
-                entry_px   = limit_px if use_limit else 0.0
+                entry_px   = limit_px if use_limit else ltp  # PAPER uses price as fill hint
                 results = await asyncio.gather(
                     loop.run_in_executor(None, lambda: kite_client.place_order(
                         tradingsymbol=trade_sym, exchange=exch, transaction_type=action, quantity=qty,

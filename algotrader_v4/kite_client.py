@@ -745,7 +745,7 @@ class KiteClient:
             self._update_paper_position(record)
         logger.info("[PAPER] {} {} {} qty={} @ ₹{} | id={}",
                     transaction_type, tradingsymbol, order_type,
-                    quantity, price, order_id)
+                    quantity, fill_price, order_id)
         return order_id
 
     def _prune_paper_orders_locked(self) -> None:

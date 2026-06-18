@@ -210,6 +210,7 @@ class AtomicBracketEngine:
                     None, lambda: kite_client.place_order(
                         tradingsymbol=symbol, exchange=exchange, transaction_type=side,
                         quantity=quantity, order_type="MARKET", product=product,
+                        price=bracket.signal_price,  # PAPER uses price as fill hint
                         tag=f"BRK-{strategy}-ENTRY"))
             bracket.entry_order_id = entry_oid
         except Exception as exc:

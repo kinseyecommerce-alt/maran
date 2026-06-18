@@ -510,8 +510,8 @@ def run_simulation(seed: int = 2026, verbose: bool = True) -> tuple[dict, list]:
                                 "pattern": (signal or {}).get("pattern", "?"),
                                 "score": (signal or {}).get("score", "–"),
                             })
-                    except Exception:
-                        pass
+                    except Exception as exc:
+                        loguru.logger.debug("[sim] agent {} error on {} {}: {}", agent_name, sym, ts, exc)
 
             # Squareoff all open positions at 15:25
             final_px = {sym: float(sessions[sym][tf_label]["close"].iloc[-1])
