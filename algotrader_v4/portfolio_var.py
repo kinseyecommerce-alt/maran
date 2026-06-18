@@ -56,6 +56,10 @@ class PortfolioVaR:
         ret_matrix = np.vstack([r[-min_len:] for _, r in valid])  # shape: (n, min_len)
         portfolio_rets = weights @ ret_matrix  # shape: (min_len,)
 
+        if not np.isfinite(portfolio_rets).all():
+            logger.warning("[PortfolioVaR] portfolio returns contain NaN/Inf — returning zero VaR")
+            return {**_zero, "total_notional": round(total_notional, 2), "n_positions": len(active)}
+
         mu = float(portfolio_rets.mean())
         sigma = float(portfolio_rets.std(ddof=1)) if len(portfolio_rets) > 1 else 0.0
 
@@ -96,7 +100,9 @@ class PortfolioVaR:
             "quantity": 1,
             "last_price": new_notional,
         }
-        combined = list(positions) + [synthetic]
+        # Exclude any existing position for new_symbol to avoid double-counting its notional
+        existing_excl = [p for p in positions if p.get("tradingsymbol") != new_symbol]
+        combined = existing_excl + [synthetic]
 
         result = self.compute(combined)
         if result["n_positions"] < 2:

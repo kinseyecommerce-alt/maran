@@ -9301,6 +9301,124 @@ run("institutional_flow: _last_refresh_date only stamped when at least one sourc
 run("alt_data: _fii_sentiment read inside lock for consistency with fii_data snapshot",       t_alt_data_fii_sentiment_read_inside_lock)
 
 
+# 112. ADAPTIVE ENGINE + PORTFOLIO VAR + PORTFOLIO OPTIMIZER — BATCH 3 FIXES
+# adaptive_engine: atomic save, correct trail_pct init, dict-iteration safety
+# portfolio_var: NaN guard after matrix multiply, duplicate-symbol exclusion
+# portfolio_optimizer: single atomic _latest snapshot
+
+def t_adaptive_engine_trail_pct_uses_sl_val():
+    """_init_params must compute trail_pct from the actual sl value, not from 0.5 fallback."""
+    import inspect
+    from adaptive_engine import AdaptiveLearningEngine
+    src = inspect.getsource(AdaptiveLearningEngine._init_params)
+    assert "sl_val" in src, "_init_params must capture sl as sl_val"
+    assert "sl_val * 0.33" in src, "_init_params must set trail_pct = sl_val * 0.33"
+    assert "cfg.get(\"sl\", 0.5) * 0.33" not in src, (
+        "_init_params must NOT use 0.5 fallback for trail_pct (produces too-tight trailing stop)"
+    )
+
+def t_adaptive_engine_trail_pct_value_for_default_strategy():
+    """_init_params with no strategy config must produce trail_pct = 1.5 * 0.33 ≈ 0.495."""
+    from adaptive_engine import AdaptiveLearningEngine
+    engine = AdaptiveLearningEngine.__new__(AdaptiveLearningEngine)
+    engine._params = {}
+    engine._trades = {}
+    engine._rebacktest_queue = []
+    engine.backtests_skipped = 0
+    engine.backtests_run = 0
+    p = engine._init_params("unknown_strategy", "TEST")
+    expected = round(1.5 * 0.33, 3)
+    assert abs(p.trail_pct - expected) < 0.001, (
+        f"trail_pct should be {expected} (sl=1.5 * 0.33) for strategy with no config, got {p.trail_pct}"
+    )
+
+def t_adaptive_engine_save_state_uses_atomic_write():
+    """_save_state must use a temp file and replace() for atomic write."""
+    import inspect
+    from adaptive_engine import AdaptiveLearningEngine
+    src = inspect.getsource(AdaptiveLearningEngine._save_state)
+    assert ".tmp" in src, "_save_state must write to a .tmp file first"
+    assert ".replace(" in src or "tmp.replace" in src, "_save_state must use Path.replace() for atomic rename"
+
+def t_adaptive_engine_nightly_review_uses_list_snapshot():
+    """nightly_review must iterate over list(self._params.items()) to prevent RuntimeError on concurrent mutation."""
+    import inspect
+    from adaptive_engine import AdaptiveLearningEngine
+    src = inspect.getsource(AdaptiveLearningEngine.nightly_review)
+    assert "list(self._params.items())" in src, (
+        "nightly_review must use list(self._params.items()) to prevent 'dictionary changed size' error"
+    )
+
+def t_portfolio_var_nan_guard_present():
+    """portfolio_var.compute must guard against NaN in portfolio returns after matrix multiply."""
+    import inspect
+    from portfolio_var import PortfolioVaR
+    src = inspect.getsource(PortfolioVaR.compute)
+    assert "np.isfinite" in src, "compute() must check np.isfinite(portfolio_rets) after matrix multiply"
+
+def t_portfolio_var_nan_portfolio_returns_zero_var():
+    """compute() must return zero VaR dict (not NaN) when portfolio_rets contains NaN."""
+    import numpy as np
+    from unittest.mock import patch
+    from portfolio_var import PortfolioVaR
+
+    pvar = PortfolioVaR()
+    positions = [
+        {"tradingsymbol": "AAA", "quantity": 10, "last_price": 100.0},
+        {"tradingsymbol": "BBB", "quantity": 5,  "last_price": 200.0},
+    ]
+    nan_returns = {"AAA": np.array([0.01, float("nan"), -0.02]), "BBB": np.array([0.02, 0.03, -0.01])}
+    with patch.object(pvar, "_fetch_returns", return_value=nan_returns):
+        result = pvar.compute(positions)
+    assert result["var_95"] == 0.0 or result["var_99"] == 0.0, (
+        "compute() must return zero VaR when portfolio_rets contains NaN"
+    )
+    import math
+    for v in [result["var_95"], result["var_99"], result["cvar_99"]]:
+        assert not math.isnan(v), f"compute() must never return NaN in VaR fields, got {v}"
+
+def t_portfolio_var_check_pre_trade_excludes_duplicate_symbol():
+    """check_pre_trade must exclude the existing position for new_symbol before adding synthetic."""
+    import inspect
+    from portfolio_var import PortfolioVaR
+    src = inspect.getsource(PortfolioVaR.check_pre_trade)
+    assert "tradingsymbol" in src and "!= new_symbol" in src, (
+        "check_pre_trade must filter out existing position for new_symbol to avoid double-counting"
+    )
+
+def t_portfolio_optimizer_single_latest_snapshot():
+    """portfolio_optimizer must use a single _latest dict for atomic allocations+sharpes snapshot."""
+    import inspect
+    from portfolio_optimizer import PortfolioOptimizer
+    src = inspect.getsource(PortfolioOptimizer.__init__)
+    assert "_latest" in src, "PortfolioOptimizer.__init__ must define self._latest"
+    assert "_latest_allocations" not in src, (
+        "PortfolioOptimizer must not have separate _latest_allocations (use _latest dict)"
+    )
+
+def t_portfolio_optimizer_should_trade_reads_latest_once():
+    """should_trade must read self._latest once and use the snapshot consistently."""
+    import inspect
+    from portfolio_optimizer import PortfolioOptimizer
+    src = inspect.getsource(PortfolioOptimizer.should_trade)
+    assert "latest = self._latest" in src, (
+        "should_trade must capture self._latest in a local variable for consistent reads"
+    )
+    assert "self._latest_allocations" not in src, (
+        "should_trade must not read self._latest_allocations (stale split-dict pattern removed)"
+    )
+
+run("adaptive_engine: _init_params trail_pct = sl_val * 0.33 (not 0.5 * 0.33)",        t_adaptive_engine_trail_pct_uses_sl_val)
+run("adaptive_engine: default strategy trail_pct ≈ 0.495 (sl=1.5 × 0.33)",             t_adaptive_engine_trail_pct_value_for_default_strategy)
+run("adaptive_engine: _save_state uses atomic temp-file + replace()",                   t_adaptive_engine_save_state_uses_atomic_write)
+run("adaptive_engine: nightly_review iterates list snapshot (safe vs concurrent mutation)", t_adaptive_engine_nightly_review_uses_list_snapshot)
+run("portfolio_var: compute() has np.isfinite guard after portfolio_rets multiply",      t_portfolio_var_nan_guard_present)
+run("portfolio_var: NaN in portfolio returns yields zero VaR (never NaN output)",        t_portfolio_var_nan_portfolio_returns_zero_var)
+run("portfolio_var: check_pre_trade excludes existing position for new_symbol",          t_portfolio_var_check_pre_trade_excludes_duplicate_symbol)
+run("portfolio_optimizer: uses single _latest dict for atomic allocation snapshot",      t_portfolio_optimizer_single_latest_snapshot)
+run("portfolio_optimizer: should_trade reads _latest once for consistent snapshot",      t_portfolio_optimizer_should_trade_reads_latest_once)
+
+
 # ══════════════════════════════════════════════════════════════════════════
 # FINAL SUMMARY
 # ══════════════════════════════════════════════════════════════════════════

@@ -240,7 +240,7 @@ class AdaptiveLearningEngine:
         report = {"date": date.today().isoformat(), "strategies_ok": [],
                   "strategies_adapt": [], "strategies_retire": [],
                   "rebacktest_needed": [], "vix": current_vix, "regime_changed": regime_changed}
-        for key, params in self._params.items():
+        for key, params in list(self._params.items()):  # list() snapshot — safe if on_regime_change fires from a scheduler thread
             strategy, symbol = key.split("::")
             gate = GATE_THRESHOLDS.get(strategy, {})
             gate_wr = gate.get("win_rate", 55) / 100
@@ -266,7 +266,7 @@ class AdaptiveLearningEngine:
     def on_regime_change(self, old_regime: str, new_regime: str, vix: float) -> None:
         volatile_regime = new_regime in ("BEAR_VOLATILE", "HIGH_VOLATILE")
         bear_regime     = new_regime in ("BEAR_TREND", "BEAR_VOLATILE")
-        for key, params in self._params.items():
+        for key, params in list(self._params.items()):  # list() snapshot safe for concurrent callers
             strategy, symbol = key.split("::")
             if volatile_regime:
                 params.size_factor = min(params.size_factor, 0.5)
@@ -315,12 +315,12 @@ class AdaptiveLearningEngine:
         }
 
     def _init_params(self, strategy: str, symbol: str) -> AdaptiveParams:
-        cfg  = STRATEGY_CONFIG.get(strategy, {})
-        gate = GATE_THRESHOLDS.get(strategy, {})
+        cfg    = STRATEGY_CONFIG.get(strategy, {})
+        sl_val = cfg.get("sl", 1.5)
         return AdaptiveParams(
             strategy=strategy, symbol=symbol,
-            sl_pct=cfg.get("sl", 1.5), target_pct=cfg.get("t1", 3.0),
-            trail_pct=cfg.get("sl", 0.5) * 0.33,
+            sl_pct=sl_val, target_pct=cfg.get("t1", 3.0),
+            trail_pct=round(sl_val * 0.33, 3),
             min_rsi=45.0, max_rsi=67.0,
             min_adx=20.0,
         )
@@ -349,8 +349,14 @@ class AdaptiveLearningEngine:
     def _save_state(self) -> None:
         state = {k: v.to_dict() for k, v in self._params.items()}
         path = self._store / "adaptive_params.json"
-        with open(path, "w") as f:
-            json.dump(state, f, indent=2, default=str)
+        tmp  = path.with_suffix(".tmp")
+        try:
+            with open(tmp, "w") as f:
+                json.dump(state, f, indent=2, default=str)
+            tmp.replace(path)
+        except Exception as exc:
+            logger.error("adaptive_engine: state save failed: {}", exc)
+            tmp.unlink(missing_ok=True)
 
     def _load_state(self) -> None:
         path = self._store / "adaptive_params.json"

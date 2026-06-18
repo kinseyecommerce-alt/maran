@@ -58,10 +58,9 @@ class PortfolioOptimizer:
     def __init__(self) -> None:
         self._sector_map: dict[str, str] = _load_json(_SECTOR_MAP_PATH)
         self._beta_map:   dict[str, float] = _load_json(_BETA_MAP_PATH)
-        # Latest optimization result — shared across agents.
-        self._latest_allocations: dict[str, float] = {}
-        # Sharpe score per symbol from last optimization run.
-        self._latest_sharpes: dict[str, float] = {}
+        # Single atomic snapshot updated by optimize(); read by should_trade() from event loop.
+        # A single dict assignment is atomic in CPython — no torn read of allocations vs sharpes.
+        self._latest: dict = {"allocations": {}, "sharpes": {}}
 
     # ── Public API ────────────────────────────────────────────────────────────
 
@@ -77,16 +76,14 @@ class PortfolioOptimizer:
         Falls back to equal-weight if scipy is unavailable or N < 2.
         """
         if not signals:
-            self._latest_allocations = {}
-            self._latest_sharpes = {}
+            self._latest = {"allocations": {}, "sharpes": {}}
             return {}
 
         if len(signals) == 1:
             sym = signals[0]["symbol"]
             alloc = min(capital, settings.max_position_size)
-            self._latest_allocations = {sym: alloc}
-            self._latest_sharpes = {sym: self._sharpe_score(signals[0])}
-            return dict(self._latest_allocations)
+            self._latest = {"allocations": {sym: alloc}, "sharpes": {sym: self._sharpe_score(signals[0])}}
+            return {sym: alloc}
 
         # Deduplicate by symbol — keep highest score if two agents flag same symbol
         seen: dict[str, dict] = {}
@@ -107,10 +104,9 @@ class PortfolioOptimizer:
             logger.warning("[portfolio_optimizer] scipy optimization failed ({}), using equal-weight", exc)
             result = self._equal_weight(signals, capital)
 
-        self._latest_allocations = result
-        self._latest_sharpes = {
-            sig["symbol"]: self._sharpe_score(sig)
-            for sig in signals
+        self._latest = {
+            "allocations": result,
+            "sharpes": {sig["symbol"]: self._sharpe_score(sig) for sig in signals},
         }
         logger.info(
             "[portfolio_optimizer] Allocated {:.0f} across {} signals: {}",
@@ -136,25 +132,26 @@ class PortfolioOptimizer:
         - If a competing signal in the same sector has >20% better Sharpe: block.
         - Otherwise: allow (optimizer hasn't run against this exact signal set).
         """
-        if not self._latest_allocations:
+        latest = self._latest  # single read — consistent allocations+sharpes snapshot
+        if not latest["allocations"]:
             # No optimization has run — startup grace, let normal risk checks decide.
             return True, 0.0
 
         # If symbol appears in the latest allocation, it was approved.
-        if symbol in self._latest_allocations:
-            return True, self._latest_allocations[symbol]
+        if symbol in latest["allocations"]:
+            return True, latest["allocations"][symbol]
 
         # Symbol not in latest run — check whether a same-sector rival beat it.
         my_sector = self._sector_map.get(symbol, _DEFAULT_SECTOR)
         my_sharpe = self._sharpe_score(signal)
 
-        for rival_sym, rival_alloc in self._latest_allocations.items():
+        for rival_sym, rival_alloc in latest["allocations"].items():
             if rival_alloc <= 0:
                 continue
             rival_sector = self._sector_map.get(rival_sym, _DEFAULT_SECTOR)
             if rival_sector != my_sector:
                 continue
-            rival_sharpe = self._latest_sharpes.get(rival_sym, 0.0)
+            rival_sharpe = latest["sharpes"].get(rival_sym, 0.0)
             if rival_sharpe > 0 and my_sharpe > 0:
                 if rival_sharpe > my_sharpe * 1.20:
                     logger.debug(
