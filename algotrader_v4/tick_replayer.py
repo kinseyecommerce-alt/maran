@@ -125,7 +125,7 @@ class TickReplayer:
             df = df.set_index("tick_ts")
             freq = f"{bar_seconds}s"
             ohlcv = df["ltp"].resample(freq).ohlc()
-            vol   = df["volume"].resample(freq).last().diff().clip(lower=0)
+            vol   = df["volume"].resample(freq).sum()
             ohlcv["volume"] = vol
             ohlcv = ohlcv.dropna(subset=["open", "close"])
             ohlcv = ohlcv.reset_index().rename(columns={"tick_ts": "date"})

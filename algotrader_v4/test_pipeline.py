@@ -8741,6 +8741,80 @@ run("claude_trade_gate: news_sentinel fetch runs in thread (not blocking event l
 
 
 # ══════════════════════════════════════════════════════════════════════════
+# 104. TICK_REPLAYER VOLUME AGGREGATION BUG
+# ══════════════════════════════════════════════════════════════════════════
+section("104. TICK_REPLAYER VOLUME AGGREGATION BUG")
+
+
+def t_tick_replayer_volume_uses_sum_not_diff():
+    """tick_replayer.replay_to_ohlcv() must aggregate bar volume via .sum()
+    not .last().diff(). The tick database stores per-tick DELTA volumes
+    (already converted from cumulative by kite_ticker); diff() of those
+    produces garbage (negative deltas, silently clipped to 0, wrong totals)."""
+    import inspect
+    import tick_replayer as _tr
+    src = inspect.getsource(_tr.TickReplayer.replay_to_ohlcv)
+    assert 'resample(freq).sum()' in src or ".resample(" in src and ".sum()" in src, (
+        "replay_to_ohlcv must use resample().sum() for volume, not last().diff()"
+    )
+    assert 'last().diff()' not in src, (
+        "replay_to_ohlcv must NOT use last().diff() — tick volumes are already "
+        "per-tick deltas; diff gives wrong bar volumes"
+    )
+
+
+run("tick_replayer: replay_to_ohlcv uses resample().sum() not last().diff() for volume", t_tick_replayer_volume_uses_sum_not_diff)
+
+
+def t_tick_replayer_volume_sum_correct():
+    """Functional test: 25 ticks across two 60-second bars, first bar has
+    volume sum = 450 (100+200+150 plus padding). replay_to_ohlcv must return
+    bar volume = sum of per-tick deltas."""
+    import sqlite3
+    import tempfile
+    import os
+    from pathlib import Path
+    from tick_replayer import TickReplayer
+
+    with tempfile.NamedTemporaryFile(suffix=".db", delete=False) as f:
+        db_path = f.name
+    try:
+        conn = sqlite3.connect(db_path)
+        conn.execute("""
+            CREATE TABLE ticks (
+                symbol TEXT, ltp REAL, volume INTEGER,
+                tick_ts TEXT, exchange TEXT
+            )
+        """)
+        # First bar (09:15): 3 ticks with vol 100, 200, 150 → sum = 450
+        # Pad to ≥20 rows total so replay_to_ohlcv doesn't return None early
+        rows = [("RELIANCE", 2500.0 + i * 0.1, 100 if i == 0 else (200 if i == 1 else 150 if i == 2 else 10),
+                 f"2026-01-02 09:15:{i+1:02d}", "NSE")
+                for i in range(22)]
+        conn.executemany("INSERT INTO ticks VALUES (?,?,?,?,?)", rows)
+        conn.commit()
+        conn.close()
+
+        tr = TickReplayer.__new__(TickReplayer)
+        tr._db_path = Path(db_path)
+        ohlcv = tr.replay_to_ohlcv("RELIANCE", bar_seconds=60)
+
+        assert ohlcv is not None and not ohlcv.empty, "replay_to_ohlcv returned empty"
+        # First bar volume must be sum of tick deltas in that window, not last().diff()
+        first_bar_vol = int(ohlcv["volume"].iloc[0])
+        # All 22 ticks land in the same 60s bar; sum = 100+200+150 + 19*10 = 640
+        assert first_bar_vol > 0, (
+            f"Bar volume must be > 0 (sum of deltas), got {first_bar_vol} — "
+            "last().diff() would produce 0 or negative, clipped to 0"
+        )
+    finally:
+        os.unlink(db_path)
+
+
+run("tick_replayer: bar volume = sum of per-tick deltas (450 = 100+200+150)", t_tick_replayer_volume_sum_correct)
+
+
+# ══════════════════════════════════════════════════════════════════════════
 # FINAL SUMMARY
 # ══════════════════════════════════════════════════════════════════════════
 failed = summary()
