@@ -9190,6 +9190,117 @@ run("tick engine: _sanitize_ind preserves valid non-NaN floats unchanged",      
 run("tick engine: IndicatorCalc.compute returns no NaN fields on 5-row dataframe", t_compute_returns_no_nan_with_minimal_dataframe)
 
 
+# ──────────────────────────────────────────────────────────────────────────
+# 111. MULTI-MODULE — production bug fixes batch 2
+# ──────────────────────────────────────────────────────────────────────────
+section("111. MULTI-MODULE — production bug fixes batch 2")
+
+def t_master_regime_none_guard_in_source():
+    """master_agent_v5._master_review must return early when regime is None after fallback."""
+    import inspect
+    import master_agent_v5 as _m
+    src = inspect.getsource(_m.MasterAgent._master_review)
+    assert "regime is None or plan is None" in src, (
+        "_master_review must guard against None regime/plan after regime_detector failure"
+    )
+    assert "return" in src, "_master_review must return early when regime is None"
+
+def t_master_halt_trades_has_release_path():
+    """master_agent_v5._apply_directives must have a path to release halt_new_trades."""
+    import inspect
+    import master_agent_v5 as _m
+    src = inspect.getsource(_m.MasterAgent._apply_directives)
+    assert "is_trading_halted = False" in src, (
+        "_apply_directives must be able to release the trade halt (is_trading_halted = False)"
+    )
+
+def t_master_review_has_max_instances():
+    """master_agent_v5.start() must configure max_instances=1 on _master_review job."""
+    import inspect
+    import master_agent_v5 as _m
+    src = inspect.getsource(_m.MasterAgent.start)
+    assert "max_instances=1" in src, (
+        "master_review job must have max_instances=1 to prevent concurrent _apply_directives calls"
+    )
+
+def t_backtest_fetch_data_default_period_is_2y():
+    """backtest_engine._fetch_data must default to '2y' when lookback_days exceeds the table."""
+    import inspect
+    from backtest_engine import BacktestEngine as WalkForwardBacktest
+    src = inspect.getsource(WalkForwardBacktest._fetch_data)
+    # The default (pre-loop) period must NOT be "6mo" — it is now "2y"
+    assert 'period = "2y"' in src, (
+        "_fetch_data must initialise period='2y' so days > 730 still fetches max data"
+    )
+
+def t_backtest_monte_carlo_uses_local_rng():
+    """backtest_engine._monte_carlo_test must use a local RNG, not global np.random."""
+    import inspect
+    from backtest_engine import BacktestEngine as WalkForwardBacktest
+    src = inspect.getsource(WalkForwardBacktest._monte_carlo_test)
+    assert "np.random.default_rng()" in src, (
+        "_monte_carlo_test must create a local RNG instance to avoid global state race"
+    )
+    assert "np.random.permutation" not in src, (
+        "_monte_carlo_test must not use global np.random.permutation (race under concurrent calls)"
+    )
+
+def t_symbol_scanner_nan_volume_returns_none():
+    """symbol_scanner._score_symbol must return None (skip) when avg_volume is NaN."""
+    import inspect
+    import symbol_scanner as _ss
+    src = inspect.getsource(_ss.SymbolScanner._score_symbol)
+    assert "pd.isna(_avg_vol)" in src, (
+        "_score_symbol must check for NaN avg_volume (rolling mean can be NaN with <10 bars)"
+    )
+    assert "return None" in src, (
+        "_score_symbol must return None to skip symbols with NaN avg_volume"
+    )
+
+def t_institutional_flow_default_not_cached():
+    """institutional_flow.get_institutional_score must not cache default entries."""
+    import inspect
+    import institutional_flow as _if
+    src = inspect.getsource(_if.get_institutional_score)
+    # The fixed code must NOT contain "_cache[sym_upper] = default"
+    assert "_cache[sym_upper] = default" not in src, (
+        "Default entries must not be cached permanently — callers must retry on next call"
+    )
+
+def t_institutional_flow_date_only_stamped_on_data():
+    """institutional_flow.refresh_daily must only stamp _last_refresh_date when data arrived."""
+    import inspect
+    import institutional_flow as _if
+    src = inspect.getsource(_if.refresh_daily)
+    assert "delivery_map or combined_deal_map" in src or "delivery_map or block_map or bulk_map" in src or "if delivery_map or" in src, (
+        "refresh_daily must guard _last_refresh_date update behind a non-empty-data check"
+    )
+
+def t_alt_data_fii_sentiment_read_inside_lock():
+    """alt_data.AltDataEngine.summary must read _fii_sentiment inside the lock."""
+    import inspect
+    from alt_data import AltDataEngine
+    src = inspect.getsource(AltDataEngine.summary)
+    # The fii_sentiment = self._fii_sentiment assignment must appear inside the with block
+    # (i.e., before the line that reads event_flag, event_name which is outside the lock)
+    lock_pos  = src.find("with self._lock:")
+    assign_pos = src.find("fii_sentiment = self._fii_sentiment")
+    event_pos = src.find("event_flag, event_name = self.is_event_day()")
+    assert 0 < lock_pos < assign_pos < event_pos, (
+        "fii_sentiment must be captured inside 'with self._lock:' block (before is_event_day call)"
+    )
+
+run("master_agent_v5: _master_review returns early when regime is None after fallback",       t_master_regime_none_guard_in_source)
+run("master_agent_v5: _apply_directives has a release path for halt_new_trades",              t_master_halt_trades_has_release_path)
+run("master_agent_v5: _master_review job has max_instances=1 to prevent concurrent calls",   t_master_review_has_max_instances)
+run("backtest_engine: _fetch_data defaults to '2y' (not '6mo') for lookback_days > 730",     t_backtest_fetch_data_default_period_is_2y)
+run("backtest_engine: _monte_carlo_test uses local RNG (no global np.random.permutation)",    t_backtest_monte_carlo_uses_local_rng)
+run("symbol_scanner: _score_symbol returns None when avg_volume rolling mean is NaN",         t_symbol_scanner_nan_volume_returns_none)
+run("institutional_flow: default entries are not cached — callers retry on next call",        t_institutional_flow_default_not_cached)
+run("institutional_flow: _last_refresh_date only stamped when at least one source returned data", t_institutional_flow_date_only_stamped_on_data)
+run("alt_data: _fii_sentiment read inside lock for consistency with fii_data snapshot",       t_alt_data_fii_sentiment_read_inside_lock)
+
+
 # ══════════════════════════════════════════════════════════════════════════
 # FINAL SUMMARY
 # ══════════════════════════════════════════════════════════════════════════

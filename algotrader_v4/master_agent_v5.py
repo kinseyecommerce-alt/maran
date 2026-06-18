@@ -212,7 +212,8 @@ class MasterAgent:
                 agent.start(q)
 
         sq_h, sq_m = [int(x) for x in settings.squareoff_time.split(":")]
-        self._scheduler.add_job(self._master_review,   "interval", seconds=60,  id="master_review")
+        self._scheduler.add_job(self._master_review,   "interval", seconds=60,  id="master_review",
+                                 max_instances=1, coalesce=True)
         self._scheduler.add_job(self._auto_squareoff,  "cron", hour=sq_h, minute=sq_m,
                                  day_of_week="mon-fri", id="squareoff")
         self._scheduler.add_job(self._daily_reset,     "cron", hour=9, minute=15,
@@ -224,7 +225,7 @@ class MasterAgent:
         self._scheduler.add_job(self._weekly_memory_synthesis, "cron", hour=21, minute=0,
                                  day_of_week="sun", id="weekly_memory")
         self._scheduler.add_job(self._portfolio_optimize_job, "interval", minutes=15,
-                                 id="portfolio_optimize")
+                                 id="portfolio_optimize", max_instances=1, coalesce=True)
         self._scheduler.add_job(self._weekly_db_cleanup, "cron", hour=22, minute=30,
                                  day_of_week="sun", id="weekly_db_cleanup")
         self._scheduler.start()
@@ -267,6 +268,11 @@ class MasterAgent:
             logger.error("[master] Regime detection failed: {}", exc)
             regime = regime_detector.current_regime
             plan   = regime_detector.current_plan
+            if regime is None or plan is None:
+                # First-cycle failure with no prior regime — cannot call regime.value;
+                # return early and retry next 60-second cycle rather than crashing
+                # the APScheduler job permanently.
+                return
 
         # BLACK SWAN emergency bypass — no hysteresis, act immediately
         if regime == Regime.BLACK_SWAN and self._confirmed_regime != Regime.BLACK_SWAN.value:
@@ -671,10 +677,14 @@ class MasterAgent:
                     q = tick_engine.add_subscriber(f"agent_{strat}")
                     agent.start(q)
 
-        if d.get("risk_override", {}).get("halt_new_trades"):
+        _risk_override = d.get("risk_override", {})
+        if _risk_override.get("halt_new_trades"):
             risk_manager.is_trading_halted = True
-            logger.warning("[master] Claude halted new trades: {}",
-                           d.get("risk_override", {}).get("reason", ""))
+            logger.warning("[master] Claude halted new trades: {}", _risk_override.get("reason", ""))
+        elif risk_manager.is_trading_halted and _risk_override.get("halt_new_trades") is False:
+            # Claude explicitly cleared the halt (halt_new_trades: false) — honour it.
+            risk_manager.is_trading_halted = False
+            logger.info("[master] Claude released trade halt (intraday recovery)")
 
         # Apply dynamic trade gate threshold from master — capped at 55 so Opus always gets the final say.
         # If Claude omits the key, reset to the default rather than letting a stale
@@ -691,8 +701,8 @@ class MasterAgent:
             regime_name = regime_detector.current_regime.value if regime_detector.current_regime else None
             if regime_name:
                 apply_optimised_config(regime=regime_name)
-        except Exception:
-            pass
+        except Exception as exc:
+            logger.warning("[master] profit_optimizer apply failed (non-critical): {}", exc)
 
         # Log opportunity alert if present
         alert = d.get("opportunity_alert")

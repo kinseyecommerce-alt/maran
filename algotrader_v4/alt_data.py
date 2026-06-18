@@ -478,8 +478,9 @@ class AltDataEngine:
         """Return current alt data state for dashboard/API."""
         from datetime import date
         with self._lock:
-            catalysts = {sym: e["score"] for sym, e in self._announcement_cache.items()}
-            fii_data  = dict(self._fii_dii)
+            catalysts     = {sym: e["score"] for sym, e in self._announcement_cache.items()}
+            fii_data      = dict(self._fii_dii)
+            fii_sentiment = self._fii_sentiment  # read inside lock for consistency with fii_data
         event_flag, event_name = self.is_event_day()
         return {
             "catalysts":          catalysts,
@@ -488,7 +489,7 @@ class AltDataEngine:
             "days_to_next_event": self.days_to_next_event(),
             "next_fno_expiry":    str(self.next_fno_expiry()),
             "fii_dii":            fii_data,
-            "fii_sentiment":      self._fii_sentiment,
+            "fii_sentiment":      fii_sentiment,
             "earnings_blackout_symbols": [
                 row["symbol"] for row in self._load_earnings_calendar()
                 if _within_earnings_window(row)

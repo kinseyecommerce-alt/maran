@@ -448,7 +448,10 @@ class BacktestEngine:
 
     def _fetch_data(self, symbol: str, exchange: str, interval: str, days: int):
         yf_interval = self._YF_INTERVAL.get(interval, "15m")
-        period = "6mo"
+        # Default to "2y" (the max available via yfinance) so that if `days`
+        # exceeds 730 the fetch still requests the maximum rather than silently
+        # falling back to the loop's starting value of "6mo".
+        period = "2y"
         for d, p in sorted(self._YF_PERIOD.items()):
             if days <= d:
                 period = p
@@ -771,8 +774,12 @@ class BacktestEngine:
         perm_sharpes:   list[float] = []
         perm_drawdowns: list[float] = []
 
+        # Use a local RNG instance (not the global numpy state) so concurrent
+        # run_batch calls from multiple API requests don't race on shared RNG
+        # state, producing non-reproducible and mutually corrupted MC p-values.
+        _rng = np.random.default_rng()
         for _ in range(n_permutations):
-            p = np.random.permutation(real_pnls)
+            p = _rng.permutation(real_pnls)
             perm_calmars.append(_calmar(p))
             perm_sharpes.append(_sharpe(p))
             perm_drawdowns.append(_max_dd(p))

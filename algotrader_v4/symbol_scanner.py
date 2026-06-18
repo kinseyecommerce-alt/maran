@@ -445,7 +445,10 @@ class SymbolScanner:
             sc.ltp = float(close.iloc[-1])
 
             # ── Average volume ────────────────────────────────────────
-            sc.avg_volume = float(volume.rolling(10).mean().iloc[-1])
+            _avg_vol = volume.rolling(10).mean().iloc[-1]
+            if pd.isna(_avg_vol):
+                return None   # insufficient data for volume filter; skip symbol
+            sc.avg_volume = float(_avg_vol)
 
             # ── ATR % ─────────────────────────────────────────────────
             if n >= 14:

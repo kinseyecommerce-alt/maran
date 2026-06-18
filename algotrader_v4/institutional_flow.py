@@ -343,7 +343,13 @@ async def refresh_daily(symbols: Optional[list[str]] = None) -> None:
         except Exception as exc:
             logger.warning("institutional_flow: cache build failed for {}: {}", sym, exc)
 
-    _last_refresh_date = date.today()
+    if delivery_map or combined_deal_map:
+        _last_refresh_date = date.today()
+    else:
+        logger.warning(
+            "institutional_flow: all NSE data sources returned empty — "
+            "refresh not marked complete; will retry on next call"
+        )
     logger.info(
         "institutional_flow: refresh complete — {} symbols cached, "
         "{} with delivery data, {} with deal data",
@@ -395,7 +401,7 @@ async def get_institutional_score(symbol: str) -> dict:
             "institutional_flow: on-demand refresh failed for {}: {}", sym_upper, exc
         )
 
-    # Last resort: return safe defaults so callers are never blocked
-    default = _default_entry(sym_upper)
-    _cache[sym_upper] = default   # store so repeated calls don't re-fetch
-    return default
+    # Last resort: return safe defaults so callers are never blocked.
+    # Do NOT cache the default — if NSE was temporarily down the next call
+    # should retry rather than being stuck with synthetic data for the day.
+    return _default_entry(sym_upper)

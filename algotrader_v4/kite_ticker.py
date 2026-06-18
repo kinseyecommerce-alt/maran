@@ -172,8 +172,16 @@ class KiteTicker:
                 timestamp  = now_ist(),
             )
 
-            asyncio.run_coroutine_threadsafe(
+            _fut = asyncio.run_coroutine_threadsafe(
                 self._callback(sym, tick), self._loop
+            )
+            # Log exceptions from the callback so they don't silently vanish.
+            # Discarding the future without this means _process_tick crashes
+            # are invisible — ticks are dropped with no log entry.
+            _fut.add_done_callback(
+                lambda f: logger.error(
+                    "[KiteTicker] tick callback raised for {}: {}", sym, f.exception()
+                ) if not f.cancelled() and f.exception() else None
             )
 
     @property
