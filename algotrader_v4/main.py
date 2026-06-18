@@ -8,6 +8,7 @@ import asyncio
 import hashlib
 import hmac
 import re
+import threading
 import time
 from collections import defaultdict
 from datetime import datetime
@@ -211,6 +212,9 @@ async def _rate_limiter(request: Request, call_next):
             now = time.monotonic()
             calls = _rate_store[key]
             calls[:] = [t for t in calls if now - t < _RATE_WINDOW]
+            if not calls:
+                del _rate_store[key]
+                calls = _rate_store[key]
             if len(calls) >= limit:
                 return JSONResponse({"detail": "Rate limit exceeded"}, status_code=429)
             calls.append(now)
@@ -925,7 +929,10 @@ def equity_chart(symbol: str, strategy: str):
 @app.post("/backtest/weekly", tags=["Backtest"])
 async def trigger_weekly_backtest():
     """Manually trigger the weekly auto-backtest across full universe."""
-    asyncio.create_task(asyncio.to_thread(backtest_engine.weekly_auto_backtest))
+    def _log_exc(t: asyncio.Task) -> None:
+        if not t.cancelled() and t.exception():
+            logger.error("[weekly_backtest] crashed: {}", t.exception())
+    asyncio.create_task(asyncio.to_thread(backtest_engine.weekly_auto_backtest), name="weekly_backtest").add_done_callback(_log_exc)
     return {"status": "weekly backtest started", "note": "runs in background, check logs"}
 
 @app.post("/backtest/portfolio", tags=["Backtest"])
@@ -2798,23 +2805,27 @@ async def on_startup():
             except Exception as _sc_exc:
                 logger.error("Stale-claim sweep error: {}", _sc_exc)
 
-    asyncio.create_task(_release_stale_claims_loop())
+    def _log_task_exc(t: asyncio.Task) -> None:
+        if not t.cancelled() and t.exception():
+            logger.error("[startup] background task {} raised: {}", t.get_name(), t.exception())
+
+    asyncio.create_task(_release_stale_claims_loop(), name="stale_claims_loop").add_done_callback(_log_task_exc)
 
     tick_engine.start_loop()
     atomic_bracket_engine.ws_broadcast = broadcast
     logger.info("FastAPI startup: tick engine + atomic bracket engine launched")
-    asyncio.create_task(symbol_scanner.run())
+    asyncio.create_task(symbol_scanner.run(), name="symbol_scanner").add_done_callback(_log_task_exc)
 
     # Continuous broker-truth reconciliation: detects manual exits, GTT fires
     # and partial fills that happened outside this process, and corrects
     # internal TSL/guard/risk state (close-only — never places entries).
     if settings.use_position_reconciler:
         from position_reconciler import position_reconciler
-        asyncio.create_task(position_reconciler.run_loop())
+        asyncio.create_task(position_reconciler.run_loop(), name="position_reconciler").add_done_callback(_log_task_exc)
 
     # Pre-warm the Claude gate connection so the first real trade doesn't pay
     # the cold-start TCP/TLS handshake cost (~300-500 ms).
-    asyncio.create_task(_prewarm_gate())
+    asyncio.create_task(_prewarm_gate(), name="prewarm_gate").add_done_callback(_log_task_exc)
     from platform_scheduler import platform_scheduler
     platform_scheduler.start()
 
@@ -3069,10 +3080,10 @@ async def run_optimizer(
             p2 = phase2_threshold_sweep()
             phase3_regime_config(p1, p2)
 
-    if background_tasks:
-        background_tasks.add_task(_run)
-        return {"status": "started", "phase": phase or "all", "note": "check logs for progress"}
-    return {"status": "error", "detail": "no BackgroundTasks injected"}
+    if not background_tasks:
+        raise HTTPException(500, "BackgroundTasks not available")
+    background_tasks.add_task(_run)
+    return {"status": "started", "phase": phase or "all", "note": "check logs for progress"}
 
 
 @app.post("/optimizer/apply", tags=["Optimizer"])
@@ -3164,7 +3175,10 @@ async def db_cleanup(keep_days: int = Query(default=None, ge=30, le=365)):
         await loop.run_in_executor(None, vacuum_db)
         logger.info("[db/cleanup] manual cleanup complete: {}", removed)
 
-    asyncio.create_task(_run())
+    def _log_exc(t: asyncio.Task) -> None:
+        if not t.cancelled() and t.exception():
+            logger.error("[db/cleanup] task crashed: {}", t.exception())
+    asyncio.create_task(_run(), name="db_cleanup").add_done_callback(_log_exc)
     return {"status": "started", "keep_days": days}
 
 

@@ -10431,6 +10431,265 @@ run("trade_memory: _trim_file_to_max_entries uses atomic temp-file rename",     
 
 
 # ══════════════════════════════════════════════════════════════════════════
+# 118. BATCH 9/10/11 FIXES — reconciler, alt_data, signals, allocator,
+#      truedata, pattern_monitor, paper_trade_sim, twap, main
+# ══════════════════════════════════════════════════════════════════════════
+
+def t_reconciler_snapshot_uses_dict_access():
+    """position_reconciler: for-loop uses pos['order_id'] dict access after snapshot."""
+    import inspect
+    import position_reconciler as _pr
+    src = inspect.getsource(_pr.PositionReconciler.reconcile_once)
+    assert 'pos["order_id"]' in src or "pos['order_id']" in src, (
+        "reconcile_once for-loop must use dict key access pos['order_id'] after snapshot change"
+    )
+
+def t_reconciler_partial_exit_uses_ref():
+    """position_reconciler: _handle_partial_external_exit writes back via pos['_ref']."""
+    import inspect
+    import position_reconciler as _pr
+    src = inspect.getsource(_pr.PositionReconciler._handle_partial_external_exit)
+    assert '_ref' in src, (
+        "_handle_partial_external_exit must write back via pos['_ref'].quantity_remaining "
+        "not via attribute access on the snapshot dict"
+    )
+
+def t_reconciler_explicit_qty_check():
+    """position_reconciler: uses explicit falsy check for quantity_remaining (not 'or')."""
+    import inspect
+    import position_reconciler as _pr
+    src = inspect.getsource(_pr.PositionReconciler.reconcile_once)
+    # Accepts either: 'qr if qr else' or 'pos["quantity_remaining"] if'
+    assert ('qr if qr else' in src
+            or 'pos["quantity_remaining"] if' in src
+            or "pos['quantity_remaining'] if" in src), (
+        "expected = qr if qr else qty — must not use 'or' which coerces 0 to quantity"
+    )
+
+def t_gamma_scalp_zero_gamma_ascending():
+    """gamma_scalp: _zero_gamma sorts strikes ascending (price order, not distance from spot)."""
+    import inspect
+    import gamma_scalp as _gs
+    src = inspect.getsource(_gs._zero_gamma)
+    assert "sorted(strike_gex.keys())" in src, (
+        "_zero_gamma must sort by ascending strike price — sorting by distance-from-spot "
+        "gives a physically meaningless cumulation order"
+    )
+    # Verify it does NOT sort by abs(k - spot)
+    assert "abs(k - spot)" not in src, (
+        "_zero_gamma must not sort by distance from spot — only ascending price order is correct"
+    )
+
+def t_alt_data_endash_fix():
+    """alt_data: FII/DII net value parsing handles Unicode en-dash (U+2013)."""
+    import inspect
+    import alt_data as _ad
+    src = inspect.getsource(_ad.AltDataEngine.refresh_fii_dii)
+    assert "–" in src or "\\u2013" in src or "–" in src, (
+        "refresh_fii_dii must replace Unicode en-dash \\u2013 with '-' — "
+        "NSE uses en-dash for negative values, making float() fail silently"
+    )
+
+def t_alt_data_bulk_cache_lock():
+    """alt_data: _bulk_cache class-level dict is guarded by _bulk_cache_lock."""
+    import inspect
+    import alt_data as _ad
+    src = inspect.getsource(_ad.AltDataEngine.get_bulk_deals)
+    assert "_bulk_cache_lock" in src, (
+        "get_bulk_deals must acquire _bulk_cache_lock — class-level dict accessed "
+        "from multiple threads without a lock has TOCTOU races"
+    )
+    assert hasattr(_ad.AltDataEngine, "_bulk_cache_lock"), (
+        "AltDataEngine must have class-level _bulk_cache_lock attribute"
+    )
+
+def t_strategy_signals_vwap_nan_guard():
+    """strategy_signals: VWAP mean-reversion NaN guard uses math.isfinite, not truthiness."""
+    import inspect
+    import strategy_signals as _ss
+    src = inspect.getsource(_ss._signals_vwap_reversion)
+    assert "math.isfinite" in src, (
+        "_signals_vwap_reversion must guard with math.isfinite() — "
+        "NaN is truthy so 'if not vwap.iloc[i]' passes NaN silently into division"
+    )
+
+def t_strategy_signals_bollinger_zero_guard():
+    """strategy_signals: Bollinger Band width guards zero mavg to avoid div-by-zero."""
+    import inspect
+    import strategy_signals as _ss
+    src = inspect.getsource(_ss._signals_iron_condor)
+    assert "bb_mavg" in src and ("bb_mavg != 0" in src or ".where(" in src), (
+        "_signals_iron_condor must guard bollinger_mavg() == 0 before division — "
+        "zero-priced or halted symbols produce bb_mavg=0 and divide-by-zero"
+    )
+
+def t_capital_allocator_missing_net_pnl():
+    """agent_capital_allocator: missing net_pnl key causes skip, not breakeven 0."""
+    import inspect
+    import agent_capital_allocator as _aca
+    src = inspect.getsource(_aca.AgentCapitalAllocator._collect_sharpes)
+    assert "net_pnl is None" in src or "if net_pnl is None" in src, (
+        "_collect_sharpes must skip agents with missing 'net_pnl' key — "
+        "get('net_pnl', 0) treats missing data as breakeven, masking misbehaving agents"
+    )
+
+def t_capital_allocator_rlock():
+    """agent_capital_allocator: uses RLock (not Lock) so save() inside lock works."""
+    import inspect
+    import agent_capital_allocator as _aca
+    src = inspect.getsource(_aca)
+    assert "RLock" in src, (
+        "AgentCapitalAllocator must use RLock so save() can be called inside "
+        "rebalance()'s lock scope without deadlocking"
+    )
+
+def t_capital_allocator_save_inside_lock():
+    """agent_capital_allocator: rebalance() calls save() inside the lock."""
+    import inspect
+    import agent_capital_allocator as _aca
+    src = inspect.getsource(_aca.AgentCapitalAllocator.rebalance)
+    # self.save() must appear inside the 'with self._lock:' block (before its end)
+    lock_start = src.find("with self._lock:")
+    save_pos = src.find("self.save()")
+    apply_pos = src.find("self._apply_locked()")
+    assert lock_start < save_pos and apply_pos < save_pos, (
+        "rebalance() must call self.save() inside the lock block, after _apply_locked(), "
+        "to prevent a reset() race corrupting persisted weights"
+    )
+
+def t_truedata_pool_shutdown_in_finally():
+    """truedata_client: pool.shutdown() is in finally block, after fut.result()."""
+    import inspect
+    import truedata_client as _tc
+    src = inspect.getsource(_tc._get_td)
+    assert "finally" in src and "pool.shutdown" in src, (
+        "_get_td must put pool.shutdown(wait=False) in a finally block after fut.result() — "
+        "calling it before fut.result() leaves a dangling thread that may permanently "
+        "set the process-level socket timeout to 4s"
+    )
+
+def t_truedata_tick_dispatch_callback():
+    """truedata_client: run_coroutine_threadsafe result has done_callback for error logging."""
+    import inspect
+    import truedata_client as _tc
+    src = inspect.getsource(_tc.TrueDataTicker._on_tick)
+    assert "add_done_callback" in src, (
+        "_on_tick must attach add_done_callback to the future from "
+        "run_coroutine_threadsafe — unchecked futures swallow tick dispatch exceptions"
+    )
+
+def t_truedata_silent_death_detection():
+    """truedata_client: inner polling loop detects >30s silence and sets silent_death flag."""
+    import inspect
+    import truedata_client as _tc
+    src = inspect.getsource(_tc.TrueDataTicker._run)
+    assert "silent_death" in src, (
+        "_run's inner polling loop must detect feed silence >30s and set silent_death=True "
+        "to trigger reconnect rather than permanently exiting _run"
+    )
+
+def t_pattern_monitor_load_history_chronological():
+    """pattern_monitor: load_history uses append() not appendleft() to preserve order."""
+    import inspect
+    import pattern_monitor as _pm
+    src = inspect.getsource(_pm.PatternMonitor.load_history)
+    assert "dq.append(" in src, (
+        "load_history must use dq.append() not dq.appendleft() — appendleft() reverses "
+        "chronological order of loaded history, corrupting decay detection across sessions"
+    )
+    assert "appendleft" not in src, (
+        "load_history must not use appendleft — it reverses the chronological order "
+        "of loaded samples, evicting the newest data first instead of oldest"
+    )
+
+def t_paper_trade_sim_candle_timedelta():
+    """paper_trade_sim: candle timestamps use timedelta(minutes=i), not minute=30+i."""
+    import inspect
+    import paper_trade_sim as _pts
+    src = inspect.getsource(_pts.make_snapshot)
+    assert "timedelta(minutes=i)" in src, (
+        "make_snapshot candle timestamps must use _base_ts + timedelta(minutes=i) — "
+        "minute=30+i raises ValueError at minute=60 if range is ever extended past 30"
+    )
+    assert "minute=30+i" not in src, (
+        "make_snapshot must not use datetime.replace(minute=30+i) — "
+        "minutes > 59 raise ValueError silently swallowed by the outer except"
+    )
+
+def t_twap_concurrent_guard():
+    """twap_executor: place_twap raises RuntimeError if a TWAP is already in progress."""
+    import inspect
+    import twap_executor as _te
+    src_twap = inspect.getsource(_te.TWAPExecutor.place_twap)
+    src_vwap = inspect.getsource(_te.TWAPExecutor.place_vwap)
+    assert "already in progress" in src_twap, (
+        "place_twap must raise RuntimeError if symbol already has an active order — "
+        "concurrent calls silently overwrite _active[symbol], corrupting order tracking"
+    )
+    assert "already in progress" in src_vwap, (
+        "place_vwap must raise RuntimeError if symbol already has an active order"
+    )
+
+def t_main_threading_import():
+    """main: threading is imported at module level (not just inside a handler body)."""
+    import ast, inspect
+    import main as _main
+    src = inspect.getsource(_main)
+    # Find the top-level imports before the first class/function definition
+    tree = ast.parse(src)
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            for alias in node.names:
+                if alias.name == "threading":
+                    return  # found at module level
+    assert False, (
+        "main.py must import threading at module level — routes /alt-data/fii-dii/refresh "
+        "and /macro/refresh use threading.Thread() without a local import"
+    )
+
+def t_main_rate_store_eviction():
+    """main: rate limiter evicts empty keys to prevent unbounded memory growth."""
+    import inspect
+    import main as _main
+    src = inspect.getsource(_main._rate_limiter)
+    assert "del _rate_store[key]" in src, (
+        "_rate_limiter must delete empty _rate_store entries after pruning — "
+        "never evicting keys causes unbounded memory growth under spoofed-IP traffic"
+    )
+
+def t_main_create_task_callbacks():
+    """main: startup create_task calls have add_done_callback for error surfacing."""
+    import inspect
+    import main as _main
+    src = inspect.getsource(_main.on_startup)
+    assert "add_done_callback" in src, (
+        "on_startup must attach add_done_callback to background tasks — "
+        "unchecked tasks silently swallow exceptions (position_reconciler, symbol_scanner)"
+    )
+
+run("reconciler: for-loop uses pos['order_id'] dict access after snapshot",               t_reconciler_snapshot_uses_dict_access)
+run("reconciler: partial_exit writes back via pos['_ref'].quantity_remaining",             t_reconciler_partial_exit_uses_ref)
+run("reconciler: explicit falsy check for quantity_remaining (not 'or')",                  t_reconciler_explicit_qty_check)
+run("gamma_scalp: _zero_gamma sorts by ascending strike price (not distance from spot)",   t_gamma_scalp_zero_gamma_ascending)
+run("alt_data: FII/DII net parsing handles Unicode en-dash (U+2013)",                     t_alt_data_endash_fix)
+run("alt_data: _bulk_cache guarded by _bulk_cache_lock (TOCTOU race fix)",                t_alt_data_bulk_cache_lock)
+run("strategy_signals: VWAP NaN guard uses math.isfinite (not truthiness)",               t_strategy_signals_vwap_nan_guard)
+run("strategy_signals: Bollinger Band width guards zero mavg (div-by-zero fix)",          t_strategy_signals_bollinger_zero_guard)
+run("capital_allocator: missing net_pnl key causes skip not breakeven 0",                 t_capital_allocator_missing_net_pnl)
+run("capital_allocator: uses RLock so save() inside lock doesn't deadlock",               t_capital_allocator_rlock)
+run("capital_allocator: rebalance() calls save() inside lock (race fix)",                 t_capital_allocator_save_inside_lock)
+run("truedata: pool.shutdown() in finally block after fut.result()",                      t_truedata_pool_shutdown_in_finally)
+run("truedata: run_coroutine_threadsafe result has done_callback for error logging",       t_truedata_tick_dispatch_callback)
+run("truedata: inner polling loop detects >30s silence (silent_death flag)",               t_truedata_silent_death_detection)
+run("pattern_monitor: load_history uses append() not appendleft() (order preserved)",     t_pattern_monitor_load_history_chronological)
+run("paper_trade_sim: candle timestamps use timedelta(minutes=i) not minute=30+i",        t_paper_trade_sim_candle_timedelta)
+run("twap_executor: place_twap/vwap raises RuntimeError on concurrent same-symbol call",  t_twap_concurrent_guard)
+run("main: threading imported at module level (not just inside handler body)",             t_main_threading_import)
+run("main: rate limiter evicts empty _rate_store keys (no unbounded memory growth)",       t_main_rate_store_eviction)
+run("main: startup create_task calls have done_callbacks (error surfacing)",               t_main_create_task_callbacks)
+
+
+# ══════════════════════════════════════════════════════════════════════════
 # FINAL SUMMARY
 # ══════════════════════════════════════════════════════════════════════════
 failed = summary()

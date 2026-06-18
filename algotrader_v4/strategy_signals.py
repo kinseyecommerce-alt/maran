@@ -6,6 +6,7 @@ auto_backtest_runner.py.
 """
 from __future__ import annotations
 
+import math
 import pandas as pd
 import ta
 
@@ -129,9 +130,10 @@ def _signals_vwap_reversion(df: pd.DataFrame) -> pd.Series:
     rsi  = ta.momentum.RSIIndicator(close, 14).rsi()
     adx  = ta.trend.ADXIndicator(high, low, close, 14).adx()
     for i in range(15, len(df)):
-        if not vwap.iloc[i]:
+        v = float(vwap.iloc[i])
+        if not math.isfinite(v) or v == 0:
             continue
-        dev = abs(close.iloc[i] - vwap.iloc[i]) / vwap.iloc[i] * 100
+        dev = abs(close.iloc[i] - v) / v * 100
         if 0.5 < dev < 2.5 and adx.iloc[i] < 22:
             if close.iloc[i] < vwap.iloc[i] and rsi.iloc[i] < 40:
                 s.iloc[i] = 1
@@ -147,7 +149,8 @@ def _signals_iron_condor(df: pd.DataFrame) -> pd.Series:
         return s
     adx  = ta.trend.ADXIndicator(high, low, close, 14).adx()
     bb   = ta.volatility.BollingerBands(close, 20, 2)
-    bb_w = (bb.bollinger_hband() - bb.bollinger_lband()) / bb.bollinger_mavg() * 100
+    bb_mavg = bb.bollinger_mavg()
+    bb_w = (bb.bollinger_hband() - bb.bollinger_lband()) / bb_mavg.where(bb_mavg != 0) * 100
     rsi  = ta.momentum.RSIIndicator(close, 14).rsi()
     for i in range(20, len(df)):
         if adx.iloc[i] < 20 and bb_w.iloc[i] < 2.5 and 38 < rsi.iloc[i] < 62:

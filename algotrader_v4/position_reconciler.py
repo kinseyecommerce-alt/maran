@@ -88,22 +88,37 @@ class PositionReconciler:
             self._warned_untracked.clear()
             self._warn_date = today
 
+        # Snapshot all relevant fields inside the lock — pos objects are live
+        # dataclasses mutated by trailing_sl_engine.on_tick(); reading them
+        # outside the lock is a TOCTOU race with the TSL background thread.
         with trailing_sl_engine._lock:
-            tracked = [p for p in trailing_sl_engine._positions.values()
-                       if p.status == SLStatus.ACTIVE]
+            tracked = [
+                {
+                    "order_id":           p.order_id,
+                    "symbol":             p.symbol,
+                    "strategy":           p.strategy,
+                    "side":               p.side,
+                    "quantity":           p.quantity,
+                    "quantity_remaining": p.quantity_remaining,
+                    "_ref":               p,   # for write-backs only, re-acquire lock first
+                }
+                for p in trailing_sl_engine._positions.values()
+                if p.status == SLStatus.ACTIVE
+            ]
 
         findings: list[dict] = []
         tracked_symbols: set[str] = set()
 
         for pos in tracked:
             with _tsl_sl_orders_lock:
-                entry = dict(_tsl_sl_orders.get(pos.order_id) or {})
+                entry = dict(_tsl_sl_orders.get(pos["order_id"]) or {})
             # The broker instrument: option/futures contract for F&O,
             # the underlying itself for equity.
-            trade_sym = entry.get("tradingsymbol") or pos.symbol
+            trade_sym = entry.get("tradingsymbol") or pos["symbol"]
             tracked_symbols.add(trade_sym)
 
-            expected = pos.quantity_remaining or pos.quantity
+            qr = pos["quantity_remaining"]
+            expected = qr if qr else pos["quantity"]
             broker_qty = abs(broker.get(trade_sym, 0))
 
             if broker_qty == 0 and expected > 0:
@@ -155,7 +170,7 @@ class PositionReconciler:
         logger.critical(
             "[Reconciler] EXTERNAL EXIT detected: {} ({} x{}) closed at broker "
             "but still tracked — cleaning up orphan stop + TSL + guard",
-            trade_sym, pos.side, expected)
+            trade_sym, pos["side"], expected)
 
         sl_oid = entry.get("sl_order_id")
         sl_cancelled = False
@@ -169,14 +184,14 @@ class PositionReconciler:
                 logger.info("[Reconciler] orphan SL {} cancel: {} (likely already "
                             "filled/cancelled)", sl_oid, exc)
 
-        trailing_sl_engine.deregister(pos.order_id)
+        trailing_sl_engine.deregister(pos["order_id"])
         with _tsl_sl_orders_lock:
-            _tsl_sl_orders.pop(pos.order_id, None)
+            _tsl_sl_orders.pop(pos["order_id"], None)
         try:
-            order_guard.release_order(pos.symbol, pos.strategy, pos.side, pnl=0.0)
+            order_guard.release_order(pos["symbol"], pos["strategy"], pos["side"], pnl=0.0)
         except Exception as exc:
             logger.warning("[Reconciler] guard release failed for {}: {}",
-                           pos.symbol, exc)
+                           pos["symbol"], exc)
         try:
             risk_manager.position_closed()
         except Exception:
@@ -184,20 +199,22 @@ class PositionReconciler:
 
         self.stats.full_exits += 1
         return {"type": "FULL_EXTERNAL_EXIT", "symbol": trade_sym,
-                "order_id": pos.order_id, "qty": expected,
+                "order_id": pos["order_id"], "qty": expected,
                 "sl_cancelled": sl_cancelled}
 
     def _handle_partial_external_exit(self, pos, trade_sym: str,
                                       expected: int, broker_qty: int) -> dict:
         """Broker holds fewer than we track: partial manual exit or partial
         fill. Shrink our tracked quantity so SL exits don't oversell."""
+        from trailing_sl_engine import trailing_sl_engine
         logger.warning(
             "[Reconciler] PARTIAL EXTERNAL EXIT: {} tracked x{} but broker "
             "holds x{} — shrinking tracked quantity", trade_sym, expected, broker_qty)
-        pos.quantity_remaining = broker_qty
+        with trailing_sl_engine._lock:
+            pos["_ref"].quantity_remaining = broker_qty
         self.stats.partial_exits += 1
         return {"type": "PARTIAL_EXTERNAL_EXIT", "symbol": trade_sym,
-                "order_id": pos.order_id,
+                "order_id": pos["order_id"],
                 "was": expected, "now": broker_qty}
 
     # ── Async loop ────────────────────────────────────────────────────

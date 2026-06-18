@@ -76,14 +76,14 @@ def _get_td():
             finally:
                 _sock.setdefaulttimeout(_old)
 
+        pool = _cf.ThreadPoolExecutor(max_workers=1)
+        fut = pool.submit(_connect)
         try:
-            pool = _cf.ThreadPoolExecutor(max_workers=1)
-            fut = pool.submit(_connect)
-            pool.shutdown(wait=False)
             td = fut.result(timeout=5)
             _td_instance = td
             logger.info("[TrueData] Connected as {}", settings.truedata_username)
         except _cf.TimeoutError:
+            fut.cancel()
             logger.warning("[TrueData] Connection timed out (5s) — disabling for this session")
             _td_instance = _TD_SENTINEL
         except ImportError:
@@ -92,6 +92,8 @@ def _get_td():
         except Exception as exc:
             logger.error("[TrueData] Connection error: {}", exc)
             _td_instance = _TD_SENTINEL
+        finally:
+            pool.shutdown(wait=False)
     return _td_instance if _td_instance is not _TD_SENTINEL else None
 
 
@@ -180,10 +182,19 @@ class TrueDataTicker:
                 consecutive_failures = 0
                 backoff = 1.0
                 logger.info("[TrueDataTicker] subscribed {} req_ids", len(req_ids))
+                silent_death = False
                 while self._connected:
                     time.sleep(1)
-                # If self._connected was set to False (graceful stop), exit the retry loop
-                return
+                    # Detect silent feed death — socket open but no ticks arriving
+                    if (self._last_tick_ts > 0
+                            and _time_mod.monotonic() - self._last_tick_ts > 30):
+                        logger.warning("[TrueDataTicker] feed silent >30s — triggering reconnect")
+                        self._connected = False
+                        silent_death = True
+                if not silent_death:
+                    # Graceful stop() — exit the retry loop entirely
+                    return
+                # Silent feed death — fall through to outer while for reconnect
             except Exception as exc:
                 self._connected = False
                 consecutive_failures += 1
@@ -233,7 +244,11 @@ class TrueDataTicker:
                 volume=vol, change=chg, change_pct=chg_pct,
                 high=hi, low=lo, open=op, timestamp=now_ist(),
             )
-            asyncio.run_coroutine_threadsafe(self._callback(sym, t), self._loop)
+            fut_cb = asyncio.run_coroutine_threadsafe(self._callback(sym, t), self._loop)
+            fut_cb.add_done_callback(
+                lambda f: logger.error("[TrueDataTicker] tick dispatch error: {}", f.exception())
+                if not f.cancelled() and f.exception() else None
+            )
         except Exception as exc:
             logger.debug("[TrueDataTicker] tick parse error: {}", exc)
 

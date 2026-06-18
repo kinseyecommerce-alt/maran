@@ -108,6 +108,8 @@ class TWAPExecutor:
         base = qty // n
         qty_list = [base] * (n - 1) + [qty - base * (n - 1)]
 
+        if symbol in self._active and not self._active[symbol].done:
+            raise RuntimeError(f"TWAP already in progress for {symbol}")
         order = TWAPOrder(symbol=symbol, total_qty=qty, direction=direction,
                           slices=n, interval_sec=interval, tag=tag)
         self._active[symbol] = order
@@ -147,6 +149,8 @@ class TWAPExecutor:
             qty_list.append(s)
             assigned += s if i < n - 1 else 0
 
+        if symbol in self._active and not self._active[symbol].done:
+            raise RuntimeError(f"VWAP already in progress for {symbol}")
         order = TWAPOrder(symbol=symbol, total_qty=qty, direction=direction,
                           slices=n, interval_sec=interval, tag=tag)
         self._active[symbol] = order
