@@ -37,6 +37,7 @@ _LOGS_DIR.mkdir(parents=True, exist_ok=True)
 _cache: dict[str, dict] = {}   # symbol → {data..., updated_at: float}
 _CACHE_TTL_SEC = 300           # 5 minutes
 _iv_hist_lock = threading.Lock()  # guards iv_history.json read-modify-write
+_cache_lock   = threading.Lock()  # guards _cache dict reads/writes
 
 
 # ── IV history I/O ─────────────────────────────────────────────────────────────
@@ -152,8 +153,14 @@ def _parse_chain(data: dict) -> Optional[dict]:
                     return datetime.strptime(d, fmt)
                 except ValueError:
                     continue
+            logger.debug("[options_intel] unparseable expiry date '{}' — skipping", d)
             return datetime.max
-        current_expiry = min(expiry_dates, key=_exp_key)
+
+        parsed_keys = {d: _exp_key(d) for d in expiry_dates}
+        valid_dates = [d for d, dt in parsed_keys.items() if dt != datetime.max]
+        if not valid_dates:
+            return None
+        current_expiry = min(valid_dates, key=lambda d: parsed_keys[d])
 
         # Build per-strike aggregates for the current expiry only
         strikes: dict[float, dict] = {}
@@ -454,7 +461,8 @@ async def get_iv_context(symbol: str) -> dict:
         }
 
         # Store in in-memory cache
-        _cache[symbol] = {**result, "_updated_ts": time.time()}
+        with _cache_lock:
+            _cache[symbol] = {**result, "_updated_ts": time.time()}
 
         # ── Populate derivative intelligence caches from the raw chain ────────
         raw_chain = data.get("records", {}).get("data", []) if data else []
@@ -515,13 +523,14 @@ def get_cached(symbol: str) -> dict:
     Returns cached dict if fresh (< 5 min), else {}.
     """
     symbol = symbol.upper()
-    entry  = _cache.get(symbol)
-    if not entry:
-        return {}
-    age = time.time() - entry.get("_updated_ts", 0)
-    if age > _CACHE_TTL_SEC:
-        return {}
-    # Return a copy without the internal timestamp key
-    return {k: v for k, v in entry.items() if k != "_updated_ts"}
+    with _cache_lock:
+        entry = _cache.get(symbol)
+        if not entry:
+            return {}
+        age = time.time() - entry.get("_updated_ts", 0)
+        if age > _CACHE_TTL_SEC:
+            return {}
+        # Return a copy without the internal timestamp key
+        return {k: v for k, v in entry.items() if k != "_updated_ts"}
 
 

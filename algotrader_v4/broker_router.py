@@ -24,6 +24,7 @@ import threading
 from typing import Any, Optional
 
 from loguru import logger
+from notifier import notifier
 
 
 class BrokerRouter:
@@ -128,6 +129,13 @@ class BrokerRouter:
 
             except Exception as exc:
                 logger.warning("[BrokerRouter] {} mirror_entry failed (primary OK): {}", name, exc)
+                notifier.send(
+                    f"Secondary broker {name} mirror_entry FAILED",
+                    body=f"Symbol: {tradingsymbol}  Qty: {quantity}  Error: {exc}\n"
+                         f"Primary order filled but {name} position NOT opened — "
+                         "risk_manager may under-count open positions.",
+                    level="WARNING",
+                )
 
         if broker_details:
             with self._lock:

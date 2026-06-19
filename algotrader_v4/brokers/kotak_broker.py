@@ -120,6 +120,7 @@ class KotakBroker(BaseBroker):
         self._paper_orders:    dict[str, dict] = {}
         self._paper_orders_lock = Lock()
         self._paper_positions: list[dict] = []
+        self._token_lock = Lock()
 
     # ── Auth ─────────────────────────────────────────────────────────────────
 
@@ -168,8 +169,9 @@ class KotakBroker(BaseBroker):
             data = resp.json().get("data", {})
             token = data.get("token", "")
             sid   = data.get("sid", "")
-            self._access_token       = token
-            self._sid                = sid
+            with self._token_lock:
+                self._access_token = token
+                self._sid          = sid
             settings.kotak_access_token = token
             settings.kotak_sid          = sid
             logger.info("[Kotak] Auth OK — sid={} token={}…", sid[:8], token[:8])
@@ -187,8 +189,9 @@ class KotakBroker(BaseBroker):
         """Set token + sid directly (from dashboard paste or .env)."""
         token = access_token or settings.kotak_access_token or ""
         s     = sid or settings.kotak_sid or ""
-        self._access_token       = token
-        self._sid                = s
+        with self._token_lock:
+            self._access_token = token
+            self._sid          = s
         settings.kotak_access_token = token
         settings.kotak_sid          = s
         logger.info("[Kotak] Token set directly — sid={} token={}…", s[:8], token[:8])
@@ -208,7 +211,8 @@ class KotakBroker(BaseBroker):
     # ── HTTP helpers ─────────────────────────────────────────────────────────
 
     def _headers(self) -> dict:
-        return _kotak_headers(self._access_token, self._sid)
+        with self._token_lock:
+            return _kotak_headers(self._access_token, self._sid)
 
     def _get(self, path: str, params: dict | None = None) -> dict:
         try:

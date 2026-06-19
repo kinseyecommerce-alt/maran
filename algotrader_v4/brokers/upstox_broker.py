@@ -98,7 +98,8 @@ class UpstoxBroker(BaseBroker):
         self._access_token: str = settings.upstox_access_token or ""
         self._paper_orders:    list[dict] = []
         self._paper_positions: list[dict] = []
-        self._paper_lock = threading.Lock()
+        self._paper_lock  = threading.Lock()
+        self._token_lock  = threading.Lock()
 
     # ── Auth ─────────────────────────────────────────────────────────────────
 
@@ -137,7 +138,8 @@ class UpstoxBroker(BaseBroker):
                 resp.raise_for_status()
                 data = resp.json()
                 token = data.get("access_token", "")
-                self._access_token = token
+                with self._token_lock:
+                    self._access_token = token
                 settings.upstox_access_token = token
                 logger.info("[Upstox] Auth OK — token: {}…", token[:8] if token else "?")
                 return token
@@ -146,7 +148,8 @@ class UpstoxBroker(BaseBroker):
                 raise RuntimeError(f"Upstox token exchange failed: {exc}") from exc
         else:
             token = access_token or settings.upstox_access_token or ""
-            self._access_token = token
+            with self._token_lock:
+                self._access_token = token
             settings.upstox_access_token = token
             logger.info("[Upstox] Access token set directly")
             return token
@@ -165,13 +168,17 @@ class UpstoxBroker(BaseBroker):
 
     # ── Internal HTTP helpers ─────────────────────────────────────────────────
 
+    def _current_token(self) -> str:
+        with self._token_lock:
+            return self._access_token
+
     def _get(self, path: str, params: dict | None = None) -> dict:
         """Make an authenticated GET request to Upstox API."""
         url = f"{_BASE_URL}{path}"
         try:
             resp = httpx.get(
                 url, params=params,
-                headers=_headers(self._access_token),
+                headers=_headers(self._current_token()),
                 timeout=15.0,
             )
             resp.raise_for_status()
@@ -189,7 +196,7 @@ class UpstoxBroker(BaseBroker):
         try:
             resp = httpx.post(
                 url, json=payload,
-                headers=_headers(self._access_token),
+                headers=_headers(self._current_token()),
                 timeout=15.0,
             )
             resp.raise_for_status()
@@ -207,7 +214,7 @@ class UpstoxBroker(BaseBroker):
         try:
             resp = httpx.put(
                 url, json=payload,
-                headers=_headers(self._access_token),
+                headers=_headers(self._current_token()),
                 timeout=15.0,
             )
             resp.raise_for_status()
@@ -225,7 +232,7 @@ class UpstoxBroker(BaseBroker):
         try:
             resp = httpx.delete(
                 url, params=params,
-                headers=_headers(self._access_token),
+                headers=_headers(self._current_token()),
                 timeout=15.0,
             )
             resp.raise_for_status()

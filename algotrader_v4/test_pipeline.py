@@ -11655,6 +11655,217 @@ run("pairs_agent: evaluate_tick signal includes absolute stop_loss and target pr
 
 
 # ══════════════════════════════════════════════════════════════════════════
+# 115. BATCH-18 BUG-FIX REGRESSION TESTS
+# ══════════════════════════════════════════════════════════════════════════
+
+# ── H-1: claude_trade_gate.py — threading.Lock replaces asyncio.Lock ─────
+
+def t_gate_breaker_uses_threading_lock():
+    """_breaker_lock is a threading.Lock (eager, sync) not an asyncio.Lock."""
+    import threading
+    import claude_trade_gate as g
+    assert hasattr(g, "_breaker_lock"), "_breaker_lock must exist at module level"
+    assert isinstance(g._breaker_lock, type(threading.Lock())), \
+        "_breaker_lock must be a threading.Lock, not asyncio.Lock"
+
+def t_gate_record_failure_is_sync():
+    """_record_gate_failure must be a regular (sync) function, not a coroutine."""
+    import inspect
+    import claude_trade_gate as g
+    assert hasattr(g, "_record_gate_failure"), "_record_gate_failure must exist"
+    assert not inspect.iscoroutinefunction(g._record_gate_failure), \
+        "_record_gate_failure must be sync (uses threading.Lock internally)"
+
+def t_gate_no_get_breaker_lock_fn():
+    """_get_breaker_lock() asyncio factory removed — no longer present in module."""
+    import claude_trade_gate as g
+    assert not hasattr(g, "_get_breaker_lock"), \
+        "_get_breaker_lock() must be removed (replaced by module-level threading.Lock)"
+
+# ── M-1: market_regime.py — state lock ───────────────────────────────────
+
+def t_regime_state_lock_exists():
+    """MarketRegimeDetector has _state_lock = threading.Lock() in __init__."""
+    import threading
+    from market_regime import MarketRegimeDetector
+    d = MarketRegimeDetector()
+    assert hasattr(d, "_state_lock"), "MarketRegimeDetector must have _state_lock"
+    assert isinstance(d._state_lock, type(threading.Lock())), \
+        "_state_lock must be a threading.Lock"
+
+def t_regime_update_acquires_state_lock():
+    """update() writes to shared state attributes inside with self._state_lock."""
+    import inspect
+    from market_regime import MarketRegimeDetector
+    src = inspect.getsource(MarketRegimeDetector.update)
+    assert "_state_lock" in src, "update() must reference _state_lock for state writes"
+
+def t_regime_status_acquires_state_lock():
+    """status() reads shared state inside with self._state_lock."""
+    import inspect
+    from market_regime import MarketRegimeDetector
+    src = inspect.getsource(MarketRegimeDetector.status)
+    assert "_state_lock" in src, "status() must acquire _state_lock before reading shared state"
+
+# ── M-2: market_regime.py — gather exception filter ──────────────────────
+
+def t_regime_breadth_filters_exceptions():
+    """_collect_breadth filters exception objects from gather() results before summing."""
+    import inspect
+    from market_regime import MarketRegimeDetector
+    src = inspect.getsource(MarketRegimeDetector._collect_breadth)
+    assert "isinstance" in src and "Exception" in src, \
+        "_collect_breadth must filter isinstance(r, Exception) from gather() results"
+
+# ── M-3: options_intelligence.py — cache lock ────────────────────────────
+
+def t_options_cache_lock_exists():
+    """_cache_lock module-level threading.Lock exists for protecting _cache dict."""
+    import threading
+    import options_intelligence as oi
+    assert hasattr(oi, "_cache_lock"), "_cache_lock must exist at module level"
+    assert isinstance(oi._cache_lock, type(threading.Lock())), \
+        "_cache_lock must be a threading.Lock"
+
+def t_options_get_cached_acquires_cache_lock():
+    """get_cached() acquires _cache_lock before reading the cache dict."""
+    import inspect
+    import options_intelligence as oi
+    src = inspect.getsource(oi.get_cached)
+    assert "_cache_lock" in src, "get_cached() must acquire _cache_lock"
+
+def t_options_get_iv_context_acquires_cache_lock_on_write():
+    """get_iv_context() acquires _cache_lock before writing to _cache."""
+    import inspect
+    import options_intelligence as oi
+    src = inspect.getsource(oi.get_iv_context)
+    assert "_cache_lock" in src, "get_iv_context() must acquire _cache_lock before writing"
+
+# ── M-4: options_intelligence.py — expiry date fallback filter ───────────
+
+def t_options_exp_key_bad_date_filtered():
+    """_parse_chain skips expiry dates that fail all format parses."""
+    import inspect
+    import options_intelligence as oi
+    src = inspect.getsource(oi._parse_chain)
+    assert "datetime.max" in src, "_parse_chain must reference datetime.max for filtering"
+    assert "valid_dates" in src, "must build valid_dates list to exclude datetime.max entries"
+
+# ── M-6: broker_router.py — notifier on secondary failure ────────────────
+
+def t_broker_router_imports_notifier():
+    """broker_router imports notifier for secondary failure alerts."""
+    import inspect
+    import broker_router
+    src = inspect.getsource(broker_router)
+    assert "notifier" in src, "broker_router must import and use notifier"
+
+def t_broker_router_mirror_entry_calls_notifier_on_failure():
+    """mirror_entry() calls notifier.send() (not just logger) when secondary fails."""
+    import inspect
+    import broker_router
+    src = inspect.getsource(broker_router.BrokerRouter.mirror_entry)
+    assert "notifier.send" in src, \
+        "mirror_entry() must call notifier.send() on secondary broker failure"
+
+# ── M-7: brokers/upstox_broker.py — token lock ───────────────────────────
+
+def t_upstox_token_lock_exists():
+    """UpstoxBroker has _token_lock = threading.Lock() in __init__."""
+    import threading
+    from brokers.upstox_broker import UpstoxBroker
+    b = UpstoxBroker()
+    assert hasattr(b, "_token_lock"), "UpstoxBroker must have _token_lock"
+    assert isinstance(b._token_lock, type(threading.Lock())), \
+        "_token_lock must be a threading.Lock"
+
+def t_upstox_set_access_token_acquires_lock():
+    """UpstoxBroker.set_access_token acquires _token_lock before writing."""
+    import inspect
+    from brokers.upstox_broker import UpstoxBroker
+    src = inspect.getsource(UpstoxBroker.set_access_token)
+    assert "_token_lock" in src, "set_access_token must acquire _token_lock"
+
+def t_upstox_http_methods_use_current_token():
+    """UpstoxBroker._get/_post/_put/_delete all use _current_token() for auth."""
+    import inspect
+    from brokers.upstox_broker import UpstoxBroker
+    for method_name in ("_get", "_post", "_put", "_delete"):
+        src = inspect.getsource(getattr(UpstoxBroker, method_name))
+        assert "_current_token" in src or "_token_lock" in src, \
+            f"UpstoxBroker.{method_name} must read _access_token under _token_lock"
+
+# ── M-8: brokers/kotak_broker.py — token lock ────────────────────────────
+
+def t_kotak_token_lock_exists():
+    """KotakBroker has _token_lock = Lock() in __init__."""
+    import threading
+    from brokers.kotak_broker import KotakBroker
+    b = KotakBroker()
+    assert hasattr(b, "_token_lock"), "KotakBroker must have _token_lock"
+    assert isinstance(b._token_lock, type(threading.Lock())), \
+        "_token_lock must be a threading.Lock"
+
+def t_kotak_headers_acquires_lock():
+    """KotakBroker._headers() acquires _token_lock to read _access_token + _sid."""
+    import inspect
+    from brokers.kotak_broker import KotakBroker
+    src = inspect.getsource(KotakBroker._headers)
+    assert "_token_lock" in src, "KotakBroker._headers() must acquire _token_lock"
+
+# ── L-1: l2_fill_model.py — inf guard ────────────────────────────────────
+
+def t_l2_fill_rejects_inf_ltp():
+    """estimate_fill returns neutral FillEstimate when ltp is math.inf."""
+    import math
+    from l2_fill_model import estimate_fill
+    result = estimate_fill("BUY", 10, [], [], math.inf)
+    assert result.fill_prob == 1.0 and result.slippage_bps == 0.0, \
+        "estimate_fill must return neutral result when ltp is inf (not propagate NaN)"
+
+def t_l2_fill_rejects_neg_inf_ltp():
+    """estimate_fill returns neutral FillEstimate when ltp is -math.inf."""
+    import math
+    from l2_fill_model import estimate_fill
+    result = estimate_fill("BUY", 10, [], [], -math.inf)
+    assert result.fill_prob == 1.0 and result.slippage_bps == 0.0, \
+        "estimate_fill must return neutral result when ltp is -inf"
+
+def t_l2_fill_guard_uses_isfinite():
+    """estimate_fill guard uses math.isfinite (catches both nan and inf)."""
+    import inspect
+    from l2_fill_model import estimate_fill
+    src = inspect.getsource(estimate_fill)
+    assert "isfinite" in src, \
+        "estimate_fill must use math.isfinite (guards both nan and inf)"
+    assert "isnan" not in src, \
+        "estimate_fill must NOT use math.isnan alone (misses inf inputs)"
+
+
+run("gate: _breaker_lock is threading.Lock (not asyncio.Lock)",                           t_gate_breaker_uses_threading_lock)
+run("gate: _record_gate_failure is sync (threading.Lock, not async/coroutine)",           t_gate_record_failure_is_sync)
+run("gate: _get_breaker_lock() factory removed (replaced by eager module-level lock)",    t_gate_no_get_breaker_lock_fn)
+run("regime: _state_lock = threading.Lock() present in __init__",                        t_regime_state_lock_exists)
+run("regime: update() acquires _state_lock before mutating shared state",                 t_regime_update_acquires_state_lock)
+run("regime: status() acquires _state_lock before reading shared state",                  t_regime_status_acquires_state_lock)
+run("regime: _collect_breadth filters isinstance(r, Exception) from gather() outcomes",  t_regime_breadth_filters_exceptions)
+run("options_intel: _cache_lock = threading.Lock() exists at module level",               t_options_cache_lock_exists)
+run("options_intel: get_cached() acquires _cache_lock for dict read",                     t_options_get_cached_acquires_cache_lock)
+run("options_intel: get_iv_context() acquires _cache_lock before writing cache",          t_options_get_iv_context_acquires_cache_lock_on_write)
+run("options_intel: _parse_chain filters datetime.max expiries before min()",             t_options_exp_key_bad_date_filtered)
+run("broker_router: imports notifier for secondary failure alerts",                        t_broker_router_imports_notifier)
+run("broker_router: mirror_entry() calls notifier.send() on secondary failure",           t_broker_router_mirror_entry_calls_notifier_on_failure)
+run("upstox: _token_lock = threading.Lock() present in __init__",                        t_upstox_token_lock_exists)
+run("upstox: set_access_token() acquires _token_lock before writing _access_token",       t_upstox_set_access_token_acquires_lock)
+run("upstox: _get/_post/_put/_delete all use _current_token() (lock-protected read)",    t_upstox_http_methods_use_current_token)
+run("kotak: _token_lock = Lock() present in __init__",                                   t_kotak_token_lock_exists)
+run("kotak: _headers() acquires _token_lock to read _access_token + _sid",               t_kotak_headers_acquires_lock)
+run("l2_fill: estimate_fill returns neutral when ltp=inf (not NaN downstream)",          t_l2_fill_rejects_inf_ltp)
+run("l2_fill: estimate_fill returns neutral when ltp=-inf",                               t_l2_fill_rejects_neg_inf_ltp)
+run("l2_fill: guard uses math.isfinite, not math.isnan (catches both nan and inf)",      t_l2_fill_guard_uses_isfinite)
+
+
+# ══════════════════════════════════════════════════════════════════════════
 # FINAL SUMMARY
 # ══════════════════════════════════════════════════════════════════════════
 failed = summary()
