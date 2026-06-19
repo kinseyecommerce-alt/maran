@@ -45,7 +45,14 @@ def _load_progress() -> dict:
 
 
 def _save_progress(progress: dict) -> None:
-    PROGRESS_FILE.write_text(json.dumps(progress, indent=2))
+    tmp = PROGRESS_FILE.with_suffix(".tmp")
+    try:
+        with open(tmp, "w") as f:
+            json.dump(progress, f, indent=2)
+        tmp.replace(PROGRESS_FILE)
+    except Exception as exc:
+        logger.warning("_save_progress failed: {}", exc)
+        tmp.unlink(missing_ok=True)
 
 
 def _load_approved() -> dict:
@@ -55,7 +62,14 @@ def _load_approved() -> dict:
 
 
 def _save_approved(approved: dict) -> None:
-    APPROVED_FILE.write_text(json.dumps(approved, indent=2, default=str))
+    tmp = APPROVED_FILE.with_suffix(".tmp")
+    try:
+        with open(tmp, "w") as f:
+            json.dump(approved, f, indent=2, default=str)
+        tmp.replace(APPROVED_FILE)
+    except Exception as exc:
+        logger.warning("_save_approved failed: {}", exc)
+        tmp.unlink(missing_ok=True)
 
 
 async def _run_one(symbol: str, strategy: str, sem: asyncio.Semaphore,
@@ -89,7 +103,7 @@ async def _run_one(symbol: str, strategy: str, sem: asyncio.Semaphore,
                     avg_loss_pct=result.avg_loss_pct if hasattr(result, "avg_loss_pct") else cfg.get("sl", 1.5) * 0.7,
                     min_rsi=45.0 if result.win_rate >= 55 else 48.0,
                     max_rsi=67.0 if result.win_rate >= 55 else 63.0,
-                    min_adx=float(gate.get("win_rate", 55)) / 5,
+                    min_adx=20.0,
                     status="ACTIVE" if result.passed else "CAUTIOUS",
                 )
                 adaptive_engine._params[params_key] = new_params
@@ -112,7 +126,7 @@ async def _run_one(symbol: str, strategy: str, sem: asyncio.Semaphore,
 
         except Exception as exc:
             logger.warning("  {} {} error: {}", symbol, strategy, exc)
-            progress[key] = {"done": True, "passed": False, "error": str(exc),
+            progress[key] = {"done": False, "passed": False, "error": str(exc),
                              "ts": datetime.now().isoformat()}
             return symbol, strategy, False, f"❌ ERROR"
 
@@ -136,12 +150,15 @@ async def learn(symbols: list[str], strategies: list[str],
     print(f"  Concurrency: {concurrency} | Resume: {resume}")
     print(f"{'═'*60}\n")
 
+    # Collect telegram tasks to await at end (fire-and-forget loses messages on loop shutdown)
+    _tg_tasks: list = []
+
     # Notify start
-    asyncio.create_task(send_telegram(
+    _tg_tasks.append(asyncio.ensure_future(send_telegram(
         f"🧠 <b>Historical Learning Started</b>\n"
         f"{len(symbols)} Nifty-100 symbols × {len(strategies)} strategies\n"
         f"Expected time: ~{total//concurrency//6} min"
-    ))
+    )))
 
     tasks = []
     for symbol in symbols:
@@ -181,10 +198,10 @@ async def learn(symbols: list[str], strategies: list[str],
         if pct >= milestone_pct + 25:
             milestone_pct = (pct // 25) * 25
             pass_counts = {s: len(v) for s, v in approved.items()}
-            asyncio.create_task(send_telegram(
+            _tg_tasks.append(asyncio.ensure_future(send_telegram(
                 f"🧠 Learning {milestone_pct}% done ({done}/{total})\n"
                 + "\n".join(f"  {s}: {n} approved" for s, n in pass_counts.items())
-            ))
+            )))
 
     # Final save
     _save_progress(progress)
@@ -207,12 +224,15 @@ async def learn(symbols: list[str], strategies: list[str],
     print(f"    USE_NIFTY100_WATCHLIST=true")
     print(f"{'═'*60}\n")
 
-    asyncio.create_task(send_telegram(
+    await send_telegram(
         f"✅ <b>Historical Learning Complete</b>\n"
         f"Time: {elapsed//60}m{elapsed%60:02d}s\n"
         + "\n".join(f"  {s}: {n} symbols approved" for s, n in pass_counts.items()) +
         f"\n\nSet SKIP_STARTUP_BACKTEST=true to use pre-learned params."
-    ))
+    )
+    # Flush any pending milestone notifications
+    if _tg_tasks:
+        await asyncio.gather(*_tg_tasks, return_exceptions=True)
 
 
 def main() -> None:

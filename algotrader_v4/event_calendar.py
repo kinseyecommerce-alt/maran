@@ -78,14 +78,14 @@ def get_event_risk(symbol: str, current_time: Optional[datetime] = None) -> dict
         for ev in events:
             dt: datetime = ev["dt"]
             delta_hours = (dt - now).total_seconds() / 3600.0
-            if -1.0 <= delta_hours < min_hours:   # allow 1h past (event day, pre-open)
+            if delta_hours < min_hours:   # include same-day past events (midnight-stored)
                 min_hours = delta_hours
                 worst_event = ev
 
         if worst_event is None:
             return dict(_SAFE_RESULT)
 
-        hours = min_hours
+        hours = max(0.0, min_hours)   # treat past events on same day as hours=0
         risk_level, size_factor = "NONE", 1.0
 
         # Results *today* are treated as HIGH regardless of exact time
@@ -128,6 +128,7 @@ async def refresh_calendar() -> None:
     """
     logger.info("[events] refreshing event calendar...")
     try:
+        _event_cache.clear()
         await asyncio.gather(
             _fetch_corporate_actions(),
             _fetch_event_calendar(),

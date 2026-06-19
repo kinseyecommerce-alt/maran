@@ -137,9 +137,10 @@ def get_kelly_fraction(agent_name: str) -> float:
     """
     try:
         from adaptive_engine import adaptive_engine as _ae
-        prefix = f"{agent_name}::"
-        params_list = [v for k, v in _ae._params.items() if k.startswith(prefix)]
-        trades_total = sum(len(t) for k, t in _ae._trades.items() if k.startswith(prefix))
+        with _ae._lock:
+            prefix = f"{agent_name}::"
+            params_list = [v for k, v in _ae._params.items() if k.startswith(prefix)]
+            trades_total = sum(len(t) for k, t in _ae._trades.items() if k.startswith(prefix))
         if trades_total < 10 or not params_list:
             return 0.0
         n = len(params_list)
@@ -147,7 +148,8 @@ def get_kelly_fraction(agent_name: str) -> float:
         avg_win  = sum(p.avg_win_pct for p in params_list) / n
         avg_loss = abs(sum(p.avg_loss_pct for p in params_list) / n)
         return _compute_kelly(win_rate, avg_win, avg_loss)
-    except Exception:
+    except Exception as exc:
+        logger.debug("[RiskManager] Kelly fraction calculation failed for {}: {}", agent_name, exc)
         return 0.0
 
 
@@ -299,7 +301,7 @@ class RiskManager:
         return True, "OK"
 
     def _check_daily_loss(self) -> tuple[bool, str]:
-        if self.daily_realised_pnl < -settings.max_daily_loss:
+        if self.daily_realised_pnl <= -settings.max_daily_loss:
             return False, (
                 f"Daily loss limit ₹{settings.max_daily_loss:.0f} breached "
                 f"(current P&L ₹{self.daily_realised_pnl:.0f})"
@@ -362,7 +364,8 @@ class RiskManager:
             logger.debug("Kelly sizing: agent={} kf={:.3f} cap=₹{:.0f}", agent, kf, cap)
         if risk_pct and price > 0:
             sl_amount = price * (settings.stop_loss_pct / 100)
-            cap = min(cap, (cap * risk_pct / 100) / sl_amount * price)
+            if sl_amount > 0:   # guard: stop_loss_pct=0 would cause ZeroDivisionError
+                cap = min(cap, (cap * risk_pct / 100) / sl_amount * price)
         qty = int(cap // price)
         if qty <= 0:
             # Capital cannot cover even 1 share — skip the trade rather than
@@ -400,7 +403,9 @@ class RiskManager:
         max_affordable = int(settings.max_position_size // price)
         if qty > max_affordable:
             qty = max_affordable
-        return max(qty, 1)
+        # Do NOT force qty=1 when max_affordable==0: a single share would exceed
+        # max_position_size. Return qty as-is (0 means skip the trade).
+        return qty
 
     def sl_price(self, entry: float, side: str) -> float:
         pct = settings.stop_loss_pct / 100
@@ -450,13 +455,15 @@ class RiskManager:
             sl_pct = settings.stop_loss_pct / 100
 
         sl_dist = max(price * sl_pct, price * 0.003)
-        qty = int(risk_amount / sl_dist) if sl_dist > 0 else 1
+        qty = int(risk_amount / sl_dist) if sl_dist > 0 else 0
+        if qty == 0:
+            return 0  # risk budget too small for even 1 share at this SL distance
         max_qty = int(settings.max_position_size // price)
         if max_qty <= 0:
             # max_position_size cannot cover even 1 share — skip the trade
             return 0
         # Cap to max_position_size AND to the actual affordable capital
-        return max(1, min(qty, max_qty, int(cap // price)))
+        return min(qty, max_qty, int(cap // price))
 
     def kelly_fraction(self, strategy: str, symbol: str = "") -> float:
         """
@@ -469,8 +476,8 @@ class RiskManager:
             if getattr(params, "adaptation_count", 0) < 10:
                 return 1.0
             W       = getattr(params, "win_rate_20", 0.5)
-            avg_win = getattr(params, "avg_win_pct", 1.0)
-            avg_loss = getattr(params, "avg_loss_pct", 1.0)
+            avg_win = abs(getattr(params, "avg_win_pct", 1.0))
+            avg_loss = abs(getattr(params, "avg_loss_pct", 1.0))   # stored as negative, need magnitude
             R       = avg_win / max(avg_loss, 0.01)
             kelly   = W - (1 - W) / max(R, 0.1)
             return max(0.25, min(1.5, kelly / 2.0))
@@ -546,35 +553,50 @@ class RiskManager:
             logger.warning("Risk manager: could not restore daily P&L from DB — {}", exc)
 
     def record_trade(self, pnl: float) -> None:
+        import threading as _threading
         with self._lock:
             prev_pnl = self.daily_realised_pnl
             self.daily_realised_pnl += pnl
             self.trades_today += 1
-        logger.info("Trade P&L ₹{:.0f} | Day total ₹{:.0f}", pnl, self.daily_realised_pnl)
+            new_pnl = self.daily_realised_pnl  # capture inside lock to avoid race
+            # BUG 13 fix: halt trading immediately when loss limit is crossed so no
+            # new orders slip in before the next check_before_order call.
+            max_loss = settings.max_daily_loss or 0
+            if max_loss > 0 and new_pnl <= -abs(max_loss):
+                self.is_trading_halted = True
+        logger.info("Trade P&L ₹{:.0f} | Day total ₹{:.0f}", pnl, new_pnl)
         # Broadcast risk_alert when daily loss crosses 50% of max_daily_loss
         max_loss = settings.max_daily_loss or 0
         if max_loss > 0:
             threshold = -0.5 * max_loss
-            if self.daily_realised_pnl < threshold <= prev_pnl:
+            if new_pnl < threshold <= prev_pnl:
                 if self.ws_broadcast is not None:
                     import asyncio
                     payload = {
                         "event": "risk_alert",
                         "type":  "daily_loss_50pct",
-                        "pnl":   self.daily_realised_pnl,
+                        "pnl":   new_pnl,   # use captured value; reading daily_realised_pnl here is a race
                     }
                     try:
                         loop = asyncio.get_running_loop()
-                        loop.create_task(self.ws_broadcast(payload))
+                        t = loop.create_task(self.ws_broadcast(payload))
+                        t.add_done_callback(lambda _t: _t.exception() and logger.warning(
+                            "[RiskManager] ws_broadcast error: {}", _t.exception()))
                     except RuntimeError:
                         pass
+                # BUG 11 fix: send notification in a daemon thread to avoid blocking
+                # the async call path with a synchronous SMTP/Telegram call.
                 try:
                     from notifier import notifier as _notifier
-                    _notifier.send(
-                        subject=f"50% daily loss warning — ₹{self.daily_realised_pnl:.0f}",
-                        body=f"Daily loss has crossed 50% of the ₹{max_loss:.0f} limit.",
-                        level="WARNING",
-                    )
+                    _threading.Thread(
+                        target=lambda: _notifier.send(
+                            subject=f"50% daily loss warning — ₹{new_pnl:.0f}",
+                            body=f"Daily loss has crossed 50% of the ₹{max_loss:.0f} limit.",
+                            level="WARNING",
+                        ),
+                        daemon=True,
+                        name="risk-50pct-notify",
+                    ).start()
                 except Exception:
                     pass
 

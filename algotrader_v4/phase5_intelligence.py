@@ -3,8 +3,8 @@ Phase 5: Intelligence Pipeline Test
 Tests market regime, options intelligence, levels, correlation guard, multi-timeframe, adaptive engine.
 Uses the ACTUAL exported names from each module.
 """
-import sys
-sys.path.insert(0, '/home/user/JAG/algotrader_v4')
+import sys, os
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from datetime import datetime
 

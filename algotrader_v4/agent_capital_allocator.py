@@ -24,7 +24,7 @@ from __future__ import annotations
 
 import json
 import math
-from threading import Lock
+from threading import RLock
 from typing import Optional
 
 from loguru import logger
@@ -59,7 +59,7 @@ class AgentCapitalAllocator:
     """Monitors rolling per-agent Sharpe and shifts capital bucket sizes."""
 
     def __init__(self) -> None:
-        self._lock = Lock()
+        self._lock = RLock()
         # bucket → current pct override (None = use settings default)
         self._overrides: dict[str, float] = {}
         # bucket → baseline pct (snapshotted at first rebalance to define floor)
@@ -77,8 +77,8 @@ class AgentCapitalAllocator:
             with self._lock:
                 self._overrides = {k: float(v) for k, v in data.get("overrides", {}).items()}
                 self._baselines = {k: float(v) for k, v in data.get("baselines", {}).items()}
-            # Apply restored overrides to settings immediately
-            self._apply_locked()
+                # Apply restored overrides to settings inside the lock
+                self._apply_locked()
             logger.info("[Allocator] restored capital weights: {}", self._overrides)
         except Exception as exc:
             logger.warning("[Allocator] load failed (non-critical): {}", exc)
@@ -88,7 +88,7 @@ class AgentCapitalAllocator:
         try:
             from state_store import set_kv
             with self._lock:
-                payload = {"overrides": self._overrides, "baselines": self._baselines}
+                payload = {"overrides": dict(self._overrides), "baselines": dict(self._baselines)}
             set_kv(_KV_KEY, json.dumps(payload))
         except Exception as exc:
             logger.warning("[Allocator] save failed (non-critical): {}", exc)
@@ -124,8 +124,7 @@ class AgentCapitalAllocator:
             result = self._compute_shift(current, sharpes)
             self._overrides.update(result["new"])
             self._apply_locked()
-
-        self.save()
+            self.save()  # inside lock — RLock allows reentrant acquisition
         logger.info("[Allocator] rebalanced: {}", result["delta"])
         return result
 
@@ -148,7 +147,10 @@ class AgentCapitalAllocator:
                     # get_trade_stats returns aggregate totals, not per-trade series.
                     # Use net_pnl / n as a mean-return proxy and derive a directional
                     # Sharpe: positive → capital shifts up, negative → shifts down.
-                    mean_pnl = stats.get("net_pnl", 0) / max(n, 1)
+                    net_pnl = stats.get("net_pnl")
+                    if net_pnl is None:
+                        continue
+                    mean_pnl = net_pnl / max(n, 1)
                     sharpe_vals.append(mean_pnl / max(abs(mean_pnl) * 0.5, 0.01))
                 except Exception:
                     continue
@@ -213,7 +215,7 @@ class AgentCapitalAllocator:
             for bucket, baseline in self._baselines.items():
                 self._overrides[bucket] = baseline
             self._apply_locked()
-        self.save()
+            self.save()  # inside lock — RLock allows reentrant acquisition
         logger.info("[Allocator] capital weights reset to baselines")
 
     def status(self) -> dict:

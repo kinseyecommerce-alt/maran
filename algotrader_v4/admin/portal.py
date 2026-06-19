@@ -151,6 +151,7 @@ def api_start(username: str, _: str = Depends(_auth)):
         cwd=str(_APP_DIR), env=env,
         stdout=log_file, stderr=log_file,
     )
+    log_file.close()  # child inherited the fd; parent's copy can be freed
 
     entry["pid"] = proc.pid
     _save_registry(reg)

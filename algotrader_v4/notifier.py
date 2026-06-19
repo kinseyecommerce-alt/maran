@@ -45,7 +45,7 @@ class Notifier:
                 self.send_email(full_subject, full_body)
                 logger.debug("Notifier: email sent — {}", full_subject)
             except Exception as exc:
-                logger.debug("Notifier: email failed — {}: {}", full_subject, exc)
+                logger.warning("Notifier: email failed — {}: {}", full_subject, exc)
 
         # Telegram
         if (getattr(settings, "telegram_bot_token", "")
@@ -55,7 +55,7 @@ class Notifier:
                 self.send_telegram(msg)
                 logger.debug("Notifier: telegram sent — {}", full_subject)
             except Exception as exc:
-                logger.debug("Notifier: telegram failed — {}: {}", full_subject, exc)
+                logger.warning("Notifier: telegram failed — {}: {}", full_subject, exc)
 
     def send_email(self, subject: str, body: str) -> None:
         """SMTP/TLS using smtplib; smtp_user → alert_email."""
@@ -74,9 +74,10 @@ class Notifier:
         msg["To"] = alert_email
         msg.attach(MIMEText(body, "plain"))
 
-        with smtplib.SMTP(smtp_host, smtp_port) as server:
+        with smtplib.SMTP(smtp_host, smtp_port, timeout=10) as server:
             server.ehlo()
             server.starttls()
+            server.ehlo()  # required after TLS — server re-advertises AUTH capability
             server.login(smtp_user, smtp_pass)
             server.sendmail(smtp_user, alert_email, msg.as_string())
 
@@ -96,7 +97,9 @@ class Notifier:
             method="POST",
         )
         with urllib.request.urlopen(req, timeout=10) as resp:
-            resp.read()
+            data = json.loads(resp.read().decode())
+        if not data.get("ok"):
+            raise RuntimeError(f"Telegram API error: {data.get('description', 'unknown')}")
 
     def send_daily_summary(
         self,

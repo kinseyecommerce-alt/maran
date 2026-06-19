@@ -27,6 +27,7 @@ import argparse
 import itertools
 import json
 import os
+import threading
 import time
 from copy import deepcopy
 from datetime import datetime
@@ -45,11 +46,17 @@ _OUT_DIR.mkdir(parents=True, exist_ok=True)
 
 _ENGINE = BacktestEngine()
 
+# Serializes settings mutations during optimization — prevents two concurrent
+# phase1 runs from interleaving their _patch_settings / _restore_settings calls.
+_opt_lock = threading.Lock()
+
 # ── Symbols with confirmed simulation data ─────────────────────────────────
-_SYMBOLS = [
-    d for d in os.listdir("logs/historical_data")
-    if (Path("logs/historical_data") / d / "15m.csv").exists()
-][:10]   # top 10 to keep runtime reasonable
+_HIST_BASE = Path("logs/historical_data")
+_SYMBOLS = (
+    [d for d in os.listdir(_HIST_BASE)
+     if (_HIST_BASE / d / "15m.csv").exists()][:10]
+    if _HIST_BASE.exists() else []
+)
 
 # ── Parameter grids per strategy ─────────────────────────────────────────────
 _GRIDS: dict[str, dict[str, list]] = {
@@ -127,10 +134,11 @@ def phase1_optimise(verbose: bool = True) -> dict[str, dict]:
 
         for combo in combos:
             params = dict(zip(keys, combo))
-            # Temporarily patch settings
-            orig = {k: getattr(settings, f"{k.replace('pct','pct_')}{strategy}", None)
-                    for k in keys}
-            _patch_settings(strategy, params)
+            with _opt_lock:
+                # Temporarily patch settings — lock prevents concurrent optimization
+                # runs from interleaving patch/restore and corrupting live settings.
+                orig = {k: getattr(settings, _attr_name(strategy, k), None) for k in keys}
+                _patch_settings(strategy, params)
 
             combo_scores = []
             for sym in symbols:
@@ -139,10 +147,11 @@ def phase1_optimise(verbose: bool = True) -> dict[str, dict]:
                                     lookback_days=settings.bt_lookback_days,
                                     n_folds=settings.bt_wf_folds)
                     combo_scores.append(_score(r))
-                except Exception:
-                    pass
+                except Exception as exc:
+                    logger.debug("Phase 1: backtest failed for {} [{}] — skipping: {}", sym, strategy, exc)
 
-            _restore_settings(strategy, orig)
+            with _opt_lock:
+                _restore_settings(strategy, orig)
 
             if not combo_scores:
                 continue
@@ -173,9 +182,18 @@ def phase1_optimise(verbose: bool = True) -> dict[str, dict]:
     return best_params
 
 
+def _attr_name(strategy: str, k: str) -> str:
+    """Map optimizer param key to Settings attribute name."""
+    if k == "target_pct":
+        return f"tgt_pct_{strategy}"
+    if "pct" in k:
+        return f"{k.replace('pct', 'pct_')}{strategy}"
+    return f"{k}_{strategy}"
+
+
 def _patch_settings(strategy: str, params: dict) -> None:
     for k, v in params.items():
-        attr = f"{k.replace('pct', 'pct_')}{strategy}"
+        attr = _attr_name(strategy, k)
         if hasattr(settings, attr):
             setattr(settings, attr, v)
         elif k == "min_score":
@@ -188,7 +206,7 @@ def _restore_settings(strategy: str, orig: dict) -> None:
     for k, v in orig.items():
         if v is None:
             continue
-        attr = f"{k.replace('pct', 'pct_')}{strategy}"
+        attr = _attr_name(strategy, k)
         if hasattr(settings, attr):
             setattr(settings, attr, v)
         elif k == "min_score":
@@ -395,7 +413,7 @@ def apply_optimised_config(regime: str | None = None) -> dict:
             applied["claude_gate_threshold"] = t
             for strategy, overrides in regime_data.get("strategy_overrides", {}).items():
                 for k, v in overrides.items():
-                    attr = f"{k.replace('pct', 'pct_')}{strategy}" if "pct" in k else f"{k}_{strategy}"
+                    attr = _attr_name(strategy, k)
                     if hasattr(settings, attr):
                         setattr(settings, attr, v)
                         applied[attr] = v
@@ -409,7 +427,7 @@ def apply_optimised_config(regime: str | None = None) -> dict:
             for k, v in params.items():
                 if k in ("avg_score",):
                     continue
-                attr = f"{k.replace('pct', 'pct_')}{strategy}" if "pct" in k else f"{k}_{strategy}"
+                attr = _attr_name(strategy, k)
                 if hasattr(settings, attr):
                     setattr(settings, attr, v)
                     applied[attr] = v
@@ -428,12 +446,17 @@ def apply_optimised_config(regime: str | None = None) -> dict:
 def _save_params(phase: str, data: dict) -> None:
     existing: dict = {}
     if _PARAMS_F.exists():
-        with open(_PARAMS_F) as f:
-            existing = json.load(f)
+        try:
+            with open(_PARAMS_F) as f:
+                existing = json.load(f)
+        except (json.JSONDecodeError, OSError):
+            logger.warning("[optimizer] corrupt params file — starting fresh")
     existing[phase] = data
     existing["updated_at"] = datetime.now().isoformat()
-    with open(_PARAMS_F, "w") as f:
+    tmp = _PARAMS_F.with_suffix(".tmp")
+    with open(tmp, "w") as f:
         json.dump(existing, f, indent=2)
+    tmp.replace(_PARAMS_F)   # atomic rename on Linux
 
 
 # ─────────────────────────────────────────────────────────────────────────────

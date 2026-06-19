@@ -72,6 +72,10 @@ def build_gex_profile(symbol: str, chain: list[dict], spot: float,
     Build GEX profile from NSE chain list.
     chain items: {strike, CE:{iv:%, oi:int}, PE:{iv:%, oi:int}}
     """
+    if spot <= 0:
+        return GEXProfile(symbol=symbol, spot=spot, net_gex=0.0, regime="NEUTRAL",
+                          top_call_wall=None, top_put_wall=None, zero_gamma_level=None,
+                          flip_pct=None, pin_risk=False, pin_strike=None)
     T = max(days_to_expiry / 365.0, 0.5 / 365.0)
     strike_gex: dict[int, tuple[float, int]] = {}   # strike → (gex, total_oi)
 
@@ -149,13 +153,17 @@ def build_gex_profile(symbol: str, chain: list[dict], spot: float,
 
 
 def _zero_gamma(strike_gex: dict[int, tuple], spot: float) -> Optional[float]:
-    """Approximate the price level where net GEX flips sign (walk outward from spot)."""
+    """Approximate the price level where net GEX flips sign.
+
+    Walk strikes in ascending price order — the zero-gamma level is where
+    cumulative dealer GEX changes sign along the price axis.  Sorting by
+    distance-from-spot produces a physically meaningless cumulation order.
+    """
     if not strike_gex:
         return None
-    sorted_strikes = sorted(strike_gex.keys(), key=lambda k: abs(k - spot))
     cum = 0.0
     prev_sign = None
-    for k in sorted_strikes:
+    for k in sorted(strike_gex.keys()):  # ascending strike price
         cum += strike_gex[k][0]
         sign = 1 if cum >= 0 else -1
         if prev_sign is not None and sign != prev_sign:

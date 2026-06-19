@@ -41,6 +41,12 @@ class TWAPExecutor:
 
     def __init__(self) -> None:
         self._active: dict[str, TWAPOrder] = {}
+        self._start_lock: asyncio.Lock | None = None   # lazy init — event loop may not exist yet
+
+    def _get_lock(self) -> asyncio.Lock:
+        if self._start_lock is None:
+            self._start_lock = asyncio.Lock()
+        return self._start_lock
 
     async def _place_single(
         self, symbol: str, qty: int, direction: str,
@@ -96,7 +102,7 @@ class TWAPExecutor:
         loop: asyncio.AbstractEventLoop | None = None,
     ) -> list[str]:
         """TWAP: equal qty per slice. Falls back to single order when disabled or qty too small."""
-        loop = loop or asyncio.get_event_loop()
+        loop = loop or asyncio.get_running_loop()
         if not settings.use_twap or qty < _threshold():
             logger.debug("TWAP bypassed (use_twap={} qty={} threshold={}), single order",
                          settings.use_twap, qty, _threshold())
@@ -108,9 +114,12 @@ class TWAPExecutor:
         base = qty // n
         qty_list = [base] * (n - 1) + [qty - base * (n - 1)]
 
-        order = TWAPOrder(symbol=symbol, total_qty=qty, direction=direction,
-                          slices=n, interval_sec=interval, tag=tag)
-        self._active[symbol] = order
+        async with self._get_lock():
+            if symbol in self._active and not self._active[symbol].done:
+                raise RuntimeError(f"TWAP already in progress for {symbol}")
+            order = TWAPOrder(symbol=symbol, total_qty=qty, direction=direction,
+                              slices=n, interval_sec=interval, tag=tag)
+            self._active[symbol] = order
         logger.info("TWAP start | {} {} {} qty={} slices={} interval={:.1f}s",
                     direction, symbol, exchange, qty, n, interval)
         return await self._run_slices(order, qty_list, exchange, product, loop)
@@ -127,8 +136,8 @@ class TWAPExecutor:
         loop: asyncio.AbstractEventLoop | None = None,
     ) -> list[str]:
         """VWAP: qty per slice proportional to volume_profile weights (uniform if None)."""
-        loop = loop or asyncio.get_event_loop()
-        n = settings.twap_slices
+        loop = loop or asyncio.get_running_loop()
+        n = max(1, settings.twap_slices)
         dur = _duration()
 
         if not volume_profile:
@@ -141,15 +150,19 @@ class TWAPExecutor:
             n = len(volume_profile)
 
         interval = dur / n if n > 1 else 0.0
+        import math
         assigned, qty_list = 0, []
         for i, w in enumerate(volume_profile):
-            s = max(1, round(qty * w)) if i < n - 1 else max(0, qty - assigned)
+            s = math.floor(qty * w) if i < n - 1 else max(0, qty - assigned)
             qty_list.append(s)
-            assigned += s if i < n - 1 else 0
+            assigned += s
 
-        order = TWAPOrder(symbol=symbol, total_qty=qty, direction=direction,
-                          slices=n, interval_sec=interval, tag=tag)
-        self._active[symbol] = order
+        async with self._get_lock():
+            if symbol in self._active and not self._active[symbol].done:
+                raise RuntimeError(f"VWAP already in progress for {symbol}")
+            order = TWAPOrder(symbol=symbol, total_qty=qty, direction=direction,
+                              slices=n, interval_sec=interval, tag=tag)
+            self._active[symbol] = order
         logger.info("VWAP start | {} {} {} qty={} slices={} interval={:.1f}s profile={}",
                     direction, symbol, exchange, qty, n, interval,
                     [round(w, 3) for w in volume_profile])

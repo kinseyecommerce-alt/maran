@@ -280,7 +280,7 @@ class AltDataEngine:
             for row in (raw if isinstance(raw, list) else []):
                 cat = str(row.get("category", "")).upper()
                 try:
-                    net = float(str(row.get("netValue", "0")).replace(",", "").replace("-", "-"))
+                    net = float(str(row.get("netValue", "0")).replace(",", "").replace("–", "-").replace("—", "-"))
                 except (ValueError, TypeError):
                     net = 0.0
                 if "FII" in cat or "FPI" in cat:
@@ -327,7 +327,8 @@ class AltDataEngine:
 
         except Exception as exc:
             logger.debug("FII/DII fetch failed (non-critical): {}", exc)
-            return self._fii_dii   # return last cached value
+            with self._lock:
+                return self._fii_dii
 
     def get_fii_sentiment(self) -> float:
         """
@@ -378,6 +379,7 @@ class AltDataEngine:
 
     # Module-level cache shared across all AltDataEngine instances
     _bulk_cache: dict = {}         # symbol → (monotonic_ts, list[dict])
+    _bulk_cache_lock = threading.Lock()
     _BULK_CACHE_TTL = 300          # 5 minutes — bulk deals are published once daily
 
     def _nse_opener(self):
@@ -419,11 +421,12 @@ class AltDataEngine:
 
         sym_upper = symbol.upper()
         # Check TTL cache first — avoids repeated 8s blocking HTTP calls
-        cached = AltDataEngine._bulk_cache.get(sym_upper)
-        if cached is not None:
-            cached_ts, cached_result = cached
-            if (_time.monotonic() - cached_ts) < AltDataEngine._BULK_CACHE_TTL:
-                return cached_result
+        with AltDataEngine._bulk_cache_lock:
+            cached = AltDataEngine._bulk_cache.get(sym_upper)
+            if cached is not None:
+                cached_ts, cached_result = cached
+                if (_time.monotonic() - cached_ts) < AltDataEngine._BULK_CACHE_TTL:
+                    return cached_result
 
         url = f"https://www.nseindia.com/api/bulk-deals?symbol={sym_upper}"
         try:
@@ -447,12 +450,14 @@ class AltDataEngine:
                     "price":    float(str(r.get("TRADE_PRICE") or r.get("price", 0) or 0)),
                     "remarks":  r.get("REMARKS") or r.get("remarks", ""),
                 })
-            AltDataEngine._bulk_cache[sym_upper] = (_time.monotonic(), result)
+            with AltDataEngine._bulk_cache_lock:
+                AltDataEngine._bulk_cache[sym_upper] = (_time.monotonic(), result)
             return result
         except Exception as exc:
             logger.debug("NSE bulk deals fetch failed for {} (non-critical): {}", symbol, exc)
             # Cache empty result briefly (30s) to avoid hammering on transient failures
-            AltDataEngine._bulk_cache[sym_upper] = (_time.monotonic() - AltDataEngine._BULK_CACHE_TTL + 30, [])
+            with AltDataEngine._bulk_cache_lock:
+                AltDataEngine._bulk_cache[sym_upper] = (_time.monotonic() - AltDataEngine._BULK_CACHE_TTL + 30, [])
             return []
 
     def get_bulk_deal_signal(self, symbol: str) -> float:
@@ -478,8 +483,9 @@ class AltDataEngine:
         """Return current alt data state for dashboard/API."""
         from datetime import date
         with self._lock:
-            catalysts = {sym: e["score"] for sym, e in self._announcement_cache.items()}
-            fii_data  = dict(self._fii_dii)
+            catalysts     = {sym: e["score"] for sym, e in self._announcement_cache.items()}
+            fii_data      = dict(self._fii_dii)
+            fii_sentiment = self._fii_sentiment  # read inside lock for consistency with fii_data
         event_flag, event_name = self.is_event_day()
         return {
             "catalysts":          catalysts,
@@ -488,7 +494,7 @@ class AltDataEngine:
             "days_to_next_event": self.days_to_next_event(),
             "next_fno_expiry":    str(self.next_fno_expiry()),
             "fii_dii":            fii_data,
-            "fii_sentiment":      self._fii_sentiment,
+            "fii_sentiment":      fii_sentiment,
             "earnings_blackout_symbols": [
                 row["symbol"] for row in self._load_earnings_calendar()
                 if _within_earnings_window(row)

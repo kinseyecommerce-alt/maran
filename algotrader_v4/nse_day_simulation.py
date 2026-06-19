@@ -231,6 +231,7 @@ def make_snapshot(sym: str, ind: LiveIndicators, df: pd.DataFrame,
                                close=row.close, volume=row.volume, ts=ts2))
     row = df.iloc[bar_idx]
     # Use day_open for the session's open price (not pre-history open)
+    day_open: float = 0.0
     if "day_open" in df.columns:
         day_open = float(df["day_open"].iloc[bar_idx])
     if not day_open or day_open <= 0:
@@ -509,15 +510,15 @@ def run_simulation(seed: int = 2026, verbose: bool = True) -> tuple[dict, list]:
                                 "pattern": (signal or {}).get("pattern", "?"),
                                 "score": (signal or {}).get("score", "–"),
                             })
-                    except Exception:
-                        pass
+                    except Exception as exc:
+                        loguru.logger.debug("[sim] agent {} error on {} {}: {}", agent_name, sym, ts, exc)
 
-            # Squareoff all open positions at 15:25
-            final_px = {sym: float(sessions[sym][tf_label]["close"].iloc[-1])
-                        for sym in SYMBOLS}
-            sq_ts = datetime.combine(date.today(), time(15, 25))
-            for agent_name, _ in AGENT_CLASSES:
-                tracker_set[agent_name].squareoff_all(final_px, sq_ts)
+        # Squareoff all open positions at 15:25 (after ALL symbols are processed)
+        final_px = {sym: float(sessions[sym][tf_label]["close"].iloc[-1])
+                    for sym in SYMBOLS}
+        sq_ts = datetime.combine(date.today(), time(15, 25))
+        for agent_name, _ in AGENT_CLASSES:
+            tracker_set[agent_name].squareoff_all(final_px, sq_ts)
 
         # Print per-TF signal count
         if verbose:

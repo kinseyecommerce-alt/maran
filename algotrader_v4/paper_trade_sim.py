@@ -3,8 +3,8 @@ paper_trade_sim.py
 Full paper trading simulation across 5 symbols and all 4 agents.
 Runs the complete pipeline: signal → risk check → order guard → SEBI check → paper order.
 """
-import sys
-sys.path.insert(0, '/home/user/JAG/algotrader_v4')
+import sys, os
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from datetime import datetime, time, timedelta
 from collections import defaultdict
@@ -90,11 +90,12 @@ def make_snapshot(symbol, ltp, scenario="bullish"):
     # Build realistic candles
     candles = []
     base = ltp - 40
+    _base_ts = datetime.now().replace(hour=9, minute=30, second=0, microsecond=0)
     for i in range(30):
         close = base + i * 1.4 * candle_dir if candle_dir != 0 else base + (random.random()-0.5)*2
         o = close - 2*candle_dir; h = close + 3; lo = o - 2
         c = Candle(
-            ts=datetime.now().replace(hour=9, minute=30+i, second=0),
+            ts=_base_ts + timedelta(minutes=i),
             open=max(o,1), high=max(h,1), low=max(lo,1), close=max(close,1),
             volume=10000 + i*300
         )

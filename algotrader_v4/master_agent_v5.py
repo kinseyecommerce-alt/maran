@@ -32,6 +32,16 @@ from agents.strategy_agents import ALL_AGENTS
 from bot_state import is_agent_enabled
 from portfolio_optimizer import portfolio_optimizer
 
+# Fire-and-forget helper: keeps a strong ref to the task so the GC doesn't
+# cancel it before it completes (bare create_task loses the ref immediately).
+_bg_tasks: set[asyncio.Task] = set()
+
+def _fire(coro) -> asyncio.Task:
+    t = asyncio.create_task(coro)
+    _bg_tasks.add(t)
+    t.add_done_callback(_bg_tasks.discard)
+    return t
+
 
 MASTER_PROMPT = """You are the MASTER TRADING INTELLIGENCE for an NSE/BSE algorithmic trading system.
 You have FULL situational awareness: regime, market breadth, sector rotation, FII/DII flows,
@@ -212,7 +222,8 @@ class MasterAgent:
                 agent.start(q)
 
         sq_h, sq_m = [int(x) for x in settings.squareoff_time.split(":")]
-        self._scheduler.add_job(self._master_review,   "interval", seconds=60,  id="master_review")
+        self._scheduler.add_job(self._master_review,   "interval", seconds=60,  id="master_review",
+                                 max_instances=1, coalesce=True)
         self._scheduler.add_job(self._auto_squareoff,  "cron", hour=sq_h, minute=sq_m,
                                  day_of_week="mon-fri", id="squareoff")
         self._scheduler.add_job(self._daily_reset,     "cron", hour=9, minute=15,
@@ -224,17 +235,17 @@ class MasterAgent:
         self._scheduler.add_job(self._weekly_memory_synthesis, "cron", hour=21, minute=0,
                                  day_of_week="sun", id="weekly_memory")
         self._scheduler.add_job(self._portfolio_optimize_job, "interval", minutes=15,
-                                 id="portfolio_optimize")
+                                 id="portfolio_optimize", max_instances=1, coalesce=True)
         self._scheduler.add_job(self._weekly_db_cleanup, "cron", hour=22, minute=30,
                                  day_of_week="sun", id="weekly_db_cleanup")
         self._scheduler.start()
         logger.info("[master_v5] started — tick-driven 1s")
-        asyncio.create_task(send_telegram(
+        _fire(send_telegram(
             f"<b>AlgoTrader Pro v5</b> started\nMode: {settings.trading_mode} | Tick: 1s\n"
             + "\n".join(f"  {s}: {r['approved']}/{r['total']} symbols" for s, r in report.items())
         ))
         from n8n_bridge import notify as _n8n
-        asyncio.create_task(_n8n("system", {"type": "bot_started", "mode": settings.trading_mode}))
+        _fire(_n8n("system", {"type": "bot_started", "mode": settings.trading_mode}))
         return report
 
     async def stop(self) -> None:
@@ -248,7 +259,7 @@ class MasterAgent:
             pass
         await send_telegram("<b>AlgoTrader Pro v5 stopped</b>")
         from n8n_bridge import notify as _n8n
-        asyncio.create_task(_n8n("system", {"type": "bot_stopped"}))
+        _fire(_n8n("system", {"type": "bot_stopped"}))
 
     # ── Scheduled jobs ─────────────────────────────────────────────────────────
 
@@ -267,6 +278,11 @@ class MasterAgent:
             logger.error("[master] Regime detection failed: {}", exc)
             regime = regime_detector.current_regime
             plan   = regime_detector.current_plan
+            if regime is None or plan is None:
+                # First-cycle failure with no prior regime — cannot call regime.value;
+                # return early and retry next 60-second cycle rather than crashing
+                # the APScheduler job permanently.
+                return
 
         # BLACK SWAN emergency bypass — no hysteresis, act immediately
         if regime == Regime.BLACK_SWAN and self._confirmed_regime != Regime.BLACK_SWAN.value:
@@ -285,7 +301,7 @@ class MasterAgent:
             try:
                 if tick_engine.ws_broadcast:
                     import asyncio
-                    asyncio.create_task(tick_engine.ws_broadcast({
+                    _bcast = asyncio.create_task(tick_engine.ws_broadcast({
                         "event":      "black_swan_detected",
                         "phase":      "FALLING",
                         "regime":     regime.value,
@@ -294,9 +310,14 @@ class MasterAgent:
                                           regime_detector._vix_history[-1]
                                           if regime_detector._vix_history else 0), 2),
                     }))
+                    _bcast.add_done_callback(
+                        lambda t: logger.warning("[master] BLACK_SWAN broadcast failed: {}",
+                                                 t.exception())
+                        if not t.cancelled() and t.exception() is not None else None
+                    )
             except Exception as _e:
                 logger.warning("[master] BLACK SWAN broadcast failed: {}", _e)
-            asyncio.create_task(send_telegram(
+            _fire(send_telegram(
                 "<b>⚡ BLACK SWAN DETECTED</b>\nEmergency regime dispatch. "
                 "TSL tightened. Opportunity agents active.\n"
                 f"VIX z-score: {regime_detector._vix_zscore(regime_detector._vix_history[-1] if regime_detector._vix_history else 0):.2f}"
@@ -311,10 +332,15 @@ class MasterAgent:
             self._apply_regime_plan(regime, plan)
             try:
                 if tick_engine.ws_broadcast:
-                    asyncio.create_task(tick_engine.ws_broadcast({
+                    _bcast2 = asyncio.create_task(tick_engine.ws_broadcast({
                         "event":      "black_swan_cleared",
                         "new_regime": regime.value,
                     }))
+                    _bcast2.add_done_callback(
+                        lambda t: logger.warning("[master] BLACK_SWAN_CLEARED broadcast failed: {}",
+                                                 t.exception())
+                        if not t.cancelled() and t.exception() is not None else None
+                    )
             except Exception:
                 pass
 
@@ -415,25 +441,32 @@ class MasterAgent:
             }
 
         # Phase 3D: Rolling Sharpe alert — warn if a strategy's rolling Sharpe is degrading
-        asyncio.create_task(self._check_rolling_sharpe())
+        def _log_task_exc(t: asyncio.Task) -> None:
+            exc = t.exception()
+            if exc:
+                logger.error("[master] background task {} raised: {}", t.get_name(), exc)
+        _t = asyncio.create_task(self._check_rolling_sharpe(), name="rolling_sharpe")
+        _t.add_done_callback(_log_task_exc)
 
         summary = self.last_directives.get("summary", "")
         if summary:
-            asyncio.create_task(send_telegram(
+            _tg = asyncio.create_task(send_telegram(
                 f"<b>Regime: {regime.value}</b>\n"
                 f"Active: {', '.join(plan.active)}\n"
                 f"Paused: {', '.join(plan.paused) or 'none'}\n"
                 f"Size:   {int(plan.size_factor * 100)}%\n{summary}"
-            ))
+            ), name="regime_telegram")
+            _tg.add_done_callback(_log_task_exc)
             from n8n_bridge import notify as _n8n
-            asyncio.create_task(_n8n("regime_change", {
+            _tn = asyncio.create_task(_n8n("regime_change", {
                 "regime":      regime.value,
                 "active":      plan.active,
                 "paused":      plan.paused,
                 "size_factor": plan.size_factor,
                 "reasoning":   plan.reasoning[:120],
                 "signals":     sigs.to_dict() if sigs else {},
-            }))
+            }), name="regime_n8n")
+            _tn.add_done_callback(_log_task_exc)
 
     async def _check_rolling_sharpe(self) -> None:
         """Phase 3D: Alert when a strategy's rolling Sharpe drops below threshold for 3 cycles."""
@@ -462,7 +495,7 @@ class MasterAgent:
                             f"Trades: {data.get('adaptation_count', 0)}"
                         )
                         logger.warning("[master] {}", msg.replace("<b>", "").replace("</b>", ""))
-                        asyncio.create_task(send_telegram(msg))
+                        _fire(send_telegram(msg))
                 else:
                     self._rolling_sharpe_below_count[key] = 0
         except Exception as exc:
@@ -474,11 +507,11 @@ class MasterAgent:
             logger.info("[master] NSE holiday — squareoff skipped")
             return
 
-        ids = kite_client.squareoff_all_positions()
+        ids = await asyncio.to_thread(kite_client.squareoff_all_positions)
         if ids:
             await send_telegram(f"<b>Auto square-off</b>\n{len(ids)} positions closed")
             from n8n_bridge import notify as _n8n
-            asyncio.create_task(_n8n("system", {"type": "squareoff", "positions_closed": len(ids)}))
+            _fire(_n8n("system", {"type": "squareoff", "positions_closed": len(ids)}))
 
         # Daily summary — fire regardless of whether positions were open
         try:
@@ -508,13 +541,13 @@ class MasterAgent:
         holiday_note = " (NSE holiday — no trading today)" if is_nse_holiday(now_ist().date()) else ""
         await send_telegram(f"<b>New trading day</b> — counters reset{holiday_note}")
         from n8n_bridge import notify as _n8n
-        asyncio.create_task(_n8n("system", {"type": "daily_reset"}))
+        _fire(_n8n("system", {"type": "daily_reset"}))
 
     async def _nightly_adaptive(self) -> None:
         try:
-            current_vix    = regime_detector.current_signals.vix if regime_detector.current_signals else 14.0
+            current_vix    = regime_detector.current_signals.india_vix if regime_detector.current_signals else 14.0
             regime_changed = regime_detector.history and len(regime_detector.history) >= 2 and \
-                             regime_detector.history[-1] != regime_detector.history[-2]
+                             regime_detector.history[-1]["regime"] != regime_detector.history[-2]["regime"]
             report = await adaptive_engine.nightly_review(current_vix, regime_changed)
             logger.info("[master] Nightly adaptive review: {} ok, {} adapt, {} retire",
                         len(report["strategies_ok"]),
@@ -565,10 +598,11 @@ class MasterAgent:
         try:
             from state_store import cleanup_old_data, vacuum_db
             keep = int(getattr(settings, "db_keep_days", 90))
-            removed = await asyncio.get_event_loop().run_in_executor(
+            _loop = asyncio.get_running_loop()
+            removed = await _loop.run_in_executor(
                 None, lambda: cleanup_old_data(keep_days=keep)
             )
-            await asyncio.get_event_loop().run_in_executor(None, vacuum_db)
+            await _loop.run_in_executor(None, vacuum_db)
             logger.info(
                 "[master] Weekly DB cleanup done — removed {} positions, {} trades, {} daily_pnl rows",
                 removed["positions"], removed["trades"], removed["daily_pnl"],
@@ -660,10 +694,14 @@ class MasterAgent:
                     q = tick_engine.add_subscriber(f"agent_{strat}")
                     agent.start(q)
 
-        if d.get("risk_override", {}).get("halt_new_trades"):
+        _risk_override = d.get("risk_override", {})
+        if _risk_override.get("halt_new_trades"):
             risk_manager.is_trading_halted = True
-            logger.warning("[master] Claude halted new trades: {}",
-                           d.get("risk_override", {}).get("reason", ""))
+            logger.warning("[master] Claude halted new trades: {}", _risk_override.get("reason", ""))
+        elif risk_manager.is_trading_halted and _risk_override.get("halt_new_trades") is False:
+            # Claude explicitly cleared the halt (halt_new_trades: false) — honour it.
+            risk_manager.is_trading_halted = False
+            logger.info("[master] Claude released trade halt (intraday recovery)")
 
         # Apply dynamic trade gate threshold from master — capped at 55 so Opus always gets the final say.
         # If Claude omits the key, reset to the default rather than letting a stale
@@ -680,14 +718,15 @@ class MasterAgent:
             regime_name = regime_detector.current_regime.value if regime_detector.current_regime else None
             if regime_name:
                 apply_optimised_config(regime=regime_name)
-        except Exception:
-            pass
+        except Exception as exc:
+            logger.error("[master] profit_optimizer apply failed: {}", exc)
+            _fire(send_telegram(f"⚠️ <b>profit_optimizer failed</b>\n{exc}"))
 
         # Log opportunity alert if present
         alert = d.get("opportunity_alert")
         if alert and alert not in (None, "null", ""):
             logger.info("[master] 💡 Opportunity: {}", alert)
-            asyncio.create_task(send_telegram(f"💡 <b>Opportunity Alert</b>\n{alert}"))
+            _fire(send_telegram(f"💡 <b>Opportunity Alert</b>\n{alert}"))
 
     def get_status(self) -> dict:
         return {

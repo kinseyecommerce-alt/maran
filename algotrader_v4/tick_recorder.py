@@ -28,10 +28,12 @@ class TickRecorder:
         self._enabled = False
         self._symbols: set[str] = set()
         self._counts:  dict[str, int] = {}
+        self._pending_writes: int = 0
 
     def _init_db(self) -> sqlite3.Connection:
         self._db_path.parent.mkdir(parents=True, exist_ok=True)
         conn = sqlite3.connect(str(self._db_path), check_same_thread=False)
+        conn.execute("PRAGMA journal_mode=WAL")
         conn.execute("""
             CREATE TABLE IF NOT EXISTS ticks (
                 id          INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -45,7 +47,7 @@ class TickRecorder:
                 open        REAL,
                 change_pct  REAL,
                 tick_ts     TEXT,
-                recorded_at TEXT    DEFAULT (datetime('now','localtime'))
+                recorded_at TEXT    DEFAULT (datetime('now'))
             )
         """)
         conn.execute("CREATE INDEX IF NOT EXISTS idx_ticks_symbol ON ticks(symbol)")
@@ -67,6 +69,13 @@ class TickRecorder:
         with self._lock:
             self._enabled = False
             counts = dict(self._counts)
+            conn, self._conn = self._conn, None
+        if conn is not None:
+            try:
+                conn.commit()
+                conn.close()
+            except Exception:
+                pass
         logger.info("TickRecorder stopped — recorded {} ticks", sum(counts.values()))
         return counts
 
@@ -101,7 +110,10 @@ class TickRecorder:
                      getattr(tick, "change_pct", 0.0),
                      ts_str),
                 )
-                self._conn.commit()
+                self._pending_writes += 1
+                if self._pending_writes >= 50:
+                    self._conn.commit()
+                    self._pending_writes = 0
                 self._counts[sym] = self._counts.get(sym, 0) + 1
         except Exception as exc:
             logger.debug("TickRecorder.record failed (non-critical): {}", exc)

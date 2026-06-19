@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import threading
 from collections import deque
 from datetime import datetime
 from dataclasses import dataclass, field
@@ -310,16 +311,21 @@ _BREAKER_THRESHOLD    = 5
 _BREAKER_COOLDOWN_SEC = 120.0
 _consec_failures: int   = 0
 _breaker_until:   float = 0.0
+# threading.Lock (not asyncio.Lock) — protects simple int/float globals that are
+# also read outside the event loop (e.g. from background threads or tests).
+# Eager initialization avoids the lazy check-then-set race of the old asyncio.Lock pattern.
+_breaker_lock = threading.Lock()
 
 
 def _record_gate_failure() -> None:
     global _consec_failures, _breaker_until
-    _consec_failures += 1
-    if _consec_failures >= _BREAKER_THRESHOLD:
-        import time as _t
-        _breaker_until = _t.time() + _BREAKER_COOLDOWN_SEC
-        logger.error("[gate] circuit breaker OPEN — {} consecutive API failures, "
-                     "skipping gate calls for {:.0f}s", _consec_failures, _BREAKER_COOLDOWN_SEC)
+    import time as _t
+    with _breaker_lock:
+        _consec_failures += 1
+        if _consec_failures >= _BREAKER_THRESHOLD:
+            _breaker_until = _t.time() + _BREAKER_COOLDOWN_SEC
+            logger.error("[gate] circuit breaker OPEN — {} consecutive API failures, "
+                         "skipping gate calls for {:.0f}s", _consec_failures, _BREAKER_COOLDOWN_SEC)
 
 
 async def assess(snap, action: str, signal: dict, strategy: str) -> GateDecision:
@@ -337,6 +343,13 @@ async def assess(snap, action: str, signal: dict, strategy: str) -> GateDecision
                             reason="Gate circuit breaker open — reduced size, no AI assessment")
 
     t0 = asyncio.get_running_loop().time()
+    # Pre-warm news cache in a thread so _build_context()'s sync read is a hit,
+    # not a blocking urlopen that would stall the event loop for up to 6 seconds.
+    try:
+        from news_sentinel import news_sentinel as _ns
+        await asyncio.to_thread(_ns.get_headlines, snap.symbol)
+    except Exception:
+        pass
     ctx = _build_context(snap, action, signal, strategy)
 
     try:
@@ -348,7 +361,7 @@ async def assess(snap, action: str, signal: dict, strategy: str) -> GateDecision
             return await asyncio.wait_for(
                 _get_client().messages.create(
                     model=settings.claude_gate_model,
-                    max_tokens=settings.gate_thinking_budget + 1024,
+                    max_tokens=(settings.gate_thinking_budget + 1024) if settings.use_extended_thinking else 1024,
                     system=[{"type": "text", "text": _SYSTEM_PROMPT, "cache_control": {"type": "ephemeral"}}],
                     messages=[{"role": "user", "content": _UNTRUSTED_FIELDS_NOTE + json.dumps(ctx)}],
                     **extra,
@@ -363,12 +376,15 @@ async def assess(snap, action: str, signal: dict, strategy: str) -> GateDecision
             logger.warning("[gate] {} timeout — retrying once", snap.symbol)
             resp = await _call()
         latency = int((asyncio.get_running_loop().time() - t0) * 1000)
-        _consec_failures = 0
+        with _breaker_lock:
+            _consec_failures = 0
 
         # FIX 4: wrap response parsing so any unexpected format falls back safely
         try:
             text_block = next(b for b in resp.content if b.type == "text")
-            raw = text_block.text.strip().lstrip("```json").rstrip("```").strip()
+            raw = text_block.text.strip()
+            if raw.startswith("```"):
+                raw = raw.split("\n", 1)[-1].rsplit("```", 1)[0].strip()
             d   = json.loads(raw)
 
             conf   = int(d.get("confidence", 60))

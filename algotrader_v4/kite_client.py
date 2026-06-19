@@ -140,12 +140,14 @@ class KiteClient:
         self._kite: Optional[KiteConnect] = None
         self._paper_orders:    dict[str, dict] = {}   # order_id → order dict (O(1) lookup)
         self._paper_orders_lock: Lock = Lock()
+        self._paper_filled_ids: set[str] = set()     # guard against double-fill race
         self._paper_positions: list[dict] = []
         self._paper_positions_lock: Lock = Lock()
         self._instruments_cache: dict[str, list[dict]] = {}
         self._pos_cache: dict = {}
         self._pos_cache_ts: float = 0.0
         self._pos_cache_ttl: float = 0.5   # 0.5s TTL — keeps sector/count checks fresh for scalping agents
+        self._pos_cache_lock: Lock = Lock()
         self._paper_ltp: dict[str, float] = {}        # sym → last known LTP for MARKET fill price
 
     # ── Auth ───────────────────────────────────────────────────────────────
@@ -278,15 +280,24 @@ class KiteClient:
         return _with_retry(self.kite.positions, label="positions")
 
     def positions_cached(self) -> dict:
-        """Return cached positions (TTL=2s) to avoid per-trade REST round-trips."""
+        """Return cached positions (TTL=0.5s) to avoid per-trade REST round-trips."""
         import time as _time
         now = _time.monotonic()
-        if now - self._pos_cache_ts < self._pos_cache_ttl and self._pos_cache:
-            return self._pos_cache
+        with self._pos_cache_lock:
+            if now - self._pos_cache_ts < self._pos_cache_ttl and self._pos_cache:
+                return self._pos_cache
         result = self.positions()
-        self._pos_cache = result
-        self._pos_cache_ts = now
+        now = _time.monotonic()  # re-capture AFTER the blocking call so TTL is accurate
+        with self._pos_cache_lock:
+            self._pos_cache = result
+            self._pos_cache_ts = now
         return result
+
+    def profile(self) -> dict:
+        """Return Zerodha user profile. PAPER: returns a stub so auth checks pass."""
+        if settings.trading_mode == "PAPER":
+            return {"user_id": "PAPER", "user_name": "Paper Trader", "email": ""}
+        return _with_retry(self.kite.profile, label="profile")
 
     def holdings(self) -> list[dict]:
         if settings.trading_mode == "PAPER":
@@ -401,8 +412,8 @@ class KiteClient:
         """
         delay = _RETRY_BASE_SEC
         for attempt in range(_RETRY_MAX + 1):
-            placed_after = time.time() - 2.0   # small clock-skew window
             _rest_bucket.acquire()
+            placed_after = time.time() - 2.0   # small clock-skew window (captured after rate-limit)
             try:
                 order_id = self.kite.place_order(
                     variety=KiteConnect.VARIETY_REGULAR,
@@ -480,7 +491,15 @@ class KiteClient:
                 if isinstance(ots, str):
                     ots = datetime.strptime(ots, "%Y-%m-%d %H:%M:%S")
                 if not isinstance(ots, datetime):
-                    continue   # cannot verify recency — do NOT claim this order
+                    # Timestamp absent or unparseable — accept the match on key
+                    # fields alone (symbol/side/qty/tag/status already specific).
+                    # Skipping would cause a blind retry that duplicates the order.
+                    logger.warning(
+                        "LIVE reconcile: order {} matched but has no parseable "
+                        "timestamp — claiming to prevent duplicate placement",
+                        o.get("order_id"),
+                    )
+                    return str(o.get("order_id")), True
                 ots = ots.replace(tzinfo=_IST) if ots.tzinfo is None else ots.astimezone(_IST)
                 if ots >= cutoff:
                     return str(o.get("order_id")), True
@@ -739,7 +758,7 @@ class KiteClient:
             self._update_paper_position(record)
         logger.info("[PAPER] {} {} {} qty={} @ ₹{} | id={}",
                     transaction_type, tradingsymbol, order_type,
-                    quantity, price, order_id)
+                    quantity, fill_price, order_id)
         return order_id
 
     def _prune_paper_orders_locked(self) -> None:
@@ -834,13 +853,17 @@ class KiteClient:
                 )
                 if not triggered:
                     continue
-                # CAS: only fill if still TRIGGER PENDING (not cancelled meanwhile)
+                # CAS: only fill if still TRIGGER PENDING — snapshot under lock prevents double-fill race
                 with self._paper_orders_lock:
                     if order["status"] != "TRIGGER PENDING":
                         continue
+                    if order["order_id"] in self._paper_filled_ids:
+                        continue
                     order["status"] = "COMPLETE"
                     order["price"]  = ltp  # filled at market after trigger
-                self._update_paper_position(order)
+                    self._paper_filled_ids.add(order["order_id"])
+                    order_copy = dict(order)
+                self._update_paper_position(order_copy)
                 logger.info("[PAPER] Trigger hit — {} {} {} qty={} trigger=₹{} fill=₹{}",
                             order["transaction_type"], symbol,
                             order["order_type"], order["quantity"], tp, ltp)
@@ -855,14 +878,18 @@ class KiteClient:
                 )
                 if not crossed:
                     continue
-                # CAS: only fill if still OPEN (not cancelled/modified meanwhile)
+                # CAS: only fill if still OPEN — snapshot under lock prevents double-fill race
                 with self._paper_orders_lock:
                     if order["status"] != "OPEN":
+                        continue
+                    if order["order_id"] in self._paper_filled_ids:
                         continue
                     order["status"]        = "COMPLETE"
                     order["price"]         = limit_px   # LIMIT fills at limit price
                     order["average_price"] = limit_px
-                self._update_paper_position(order)
+                    self._paper_filled_ids.add(order["order_id"])
+                    order_copy = dict(order)
+                self._update_paper_position(order_copy)
                 logger.info("[PAPER] LIMIT fill — {} {} qty={} limit=₹{} ltp=₹{}",
                             order["transaction_type"], symbol,
                             order["quantity"], limit_px, ltp)

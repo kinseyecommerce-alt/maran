@@ -41,9 +41,10 @@ from __future__ import annotations
 import asyncio
 import json
 import math
+import threading
 import time
 from collections import deque
-from dataclasses import dataclass, field, asdict
+from dataclasses import dataclass, field, asdict, fields as dc_fields
 from datetime import datetime, date, timedelta
 from pathlib import Path
 from typing import Optional
@@ -142,6 +143,7 @@ class AdaptiveLearningEngine:
         self._rebacktest_queue: list[dict] = []
         self.backtests_skipped: int = 0
         self.backtests_run:     int = 0
+        self._lock = threading.Lock()   # protects _params from concurrent reads/writes
         import os as _os_ae
         self._store = Path(_os_ae.environ.get("ADAPTIVE_DATA_DIR", "logs/adaptive"))
         self._store.mkdir(parents=True, exist_ok=True)
@@ -150,25 +152,26 @@ class AdaptiveLearningEngine:
 
     def record_trade(self, trade: TradeRecord) -> None:
         key = f"{trade.strategy}::{trade.symbol}"
-        if key not in self._params:
-            self._params[key] = self._init_params(trade.strategy, trade.symbol)
-        if key not in self._trades:
-            self._trades[key] = deque(maxlen=self.ROLLING_WINDOW)
-        self._trades[key].append(trade)
-        params = self._params[key]
-        trades_list = list(self._trades[key])
-        self._update_rolling_metrics(params, trades_list)
-        regime = trade.regime
-        if regime not in params.regime_performance:
-            params.regime_performance[regime] = {"wins": 0, "total": 0}
-        params.regime_performance[regime]["total"] += 1
-        if trade.won:
-            params.regime_performance[regime]["wins"] += 1
-        if len(trades_list) >= self.MIN_TRADES_ADAPT:
-            self._adapt_parameters(params, trades_list, trade.strategy)
-        self._check_health(params, trade.strategy)
-        params.last_updated = datetime.now().isoformat()
-        params.adaptation_count += 1
+        with self._lock:
+            if key not in self._params:
+                self._params[key] = self._init_params(trade.strategy, trade.symbol)
+            if key not in self._trades:
+                self._trades[key] = deque(maxlen=self.ROLLING_WINDOW)
+            self._trades[key].append(trade)
+            params = self._params[key]
+            trades_list = list(self._trades[key])
+            self._update_rolling_metrics(params, trades_list)
+            regime = trade.regime
+            if regime not in params.regime_performance:
+                params.regime_performance[regime] = {"wins": 0, "total": 0}
+            params.regime_performance[regime]["total"] += 1
+            if trade.won:
+                params.regime_performance[regime]["wins"] += 1
+            if len(trades_list) >= self.MIN_TRADES_ADAPT:
+                self._adapt_parameters(params, trades_list, trade.strategy)
+            self._check_health(params, trade.strategy)
+            params.last_updated = datetime.now().isoformat()
+            params.adaptation_count += 1
         logger.info("Adapt [{}::{}] WR={:.0f}% size={:.2f} sl={:.1f}% → {}",
             trade.strategy, trade.symbol, params.win_rate_20 * 100,
             params.size_factor, params.sl_pct, params.status)
@@ -240,8 +243,10 @@ class AdaptiveLearningEngine:
         report = {"date": date.today().isoformat(), "strategies_ok": [],
                   "strategies_adapt": [], "strategies_retire": [],
                   "rebacktest_needed": [], "vix": current_vix, "regime_changed": regime_changed}
-        for key, params in self._params.items():
-            strategy, symbol = key.split("::")
+        with self._lock:
+            params_snapshot = list(self._params.items())
+        for key, params in params_snapshot:
+            strategy, symbol = key.split("::", maxsplit=1)
             gate = GATE_THRESHOLDS.get(strategy, {})
             gate_wr = gate.get("win_rate", 55) / 100
             if regime_changed:
@@ -266,14 +271,14 @@ class AdaptiveLearningEngine:
     def on_regime_change(self, old_regime: str, new_regime: str, vix: float) -> None:
         volatile_regime = new_regime in ("BEAR_VOLATILE", "HIGH_VOLATILE")
         bear_regime     = new_regime in ("BEAR_TREND", "BEAR_VOLATILE")
-        for key, params in self._params.items():
-            strategy, symbol = key.split("::")
+        for key, params in list(self._params.items()):  # list() snapshot safe for concurrent callers
+            strategy, symbol = key.split("::", maxsplit=1)
             if volatile_regime:
                 params.size_factor = min(params.size_factor, 0.5)
                 params.sl_pct = round(params.sl_pct * 1.2, 2)
             if bear_regime and "swing" in strategy:
                 params.status = "CAUTIOUS"
-                params.size_factor = 0.0
+                params.size_factor = 0.25  # floor matches _adapt_parameters minimum; 0.0 causes zero-qty orders
             if new_regime == "BULL_TREND" and old_regime != "BULL_TREND":
                 params.size_factor = max(0.75, params.size_factor)
             if strategy in ("iron_condor", "short_straddle") and volatile_regime:
@@ -315,14 +320,14 @@ class AdaptiveLearningEngine:
         }
 
     def _init_params(self, strategy: str, symbol: str) -> AdaptiveParams:
-        cfg  = STRATEGY_CONFIG.get(strategy, {})
-        gate = GATE_THRESHOLDS.get(strategy, {})
+        cfg    = STRATEGY_CONFIG.get(strategy, {})
+        sl_val = cfg.get("sl", 1.5)
         return AdaptiveParams(
             strategy=strategy, symbol=symbol,
-            sl_pct=cfg.get("sl", 1.5), target_pct=cfg.get("t1", 3.0),
-            trail_pct=cfg.get("sl", 0.5) * 0.33,
+            sl_pct=sl_val, target_pct=cfg.get("t1", 3.0),
+            trail_pct=round(sl_val * 0.33, 3),
             min_rsi=45.0, max_rsi=67.0,
-            min_adx=float(gate.get("win_rate", 55)) / 5,
+            min_adx=20.0,
         )
 
     def _update_rolling_metrics(self, params: AdaptiveParams, trades: list[TradeRecord]) -> None:
@@ -349,8 +354,14 @@ class AdaptiveLearningEngine:
     def _save_state(self) -> None:
         state = {k: v.to_dict() for k, v in self._params.items()}
         path = self._store / "adaptive_params.json"
-        with open(path, "w") as f:
-            json.dump(state, f, indent=2, default=str)
+        tmp  = path.with_suffix(".tmp")
+        try:
+            with open(tmp, "w") as f:
+                json.dump(state, f, indent=2, default=str)
+            tmp.replace(path)
+        except Exception as exc:
+            logger.error("adaptive_engine: state save failed: {}", exc)
+            tmp.unlink(missing_ok=True)
 
     def _load_state(self) -> None:
         path = self._store / "adaptive_params.json"
@@ -358,12 +369,11 @@ class AdaptiveLearningEngine:
         try:
             with open(path) as f:
                 data = json.load(f)
+            _valid = {f.name for f in dc_fields(AdaptiveParams)} - {"strategy", "symbol"}
             for key, d in data.items():
-                strategy, symbol = key.split("::")
-                self._params[key] = AdaptiveParams(
-                    strategy=strategy, symbol=symbol,
-                    **{k: v for k, v in d.items() if k not in ("strategy", "symbol")}
-                )
+                strategy, symbol = key.split("::", maxsplit=1)
+                filtered = {k: v for k, v in d.items() if k in _valid}
+                self._params[key] = AdaptiveParams(strategy=strategy, symbol=symbol, **filtered)
             logger.info("Loaded {} adaptive param sets", len(self._params))
         except Exception as exc:
             logger.warning("Could not load adaptive state: {}", exc)

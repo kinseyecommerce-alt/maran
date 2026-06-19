@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import threading
 import time
 from datetime import date, datetime
 from pathlib import Path
@@ -35,6 +36,8 @@ _LOGS_DIR.mkdir(parents=True, exist_ok=True)
 
 _cache: dict[str, dict] = {}   # symbol → {data..., updated_at: float}
 _CACHE_TTL_SEC = 300           # 5 minutes
+_iv_hist_lock = threading.Lock()  # guards iv_history.json read-modify-write
+_cache_lock   = threading.Lock()  # guards _cache dict reads/writes
 
 
 # ── IV history I/O ─────────────────────────────────────────────────────────────
@@ -51,16 +54,24 @@ def _load_iv_history() -> dict[str, list[dict]]:
 
 
 def _save_iv_history(history: dict[str, list[dict]]) -> None:
-    """Persist IV history to disk. Silent on failure."""
+    """Persist IV history to disk atomically. Silent on failure."""
+    tmp = _IV_HIST_FILE.with_suffix(".tmp")
     try:
-        with _IV_HIST_FILE.open("w") as fh:
+        with tmp.open("w") as fh:
             json.dump(history, fh)
+        tmp.replace(_IV_HIST_FILE)
     except Exception as exc:
         logger.debug("[options_intel] iv_history save failed: {}", exc)
+        tmp.unlink(missing_ok=True)
 
 
 def _append_iv_history(symbol: str, atm_iv: float) -> None:
     """Append today's ATM IV to the 60-day rolling history for symbol."""
+    with _iv_hist_lock:
+        _append_iv_history_locked(symbol, atm_iv)
+
+
+def _append_iv_history_locked(symbol: str, atm_iv: float) -> None:
     history = _load_iv_history()
     entries = history.get(symbol, [])
     today_str = date.today().isoformat()
@@ -133,9 +144,23 @@ def _parse_chain(data: dict) -> Optional[dict]:
         if not expiry_dates:
             return None
 
-        # "Current" expiry = smallest date string (ISO or DD-Mon-YYYY — sort lexicographically
-        # after normalising; NSE uses "DD-Mon-YYYY" which sorts naturally within same month)
-        current_expiry = sorted(expiry_dates)[0]
+        # NSE uses "DD-Mon-YYYY" format (e.g. "02-Jul-2026"). Lexicographic sort is
+        # WRONG across month boundaries: "02-Jul" < "25-Jun" alphabetically but
+        # 2-Jul is actually LATER than 25-Jun. Parse to datetime for correct ordering.
+        def _exp_key(d: str) -> datetime:
+            for fmt in ("%d-%b-%Y", "%d-%B-%Y", "%Y-%m-%d"):
+                try:
+                    return datetime.strptime(d, fmt)
+                except ValueError:
+                    continue
+            logger.debug("[options_intel] unparseable expiry date '{}' — skipping", d)
+            return datetime.max
+
+        parsed_keys = {d: _exp_key(d) for d in expiry_dates}
+        valid_dates = [d for d, dt in parsed_keys.items() if dt != datetime.max]
+        if not valid_dates:
+            return None
+        current_expiry = min(valid_dates, key=lambda d: parsed_keys[d])
 
         # Build per-strike aggregates for the current expiry only
         strikes: dict[float, dict] = {}
@@ -180,7 +205,8 @@ def _parse_chain(data: dict) -> Optional[dict]:
         total_ce_oi = sum(
             strikes[k]["CE"]["oi"] for k in sorted_strikes if strikes[k]["CE"]
         )
-        pcr = round(total_pe_oi / total_ce_oi, 3) if total_ce_oi > 0 else 0.0
+        # Return None (not 0.0) when call OI is zero — 0.0 is ambiguous (genuine vs data gap)
+        pcr = round(total_pe_oi / total_ce_oi, 3) if total_ce_oi > 0 else None
 
         # ── Max Pain ──────────────────────────────────────────────────────────
         # For each candidate strike K, compute total pain to all option holders:
@@ -238,11 +264,11 @@ def _compute_max_pain(
         total_pain = 0.0
         for k in sorted_strikes:
             entry = strikes[k]
-            # CE holders lose max(0, candidate - k) * OI  (in-the-money CEs expire worthless)
+            # CE writers pay max(0, candidate - k) per share when CE expires ITM
             if entry["CE"]:
                 ce_oi = entry["CE"]["oi"]
                 total_pain += max(0.0, candidate - k) * ce_oi
-            # PE holders lose max(0, k - candidate) * OI
+            # PE writers pay max(0, k - candidate) per share when PE expires ITM
             if entry["PE"]:
                 pe_oi = entry["PE"]["oi"]
                 total_pain += max(0.0, k - candidate) * pe_oi
@@ -327,10 +353,10 @@ def _parse_truedata_chain(rows: list[dict]) -> Optional[dict]:
         valid_ivs  = [v for v in (ce_iv, pe_iv) if v > 0]
         atm_iv     = round(sum(valid_ivs) / len(valid_ivs), 2) if valid_ivs else 0.0
 
-        # PCR
+        # PCR — None when call OI is zero (ambiguous: genuine vs data gap)
         total_pe_oi = sum(strikes[k]["PE"]["oi"] for k in sorted_strikes if strikes[k]["PE"])
         total_ce_oi = sum(strikes[k]["CE"]["oi"] for k in sorted_strikes if strikes[k]["CE"])
-        pcr = round(total_pe_oi / total_ce_oi, 3) if total_ce_oi > 0 else 0.0
+        pcr = round(total_pe_oi / total_ce_oi, 3) if total_ce_oi > 0 else None
 
         max_pain_strike = _compute_max_pain(strikes, sorted_strikes)
 
@@ -343,6 +369,10 @@ def _parse_truedata_chain(rows: list[dict]) -> Optional[dict]:
                                        "oi_change": entry["oi_change"]})
         oi_buildup = sorted(oi_changes, key=lambda x: abs(x["oi_change"]), reverse=True)[:3]
 
+        logger.debug(
+            "[options_intel] TrueData spot_price estimated from median strike {}; "
+            "no underlying feed — greeks may be imprecise", atm_strike
+        )
         return {
             "spot_price":  round(atm_strike, 2),   # best estimate without underlying feed
             "atm_strike":  atm_strike,
@@ -381,7 +411,7 @@ async def get_iv_context(symbol: str) -> dict:
         if _s.use_truedata_options:
             try:
                 from truedata_client import truedata_options
-                td_rows = await asyncio.get_event_loop().run_in_executor(
+                td_rows = await asyncio.get_running_loop().run_in_executor(
                     None, lambda: truedata_options.get_option_chain(symbol)
                 )
                 if td_rows:
@@ -409,8 +439,10 @@ async def get_iv_context(symbol: str) -> dict:
         # Persist today's IV and compute rank/percentile
         if atm_iv > 0:
             _append_iv_history(symbol, atm_iv)
-
-        iv_rank, iv_percentile = _compute_iv_rank_percentile(symbol, atm_iv)
+            iv_rank, iv_percentile = _compute_iv_rank_percentile(symbol, atm_iv)
+        else:
+            # No valid ATM IV — return neutral rather than misleading 0/0
+            iv_rank, iv_percentile = 50.0, 50.0
 
         result = {
             "symbol":        symbol,
@@ -429,7 +461,8 @@ async def get_iv_context(symbol: str) -> dict:
         }
 
         # Store in in-memory cache
-        _cache[symbol] = {**result, "_updated_ts": time.time()}
+        with _cache_lock:
+            _cache[symbol] = {**result, "_updated_ts": time.time()}
 
         # ── Populate derivative intelligence caches from the raw chain ────────
         raw_chain = data.get("records", {}).get("data", []) if data else []
@@ -490,13 +523,14 @@ def get_cached(symbol: str) -> dict:
     Returns cached dict if fresh (< 5 min), else {}.
     """
     symbol = symbol.upper()
-    entry  = _cache.get(symbol)
-    if not entry:
-        return {}
-    age = time.time() - entry.get("_updated_ts", 0)
-    if age > _CACHE_TTL_SEC:
-        return {}
-    # Return a copy without the internal timestamp key
-    return {k: v for k, v in entry.items() if k != "_updated_ts"}
+    with _cache_lock:
+        entry = _cache.get(symbol)
+        if not entry:
+            return {}
+        age = time.time() - entry.get("_updated_ts", 0)
+        if age > _CACHE_TTL_SEC:
+            return {}
+        # Return a copy without the internal timestamp key
+        return {k: v for k, v in entry.items() if k != "_updated_ts"}
 
 

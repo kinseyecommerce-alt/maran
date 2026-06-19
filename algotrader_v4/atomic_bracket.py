@@ -31,6 +31,7 @@ TSL Progression (per trade):
 from __future__ import annotations
 
 import asyncio
+import math
 import time
 import uuid
 from dataclasses import dataclass, field
@@ -105,6 +106,7 @@ class BracketOrder:
     target_1:     float = 0.0
     target_2:     float = 0.0
     quantity:     int   = 0
+    quantity_remaining: int = 0  # set to quantity on registration; decremented on T1 scale-out
     entry_order_id: str = ""
     sl_order_id:    str = ""
     status:        BracketStatus = BracketStatus.PENDING
@@ -169,6 +171,12 @@ class AtomicBracketEngine:
                       target_2: Optional[float] = None, sub_strategy: str = "",
                       trigger: str = "", avg_volume: float = 0.0,
                       atr: float = 0.0) -> Optional[BracketOrder]:
+        if quantity <= 0:
+            logger.warning(
+                "Bracket SKIP: qty={} for {} {} {} — zero/negative quantity",
+                quantity, strategy, symbol, side,
+            )
+            return None
         bracket_id = f"BRK-{uuid.uuid4().hex[:8].upper()}"
         cfg = TRAIL_CONFIGS.get(strategy, TRAIL_CONFIGS["intraday"])
         entry_est = signal_price
@@ -184,6 +192,7 @@ class AtomicBracketEngine:
             bracket_id=bracket_id, strategy=strategy, symbol=symbol, exchange=exchange,
             side=side, product=product, signal_price=signal_price, sl_price=stop_loss,
             trail_sl=stop_loss, target_1=target_1, target_2=target_2, quantity=quantity,
+            quantity_remaining=quantity,
             sub_strategy=sub_strategy, trigger_reason=trigger)
         self._brackets[bracket_id] = bracket
         # Atomically claim the symbol slot BEFORE placing the entry — without this
@@ -210,6 +219,7 @@ class AtomicBracketEngine:
                     None, lambda: kite_client.place_order(
                         tradingsymbol=symbol, exchange=exchange, transaction_type=side,
                         quantity=quantity, order_type="MARKET", product=product,
+                        price=bracket.signal_price,  # PAPER uses price as fill hint
                         tag=f"BRK-{strategy}-ENTRY"))
             bracket.entry_order_id = entry_oid
         except Exception as exc:
@@ -223,12 +233,20 @@ class AtomicBracketEngine:
             try:
                 await asyncio.get_running_loop().run_in_executor(
                     None, lambda: kite_client.cancel_order(entry_oid))
-            except Exception: pass
+            except Exception as _exc:
+                logger.warning("Bracket {} — cancel timed-out entry {} failed: {}", bracket_id, entry_oid, _exc)
             order_guard.release_claim(symbol, strategy, side)
             bracket.status = BracketStatus.CANCELLED
             await self._broadcast_update(bracket)
             return None
         adjusted = _estimate_fill_price(fill_price, side, avg_volume, atr)
+        if math.isnan(adjusted) or adjusted <= 0:
+            logger.error("Bracket {} — invalid fill_price {} after slippage estimate; aborting",
+                         bracket_id, adjusted)
+            order_guard.release_claim(symbol, strategy, side)
+            bracket.status = BracketStatus.FAILED
+            await self._broadcast_update(bracket)
+            return None
         if adjusted != fill_price:
             tier = ("large" if avg_volume > 1_000_000 else "mid" if avg_volume > 200_000 else "small")
             bps  = settings.slippage_bps_override or _SLIPPAGE_BPS[tier]
@@ -244,8 +262,15 @@ class AtomicBracketEngine:
         sl_placed = await self._place_sl_order(bracket)
         if not sl_placed:
             logger.critical("Bracket {} — SL FAILED. REVERSING!", bracket_id)
-            await self._emergency_reverse(bracket)
-            order_guard.release_claim(symbol, strategy, side)
+            reverse_ok = await self._emergency_reverse(bracket)
+            if reverse_ok:
+                # Position successfully closed — release symbol so others can trade it
+                order_guard.release_claim(symbol, strategy, side)
+            else:
+                # Reverse also failed — keep claim to block duplicate entry on this symbol
+                logger.critical(
+                    "Bracket {} — emergency reverse FAILED; holding order_guard claim "
+                    "on {} to prevent duplicate entry into unprotected position", bracket_id, symbol)
             bracket.status = BracketStatus.FAILED
             await self._broadcast_update(bracket)
             return None
@@ -287,6 +312,7 @@ class AtomicBracketEngine:
 
     async def _place_sl_order(self, bracket: BracketOrder) -> bool:
         sl_side = "SELL" if bracket.side == "BUY" else "BUY"
+        _sl_px = bracket.sl_price  # capture by value before handing off to thread pool
         for attempt in range(1, self.SL_RETRY_MAX + 1):
             try:
                 sl_oid = await asyncio.get_running_loop().run_in_executor(
@@ -294,7 +320,7 @@ class AtomicBracketEngine:
                         tradingsymbol=bracket.symbol, exchange=bracket.exchange,
                         transaction_type=sl_side, quantity=bracket.quantity,
                         order_type="SL-M", product=bracket.product,
-                        trigger_price=bracket.sl_price, tag=f"BRK-{bracket.strategy}-SL"))
+                        trigger_price=_sl_px, tag=f"BRK-{bracket.strategy}-SL"))
                 bracket.sl_order_id = sl_oid
                 return True
             except Exception as exc:
@@ -306,7 +332,9 @@ class AtomicBracketEngine:
                         self.SL_RETRY_MAX, bracket.symbol, bracket.strategy, exc)
         return False
 
-    async def _emergency_reverse(self, bracket: BracketOrder) -> None:
+    async def _emergency_reverse(self, bracket: BracketOrder) -> bool:
+        """Attempt to close the entry position after SL placement failure.
+        Returns True if reversal succeeded, False otherwise."""
         reverse_side = "SELL" if bracket.side == "BUY" else "BUY"
         try:
             await asyncio.get_running_loop().run_in_executor(
@@ -314,6 +342,7 @@ class AtomicBracketEngine:
                     tradingsymbol=bracket.symbol, exchange=bracket.exchange,
                     transaction_type=reverse_side, quantity=bracket.quantity,
                     order_type="MARKET", product=bracket.product, tag="BRK-EMERGENCY-REVERSE"))
+            return True
         except Exception as exc:
             logger.critical("Emergency reverse ALSO FAILED: {}", exc)
             # Alert + kill switch: unprotected position exists with no SL
@@ -335,6 +364,7 @@ class AtomicBracketEngine:
                 )
             except Exception as ks_exc:
                 logger.critical("Kill switch trigger ALSO FAILED: {}", ks_exc)
+            return False
 
     async def _on_tsl_sl_hit(self, pos, ltp: float, pnl: float) -> None:
         bracket = self._find_by_symbol_strategy(pos.symbol, pos.strategy)
@@ -358,7 +388,7 @@ class AtomicBracketEngine:
                     o = kite_client._paper_orders.get(bracket.sl_order_id)
                     if o and o["status"] == "COMPLETE":
                         sl_already_filled = True
-                if not sl_already_filled:
+                if not sl_already_filled and settings.trading_mode != "PAPER":
                     history = await _loop.run_in_executor(
                         None, lambda: kite_client.order_history(bracket.sl_order_id))
                     for h in reversed(history):
@@ -371,7 +401,9 @@ class AtomicBracketEngine:
                 try:
                     await _loop.run_in_executor(
                         None, lambda: kite_client.cancel_order(bracket.sl_order_id))
-                except Exception: pass
+                except Exception as _exc:
+                    logger.warning("Bracket {} — cancel SL-M {} on TSL exit failed: {}",
+                                   bracket.bracket_id, bracket.sl_order_id, _exc)
 
         if not sl_already_filled:
             exit_side = "SELL" if bracket.side == "BUY" else "BUY"
@@ -410,23 +442,30 @@ class AtomicBracketEngine:
     async def _on_tsl_target_hit(self, pos, ltp: float, level: int) -> None:
         bracket = self._find_by_symbol_strategy(pos.symbol, pos.strategy)
         if not bracket: return
+        if level == 1:
+            # Sync quantity_remaining from the TSL position after T1 partial scale-out
+            bracket.quantity_remaining = pos.quantity_remaining
+            return
         if level == 2:
             exit_side = "SELL" if bracket.side == "BUY" else "BUY"
-            gross_pnl = (ltp - bracket.entry_price) * bracket.quantity * (1 if bracket.side == "BUY" else -1)
-            tx_cost   = compute_round_trip_cost(bracket.symbol, bracket.quantity,
+            qty_for_t2 = bracket.quantity_remaining if bracket.quantity_remaining > 0 else bracket.quantity
+            gross_pnl = (ltp - bracket.entry_price) * qty_for_t2 * (1 if bracket.side == "BUY" else -1)
+            tx_cost   = compute_round_trip_cost(bracket.symbol, qty_for_t2,
                                                 bracket.entry_price, bracket.product)
             net_pnl   = round(gross_pnl - tx_cost, 2)
             try:
                 _loop = asyncio.get_running_loop()
                 await _loop.run_in_executor(None, lambda: kite_client.place_order(
                     tradingsymbol=bracket.symbol, exchange=bracket.exchange,
-                    transaction_type=exit_side, quantity=bracket.quantity,
+                    transaction_type=exit_side, quantity=qty_for_t2,
                     order_type="MARKET", product=bracket.product, tag="BRK-TARGET-EXIT"))
                 if bracket.sl_order_id:
                     try:
                         await _loop.run_in_executor(
                             None, lambda: kite_client.cancel_order(bracket.sl_order_id))
-                    except Exception: pass
+                    except Exception as _exc:
+                        logger.warning("Bracket {} — cancel SL-M {} on T2 exit failed: {}",
+                                       bracket.bracket_id, bracket.sl_order_id, _exc)
             except Exception as exc:
                 # Exit order failed — SL-M is still active, position is protected.
                 # Abort cleanup: guard held, TSL registered, trade unrecorded.
@@ -490,11 +529,17 @@ class AtomicBracketEngine:
                     "Cancel old SL {} failed — skipping replacement to avoid double-SL: {}",
                     bracket.sl_order_id, cancel_exc)
             if cancel_ok:
-                await self._place_sl_order(bracket)
+                sl_replaced = await self._place_sl_order(bracket)
+                if not sl_replaced:
+                    logger.critical(
+                        "TSL SL replacement failed for {} {} — position has no working SL; "
+                        "clearing sl_order_id to surface the gap",
+                        bracket.symbol, bracket.strategy)
+                    bracket.sl_order_id = ""
         await self._broadcast_update(bracket)
 
     def _find_by_symbol_strategy(self, symbol: str, strategy: str) -> Optional[BracketOrder]:
-        for b in self._brackets.values():
+        for b in list(self._brackets.values()):
             if b.symbol == symbol and b.strategy == strategy and b.status == BracketStatus.ACTIVE:
                 return b
         return None
@@ -502,7 +547,8 @@ class AtomicBracketEngine:
     async def _broadcast_update(self, bracket: BracketOrder) -> None:
         if self.ws_broadcast:
             try: await self.ws_broadcast({"event": "bracket_update", "bracket": bracket.to_dict()})
-            except Exception: pass
+            except Exception as _exc:
+                logger.debug("[Bracket] ws_broadcast failed: {}", _exc)
 
     def all_brackets(self, active_only: bool = False) -> list[dict]:
         brackets = list(self._brackets.values())

@@ -330,7 +330,7 @@ class Settings(BaseSettings):
     @field_validator("jwt_secret_key")
     @classmethod
     def validate_jwt_secret(cls, v: str) -> str:
-        if v and len(v) < 32:
+        if len(v) < 32:
             raise ValueError("jwt_secret_key must be at least 32 characters for HS256 security")
         return v
 

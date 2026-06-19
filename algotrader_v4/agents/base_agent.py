@@ -6,6 +6,7 @@ from the TickEngine queue. Strategies evaluate on every live tick.
 from __future__ import annotations
 
 import asyncio
+import math
 import time as _time_mod
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
@@ -175,7 +176,7 @@ def _setup_tsl_callbacks() -> None:
         try:
             from pattern_monitor import pattern_monitor as _pm
             _denom = pos.entry_price * pos.quantity
-            if _denom:
+            if _denom and math.isfinite(_denom):
                 _pm.record(pos.strategy, (entry or {}).get("pattern", ""),
                            pnl / _denom * 100.0)
         except Exception:
@@ -215,7 +216,7 @@ def _setup_tsl_callbacks() -> None:
         # Notify ML filter for online retraining
         try:
             from ml_signal_filter import ml_signal_filter as _mlf
-            _mlf.record_outcome({}, pnl > 0)
+            _mlf.record_outcome(pnl > 0)
         except Exception:
             pass
 
@@ -384,6 +385,13 @@ class BaseAgent(ABC):
     @abstractmethod
     def should_exit_position(self, position: dict, ind: LiveIndicators) -> tuple[bool, str]:
         ...
+
+    def _pos_matches_sym(self, pos: dict, snap_sym: str) -> bool:
+        """Return True if this kite position belongs to the current tick's symbol.
+        Equity agents: exact tradingsymbol match.
+        F&O agents override this to also accept contract symbols that start with
+        the underlying (e.g. "NIFTY2607051850CE" for snap_sym="NIFTY")."""
+        return pos.get("tradingsymbol") == snap_sym
 
     # ── Backtest filter ───────────────────────────────────────────────────
 
@@ -679,8 +687,9 @@ class BaseAgent(ABC):
                         _sf = round(_sf * _evt["size_factor"], 3)
 
                     from correlation_guard import check as _corr_check
-                    _positions_data = await asyncio.get_running_loop().run_in_executor(
-                        None, kite_client.positions
+                    _positions_data = await asyncio.wait_for(
+                        asyncio.get_running_loop().run_in_executor(None, kite_client.positions),
+                        timeout=5.0,
                     )
                     _open_syms = [
                         p["tradingsymbol"] for p in _positions_data.get("net", [])
@@ -1095,6 +1104,9 @@ class BaseAgent(ABC):
             raise RuntimeError("sebi_denied")
 
         sl          = signal.get("stop_loss", risk_manager.sl_price(ltp, action))
+        if not sl or sl <= 0:
+            order_guard.release_claim(sym, self.name, action)
+            raise RuntimeError("invalid_sl")
         product     = signal.get("product", self.product)
         sl_side     = "SELL" if action == "BUY" else "BUY"
         use_limit   = getattr(settings, "use_limit_orders", False)
@@ -1190,7 +1202,7 @@ class BaseAgent(ABC):
                     raise
             else:
                 entry_type = "LIMIT" if use_limit else "MARKET"
-                entry_px   = limit_px if use_limit else 0.0
+                entry_px   = limit_px if use_limit else ltp  # PAPER uses price as fill hint
                 results = await asyncio.gather(
                     loop.run_in_executor(None, lambda: kite_client.place_order(
                         tradingsymbol=trade_sym, exchange=exch, transaction_type=action, quantity=qty,
@@ -1278,7 +1290,7 @@ class BaseAgent(ABC):
 
         # Mirror to secondary broker(s) if multi-broker is enabled
         if settings.enable_multi_broker and broker_router.has_secondaries:
-            loop.run_in_executor(None, lambda: broker_router.mirror_entry(
+            _mirror_kwargs = dict(
                 primary_order_id=str(order_id),
                 tradingsymbol=trade_sym,
                 exchange=exch,
@@ -1287,7 +1299,14 @@ class BaseAgent(ABC):
                 product=signal.get("product", self.product),
                 sl_trigger=signal.get("stop_loss", risk_manager.sl_price(ltp, action)),
                 agent_tag=f"Agent-{self.name}",
-            ))
+            )
+            async def _mirror_to_secondaries(_kw=_mirror_kwargs) -> None:
+                try:
+                    await loop.run_in_executor(None, lambda: broker_router.mirror_entry(**_kw))
+                except Exception as _exc:
+                    logger.warning("[{}] mirror_entry to secondary broker failed: {}",
+                                   self.name, _exc)
+            asyncio.create_task(_mirror_to_secondaries())
 
         return order_id, sl_order_id, qty
 
@@ -1446,7 +1465,7 @@ class BaseAgent(ABC):
             None, kite_client.positions_cached
         )
         for pos in _exit_pos_data.get("net", []):
-            if pos.get("tradingsymbol") != sym or pos.get("quantity", 0) == 0:
+            if not self._pos_matches_sym(pos, sym) or pos.get("quantity", 0) == 0:
                 continue
             # Ownership gate: in LIVE, kite.positions() also returns bracket-managed
             # positions and the account holder's MANUAL trades. Only flatten positions

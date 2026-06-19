@@ -7,8 +7,10 @@ Knowledge is fed back to the trade gate as institutional memory.
 from __future__ import annotations
 
 import asyncio
+import html as _html
 import json
 import os
+import threading
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Optional
@@ -21,7 +23,7 @@ from agents.base_agent import send_telegram
 
 
 # ── Storage ───────────────────────────────────────────────────────────────────
-MEMORY_FILE = Path("logs/trade_memory.jsonl")
+MEMORY_FILE = Path(__file__).parent / "logs" / "trade_memory.jsonl"
 MAX_ENTRIES = 500
 
 
@@ -117,14 +119,18 @@ def _extract_field(trade_record: Any, *keys: str, default: Any = None) -> Any:
     return default
 
 
+_trim_lock = threading.Lock()
+
+
 def _trim_file_to_max_entries() -> None:
-    """Keep only the last MAX_ENTRIES lines in MEMORY_FILE."""
+    """Keep only the last MAX_ENTRIES lines in MEMORY_FILE. Caller must hold _trim_lock."""
     try:
         lines = MEMORY_FILE.read_text(encoding="utf-8").splitlines()
         if len(lines) > MAX_ENTRIES:
-            MEMORY_FILE.write_text(
-                "\n".join(lines[-MAX_ENTRIES:]) + "\n", encoding="utf-8"
-            )
+            content = "\n".join(lines[-MAX_ENTRIES:]) + "\n"
+            tmp = MEMORY_FILE.with_suffix(".tmp")
+            tmp.write_text(content, encoding="utf-8")
+            tmp.replace(MEMORY_FILE)   # atomic rename — safe on crash mid-write
     except Exception as exc:
         logger.debug("[memory] trim error: {}", exc)
 
@@ -190,10 +196,13 @@ async def record_trade(
             "lesson":       lesson,
         }
 
-        with MEMORY_FILE.open("a", encoding="utf-8") as fh:
-            fh.write(json.dumps(entry) + "\n")
+        def _write_and_trim(_entry: dict) -> None:
+            with _trim_lock:   # serialize append+trim so concurrent trades don't corrupt the file
+                with MEMORY_FILE.open("a", encoding="utf-8") as fh:
+                    fh.write(json.dumps(_entry) + "\n")
+                _trim_file_to_max_entries()
 
-        _trim_file_to_max_entries()
+        await asyncio.to_thread(_write_and_trim, entry)
 
         logger.info(
             "[memory] {} {} {} {:.2f}% | {}", outcome, action, symbol, float(pnl_pct), insight
@@ -239,13 +248,15 @@ async def _haiku_analyse(
     try:
         resp = await asyncio.wait_for(
             _get_client().messages.create(
-                model="claude-haiku-4-5-20251001",
+                model="claude-haiku-4-5",
                 max_tokens=200,
                 messages=[{"role": "user", "content": prompt}],
             ),
             timeout=8.0,
         )
-        raw = resp.content[0].text.strip().lstrip("```json").rstrip("```").strip()
+        raw = resp.content[0].text.strip()
+        if raw.startswith("```"):
+            raw = raw.split("\n", 1)[-1].rsplit("```", 1)[0].strip()
         d   = json.loads(raw)
         return d.get("insight", "No insight"), d.get("lesson", "No lesson")
     except asyncio.TimeoutError:
@@ -367,7 +378,7 @@ async def weekly_synthesis() -> str:
 
         msg = (
             "<b>Weekly Trade Memory Synthesis</b>\n\n"
-            f"{synthesis}\n\n"
+            f"{_html.escape(synthesis)}\n\n"
             f"<i>Based on {len(entries)} trades — {datetime.now().strftime('%Y-%m-%d')}</i>"
         )
         await send_telegram(msg)

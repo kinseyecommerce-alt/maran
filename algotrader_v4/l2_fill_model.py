@@ -22,6 +22,7 @@ A BUY lifts the ASK side; a SELL hits the BID side.
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass
 
 
@@ -60,7 +61,7 @@ def estimate_fill(
 ) -> FillEstimate:
     """Estimate how a MARKET `side` order for `quantity` would fill against
     the visible book. Neutral (1.0, 0.0) when depth or inputs are missing."""
-    if quantity <= 0 or not ltp or ltp <= 0:
+    if quantity <= 0 or not ltp or ltp <= 0 or not math.isfinite(ltp):
         return FillEstimate(1.0, 0.0, ltp or 0.0, 0)
 
     # BUY consumes offers (ask side); SELL consumes bids.

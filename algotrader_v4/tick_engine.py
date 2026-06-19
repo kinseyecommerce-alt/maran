@@ -21,7 +21,8 @@ from __future__ import annotations
 import asyncio
 import time
 from collections import deque
-from dataclasses import dataclass, field, replace
+import math
+from dataclasses import dataclass, field, fields as dc_fields, replace, MISSING as dataclass_MISSING
 from datetime import datetime, timedelta
 from threading import Lock
 from typing import Callable, Optional
@@ -372,6 +373,20 @@ def _ichimoku(high: pd.Series, low: pd.Series) -> tuple[float, float, float, flo
 
 # ── Indicator calculator ──────────────────────────────────────────────────────
 
+def _sanitize_ind(ind: LiveIndicators) -> None:
+    """Replace any NaN floats (ta.* edge-case output) with each field's declared default.
+
+    NaN is truthy in Python, so ``if ind.ema9:`` silently passes when ema9 is NaN,
+    allowing NaN to reach ws_broadcast (non-standard JSON) and quantity math
+    (``int(NaN)`` → OverflowError). Sanitising here keeps all downstream code clean.
+    """
+    for f in dc_fields(ind):
+        v = getattr(ind, f.name)
+        if isinstance(v, float) and math.isnan(v):
+            safe = f.default if f.default is not dataclass_MISSING else 0.0
+            setattr(ind, f.name, safe)
+
+
 class IndicatorCalc:
 
     @staticmethod
@@ -480,6 +495,10 @@ class IndicatorCalc:
 
         except Exception as exc:
             logger.debug("Indicator compute error {}: {}", sym, exc)
+
+        # Sanitize NaN before derived-label checks: NaN is truthy so ``if ind.ema9``
+        # would silently pass, and downstream math (int(NaN)) would OverflowError.
+        _sanitize_ind(ind)
 
         # Derived labels
         ltp = tick.ltp
@@ -653,7 +672,7 @@ class TickEngine:
     def start_loop(self) -> None:
         """Called once FastAPI is running — starts the async polling loop and WebSocket."""
         self._running = True
-        self._loop = asyncio.get_event_loop()
+        self._loop = asyncio.get_running_loop()
         self._task = asyncio.create_task(self._poll_loop())
 
         # Start tick WebSocket in LIVE mode — TrueData preferred, Kite as fallback
@@ -759,7 +778,8 @@ class TickEngine:
         # only meaningful at candle close; intra-candle recomputes add noise, not edge.
         _n_candles = len(df)
         _cached_ltp = self._ind_cache_ltp.get(symbol, 0.0)
-        _ltp_moved_pct = abs(tick.ltp - _cached_ltp) / _cached_ltp * 100 if _cached_ltp else 100.0
+        _ltp_moved_pct = (abs(tick.ltp - _cached_ltp) / _cached_ltp * 100
+                          if _cached_ltp and not math.isnan(_cached_ltp) else 100.0)
         if (_n_candles == self._ind_cache_count.get(symbol, -1)
                 and _ltp_moved_pct < 0.05
                 and symbol in self._ind_cache):
@@ -823,7 +843,7 @@ class TickEngine:
             except Exception:
                 pass
 
-        for name, q in self._subscribers.items():
+        for name, q in list(self._subscribers.items()):
             try:
                 q.put_nowait(snap)
             except asyncio.QueueFull:
@@ -898,7 +918,7 @@ class TickEngine:
 
             # ── WS health check: fall back to REST if WS disconnected > 3s ──
             if self._use_ws and self._kite_ticker is not None:
-                ws_connected = getattr(self._kite_ticker, "is_connected", True)
+                ws_connected = getattr(self._kite_ticker, "is_connected", False)
                 # is_connected may be a property or a bool; resolve it
                 if callable(ws_connected):
                     ws_connected = ws_connected()
@@ -955,7 +975,7 @@ class TickEngine:
             return
         instruments = [f"{self._exchange.get(s, 'NSE')}:{s}" for s in pending]
         try:
-            raw = await asyncio.get_event_loop().run_in_executor(
+            raw = await asyncio.get_running_loop().run_in_executor(
                 None, lambda: kite_client.quote_kite(instruments)
             )
         except Exception as exc:
@@ -978,7 +998,7 @@ class TickEngine:
 
     def all_latest(self) -> dict[str, dict]:
         result = {}
-        for sym in self._latest_tick:
+        for sym in list(self._latest_tick):  # snapshot keys — new-symbol writes from event loop can change size during sync-endpoint iteration
             tick = self._latest_tick[sym]
             ind  = self._latest_ind[sym]
             if tick and ind:

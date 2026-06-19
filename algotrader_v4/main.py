@@ -8,6 +8,7 @@ import asyncio
 import hashlib
 import hmac
 import re
+import threading
 import time
 from collections import defaultdict
 from datetime import datetime
@@ -90,7 +91,10 @@ _SENSITIVE_GETS = frozenset({
     "/portfolio/performance-report",   # full P&L history — requires auth
     "/config/god-mode/status",         # exposes live risk profile — requires auth
     "/risk/status",                    # exposes daily P&L limits
+    "/risk/stress-test",               # exposes position beta + shock impact
+    "/risk/var",                       # exposes portfolio VaR/CVaR
     "/settings/trading-limits",        # exposes risk config
+    "/compliance/sebi-report",         # SEBI daily activity audit trail
     # QA-fix: additional sensitive GETs missing from original set
     "/portfolio/trades/history",       # full trade records with P&L per trade
     "/portfolio/trades/export",        # same data as CSV
@@ -211,6 +215,9 @@ async def _rate_limiter(request: Request, call_next):
             now = time.monotonic()
             calls = _rate_store[key]
             calls[:] = [t for t in calls if now - t < _RATE_WINDOW]
+            if not calls:
+                del _rate_store[key]
+                calls = _rate_store[key]
             if len(calls) >= limit:
                 return JSONResponse({"detail": "Rate limit exceeded"}, status_code=429)
             calls.append(now)
@@ -728,8 +735,10 @@ async def kite_token_refresh():
         raise HTTPException(400, f"Missing .env settings: {', '.join(missing)}")
     try:
         from kite_auto_login import refresh_kite_token_async
-        token = await refresh_kite_token_async()
+        token = await asyncio.wait_for(refresh_kite_token_async(), timeout=120.0)
         return {"status": "ok", "token_set": bool(token), "message": "Kite token refreshed"}
+    except asyncio.TimeoutError:
+        raise HTTPException(504, "Auto-login timed out after 120 seconds")
     except Exception as e:
         logger.error("Kite auto-login failed: {}", e)
         raise HTTPException(500, f"Auto-login failed: {e}")
@@ -925,7 +934,10 @@ def equity_chart(symbol: str, strategy: str):
 @app.post("/backtest/weekly", tags=["Backtest"])
 async def trigger_weekly_backtest():
     """Manually trigger the weekly auto-backtest across full universe."""
-    asyncio.create_task(asyncio.to_thread(backtest_engine.weekly_auto_backtest))
+    def _log_exc(t: asyncio.Task) -> None:
+        if not t.cancelled() and t.exception():
+            logger.error("[weekly_backtest] crashed: {}", t.exception())
+    asyncio.create_task(asyncio.to_thread(backtest_engine.weekly_auto_backtest), name="weekly_backtest").add_done_callback(_log_exc)
     return {"status": "weekly backtest started", "note": "runs in background, check logs"}
 
 @app.post("/backtest/portfolio", tags=["Backtest"])
@@ -1014,7 +1026,7 @@ async def cancel(order_id: str):
 
 @app.post("/orders/squareoff", tags=["Orders"])
 async def squareoff():
-    ids = kite_client.squareoff_all_positions()
+    ids = await asyncio.to_thread(kite_client.squareoff_all_positions)
     # Clear only active orders/claims — keep daily trade counts and cooldowns
     # intact so a squareoff cannot be used to reset overtrade limits.
     order_guard.clear_active_only()
@@ -1062,6 +1074,20 @@ async def multi_leg_order(req: MultiLegRequest):
         except Exception as exc:
             logger.error("Multi-leg leg failed {}: {}", sym, exc)
             errors.append(f"{sym}: {exc}")
+            # Roll back already-placed legs to avoid an unhedged position on the exchange
+            for placed_oid in order_ids:
+                try:
+                    kite_client.cancel_order(order_id=placed_oid)
+                    logger.info("Multi-leg rollback: cancelled {}", placed_oid)
+                except Exception as _ce:
+                    logger.error("Multi-leg rollback cancel {} failed: {}", placed_oid, _ce)
+            return {
+                "status":      "failed",
+                "order_ids":   [],
+                "errors":      errors,
+                "legs_placed": 0,
+                "legs_total":  len(req.legs),
+            }
     return {
         "status":   "ok" if not errors else "partial",
         "order_ids": order_ids,
@@ -1106,7 +1132,13 @@ async def gen_signal(req: SignalRequest):
     sym   = _clean_symbol(req.symbol)
     strat = _clean_strategy(req.strategy)
     try:
-        sig = signal_engine.generate(sym, req.exchange, strat)
+        # BUG S-4 fix: signal_engine.generate() makes a synchronous blocking
+        # Claude API call (up to 15 s). Calling it directly from an async route
+        # stalls the entire event loop. Offload to a thread-pool executor.
+        loop = asyncio.get_event_loop()
+        sig = await loop.run_in_executor(
+            None, signal_engine.generate, sym, req.exchange, strat
+        )
         await broadcast({"event": "signal", "symbol": sym, "signal": sig})
         from n8n_bridge import notify as _n8n
         asyncio.create_task(_n8n("signal", {
@@ -1594,7 +1626,6 @@ def admin_start_user(user: str, _: str = Depends(_admin_required)):
     if not env_file.exists():
         raise HTTPException(500, f".env missing for {user}")
     log_path = inst_dir / "logs" / "server.log"
-    log_file = open(log_path, "a")
     env = {
         **os.environ,
         "APP_ENV_FILE": str(env_file),
@@ -1602,13 +1633,18 @@ def admin_start_user(user: str, _: str = Depends(_admin_required)):
         "KITE_ACCOUNTS_FILE": str(inst_dir / "kite_accounts.json"),
         "ADAPTIVE_DATA_DIR": str(inst_dir / "logs" / "adaptive"),
     }
-    proc = subprocess.Popen(
-        ["python", "-m", "uvicorn", "main:app", "--host", "0.0.0.0", "--port", str(entry["port"])],
-        cwd=str(Path(__file__).parent),
-        env=env,
-        stdout=log_file,
-        stderr=log_file,
-    )
+    log_file = open(log_path, "a")
+    try:
+        proc = subprocess.Popen(
+            ["python", "-m", "uvicorn", "main:app", "--host", "0.0.0.0", "--port", str(entry["port"])],
+            cwd=str(Path(__file__).parent),
+            env=env,
+            stdout=log_file,
+            stderr=log_file,
+        )
+    finally:
+        # Close parent's copy; subprocess inherits the FD and keeps the file open.
+        log_file.close()
     entry["pid"] = proc.pid
     p._save_registry(reg)
     return {"ok": True, "pid": proc.pid, "port": entry["port"]}
@@ -1857,8 +1893,8 @@ async def trigger_kill_switch(reason: str = "Manual kill switch"):
         try:
             from notifier import notifier as _notifier
             await asyncio.to_thread(_notifier.send_kill_switch_alert, reason)
-        except Exception:
-            pass
+        except Exception as _exc:
+            logger.warning("[kill-switch] alert dispatch failed: {}", _exc)
     asyncio.create_task(_alert())
     return {"status": "KILLED", "reason": reason}
 
@@ -1935,6 +1971,7 @@ def readiness():
     ready_for_live = all([
         checks["kite_api_key"], checks["kite_api_secret"],
         checks["kite_access_token"], checks["kite_initialised"],
+        checks["anthropic_api_key"], checks["jwt_secret_key"],
     ])
     missing = [k for k, v in checks.items() if not v]
     return {
@@ -2021,7 +2058,7 @@ async def n8n_inbound(request: Request):
         return {"status": "stopped"}
 
     elif action == "squareoff":
-        ids = kite_client.squareoff_all_positions()
+        ids = await asyncio.to_thread(kite_client.squareoff_all_positions)
         return {"status": "ok", "squared_off": len(ids)}
 
     elif action == "start_bot":
@@ -2751,7 +2788,7 @@ async def on_startup():
     # Wire kill-switch → immediate squareoff of all open positions.
     async def _kill_switch_squareoff() -> None:
         try:
-            ids = kite_client.squareoff_all_positions()
+            ids = await asyncio.to_thread(kite_client.squareoff_all_positions)
             # Clear only active orders/claims — preserve trade counts/cooldowns
             # so a kill-switch cycle cannot wipe overtrade counters.
             order_guard.clear_active_only()
@@ -2780,23 +2817,27 @@ async def on_startup():
             except Exception as _sc_exc:
                 logger.error("Stale-claim sweep error: {}", _sc_exc)
 
-    asyncio.create_task(_release_stale_claims_loop())
+    def _log_task_exc(t: asyncio.Task) -> None:
+        if not t.cancelled() and t.exception():
+            logger.error("[startup] background task {} raised: {}", t.get_name(), t.exception())
+
+    asyncio.create_task(_release_stale_claims_loop(), name="stale_claims_loop").add_done_callback(_log_task_exc)
 
     tick_engine.start_loop()
     atomic_bracket_engine.ws_broadcast = broadcast
     logger.info("FastAPI startup: tick engine + atomic bracket engine launched")
-    asyncio.create_task(symbol_scanner.run())
+    asyncio.create_task(symbol_scanner.run(), name="symbol_scanner").add_done_callback(_log_task_exc)
 
     # Continuous broker-truth reconciliation: detects manual exits, GTT fires
     # and partial fills that happened outside this process, and corrects
     # internal TSL/guard/risk state (close-only — never places entries).
     if settings.use_position_reconciler:
         from position_reconciler import position_reconciler
-        asyncio.create_task(position_reconciler.run_loop())
+        asyncio.create_task(position_reconciler.run_loop(), name="position_reconciler").add_done_callback(_log_task_exc)
 
     # Pre-warm the Claude gate connection so the first real trade doesn't pay
     # the cold-start TCP/TLS handshake cost (~300-500 ms).
-    asyncio.create_task(_prewarm_gate())
+    asyncio.create_task(_prewarm_gate(), name="prewarm_gate").add_done_callback(_log_task_exc)
     from platform_scheduler import platform_scheduler
     platform_scheduler.start()
 
@@ -2982,7 +3023,8 @@ async def implementation_shortfall(days: int = 30):
     try:
         import sqlite3
         from pathlib import Path as _P
-        db_path = _P(__file__).parent / "logs" / "algotrader.db"
+        from state_store import DB_PATH as _DB_PATH
+        db_path = _P(_DB_PATH)
         if not db_path.exists():
             return {"trades_analysed": 0, "avg_shortfall_bps": 0.0, "total_shortfall_inr": 0.0}
         con = sqlite3.connect(db_path)
@@ -3051,10 +3093,10 @@ async def run_optimizer(
             p2 = phase2_threshold_sweep()
             phase3_regime_config(p1, p2)
 
-    if background_tasks:
-        background_tasks.add_task(_run)
-        return {"status": "started", "phase": phase or "all", "note": "check logs for progress"}
-    return {"status": "error", "detail": "no BackgroundTasks injected"}
+    if not background_tasks:
+        raise HTTPException(500, "BackgroundTasks not available")
+    background_tasks.add_task(_run)
+    return {"status": "started", "phase": phase or "all", "note": "check logs for progress"}
 
 
 @app.post("/optimizer/apply", tags=["Optimizer"])
@@ -3141,12 +3183,15 @@ async def db_cleanup(keep_days: int = Query(default=None, ge=30, le=365)):
     days = keep_days if keep_days is not None else settings.db_keep_days
 
     async def _run():
-        loop = asyncio.get_event_loop()
+        loop = asyncio.get_running_loop()
         removed = await loop.run_in_executor(None, lambda: cleanup_old_data(keep_days=days))
         await loop.run_in_executor(None, vacuum_db)
         logger.info("[db/cleanup] manual cleanup complete: {}", removed)
 
-    asyncio.create_task(_run())
+    def _log_exc(t: asyncio.Task) -> None:
+        if not t.cancelled() and t.exception():
+            logger.error("[db/cleanup] task crashed: {}", t.exception())
+    asyncio.create_task(_run(), name="db_cleanup").add_done_callback(_log_exc)
     return {"status": "started", "keep_days": days}
 
 
@@ -3214,7 +3259,7 @@ async def get_ml_signal_status():
 async def train_ml_signal(symbol: str):
     """Train or retrain the ML signal model for a symbol."""
     from ml_signal_scorer import ml_signal_scorer
-    loop = asyncio.get_event_loop()
+    loop = asyncio.get_running_loop()
     success = await loop.run_in_executor(None, lambda: ml_signal_scorer.train(symbol.upper()))
     return {"symbol": symbol.upper(), "trained": success}
 
@@ -3238,7 +3283,7 @@ async def place_twap_order(
 ):
     """Manually place a TWAP order for a large lot. direction: BUY or SELL."""
     from twap_executor import twap_executor
-    loop = asyncio.get_event_loop()
+    loop = asyncio.get_running_loop()
     ids = await twap_executor.place_twap(
         symbol.upper(), qty, direction.upper(), exchange, product,
         tag="manual-twap", duration_sec=duration_sec, slices=slices, loop=loop,

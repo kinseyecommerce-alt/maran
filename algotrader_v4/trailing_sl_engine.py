@@ -26,6 +26,7 @@ Events emitted (logged + Telegram):
 from __future__ import annotations
 
 import asyncio
+import math
 import time
 from dataclasses import dataclass, field
 from enum import Enum
@@ -375,6 +376,7 @@ class TrailingSLEngine:
         with self._lock:
             if pos.status != SLStatus.ACTIVE:
                 return
+            current_sl_snap = pos.current_sl  # snapshot under lock — guards against tighten_all() race
 
         cfg = pos.cfg
         old_sl = pos.current_sl
@@ -399,8 +401,8 @@ class TrailingSLEngine:
         profit_pct = pos.current_pnl_pct
 
         # ── 2. Check SL hit ────────────────────────────────────────────
-        sl_hit = (pos.side == "BUY" and ltp <= pos.current_sl) or \
-                 (pos.side == "SELL" and ltp >= pos.current_sl)
+        sl_hit = (pos.side == "BUY" and ltp <= current_sl_snap) or \
+                 (pos.side == "SELL" and ltp >= current_sl_snap)
 
         if sl_hit:
             # Atomically claim ownership of the SL-hit under lock to prevent a
@@ -417,16 +419,16 @@ class TrailingSLEngine:
             if cb_sl_hit:
                 try:
                     await cb_sl_hit(pos, ltp, pnl)
-                except Exception as exc:
-                    logger.error(
-                        "[TSL] callback error for {}: {} — position cleaned up anyway",
-                        pos.symbol, exc
-                    )
-                finally:
-                    pos.status = SLStatus.HIT  # ensure EXITED-equivalent is marked
                     with self._lock:
                         self._positions.pop(pos.order_id, None)
+                except Exception as exc:
+                    logger.error(
+                        "[TSL] SL callback failed for {} — leaving in position list for retry: {}",
+                        pos.symbol, exc
+                    )
+                    pos.status = SLStatus.ACTIVE  # allow re-evaluation on next tick
             else:
+                pos.status = SLStatus.HIT
                 with self._lock:
                     self._positions.pop(pos.order_id, None)
             return
@@ -471,11 +473,13 @@ class TrailingSLEngine:
                 if pos.side == "BUY":
                     tighter_sl = round(ltp * (1 - cfg.trail_pct / 200), 2)
                     if tighter_sl > pos.current_sl:
+                        old_sl = pos.current_sl  # update for breakeven/trail callback below
                         pos.current_sl = tighter_sl
                         pos.sl_moves  += 1
                 else:
                     tighter_sl = round(ltp * (1 + cfg.trail_pct / 200), 2)
                     if tighter_sl < pos.current_sl:
+                        old_sl = pos.current_sl  # update for breakeven/trail callback below
                         pos.current_sl = tighter_sl
                         pos.sl_moves  += 1
                 logger.info(
@@ -558,6 +562,8 @@ class TrailingSLEngine:
     ) -> Optional[float]:
         cfg = pos.cfg
 
+        if pos.best_price <= 0:
+            return None
         if cfg.mode == SLMode.ATR_TRAIL and atr > 0:
             multiplier = cfg.atr_multiplier / 2 if pos.target1_hit else cfg.atr_multiplier
             trail_dist = atr * multiplier
@@ -566,19 +572,24 @@ class TrailingSLEngine:
             pct = cfg.trail_pct / 200 if pos.target1_hit else cfg.trail_pct / 100
             trail_dist = pos.best_price * pct
 
-        # Volatility-adaptive tightening: if ATR has spiked >50% vs entry, tighten by 30%
+        # Volatility-adaptive tightening: if ATR has spiked >50% vs entry, tighten by 30%.
+        # Floor at 0.05 (5 paise) to prevent tightening to zero on extreme vol spikes.
         if pos.atr_at_entry > 0 and atr > pos.atr_at_entry * 1.5:
-            trail_dist *= 0.70
+            trail_dist = max(trail_dist * 0.70, 0.05)
 
         if pos.side == "BUY":
-            return round(pos.best_price - trail_dist, 2)
+            new_sl = round(pos.best_price - trail_dist, 2)
         else:
-            return round(pos.best_price + trail_dist, 2)
+            new_sl = round(pos.best_price + trail_dist, 2)
+        if math.isnan(new_sl) or new_sl <= 0:
+            return None
+        return new_sl
 
     # ── Queries ────────────────────────────────────────────────────────
 
     def get_position(self, order_id: str) -> Optional[PositionSL]:
-        return self._positions.get(order_id)
+        with self._lock:
+            return self._positions.get(order_id)
 
     def tighten_all(self, trail_pct: float = 0.5) -> int:
         """Emergency TSL tightening — called on BLACK_SWAN detection.
@@ -640,7 +651,14 @@ class TrailingSLEngine:
                         continue
                     _task = loop.create_task(_cb(pos, old_sl, "BLACK_SWAN_TIGHTEN"))
                     _TIGHTEN_TASKS.add(_task)
-                    _task.add_done_callback(_TIGHTEN_TASKS.discard)
+                    def _handle_done(t: _asyncio.Task, _sym=pos.symbol) -> None:
+                        _TIGHTEN_TASKS.discard(t)
+                        exc = None if t.cancelled() else t.exception()
+                        if exc is not None:
+                            logger.warning(
+                                "[TSL] BLACK_SWAN_TIGHTEN callback failed for {}: {}",
+                                _sym, exc)
+                    _task.add_done_callback(_handle_done)
         return count
 
     def all_positions(self) -> list[dict]:
@@ -653,7 +671,8 @@ class TrailingSLEngine:
             active = [p for p in self._positions.values() if p.status == SLStatus.ACTIVE]
             return {
                 "active_count":    len(active),
-                "total_locked":    round(sum(p.locked_profit for p in active), 0),
+                "total_locked":    round(sum(p.locked_profit for p in active
+                                             if not math.isnan(p.locked_profit)), 0),
                 "positions":       [p.to_dict() for p in active],
                 "sl_moves_today":  sum(p.sl_moves for p in self._positions.values()),
             }

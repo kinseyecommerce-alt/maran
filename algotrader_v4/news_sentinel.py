@@ -13,6 +13,7 @@ the last 6 hours. Cached per symbol for 5 minutes to avoid hammering RSS.
 """
 from __future__ import annotations
 
+import threading
 import time
 import urllib.request
 import xml.etree.ElementTree as ET
@@ -39,6 +40,7 @@ class NewsSentinel:
     def __init__(self) -> None:
         # Maps symbol -> (fetch_timestamp, [headlines])
         self._cache: dict[str, tuple[float, list[str]]] = {}
+        self._cache_lock = threading.Lock()
 
     # ── Public API ────────────────────────────────────────────────────────────
 
@@ -50,22 +52,29 @@ class NewsSentinel:
         sym_upper = symbol.upper()
         sym_lower = symbol.lower()
 
-        # Check cache
-        cached = self._cache.get(sym_upper)
-        if cached is not None:
-            ts, headlines = cached
-            if time.time() - ts < _CACHE_TTL_SECONDS:
-                logger.debug("[NewsSentinel] {}: {} headlines (cached)", symbol, len(headlines))
-                return headlines
+        # Check cache (under lock to prevent concurrent fetches for same symbol)
+        with self._cache_lock:
+            cached = self._cache.get(sym_upper)
+            if cached is not None:
+                ts, headlines = cached
+                if time.time() - ts < _CACHE_TTL_SECONDS:
+                    logger.debug("[NewsSentinel] {}: {} headlines (cached)", symbol, len(headlines))
+                    return headlines
+            # Purge stale entries to prevent unbounded growth
+            cutoff = time.time() - _CACHE_TTL_SECONDS
+            stale = [k for k, (t, _) in self._cache.items() if t < cutoff]
+            for k in stale:
+                del self._cache[k]
 
-        # Fetch from RSS feeds
+        # Fetch from RSS feeds (outside lock — can be slow)
         try:
             headlines = self._fetch_headlines(sym_lower, max_headlines)
         except Exception as exc:
             logger.debug("[NewsSentinel] {}: fetch error — {}", symbol, exc)
             headlines = []
 
-        self._cache[sym_upper] = (time.time(), headlines)
+        with self._cache_lock:
+            self._cache[sym_upper] = (time.time(), headlines)
         logger.debug("[NewsSentinel] {}: {} headlines found", symbol, len(headlines))
         return headlines
 
@@ -93,7 +102,7 @@ class NewsSentinel:
                     headers={"User-Agent": "AlgoTrader/4.0 (market data feed reader)"},
                 )
                 with urllib.request.urlopen(req, timeout=_FETCH_TIMEOUT) as resp:
-                    raw_xml = resp.read()
+                    raw_xml = resp.read(512 * 1024)  # cap at 512 KB
 
                 root = ET.fromstring(raw_xml)
                 items = root.findall(".//item")

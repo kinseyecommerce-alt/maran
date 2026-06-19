@@ -49,7 +49,7 @@ class TickReplayer:
                 params.append(start)
             if end:
                 q += " AND tick_ts <= ?"
-                params.append(end + " 23:59:59")
+                params.append(end + "T23:59:59.999999")
             (count,) = conn.execute(q, params).fetchone()
             return count >= 20
         except Exception:
@@ -108,7 +108,7 @@ class TickReplayer:
                 params.append(start)
             if end:
                 q += " AND tick_ts <= ?"
-                params.append(end + " 23:59:59")
+                params.append(end + "T23:59:59.999999")
             q += " ORDER BY tick_ts ASC"
 
             rows = conn.execute(q, params).fetchall()
@@ -119,13 +119,19 @@ class TickReplayer:
             # Build DataFrame
             df = pd.DataFrame(rows, columns=["ltp", "volume", "tick_ts"])
             df["tick_ts"] = pd.to_datetime(df["tick_ts"], errors="coerce")
+            before = len(df)
             df = df.dropna(subset=["tick_ts"]).sort_values("tick_ts")
+            if len(df) < before:
+                logger.warning(
+                    "tick_replayer: dropped {} rows with unparseable timestamps for {}",
+                    before - len(df), symbol
+                )
 
             # Resample into OHLCV bars
             df = df.set_index("tick_ts")
             freq = f"{bar_seconds}s"
             ohlcv = df["ltp"].resample(freq).ohlc()
-            vol   = df["volume"].resample(freq).last().diff().clip(lower=0)
+            vol   = df["volume"].resample(freq).sum()
             ohlcv["volume"] = vol
             ohlcv = ohlcv.dropna(subset=["open", "close"])
             ohlcv = ohlcv.reset_index().rename(columns={"tick_ts": "date"})

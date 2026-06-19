@@ -18,6 +18,7 @@ Score breakdown (0-100):
 from __future__ import annotations
 
 import asyncio
+import threading
 from datetime import date, datetime
 from typing import Optional
 
@@ -36,6 +37,7 @@ BULK_DEAL_URL        = NSE_BASE + "/api/bulk-deal"
 #                        block_deal_direction, block_deal_qty,
 #                        institutional_score, refreshed_at } }
 _cache: dict[str, dict] = {}
+_cache_lock = threading.Lock()  # protects _cache, _warned_urls, _last_refresh_date
 
 # Tracks which API URLs have already had their failure logged today
 # to avoid spamming the log on every query call.
@@ -43,6 +45,17 @@ _warned_urls: set[str] = set()
 
 # Date of last successful full refresh (used to gate once-daily logic)
 _last_refresh_date: Optional[date] = None
+
+# Guards refresh_daily against concurrent calls to prevent double NSE fetches
+_refresh_lock: Optional[asyncio.Lock] = None
+
+
+def _get_refresh_lock() -> asyncio.Lock:
+    """Lazily create the asyncio.Lock inside the running event loop."""
+    global _refresh_lock
+    if _refresh_lock is None:
+        _refresh_lock = asyncio.Lock()
+    return _refresh_lock
 
 
 # ── Helpers ────────────────────────────────────────────────────────────────────
@@ -97,9 +110,11 @@ def _default_entry(symbol: str) -> dict:
 
 def _warn_once(url: str, exc: object) -> None:
     """Log an API failure at WARNING level, but only once per session per URL."""
-    if url not in _warned_urls:
-        logger.warning("institutional_flow: NSE API failed for {} — {}", url, exc)
+    with _cache_lock:
+        if url in _warned_urls:
+            return
         _warned_urls.add(url)
+    logger.warning("institutional_flow: NSE API failed for {} — {}", url, exc)
 
 
 # ── Data parsers ───────────────────────────────────────────────────────────────
@@ -312,50 +327,69 @@ async def refresh_daily(symbols: Optional[list[str]] = None) -> None:
     Clears stale warnings from the previous session so fresh errors are logged.
     """
     global _last_refresh_date
-    _warned_urls.clear()
+    async with _get_refresh_lock():  # prevents concurrent double-fetches of NSE APIs
+        with _cache_lock:
+            _warned_urls.clear()
 
-    logger.info("institutional_flow: starting daily refresh ({})", _today_str())
+        logger.info("institutional_flow: starting daily refresh ({})", _today_str())
 
-    # Run all three fetches concurrently to minimise wall time
-    delivery_map, block_map, bulk_map = await asyncio.gather(
-        _fetch_delivery(),
-        _fetch_block_deals(),
-        _fetch_bulk_deals(),
-    )
-
-    # Merge block + bulk deal maps; block deals take precedence for BUY signals
-    combined_deal_map: dict[str, dict] = {**bulk_map, **block_map}
-
-    # Determine which symbols to cache
-    if symbols:
-        target_symbols = [s.upper() for s in symbols]
-    else:
-        # Union of all symbols we have any data for
-        target_symbols = list(
-            set(delivery_map.keys()) | set(combined_deal_map.keys())
+        # Run all three fetches concurrently to minimise wall time
+        delivery_map, block_map, bulk_map = await asyncio.gather(
+            _fetch_delivery(),
+            _fetch_block_deals(),
+            _fetch_bulk_deals(),
         )
 
-    refreshed = 0
-    for sym in target_symbols:
-        try:
-            _cache[sym] = _build_cache_entry(sym, delivery_map, combined_deal_map)
-            refreshed += 1
-        except Exception as exc:
-            logger.warning("institutional_flow: cache build failed for {}: {}", sym, exc)
+        # Merge block + bulk deal maps; block deals take precedence for BUY signals
+        combined_deal_map: dict[str, dict] = {**bulk_map, **block_map}
 
-    _last_refresh_date = date.today()
-    logger.info(
-        "institutional_flow: refresh complete — {} symbols cached, "
-        "{} with delivery data, {} with deal data",
-        refreshed,
-        len(delivery_map),
-        len(combined_deal_map),
-    )
+        # Determine which symbols to cache
+        if symbols:
+            target_symbols = [s.upper() for s in symbols]
+        else:
+            # Union of all symbols we have any data for
+            target_symbols = list(
+                set(delivery_map.keys()) | set(combined_deal_map.keys())
+            )
+
+        refreshed = 0
+        new_entries: dict[str, dict] = {}
+        for sym in target_symbols:
+            try:
+                new_entries[sym] = _build_cache_entry(sym, delivery_map, combined_deal_map)
+                refreshed += 1
+            except Exception as exc:
+                logger.warning("institutional_flow: cache build failed for {}: {}", sym, exc)
+
+        with _cache_lock:
+            _cache.update(new_entries)
+            if delivery_map or combined_deal_map:
+                _last_refresh_date = date.today()
+
+        if not (delivery_map or combined_deal_map):
+            logger.warning(
+                "institutional_flow: all NSE data sources returned empty — "
+                "refresh not marked complete; will retry on next call"
+            )
+        logger.info(
+            "institutional_flow: refresh complete — {} symbols cached, "
+            "{} with delivery data, {} with deal data",
+            refreshed,
+            len(delivery_map),
+            len(combined_deal_map),
+        )
 
 
 def get_cached_score(symbol: str) -> dict:
-    """Synchronous accessor — returns cached entry or neutral default. Never raises."""
-    return _cache.get(symbol.upper(), _default_entry(symbol))
+    """Synchronous accessor — returns cached entry or neutral default. Never raises.
+
+    Returns default when cache is stale (refreshed on a prior calendar day).
+    """
+    sym_upper = symbol.upper()
+    with _cache_lock:
+        today_fresh = _last_refresh_date == date.today()
+        entry = _cache.get(sym_upper) if today_fresh else None
+    return entry if entry else _default_entry(symbol)
 
 
 async def get_institutional_score(symbol: str) -> dict:
@@ -382,20 +416,25 @@ async def get_institutional_score(symbol: str) -> dict:
     """
     sym_upper = symbol.upper()
 
-    if sym_upper in _cache:
-        return _cache[sym_upper]
+    with _cache_lock:
+        today_fresh = _last_refresh_date == date.today()
+        entry = _cache.get(sym_upper) if today_fresh else None
+    if entry:
+        return entry
 
-    # Cache miss — try a targeted refresh before falling back to defaults
+    # Cache miss or stale — try a targeted refresh before falling back to defaults
     try:
         await refresh_daily(symbols=[sym_upper])
-        if sym_upper in _cache:
-            return _cache[sym_upper]
+        with _cache_lock:
+            entry = _cache.get(sym_upper)
+        if entry:
+            return entry
     except Exception as exc:
         logger.warning(
             "institutional_flow: on-demand refresh failed for {}: {}", sym_upper, exc
         )
 
-    # Last resort: return safe defaults so callers are never blocked
-    default = _default_entry(sym_upper)
-    _cache[sym_upper] = default   # store so repeated calls don't re-fetch
-    return default
+    # Last resort: return safe defaults so callers are never blocked.
+    # Do NOT cache the default — if NSE was temporarily down the next call
+    # should retry rather than being stuck with synthetic data for the day.
+    return _default_entry(sym_upper)

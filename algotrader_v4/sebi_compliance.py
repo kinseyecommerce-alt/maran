@@ -16,12 +16,15 @@ from __future__ import annotations
 
 import hmac
 import json
+import math
+import os
 import uuid
 from collections import defaultdict
 from dataclasses import dataclass, field
 from datetime import datetime, date
 from enum import Enum
 from pathlib import Path
+import threading
 from threading import Lock
 from typing import Awaitable, Callable, Optional
 
@@ -174,8 +177,8 @@ class SEBICompliance:
                 _ip = _ip.strip()
                 if _ip:
                     self._whitelisted_ips.add(_ip)
-        except Exception:
-            pass
+        except Exception as exc:
+            logger.warning("[SEBI] could not load whitelisted IPs from config: {}", exc)
 
         # Reg 3: order-to-trade ratio (orders placed vs orders executed)
         self._orders_placed:   int = 0
@@ -283,7 +286,7 @@ class SEBICompliance:
                 loop = asyncio.get_running_loop()
                 task = loop.create_task(cb())
                 task.add_done_callback(
-                    lambda t: t.exception() and logger.error(
+                    lambda t: (not t.cancelled() and t.exception()) and logger.error(
                         "SEBI kill-switch squareoff raised: {}", t.exception()
                     )
                 )
@@ -403,6 +406,12 @@ class SEBICompliance:
             # Reg 4: max order value — BOTH limits enforced independently:
             #   • SEBI guideline hard cap: ₹10 lakh per order (NOT raisable via config)
             #   • configured max_position_size, when smaller
+            if not price_at_signal or math.isnan(price_at_signal) or price_at_signal <= 0:
+                reason = f"Invalid price_at_signal: {price_at_signal}"
+                self._record_audit(strategy, symbol, exchange, transaction_type,
+                                   quantity, order_type, price_at_signal,
+                                   signal_source, regime, "REJECTED", reason, algo_id)
+                return False, algo_id, reason
             order_value = quantity * max(price_at_signal, 1.0)
             if order_value > _SEBI_MAX_ORDER_VALUE:
                 reason = (f"Order value ₹{order_value:,.0f} exceeds SEBI per-order limit "
@@ -411,8 +420,10 @@ class SEBICompliance:
                                    quantity, order_type, price_at_signal,
                                    signal_source, regime, "REJECTED", reason, algo_id)
                 return False, algo_id, reason
-            config_cap = max(settings.max_position_size, 1.0)
-            if order_value > config_cap:
+            config_cap = settings.max_position_size
+            # 0 means "no cap configured" — skip the check; max(cap, 1.0) would
+            # accidentally set a ₹1 limit and reject every order.
+            if config_cap > 0 and order_value > config_cap:
                 reason = (f"Order value ₹{order_value:,.0f} exceeds configured "
                           f"max_position_size ₹{config_cap:,.0f}")
                 self._record_audit(strategy, symbol, exchange, transaction_type,
@@ -459,14 +470,20 @@ class SEBICompliance:
         )
         today = date.today().isoformat()
         self._audit_log[today].append(rec)
-        # MED-4: persist to append-only NDJSON file
-        try:
-            _AUDIT_LOG_DIR.mkdir(exist_ok=True)
-            log_file = _AUDIT_LOG_DIR / f"sebi_audit_{today}.json"
-            with open(log_file, "a") as fh:
-                fh.write(json.dumps(rec.__dict__) + "\n")
-        except Exception as exc:
-            logger.error("SEBI audit log file write error: {}", exc)
+
+        # Disk write in a daemon thread so file I/O never holds self._lock,
+        # which would block the kill-switch during slow disk operations.
+        def _write() -> None:
+            try:
+                _AUDIT_LOG_DIR.mkdir(exist_ok=True)
+                log_file = _AUDIT_LOG_DIR / f"sebi_audit_{today}.json"
+                with open(log_file, "a") as fh:
+                    fh.write(json.dumps(rec.__dict__) + "\n")
+                os.chmod(log_file, 0o600)
+            except Exception as exc:
+                logger.error("SEBI audit log file write error: {}", exc)
+
+        threading.Thread(target=_write, daemon=True).start()
 
     def _load_audit_from_file(self, date_str: str) -> list[dict]:
         """Load audit records from the on-disk NDJSON file for *date_str*.
@@ -583,6 +600,8 @@ class SEBICompliance:
             "kill_switch_active": self._state == KillSwitchState.KILLED,
             "registered_algos":  list(APPROVED_ALGO_IDS.keys()),
             "audit_entries":     today_entries[:200],
+            "total_entries":     len(today_entries),
+            "entries_truncated": len(today_entries) > 200,
             "generated_at":      datetime.datetime.utcnow().isoformat() + "Z",
         }
 

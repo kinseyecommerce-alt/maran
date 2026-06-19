@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import asyncio
 import copy
+import math
 from dataclasses import dataclass, field
 from datetime import datetime, time
 from pathlib import Path
@@ -445,13 +446,18 @@ class SymbolScanner:
             sc.ltp = float(close.iloc[-1])
 
             # ── Average volume ────────────────────────────────────────
-            sc.avg_volume = float(volume.rolling(10).mean().iloc[-1])
+            _avg_vol = volume.rolling(10).mean().iloc[-1]
+            if pd.isna(_avg_vol):
+                return None   # insufficient data for volume filter; skip symbol
+            sc.avg_volume = float(_avg_vol)
 
             # ── ATR % ─────────────────────────────────────────────────
             if n >= 14:
                 atr = ta.volatility.AverageTrueRange(high, low, close, 14) \
                         .average_true_range().iloc[-1]
                 sc.atr_pct = (atr / sc.ltp * 100) if sc.ltp > 0 else 0
+                if not math.isfinite(sc.atr_pct):
+                    return None   # NaN/Inf ATR: insufficient price variance — skip symbol
 
             # ── EMA ────────────────────────────────────────────────────
             if n >= 9:
@@ -461,7 +467,7 @@ class SymbolScanner:
             if n >= 50:
                 sc.ema50 = float(ta.trend.EMAIndicator(close, 50).ema_indicator().iloc[-1])
 
-            if sc.ema9 and sc.ema21:
+            if (sc.ema9 and sc.ema9 == sc.ema9 and sc.ema21 and sc.ema21 == sc.ema21):
                 if sc.ltp > sc.ema9 > sc.ema21:   sc.trend_direction = "UP"
                 elif sc.ltp < sc.ema9 < sc.ema21: sc.trend_direction = "DOWN"
 
@@ -472,11 +478,12 @@ class SymbolScanner:
             # ── ADX ────────────────────────────────────────────────────
             if n >= 14:
                 sc.adx = float(ta.trend.ADXIndicator(high, low, close, 14).adx().iloc[-1])
+                if not math.isfinite(sc.adx):
+                    sc.adx = 0.0   # treat unknown trend strength as zero (filtered out)
 
             # ── Component scores ──────────────────────────────────────
 
             # Liquidity (0–100): rank by log volume
-            import math
             vol_log = math.log(sc.avg_volume + 1)
             sc.liquidity_score = min(100, vol_log / 16 * 100)  # 16 ≈ log(10M)
 

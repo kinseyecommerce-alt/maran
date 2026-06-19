@@ -20,7 +20,9 @@ class PortfolioVaR:
                 if col not in df.columns:
                     continue
                 closes = df[col].dropna().values.astype(float)
-                if len(closes) < 2:
+                if len(closes) < 3:   # need ≥2 returns for meaningful std (ddof=1)
+                    continue
+                if (closes <= 0).any():
                     continue
                 rets = np.diff(closes) / closes[:-1]
                 result[sym] = rets
@@ -54,16 +56,26 @@ class PortfolioVaR:
         ret_matrix = np.vstack([r[-min_len:] for _, r in valid])  # shape: (n, min_len)
         portfolio_rets = weights @ ret_matrix  # shape: (min_len,)
 
+        if not np.isfinite(portfolio_rets).all():
+            logger.warning("[PortfolioVaR] portfolio returns contain NaN/Inf — returning zero VaR")
+            return {**_zero, "total_notional": round(total_notional, 2), "n_positions": len(active)}
+
+        if len(portfolio_rets) < 2:
+            logger.warning("[PortfolioVaR] insufficient history ({} day) — returning zero VaR", len(portfolio_rets))
+            return {**_zero, "total_notional": round(total_notional, 2), "n_positions": len(active)}
         mu = float(portfolio_rets.mean())
-        sigma = float(portfolio_rets.std(ddof=1)) if len(portfolio_rets) > 1 else 0.0
+        sigma = float(portfolio_rets.std(ddof=1))
 
         z95 = float(_stats.norm.ppf(0.05))
         z99 = float(_stats.norm.ppf(0.01))
         var_95 = -(mu + z95 * sigma) * total_notional
         var_99 = -(mu + z99 * sigma) * total_notional
 
-        threshold_99 = float(np.quantile(portfolio_rets, 0.01))
-        tail = portfolio_rets[portfolio_rets <= threshold_99]
+        # CVaR: use sorted tail (bottom ceil(1%) observations) — np.quantile equality
+        # comparison can include too many values in flat-market conditions
+        sorted_rets = np.sort(portfolio_rets)
+        cutoff = max(1, int(np.ceil(0.01 * len(sorted_rets))))
+        tail = sorted_rets[:cutoff]
         cvar_99 = (-float(tail.mean()) * total_notional) if len(tail) > 0 else var_99
 
         return {
@@ -94,7 +106,9 @@ class PortfolioVaR:
             "quantity": 1,
             "last_price": new_notional,
         }
-        combined = list(positions) + [synthetic]
+        # Exclude any existing position for new_symbol to avoid double-counting its notional
+        existing_excl = [p for p in positions if p.get("tradingsymbol") != new_symbol]
+        combined = existing_excl + [synthetic]
 
         result = self.compute(combined)
         if result["n_positions"] < 2:

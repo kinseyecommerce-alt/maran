@@ -7,6 +7,7 @@ Feeds ticks directly into tick_engine via asyncio.run_coroutine_threadsafe().
 from __future__ import annotations
 
 import asyncio
+import threading
 from datetime import datetime
 from ist_clock import now_ist
 from typing import Callable, Optional
@@ -37,6 +38,9 @@ class KiteTicker:
         self._callback: Optional[Callable] = None
         self._loop: Optional[asyncio.AbstractEventLoop] = None
         self._connected = False
+        # BUG K-1: protect _connected with a lock so writes from the WS
+        # background thread are safely visible to any reader thread.
+        self._state_lock = threading.Lock()
         # Kite's volume_traded is the CUMULATIVE day volume — track the last seen
         # value per symbol and emit only the per-tick delta (TickBuffer sums volumes).
         self._last_cum_vol: dict[str, int] = {}
@@ -81,20 +85,23 @@ class KiteTicker:
             api_key=settings.kite_api_key,
             access_token=settings.kite_access_token,
         )
-        self._kws.on_ticks   = self._on_ticks
-        self._kws.on_connect = self._on_connect
-        self._kws.on_error   = self._on_error
-        self._kws.on_close   = self._on_close
+        self._kws.on_ticks       = self._on_ticks
+        self._kws.on_connect     = self._on_connect
+        self._kws.on_error       = self._on_error
+        self._kws.on_close       = self._on_close
+        self._kws.on_reconnect   = self._on_reconnect
+        self._kws.on_noreconnect = self._on_noreconnect
         self._kws.connect(threaded=True)
         logger.info("[KiteTicker] WebSocket connecting…")
 
     def stop(self) -> None:
-        self._connected = False
+        with self._state_lock:
+            self._connected = False
         if self._kws:
             try:
                 self._kws.stop()
-            except Exception:
-                pass
+            except Exception as exc:
+                logger.debug("[KiteTicker] WebSocket stop error (non-critical): {}", exc)
 
     # ── KiteConnect callbacks (called from C thread) ──────────────────────────
 
@@ -113,7 +120,8 @@ class KiteTicker:
             tokens = tokens[:self._KITE_WS_TOKEN_LIMIT]
         ws.subscribe(tokens)
         ws.set_mode(ws.MODE_FULL, tokens)
-        self._connected = True
+        with self._state_lock:
+            self._connected = True
         self.reset_volume_baseline()
         logger.info("[KiteTicker] Connected — subscribed {} tokens in FULL mode", len(tokens))
 
@@ -121,14 +129,27 @@ class KiteTicker:
         logger.error("[KiteTicker] Error {}: {}", code, reason)
 
     def _on_close(self, ws, code, reason) -> None:
-        self._connected = False
+        with self._state_lock:
+            self._connected = False
         logger.warning("[KiteTicker] Closed {}: {}", code, reason)
+
+    def _on_reconnect(self, ws, attempts_count) -> None:
+        logger.warning("[KiteTicker] Reconnecting… attempt {}", attempts_count)
+        self.reset_volume_baseline()
+
+    def _on_noreconnect(self, ws) -> None:
+        with self._state_lock:
+            self._connected = False
+        logger.error("[KiteTicker] WebSocket exhausted reconnect attempts — feed is dead")
 
     def _on_ticks(self, ws, ticks: list[dict]) -> None:
         if not self._callback or not self._loop:
             return
 
-        # New trading session — cumulative volume restarts at the exchange
+        # BUG K-2 fix: check date once before the loop so that
+        # reset_volume_baseline() is not called mid-batch (which would clear
+        # baselines for symbols already processed in this same batch, causing
+        # vol_delta=0 for those symbols on all subsequent ticks in the batch).
         if now_ist().date() != self._vol_date:
             self.reset_volume_baseline()
 
@@ -172,10 +193,28 @@ class KiteTicker:
                 timestamp  = now_ist(),
             )
 
-            asyncio.run_coroutine_threadsafe(
+            _fut = asyncio.run_coroutine_threadsafe(
                 self._callback(sym, tick), self._loop
             )
+            # BUG K-3 fix: the original lambda called f.exception() twice and
+            # could raise CancelledError (swallowed silently) during shutdown.
+            # Use a named function with _sym=sym to capture sym by value (not
+            # by reference — a plain `lambda f: ... sym` in a loop captures
+            # the loop variable by reference, logging the last sym for all cbs).
+            def _tick_done(f, _sym=sym):
+                try:
+                    exc = f.exception()
+                except Exception:
+                    # Future was cancelled or otherwise unavailable — not a
+                    # callback-raised exception; ignore.
+                    return
+                if exc is not None:
+                    logger.error(
+                        "[KiteTicker] tick callback raised for {}: {}", _sym, exc
+                    )
+            _fut.add_done_callback(_tick_done)
 
     @property
     def is_connected(self) -> bool:
-        return self._connected
+        with self._state_lock:
+            return self._connected

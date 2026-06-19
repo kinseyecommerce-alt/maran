@@ -35,6 +35,7 @@ Strategy selection per regime
 from __future__ import annotations
 
 import asyncio
+import threading
 import time
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
@@ -253,6 +254,7 @@ class MarketRegimeDetector:
         self._last_full_update: float           = 0.0
         self._nifty_cache:    Optional[pd.DataFrame] = None
         self._vix_history:    list[float]       = []   # Phase 3B: rolling 20-day VIX readings
+        self._state_lock      = threading.Lock()
 
     # ── Main update ────────────────────────────────────────────────────
 
@@ -290,21 +292,22 @@ class MarketRegimeDetector:
         regime = self._classify(signals)
         plan   = REGIME_PLANS.get(regime, REGIME_PLANS[Regime.UNKNOWN])
 
-        self.current_regime  = regime
-        self.current_plan    = plan
-        self.current_signals = signals
+        with self._state_lock:
+            self.current_regime  = regime
+            self.current_plan    = plan
+            self.current_signals = signals
 
-        # Keep history
-        self.history.append({
-            "ts":     signals.timestamp.isoformat(),
-            "regime": regime.value,
-            "vix":    round(signals.india_vix, 2),
-            "nifty":  round(signals.nifty_ltp, 2),
-            "adx":    round(signals.nifty_adx, 1),
-            "ad":     round(signals.advance_decline, 2),
-        })
-        if len(self.history) > 100:
-            self.history = self.history[-100:]
+            # Keep history
+            self.history.append({
+                "ts":     signals.timestamp.isoformat(),
+                "regime": regime.value,
+                "vix":    round(signals.india_vix, 2),
+                "nifty":  round(signals.nifty_ltp, 2),
+                "adx":    round(signals.nifty_adx, 1),
+                "ad":     round(signals.advance_decline, 2),
+            })
+            if len(self.history) > 100:
+                self.history = self.history[-100:]
 
         logger.info(
             "Regime: {} | VIX={:.1f} | NIFTY={:.0f} | ADX={:.0f} | A/D={:.2f} | PCR={:.2f}",
@@ -336,7 +339,7 @@ class MarketRegimeDetector:
     async def _collect_nifty(self, s: RegimeSignals) -> None:
         """NIFTY 50 trend from yfinance."""
         try:
-            loop = asyncio.get_event_loop()
+            loop = asyncio.get_running_loop()
 
             # Daily data for trend
             df_d = await loop.run_in_executor(
@@ -363,8 +366,8 @@ class MarketRegimeDetector:
             low   = df_d["low"]
 
             s.nifty_ltp       = float(close.iloc[-1])
-            s.nifty_1d_chg_pct= float((close.iloc[-1]-close.iloc[-2])/close.iloc[-2]*100)
-            s.nifty_5d_chg_pct= float((close.iloc[-1]-close.iloc[-6])/close.iloc[-6]*100) if len(close)>=6 else 0
+            s.nifty_1d_chg_pct= float((close.iloc[-1]-close.iloc[-2])/close.iloc[-2]*100) if close.iloc[-2] != 0 else 0.0
+            s.nifty_5d_chg_pct= float((close.iloc[-1]-close.iloc[-6])/close.iloc[-6]*100) if len(close)>=6 and close.iloc[-6] != 0 else 0.0
 
             if len(close) >= 20:
                 s.nifty_ema20 = float(ta.trend.EMAIndicator(close, 20).ema_indicator().iloc[-1])
@@ -381,7 +384,7 @@ class MarketRegimeDetector:
             if not df_5m.empty and len(df_5m) >= 6:
                 recent = df_5m["close"].tail(6)
                 x = list(range(len(recent)))
-                if len(x) > 1:
+                if len(x) > 1 and recent.iloc[0] != 0:
                     slope = float((recent.iloc[-1] - recent.iloc[0]) / recent.iloc[0] * 100)
                     s.nifty_slope_30min = slope
 
@@ -426,28 +429,29 @@ class MarketRegimeDetector:
         """
         try:
             from symbol_scanner import NIFTY_50
-            loop = asyncio.get_event_loop()
+            loop = asyncio.get_running_loop()
 
-            adv = 0; dec = 0
             # Sample 20 stocks to keep it fast
             sample = NIFTY_50[:20]
 
-            async def check_one(sym):
-                nonlocal adv, dec
+            async def check_one(sym) -> int:
+                """Return +1 for advance, -1 for decline, 0 for no data."""
                 try:
                     df = await loop.run_in_executor(
                         None, lambda s=sym: yf_client.historical(s,"NSE","1d","5d")
                     )
                     if df.empty or len(df) < 2:
-                        return
-                    if float(df["close"].iloc[-1]) > float(df["close"].iloc[-2]):
-                        adv += 1
-                    else:
-                        dec += 1
+                        return 0
+                    return 1 if float(df["close"].iloc[-1]) > float(df["close"].iloc[-2]) else -1
                 except Exception:
-                    pass
+                    return 0
 
-            await asyncio.gather(*[check_one(s) for s in sample], return_exceptions=True)
+            # Gather return values instead of mutating shared nonlocal counters —
+            # concurrent coroutines interleave at each await, causing lost updates
+            raw = await asyncio.gather(*[check_one(sym) for sym in sample], return_exceptions=True)
+            outcomes = [r for r in raw if not isinstance(r, Exception)]
+            adv = sum(1 for r in outcomes if r == 1)
+            dec = sum(1 for r in outcomes if r == -1)
 
             s.advance_count  = adv
             s.decline_count  = dec
@@ -459,7 +463,7 @@ class MarketRegimeDetector:
     async def _collect_sectors(self, s: RegimeSignals) -> None:
         """Which sectors are leading / lagging today."""
         try:
-            loop = asyncio.get_event_loop()
+            loop = asyncio.get_running_loop()
             sector_chg: dict[str, float] = {}
 
             async def fetch_sector(name, ticker):
@@ -471,7 +475,10 @@ class MarketRegimeDetector:
                         return
                     cols = df.columns.get_level_values(0) if isinstance(df.columns, pd.MultiIndex) else df.columns
                     cc = "Close" if "Close" in cols else "close"
-                    pct = float((df[cc].iloc[-1] - df[cc].iloc[-2]) / df[cc].iloc[-2] * 100)
+                    prev = float(df[cc].iloc[-2])
+                    if prev == 0:
+                        return
+                    pct = float((df[cc].iloc[-1] - prev) / prev * 100)
                     sector_chg[name] = round(pct, 2)
                 except Exception:
                     pass
@@ -599,12 +606,16 @@ class MarketRegimeDetector:
     # ── Status ────────────────────────────────────────────────────────
 
     def status(self) -> dict:
-        plan = self.current_plan
-        sig  = self.current_signals
+        with self._state_lock:
+            plan    = self.current_plan
+            sig     = self.current_signals
+            regime  = self.current_regime
+            label   = self._regime_label()
+            history = list(self.history[-20:])
 
         return {
-            "regime":           self.current_regime.value,
-            "regime_label":     self._regime_label(),
+            "regime":           regime.value,
+            "regime_label":     label,
             "strategy_plan": {
                 "active":       plan.active,
                 "paused":       plan.paused,
@@ -613,7 +624,7 @@ class MarketRegimeDetector:
                 "reasoning":    plan.reasoning,
             },
             "signals":          sig.to_dict() if sig else {},
-            "history":          self.history[-20:],
+            "history":          history,
             "last_update":      sig.timestamp.isoformat() if sig else None,
         }
 

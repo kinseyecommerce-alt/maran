@@ -6,6 +6,7 @@ weekly high/low, and VWAP ± ATR bands. Fed to Claude trade gate for better SL/t
 from __future__ import annotations
 
 import asyncio
+import threading
 from typing import Optional
 
 import yfinance as yf
@@ -15,6 +16,7 @@ from loguru import logger
 # ── Module-level cache ────────────────────────────────────────────────────────
 # Keyed by symbol. Populated by refresh_daily(), read by get_levels() / level_context().
 _levels_cache: dict[str, dict] = {}
+_levels_cache_lock = threading.Lock()
 
 
 # ── Refresh ───────────────────────────────────────────────────────────────────
@@ -51,7 +53,8 @@ async def _refresh_symbol(symbol: str) -> None:
         return
 
     # Flatten MultiIndex columns that yfinance sometimes produces
-    if hasattr(df.columns, "get_level_values"):
+    import pandas as pd
+    if isinstance(df.columns, pd.MultiIndex):
         df.columns = df.columns.get_level_values(0)
 
     df = df.rename(columns={"Open": "open", "High": "high", "Low": "low",
@@ -80,18 +83,19 @@ async def _refresh_symbol(symbol: str) -> None:
     s1     = 2.0 * pivot - pdh
     s2     = pivot - (pdh - pdl)
 
-    _levels_cache[symbol] = {
-        "pdh":         round(pdh, 2),
-        "pdl":         round(pdl, 2),
-        "pdc":         round(pdc, 2),
-        "weekly_high": round(weekly_high, 2),
-        "weekly_low":  round(weekly_low, 2),
-        "pivot":       round(pivot, 2),
-        "r1":          round(r1, 2),
-        "r2":          round(r2, 2),
-        "s1":          round(s1, 2),
-        "s2":          round(s2, 2),
-    }
+    with _levels_cache_lock:
+        _levels_cache[symbol] = {
+            "pdh":         round(pdh, 2),
+            "pdl":         round(pdl, 2),
+            "pdc":         round(pdc, 2),
+            "weekly_high": round(weekly_high, 2),
+            "weekly_low":  round(weekly_low, 2),
+            "pivot":       round(pivot, 2),
+            "r1":          round(r1, 2),
+            "r2":          round(r2, 2),
+            "s1":          round(s1, 2),
+            "s2":          round(s2, 2),
+        }
     logger.debug(
         "[levels] {} → PDH={} PDL={} PDC={} P={} R1={} S1={}",
         symbol, pdh, pdl, pdc, round(pivot, 2), round(r1, 2), round(s1, 2),
@@ -107,21 +111,23 @@ def get_levels(symbol: str) -> dict:
 
     Returns an empty dict if no daily data has been loaded yet.
     """
-    base = _levels_cache.get(symbol)
-    if not base:
-        return {}
-
-    result = dict(base)
+    with _levels_cache_lock:
+        base = _levels_cache.get(symbol)
+        if not base:
+            return {}
+        result = dict(base)
 
     # Enrich with live VWAP / ATR from tick_engine (best-effort)
     try:
         from tick_engine import tick_engine  # local import avoids circular dependency
         snap = tick_engine.all_latest().get(symbol, {})
-        vwap = snap.get("vwap")
-        atr  = snap.get("atr_14")
+        vwap    = snap.get("vwap")
+        atr_pct = snap.get("atr_pct")   # ATR as % of price (tick_engine key)
+        ltp_val = snap.get("ltp")
         if vwap and vwap > 0:
             result["vwap"] = round(vwap, 2)
-        if vwap and vwap > 0 and atr and atr > 0:
+        if vwap and vwap > 0 and atr_pct and ltp_val and ltp_val > 0:
+            atr = atr_pct / 100.0 * ltp_val   # convert % to absolute points
             result["atr"]           = round(atr, 2)
             result["vwap_upper_1"]  = round(vwap + atr, 2)
             result["vwap_lower_1"]  = round(vwap - atr, 2)
@@ -146,6 +152,8 @@ def level_context(symbol: str, ltp: float) -> str:
         return ""
 
     ltp = float(ltp)
+    if ltp <= 0:
+        return ""
 
     # ── Resistance candidates (above ltp) ──────────────────────────────
     resistance_candidates: dict[str, Optional[float]] = {

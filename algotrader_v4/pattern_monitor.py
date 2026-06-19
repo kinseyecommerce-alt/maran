@@ -177,7 +177,7 @@ class PatternMonitor:
                         dq = deque(maxlen=window)
                         self._hist[key] = dq
                     for v in carried:
-                        dq.appendleft(float(v))  # prepend as older observations
+                        dq.append(float(v))  # preserve chronological order
             logger.info("[PatternMonitor] loaded history for {} patterns from DB",
                         len(payload))
         except Exception as exc:

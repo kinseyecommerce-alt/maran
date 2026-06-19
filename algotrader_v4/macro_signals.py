@@ -48,6 +48,8 @@ def _fetch_ticker_last_two(symbol: str) -> tuple[float | None, float]:
     df = yf.download(symbol, period="5d", interval="1d", progress=False, auto_adjust=True)
     if df is None or len(df) < 1:
         raise ValueError(f"No data for {symbol}")
+    if isinstance(df.columns, __import__("pandas").MultiIndex):
+        df.columns = df.columns.get_level_values(0)
     closes = df["Close"].dropna()
     last = float(closes.iloc[-1])
     prev = float(closes.iloc[-2]) if len(closes) >= 2 else None
@@ -169,7 +171,7 @@ class MacroSignals:
         """Trigger a background refresh if data is stale (non-blocking).
         Single-flight: only one refresh thread may run at a time."""
         with self._lock:
-            stale = (time.monotonic() - self._last_refresh) >= self._refresh_interval
+            stale = (time.monotonic() - self._last_success_ts) >= self._refresh_interval
             if not stale or self._refreshing.is_set():
                 return
             self._refreshing.set()  # claimed under the lock — no thread storm

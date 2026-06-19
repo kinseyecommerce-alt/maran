@@ -39,8 +39,8 @@ class NewsGate:
                 from alt_data import alt_data_engine
                 if alt_data_engine.is_earnings_period(sym):
                     return True, "earnings_period"
-            except Exception:
-                pass
+            except Exception as exc:
+                logger.debug("NewsGate: earnings check failed for {}: {}", sym, exc)
             with self._lock:
                 entry = self._blocked.get(sym)
                 if entry is None:
@@ -75,9 +75,10 @@ class NewsGate:
         """Poll NSE announcements and block negative-score symbols. Fully exception-safe."""
         try:
             now = time.monotonic()
-            if now - self._last_poll < settings.news_poll_interval_sec:
-                return
-            self._last_poll = now
+            with self._lock:
+                if now - self._last_poll < settings.news_poll_interval_sec:
+                    return
+                self._last_poll = now  # claim the slot under lock to prevent duplicate fetches
             from_date = (datetime.now() - timedelta(days=1)).strftime("%d-%m-%Y")
             to_date = datetime.now().strftime("%d-%m-%Y")
             url = (
@@ -101,10 +102,10 @@ class NewsGate:
                     if not sym:
                         continue
                     subject = str(ann.get("subject") or ann.get("desc") or "")
-                    if self._score_text(subject) < -1.0:
+                    if self._score_text(subject) <= -1.0:
                         self.block(sym, f"NSE: {subject[:80]}")
-                except Exception:
-                    pass
+                except Exception as exc:
+                    logger.debug("NewsGate: announcement parse error: {}", exc)
         except Exception as exc:
             logger.debug("NewsGate.refresh error (non-critical): {}", exc)
 
@@ -137,8 +138,8 @@ class NewsGate:
                 price=0.0, signal_source="news_gate",
                 regime="N/A", decision=event, reason=detail, algo_id="NEWS_GATE",
             )
-        except Exception:
-            pass
+        except Exception as exc:
+            logger.debug("NewsGate: audit record failed: {}", exc)
 
 
 news_gate = NewsGate()

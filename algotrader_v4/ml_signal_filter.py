@@ -63,19 +63,20 @@ class MLSignalFilter:
         with self._lock:
             if self._model is None:
                 return True, 0.5
+            m = self._model   # capture reference while holding lock
         try:
             features = self._build_features(
                 rsi, adx, volume_ratio, macd_hist, bb_width,
                 atr_pct, score, session, agent, direction,
             )
-            prob = float(self._model.predict_proba([features])[0][1])
+            prob = float(m.predict_proba([features])[0][1])
             return prob >= min_prob, prob
         except Exception as exc:
             logger.debug("[MLFilter] inference error: {}", exc)
             return True, 0.5
 
-    def record_outcome(self, features: dict, won: bool) -> None:
-        """Call after a trade closes to feed the training buffer."""
+    def record_outcome(self, won: bool) -> None:
+        """Call after a trade closes to trigger retraining from SQLite trade history."""
         try:
             from state_store import state_store as _ss
             _ss  # just verify import works
@@ -137,9 +138,10 @@ class MLSignalFilter:
             clf.fit(X, y)
             with self._lock:
                 self._model = clf
+                enc_snapshot = dict(self._encoder)   # snapshot under lock before disk write
             _MODEL_PATH.parent.mkdir(parents=True, exist_ok=True)
             with open(_MODEL_PATH, "wb") as f:
-                pickle.dump((clf, self._encoder), f)
+                pickle.dump((clf, enc_snapshot), f)
             wins = sum(y)
             logger.info("[MLFilter] retrained on {} trades | win rate {:.0f}%",
                         len(y), 100 * wins / max(len(y), 1))
@@ -180,9 +182,10 @@ class MLSignalFilter:
 
     def _encode(self, category: str, value: str) -> int:
         key = f"{category}:{value}"
-        if key not in self._encoder:
-            self._encoder[key] = len(self._encoder)
-        return self._encoder[key]
+        with self._lock:
+            if key not in self._encoder:
+                self._encoder[key] = len(self._encoder)
+            return self._encoder[key]
 
     def _build_features(
         self,

@@ -122,9 +122,21 @@ class OrderGuard:
                     self._symbol_owner.pop(symbol, None)
 
     def register_order(self, symbol: str, strategy: str, side: str, order_id: str) -> None:
-        """Legacy direct-register (used by tests and non-claim callers)."""
+        """Legacy direct-register (used by tests and non-claim callers).
+
+        Skips registration when a live (non-pending) claim already exists for the
+        key, preventing double-counting of trades when a prior try_claim() was already
+        promoted via confirm_order().
+        """
         with self._lock:
             key = (symbol, strategy, side)
+            existing = self._active.get(key)
+            if existing and not existing.pending:
+                logger.debug(
+                    "OrderGuard: register_order skipped — active order already exists for {}/{}/{}",
+                    symbol, strategy, side,
+                )
+                return
             self._active[key] = ActiveOrder(symbol=symbol, strategy=strategy, side=side,
                                              order_id=order_id, placed_at=time.time())
             self._trade_count[strategy] += 1
@@ -140,8 +152,8 @@ class OrderGuard:
             import json
             from state_store import set_kv
             set_kv("order_guard_trade_count", json.dumps(snapshot))
-        except Exception:
-            pass
+        except Exception as exc:
+            logger.debug("OrderGuard: trade count persist failed (counts survive in-memory until restart): {}", exc)
 
     def restore_counts(self) -> None:
         """Reload persisted per-strategy trade counts (e.g. after a restart).
@@ -164,8 +176,8 @@ class OrderGuard:
                             self._trade_count.get(strategy, 0), int(count))
                     except (TypeError, ValueError):
                         continue
-        except Exception:
-            pass
+        except Exception as exc:
+            logger.debug("OrderGuard: trade count restore failed (counts reset to 0): {}", exc)
 
     def owner_of(self, symbol: str) -> str | None:
         """Return the '{strategy}:{side}' owner of the symbol lock, or None."""
@@ -252,7 +264,7 @@ class OrderGuard:
                         "order_id": v.order_id,
                         "placed_at": v.placed_at,
                         "pending": v.pending,
-                        "age_sec": int(now - v.placed_at),
+                        "age_sec": max(0, int(now - v.placed_at)),
                         "stale": (v.pending and now - v.placed_at > 30),
                     }
                     for k, v in self._active.items()

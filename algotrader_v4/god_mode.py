@@ -141,8 +141,8 @@ class GodModeManager:
             self._overrides_applied["max_daily_loss"] = god_loss
             changes["max_daily_loss"] = (old_loss, god_loss)
 
-            # Enable every agent
-            for agent in bot_state._agent_enabled:
+            # Enable every agent (snapshot keys to avoid dict-size-change during iteration)
+            for agent in list(bot_state._agent_enabled):
                 bot_state.set_agent_enabled(agent, True)
 
             self._active = True

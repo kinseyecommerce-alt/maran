@@ -24,6 +24,7 @@ import threading
 from typing import Any, Optional
 
 from loguru import logger
+from notifier import notifier
 
 
 class BrokerRouter:
@@ -111,8 +112,9 @@ class BrokerRouter:
                                    name, entry_id, sl_exc)
                     try:
                         client.cancel_order(entry_id)
-                    except Exception:
-                        pass
+                    except Exception as cancel_exc:
+                        logger.error("[BrokerRouter] {} cancel of entry {} also failed (position may be unprotected): {}",
+                                     name, entry_id, cancel_exc)
                     continue
 
                 broker_details[name] = {
@@ -127,10 +129,21 @@ class BrokerRouter:
 
             except Exception as exc:
                 logger.warning("[BrokerRouter] {} mirror_entry failed (primary OK): {}", name, exc)
+                notifier.send(
+                    f"Secondary broker {name} mirror_entry FAILED",
+                    body=f"Symbol: {tradingsymbol}  Qty: {quantity}  Error: {exc}\n"
+                         f"Primary order filled but {name} position NOT opened — "
+                         "risk_manager may under-count open positions.",
+                    level="WARNING",
+                )
 
         if broker_details:
             with self._lock:
-                self._secondary_orders[primary_order_id] = broker_details
+                if primary_order_id in self._secondary_orders:
+                    logger.warning("[BrokerRouter] duplicate primary_order_id {} — keeping existing entry",
+                                   primary_order_id)
+                else:
+                    self._secondary_orders[primary_order_id] = broker_details
 
     # ── Mirror exit (target hit / manual squareoff) ───────────────────────
 
@@ -141,11 +154,12 @@ class BrokerRouter:
         """
         with self._lock:
             details = self._secondary_orders.pop(primary_order_id, None)
+            secondaries_snapshot = list(self._secondaries)
 
         if not details:
             return
 
-        broker_map = {n: c for n, c in self._secondaries}
+        broker_map = {n: c for n, c in secondaries_snapshot}
         for broker_name, info in details.items():
             client = broker_map.get(broker_name)
             if not client:
@@ -172,17 +186,31 @@ class BrokerRouter:
 
     def squareoff_all_secondaries(self) -> dict[str, str]:
         """Call squareoff on every secondary broker. Returns {broker: status}."""
+        with self._lock:
+            secondaries_snapshot = list(self._secondaries)
         results: dict[str, str] = {}
-        for name, client in self._secondaries:
+        failed_brokers: set[str] = set()
+        for name, client in secondaries_snapshot:
             try:
                 client.squareoff_all_positions()
                 results[name] = "ok"
                 logger.info("[BrokerRouter] {} squaredoff", name)
             except Exception as exc:
                 results[name] = f"error: {exc}"
+                failed_brokers.add(name)
                 logger.warning("[BrokerRouter] {} squareoff failed: {}", name, exc)
         with self._lock:
-            self._secondary_orders.clear()
+            if not failed_brokers:
+                self._secondary_orders.clear()
+            else:
+                # Keep tracking only for brokers that failed so they can be retried/reconciled
+                for pid in list(self._secondary_orders.keys()):
+                    details = self._secondary_orders[pid]
+                    for broker in list(details.keys()):
+                        if broker not in failed_brokers:
+                            del details[broker]
+                    if not details:
+                        del self._secondary_orders[pid]
         return results
 
     # ── Status ────────────────────────────────────────────────────────────

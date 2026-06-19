@@ -82,8 +82,15 @@ def _kotak_order_to_kite(o: dict) -> dict:
 
 
 def _kotak_pos_to_kite(p: dict) -> dict:
-    qty = int(p.get("flBuyQty", 0)) - int(p.get("flSellQty", 0))
-    avg = float(p.get("buyAmt", 0)) / max(int(p.get("flBuyQty", 1)), 1)
+    qty      = int(p.get("flBuyQty", 0)) - int(p.get("flSellQty", 0))
+    buy_qty  = int(p.get("flBuyQty",  0))
+    sell_qty = int(p.get("flSellQty", 0))
+    if buy_qty > 0:
+        avg = float(p.get("buyAmt", 0)) / buy_qty
+    elif sell_qty > 0:
+        avg = float(p.get("sellAmt", 0)) / sell_qty
+    else:
+        avg = 0.0
     return {
         "tradingsymbol": p.get("trdSym", p.get("sym", "")),
         "exchange":      _KOTAK_TO_EXCHANGE.get(p.get("exSeg", "nse_cm"), "NSE"),
@@ -113,6 +120,7 @@ class KotakBroker(BaseBroker):
         self._paper_orders:    dict[str, dict] = {}
         self._paper_orders_lock = Lock()
         self._paper_positions: list[dict] = []
+        self._token_lock = Lock()
 
     # ── Auth ─────────────────────────────────────────────────────────────────
 
@@ -161,8 +169,9 @@ class KotakBroker(BaseBroker):
             data = resp.json().get("data", {})
             token = data.get("token", "")
             sid   = data.get("sid", "")
-            self._access_token       = token
-            self._sid                = sid
+            with self._token_lock:
+                self._access_token = token
+                self._sid          = sid
             settings.kotak_access_token = token
             settings.kotak_sid          = sid
             logger.info("[Kotak] Auth OK — sid={} token={}…", sid[:8], token[:8])
@@ -180,8 +189,9 @@ class KotakBroker(BaseBroker):
         """Set token + sid directly (from dashboard paste or .env)."""
         token = access_token or settings.kotak_access_token or ""
         s     = sid or settings.kotak_sid or ""
-        self._access_token       = token
-        self._sid                = s
+        with self._token_lock:
+            self._access_token = token
+            self._sid          = s
         settings.kotak_access_token = token
         settings.kotak_sid          = s
         logger.info("[Kotak] Token set directly — sid={} token={}…", s[:8], token[:8])
@@ -201,7 +211,8 @@ class KotakBroker(BaseBroker):
     # ── HTTP helpers ─────────────────────────────────────────────────────────
 
     def _headers(self) -> dict:
-        return _kotak_headers(self._access_token, self._sid)
+        with self._token_lock:
+            return _kotak_headers(self._access_token, self._sid)
 
     def _get(self, path: str, params: dict | None = None) -> dict:
         try:
@@ -244,6 +255,9 @@ class KotakBroker(BaseBroker):
         except httpx.HTTPStatusError as exc:
             logger.error("[Kotak] PUT {} → {} {}", path, exc.response.status_code, exc.response.text[:200])
             raise
+        except Exception as exc:
+            logger.error("[Kotak] PUT {} error: {}", path, exc)
+            raise
 
     def _delete(self, path: str, params: dict) -> dict:
         try:
@@ -255,6 +269,9 @@ class KotakBroker(BaseBroker):
             return resp.json()
         except httpx.HTTPStatusError as exc:
             logger.error("[Kotak] DELETE {} → {} {}", path, exc.response.status_code, exc.response.text[:200])
+            raise
+        except Exception as exc:
+            logger.error("[Kotak] DELETE {} error: {}", path, exc)
             raise
 
     # ── Orders ────────────────────────────────────────────────────────────────

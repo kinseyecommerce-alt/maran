@@ -13,6 +13,7 @@ Upstox API v2 endpoints used:
 """
 from __future__ import annotations
 
+import threading
 import uuid
 from datetime import datetime
 from typing import Any, Optional
@@ -97,6 +98,8 @@ class UpstoxBroker(BaseBroker):
         self._access_token: str = settings.upstox_access_token or ""
         self._paper_orders:    list[dict] = []
         self._paper_positions: list[dict] = []
+        self._paper_lock  = threading.Lock()
+        self._token_lock  = threading.Lock()
 
     # ── Auth ─────────────────────────────────────────────────────────────────
 
@@ -135,7 +138,8 @@ class UpstoxBroker(BaseBroker):
                 resp.raise_for_status()
                 data = resp.json()
                 token = data.get("access_token", "")
-                self._access_token = token
+                with self._token_lock:
+                    self._access_token = token
                 settings.upstox_access_token = token
                 logger.info("[Upstox] Auth OK — token: {}…", token[:8] if token else "?")
                 return token
@@ -144,7 +148,8 @@ class UpstoxBroker(BaseBroker):
                 raise RuntimeError(f"Upstox token exchange failed: {exc}") from exc
         else:
             token = access_token or settings.upstox_access_token or ""
-            self._access_token = token
+            with self._token_lock:
+                self._access_token = token
             settings.upstox_access_token = token
             logger.info("[Upstox] Access token set directly")
             return token
@@ -163,13 +168,17 @@ class UpstoxBroker(BaseBroker):
 
     # ── Internal HTTP helpers ─────────────────────────────────────────────────
 
+    def _current_token(self) -> str:
+        with self._token_lock:
+            return self._access_token
+
     def _get(self, path: str, params: dict | None = None) -> dict:
         """Make an authenticated GET request to Upstox API."""
         url = f"{_BASE_URL}{path}"
         try:
             resp = httpx.get(
                 url, params=params,
-                headers=_headers(self._access_token),
+                headers=_headers(self._current_token()),
                 timeout=15.0,
             )
             resp.raise_for_status()
@@ -187,7 +196,7 @@ class UpstoxBroker(BaseBroker):
         try:
             resp = httpx.post(
                 url, json=payload,
-                headers=_headers(self._access_token),
+                headers=_headers(self._current_token()),
                 timeout=15.0,
             )
             resp.raise_for_status()
@@ -205,7 +214,7 @@ class UpstoxBroker(BaseBroker):
         try:
             resp = httpx.put(
                 url, json=payload,
-                headers=_headers(self._access_token),
+                headers=_headers(self._current_token()),
                 timeout=15.0,
             )
             resp.raise_for_status()
@@ -223,7 +232,7 @@ class UpstoxBroker(BaseBroker):
         try:
             resp = httpx.delete(
                 url, params=params,
-                headers=_headers(self._access_token),
+                headers=_headers(self._current_token()),
                 timeout=15.0,
             )
             resp.raise_for_status()
@@ -263,9 +272,13 @@ class UpstoxBroker(BaseBroker):
         upstox_product   = _KITE_PRODUCT_TO_UPSTOX.get(product, "I")
         upstox_otype     = _KITE_OTYPE_TO_UPSTOX.get(order_type, "MKT")
 
-        # Upstox instrument_key format: "NSE_EQ|{isin}" or "NSE_EQ|{symbol}"
-        # For simplicity, use exchange|symbol format — caller should pass correct key
+        # Upstox instrument_key format: "NSE_EQ|{isin}" — symbol-based keys are invalid in LIVE mode
         instrument_key = f"{exchange}_{self._segment(exchange)}|{tradingsymbol}"
+        if settings.trading_mode != "PAPER":
+            logger.warning(
+                "[Upstox] instrument_key '{}' uses symbol name — Upstox requires ISIN-based keys in LIVE mode",
+                instrument_key
+            )
 
         payload: dict = {
             "quantity":        quantity,
@@ -310,11 +323,12 @@ class UpstoxBroker(BaseBroker):
         trigger_price: float = 0.0,
     ) -> str:
         if settings.trading_mode == "PAPER":
-            for o in self._paper_orders:
-                if o["order_id"] == order_id:
-                    if price:         o["price"]         = price
-                    if quantity:      o["quantity"]       = quantity
-                    if trigger_price: o["trigger_price"]  = trigger_price
+            with self._paper_lock:
+                for o in self._paper_orders:
+                    if o["order_id"] == order_id:
+                        if price:         o["price"]         = price
+                        if quantity:      o["quantity"]       = quantity
+                        if trigger_price: o["trigger_price"]  = trigger_price
             return order_id
 
         payload: dict = {"order_id": order_id}
@@ -327,9 +341,10 @@ class UpstoxBroker(BaseBroker):
 
     def cancel_order(self, order_id: str) -> str:
         if settings.trading_mode == "PAPER":
-            for o in self._paper_orders:
-                if o["order_id"] == order_id:
-                    o["status"] = "CANCELLED"
+            with self._paper_lock:
+                for o in self._paper_orders:
+                    if o["order_id"] == order_id:
+                        o["status"] = "CANCELLED"
             return order_id
 
         self._delete("/order/cancel", params={"order_id": order_id})
@@ -359,7 +374,8 @@ class UpstoxBroker(BaseBroker):
 
     def orders(self) -> list[dict]:
         if settings.trading_mode == "PAPER":
-            return self._paper_orders
+            with self._paper_lock:
+                return list(self._paper_orders)
 
         try:
             data = self._get("/order/retrieve-all")
@@ -371,7 +387,9 @@ class UpstoxBroker(BaseBroker):
 
     def positions(self) -> dict:
         if settings.trading_mode == "PAPER":
-            return {"net": self._paper_positions, "day": self._paper_positions}
+            with self._paper_lock:
+                snap = list(self._paper_positions)
+            return {"net": snap, "day": snap}
 
         try:
             data = self._get("/portfolio/short-term-positions")
@@ -409,7 +427,7 @@ class UpstoxBroker(BaseBroker):
         if settings.trading_mode == "PAPER":
             return {
                 "equity": {
-                    "available": {"live_balance": settings.max_position_size * 5}
+                    "available": {"live_balance": (settings.max_position_size or 10_000_000) * 5}
                 }
             }
 
@@ -489,9 +507,10 @@ class UpstoxBroker(BaseBroker):
             "tag":              tag,
             "placed_at":        datetime.now().isoformat(),
         }
-        self._paper_orders.append(record)
-        if status == "COMPLETE":
-            self._update_paper_position(record)
+        with self._paper_lock:
+            self._paper_orders.append(record)
+            if status == "COMPLETE":
+                self._update_paper_position(record)
         logger.info(
             "[Upstox PAPER] {} {} {} qty={} @ ₹{} | id={}",
             transaction_type, tradingsymbol, order_type, quantity, price, order_id,
@@ -526,32 +545,34 @@ class UpstoxBroker(BaseBroker):
 
     def check_paper_triggers(self, symbol: str, ltp: float) -> None:
         """Check pending SL/SL-M paper orders for *symbol*."""
-        for order in self._paper_orders:
-            if order["tradingsymbol"] != symbol:
-                continue
-            if order["status"] != "TRIGGER PENDING":
-                continue
-            tp = order.get("trigger_price", 0.0)
-            if tp <= 0:
-                continue
-            triggered = False
-            if order["transaction_type"] == "SELL" and ltp <= tp:
-                triggered = True
-            elif order["transaction_type"] == "BUY" and ltp >= tp:
-                triggered = True
-            if triggered:
-                order["status"] = "COMPLETE"
-                order["price"]  = ltp
-                self._update_paper_position(order)
-                logger.info(
-                    "[Upstox PAPER] Trigger hit — {} {} {} qty={} trigger=₹{} fill=₹{}",
-                    order["transaction_type"], symbol,
-                    order["order_type"], order["quantity"], tp, ltp,
-                )
+        with self._paper_lock:
+            for order in self._paper_orders:
+                if order["tradingsymbol"] != symbol:
+                    continue
+                if order["status"] != "TRIGGER PENDING":
+                    continue
+                tp = order.get("trigger_price", 0.0)
+                if tp <= 0:
+                    continue
+                triggered = False
+                if order["transaction_type"] == "SELL" and ltp <= tp:
+                    triggered = True
+                elif order["transaction_type"] == "BUY" and ltp >= tp:
+                    triggered = True
+                if triggered:
+                    order["status"] = "COMPLETE"
+                    order["price"]  = ltp
+                    self._update_paper_position(order)
+                    logger.info(
+                        "[Upstox PAPER] Trigger hit — {} {} {} qty={} trigger=₹{} fill=₹{}",
+                        order["transaction_type"], symbol,
+                        order["order_type"], order["quantity"], tp, ltp,
+                    )
 
     def update_paper_pnl(self, symbol: str, ltp: float) -> None:
         """Update last_price and P&L for every paper position matching *symbol*."""
-        for pos in self._paper_positions:
-            if pos["tradingsymbol"] == symbol:
-                pos["last_price"] = ltp
-                pos["pnl"] = round((ltp - pos["average_price"]) * pos["quantity"], 2)
+        with self._paper_lock:
+            for pos in self._paper_positions:
+                if pos["tradingsymbol"] == symbol:
+                    pos["last_price"] = ltp
+                    pos["pnl"] = round((ltp - pos["average_price"]) * pos["quantity"], 2)

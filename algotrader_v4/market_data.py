@@ -119,32 +119,64 @@ class NSEClient:
         # Rate-limit: cap at 8 req/s per NSE Circular 54/2024 (10 OPS limit)
         self._last_req_ts: float = 0.0
         self._MIN_INTERVAL: float = 0.125
+        # BUG M-1 fix: serialize session refresh to prevent concurrent coroutines
+        # from each closing and recreating self._client, leaking connections.
+        self._session_lock: Optional[asyncio.Lock] = None
+        # BUG M-3 fix: serialize request dispatch so the read-check-write on
+        # _last_req_ts is atomic, preventing all concurrent callers from
+        # bypassing the rate limiter simultaneously.
+        self._rate_lock: Optional[asyncio.Lock] = None
+
+    def _get_session_lock(self) -> asyncio.Lock:
+        # Locks must be created inside the running event loop; lazily init here.
+        if self._session_lock is None:
+            self._session_lock = asyncio.Lock()
+        return self._session_lock
+
+    def _get_rate_lock(self) -> asyncio.Lock:
+        if self._rate_lock is None:
+            self._rate_lock = asyncio.Lock()
+        return self._rate_lock
 
     async def _ensure_session(self) -> None:
+        # Fast path without lock — avoids lock contention when session is healthy.
         now = time.time()
         if self._session_ok and (now - self._last_session) < 300:
             return
-        if self._client:
-            await self._client.aclose()
-        self._client = httpx.AsyncClient(
-            headers=NSE_HEADERS, timeout=10, follow_redirects=True,
-        )
-        try:
-            await self._client.get(NSE_HOME)
-            self._session_ok  = True
-            self._last_session = now
-        except Exception as exc:
-            logger.warning("NSE session init failed: {}", exc)
-            self._session_ok = False
+        # BUG M-1 fix: serialize session refresh under a lock and re-check
+        # inside to avoid multiple coroutines each closing/recreating the client.
+        async with self._get_session_lock():
+            now = time.time()
+            if self._session_ok and (now - self._last_session) < 300:
+                return
+            if self._client:
+                await self._client.aclose()
+            self._client = httpx.AsyncClient(
+                headers=NSE_HEADERS, timeout=10, follow_redirects=True,
+            )
+            try:
+                await self._client.get(NSE_HOME)
+                self._session_ok  = True
+                self._last_session = now
+            except Exception as exc:
+                logger.warning("NSE session init failed: {}", exc)
+                self._session_ok = False
 
     async def get(self, url: str) -> Optional[dict]:
         await self._ensure_session()
-        # Throttle to 8 req/s
-        import asyncio as _aio
-        wait = self._MIN_INTERVAL - (time.monotonic() - self._last_req_ts)
-        if wait > 0:
-            await _aio.sleep(wait)
-        self._last_req_ts = time.monotonic()
+        # BUG M-2 fix: guard against self._client still being None after a
+        # failed session init (e.g. constructor raised before assignment).
+        if self._client is None:
+            logger.warning("NSE client is None after _ensure_session — skipping {}", url)
+            return None
+        # BUG M-3 fix: serialize the rate-limit check+sleep+timestamp-update
+        # under a lock so concurrent coroutines don't all read _last_req_ts=0
+        # at the same time and bypass the throttle entirely.
+        async with self._get_rate_lock():
+            wait = self._MIN_INTERVAL - (time.monotonic() - self._last_req_ts)
+            if wait > 0:
+                await asyncio.sleep(wait)
+            self._last_req_ts = time.monotonic()
         try:
             resp = await self._client.get(url)
             resp.raise_for_status()
@@ -153,7 +185,8 @@ class NSEClient:
             if exc.response.status_code in (401, 403):
                 self._session_ok = False
             return None
-        except Exception:
+        except Exception as exc:
+            logger.debug("NSE GET {} failed: {}", url, exc)
             return None
 
     async def quote_equity(self, symbol: str) -> Optional[Quote]:
@@ -227,10 +260,14 @@ class NSEClient:
 
 
 # ── yfinance historical data ────────────────────────────────────────────
+import threading as _threading
+
+
 class YFinanceClient:
     # In-memory CSV cache: avoids re-reading the same file from disk on every
     # signal-generation call in the tick path. Key: (symbol, timeframe).
     _csv_cache: dict[tuple[str, str], pd.DataFrame] = {}
+    _csv_cache_lock: _threading.Lock = _threading.Lock()
 
     @staticmethod
     def _ticker(symbol: str, exchange: str = "NSE") -> str:
@@ -241,7 +278,8 @@ class YFinanceClient:
         _CACHE_ALIASES = {"60m": "1h", "60min": "1h", "1hour": "1h"}
         _cache_tf = _CACHE_ALIASES.get(interval, interval)
         mem_key = (symbol, _cache_tf)
-        cached = self._csv_cache.get(mem_key)
+        with self._csv_cache_lock:
+            cached = self._csv_cache.get(mem_key)
         if cached is not None:
             return cached.copy()
         _cache = Path(f"logs/historical_data/{symbol}/{_cache_tf}.csv")
@@ -249,7 +287,8 @@ class YFinanceClient:
             df = pd.read_csv(_cache, parse_dates=["date"])
             cols = [c for c in ("date", "open", "high", "low", "close", "volume") if c in df.columns]
             df = df[cols].dropna().sort_values("date").reset_index(drop=True)
-            self._csv_cache[mem_key] = df
+            with self._csv_cache_lock:
+                self._csv_cache[mem_key] = df
             return df.copy()
 
         from config import settings as _s
@@ -300,7 +339,7 @@ class YFinanceClient:
         ticker = self._ticker(symbol, exchange)
         try:
             info = yf.Ticker(ticker).fast_info
-            return float(info.get("last_price") or info.get("regularMarketPrice") or 0)
+            return float(info.last_price or info.previous_close or 0)
         except Exception:
             return 0.0
 
