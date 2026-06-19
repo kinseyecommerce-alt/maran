@@ -292,6 +292,25 @@ class YFinanceClient:
             return df.copy()
 
         from config import settings as _s
+
+        # Bhavcopy: survivorship-bias-free daily data for backtests.
+        # Only applies to daily interval — intraday still uses yfinance/TrueData.
+        if interval in ("1d", "daily"):
+            try:
+                from datetime import date as _date, timedelta as _td
+                from bhavcopy_loader import load_symbol as _bhav_load
+                _days_map = {"5d": 5, "15d": 15, "30d": 30, "60d": 60,
+                             "90d": 90, "180d": 180, "1y": 365, "2y": 730, "5y": 1825}
+                _lookback = _days_map.get(period, 90)
+                _to   = _date.today() - _td(days=1)
+                _from = _to - _td(days=_lookback)
+                _df = _bhav_load(symbol, _from, _to)
+                if not _df.empty:
+                    logger.debug("Bhavcopy: {} {} {} ({} bars)", symbol, interval, period, len(_df))
+                    return _df
+            except Exception as _bexc:
+                logger.debug("Bhavcopy fallback for {}: {}", symbol, _bexc)
+
         # Auto-enable TrueData historical when credentials are configured,
         # even if the explicit flag is not set in .env.
         _td_creds_ok = bool(_s.truedata_username and _s.truedata_password)

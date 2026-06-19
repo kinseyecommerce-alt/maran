@@ -8,6 +8,7 @@ from __future__ import annotations
 import threading
 import time
 from datetime import datetime, timezone
+from typing import Optional
 from loguru import logger
 
 
@@ -39,6 +40,33 @@ def _compute_score(usdinr: float, crude: float, sp_chg: float, us_vix: float) ->
     elif us_vix > 20: score -= 0.1
     elif us_vix < 14: score += 0.1
     return max(-1.0, min(1.0, score))
+
+
+def _fetch_india_vix_nse() -> Optional[float]:
+    """
+    Fetch India VIX from NSE allIndices API.
+    Returns float or None on failure.
+    India VIX is the correct vol reference for NSE/BSE strategies;
+    US ^VIX is a fallback for when NSE is unreachable.
+    """
+    try:
+        import urllib.request
+        import json as _json
+        url = "https://www.nseindia.com/api/allIndices"
+        req = urllib.request.Request(url, headers={
+            "User-Agent": "Mozilla/5.0",
+            "Accept": "application/json",
+            "Referer": "https://www.nseindia.com/",
+        })
+        with urllib.request.urlopen(req, timeout=6) as resp:
+            data = _json.loads(resp.read())
+        for item in data.get("data", []):
+            name = item.get("indexSymbol", "").upper()
+            if "INDIA VIX" in name or name == "INDIAVIX":
+                return float(item.get("last", 0) or 0) or None
+    except Exception as exc:
+        logger.debug("India VIX NSE fetch failed: {}", exc)
+    return None
 
 
 def _fetch_ticker_last_two(symbol: str) -> tuple[float | None, float]:
@@ -111,9 +139,13 @@ class MacroSignals:
             logger.debug("Macro: S&P futures (ES=F) fetch failed — {}", exc)
 
         try:
-            _, us_vix = _fetch_ticker_last_two("^VIX")
+            us_vix = _fetch_india_vix_nse()
+            if us_vix is None:
+                _, us_vix = _fetch_ticker_last_two("^VIX")
+                logger.debug("Macro: India VIX unavailable — using US VIX")
         except Exception as exc:
-            logger.debug("Macro: VIX (^VIX) fetch failed — {}", exc)
+            logger.debug("Macro: VIX fetch failed — {}", exc)
+            us_vix = None
 
         fetched_any = any(v is not None for v in (usdinr, crude, sp_last, us_vix))
 

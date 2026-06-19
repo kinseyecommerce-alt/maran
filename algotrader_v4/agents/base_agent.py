@@ -643,18 +643,35 @@ class BaseAgent(ABC):
                                 gate_conf=100,
                             )
                         else:
-                            try:
-                                gate = await asyncio.wait_for(
-                                    gate_assess(snap, action, signal, self.name),
-                                    timeout=_gate_timeout,
+                            # Cache-first: skip the 400-800ms API call when the 5-min
+                            # regime decision is still fresh for this (symbol, agent, direction).
+                            from claude_trade_gate import (
+                                get_regime_decision   as _gate_cached,
+                                store_regime_decision as _gate_store,
+                                _apply_tick_adjustments as _gate_tick_adj,
+                            )
+                            _cached_decision = _gate_cached(snap.symbol, self.name, action)
+                            if _cached_decision is not None:
+                                gate = _gate_tick_adj(_cached_decision, snap, signal)
+                                logger.debug(
+                                    "[{}] {} gate cache hit conf={} size={:.2f} (0ms)",
+                                    self.name, snap.symbol, gate.confidence, gate.size_factor,
                                 )
                                 record_gate_decision(gate.enter)
-                            except asyncio.TimeoutError:
-                                logger.warning(
-                                    "[{}] {} Claude gate timed out after {:.0f}s — skipping trade",
-                                    self.name, snap.symbol, _gate_timeout,
-                                )
-                                continue
+                            else:
+                                try:
+                                    gate = await asyncio.wait_for(
+                                        gate_assess(snap, action, signal, self.name),
+                                        timeout=_gate_timeout,
+                                    )
+                                    _gate_store(snap.symbol, self.name, action, gate)
+                                    record_gate_decision(gate.enter)
+                                except asyncio.TimeoutError:
+                                    logger.warning(
+                                        "[{}] {} Claude gate timed out after {:.0f}s — skipping trade",
+                                        self.name, snap.symbol, _gate_timeout,
+                                    )
+                                    continue
                             if not gate.enter:
                                 _activity(
                                     agent=self.name, event="GATE_VETO",

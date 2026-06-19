@@ -238,6 +238,10 @@ class MasterAgent:
                                  id="portfolio_optimize", max_instances=1, coalesce=True)
         self._scheduler.add_job(self._weekly_db_cleanup, "cron", hour=22, minute=30,
                                  day_of_week="sun", id="weekly_db_cleanup")
+        self._scheduler.add_job(self._refresh_fii_dii_job, "cron", hour=19, minute=30,
+                                 day_of_week="mon-fri", id="refresh_fii_dii")
+        self._scheduler.add_job(self._refresh_macro_job,   "interval", minutes=5,
+                                 id="refresh_macro", max_instances=1, coalesce=True)
         self._scheduler.start()
         logger.info("[master_v5] started — tick-driven 1s")
         _fire(send_telegram(
@@ -609,6 +613,26 @@ class MasterAgent:
             )
         except Exception as exc:
             logger.error("[master] Weekly DB cleanup failed: {}", exc)
+
+    async def _refresh_fii_dii_job(self) -> None:
+        """Refresh FII/DII market-wide flow data (scheduled daily at 19:30 IST)."""
+        try:
+            from alt_data import alt_data_engine
+            await asyncio.get_running_loop().run_in_executor(
+                None, alt_data_engine.refresh_fii_dii
+            )
+        except Exception as exc:
+            logger.warning("[master_v5] FII/DII refresh failed: {}", exc)
+
+    async def _refresh_macro_job(self) -> None:
+        """Refresh cross-asset macro signals every 5 minutes."""
+        try:
+            from macro_signals import macro_signals
+            await asyncio.get_running_loop().run_in_executor(
+                None, macro_signals.refresh
+            )
+        except Exception as exc:
+            logger.debug("[master_v5] Macro refresh failed: {}", exc)
 
     async def _portfolio_optimize_job(self) -> None:
         """
