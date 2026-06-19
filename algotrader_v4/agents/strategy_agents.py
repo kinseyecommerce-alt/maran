@@ -1316,7 +1316,7 @@ class OptionsAgent(BaseAgent):
             _oc  = _get_oc(sym)
             iv_f = ((_oc.atm_iv / 100.0) if _oc and _oc.atm_iv and _oc.atm_iv > 1.0 else 0.20)
             iv_f = max(iv_f, 0.05)
-            dte  = self._days_to_expiry()
+            dte  = self._days_to_expiry(snap.symbol)
             if dte >= 1:
                 T_val = dte / 365.0
                 theta_d = abs(self._bs_theta(ltp, ltp, T_val, 0.065, iv_f, opt_type))
@@ -1328,7 +1328,7 @@ class OptionsAgent(BaseAgent):
 
         # 11. Days to expiry (0-1): more runway = less urgency from time decay
         try:
-            if self._days_to_expiry() >= 5:
+            if self._days_to_expiry(snap.symbol) >= 5:
                 b += 1
         except Exception:
             pass
@@ -1539,7 +1539,17 @@ class OptionsAgent(BaseAgent):
         from sebi_compliance import sebi_compliance
         from market_regime import regime_detector
         from config import settings
+        import time as _time
 
+        # Latency guard: mirror the base_agent check — a slow previous order means
+        # the broker/network path is degraded; skip new entries until cooldown clears.
+        if getattr(settings, "use_latency_guard", False):
+            if _time.time() < self._latency_cooldown_until:
+                logger.debug("[{}] {} latency cooldown active ({:.0f}ms last) — skip entry",
+                             self.name, snap.symbol, self._last_order_latency_ms)
+                return
+
+        _order_t0  = _time.monotonic()
         underlying = snap.symbol
         opt_sym    = signal.get("option_symbol", underlying)
         exch       = signal.get("exchange", "NFO")
@@ -1682,6 +1692,18 @@ class OptionsAgent(BaseAgent):
             await self._enter_straddle_pe_leg(snap, signal, underlying, exch, qty,
                                               sl_pct, bs_est, loop)
 
+        latency_ms = (_time.monotonic() - _order_t0) * 1000
+        self._last_order_latency_ms = latency_ms
+        if getattr(settings, "use_latency_guard", False):
+            budget = float(getattr(settings, "max_order_latency_ms", 1500.0))
+            if latency_ms > budget:
+                cooldown = float(getattr(settings, "latency_cooldown_sec", 30.0))
+                self._latency_cooldown_until = _time.time() + cooldown
+                logger.warning(
+                    "[options] order latency {:.0f}ms > budget {:.0f}ms — "
+                    "pausing new entries for {:.0f}s", latency_ms, budget, cooldown)
+        logger.info("[options] order latency: {:.0f}ms | entry={} sl={}", latency_ms, order_id, sl_order_id)
+
         entry_delta = signal.get("entry_delta", "?")
         dte         = signal.get("days_to_expiry", "?")
         await send_telegram(
@@ -1796,6 +1818,12 @@ class OptionsAgent(BaseAgent):
 
     # ── Exit conditions ───────────────────────────────────────────────────────
 
+    def _pos_matches_sym(self, pos: dict, snap_sym: str) -> bool:
+        # F&O contracts: tradingsymbol is the contract (e.g. NIFTY2607051850CE),
+        # snap_sym is the underlying. Accept both exact match and prefix match.
+        ts = pos.get("tradingsymbol", "")
+        return ts == snap_sym or ts.startswith(snap_sym)
+
     def should_exit_position(self, pos: dict, ind: LiveIndicators) -> tuple[bool, str]:
         from datetime import datetime, time as _t
         entry    = pos.get("average_price", 0.0)
@@ -1829,7 +1857,14 @@ class OptionsAgent(BaseAgent):
         try:
             opt_type = pos.get("option_type", "CE")
             strike   = float(pos.get("strike", ltp))
-            dte      = self._days_to_expiry()
+            _ts      = pos.get("tradingsymbol", "")
+            try:
+                from greeks_engine import parse_nfo_symbol as _parse
+                _parsed  = _parse(_ts)
+                _undl    = _parsed["underlying"] if _parsed else "NIFTY"
+            except Exception:
+                _undl    = "NIFTY"
+            dte      = self._days_to_expiry(_undl)
             iv_rank  = float(pos.get("iv_rank", 30.0))
             iv_f     = max((iv_rank / 100.0) if iv_rank > 1 else iv_rank, 0.10)
             T_val    = max(dte, 0.5) / 365.0
@@ -3138,7 +3173,7 @@ class FuturesAgent(BaseAgent):
         prev_hist  = self._prev_macd_hist.get(sym, ind.macd_hist)
         macd_accel = abs(ind.macd_hist) > abs(prev_hist)
         bull = ind.ema9 > ind.ema21 > ind.ema50 > 0 and 50 <= ind.rsi_14 <= 72 and ind.macd_hist > 0 and macd_accel
-        bear = ind.ema9 < ind.ema21 < ind.ema50 > 0 and 28 <= ind.rsi_14 <= 50 and ind.macd_hist < 0 and macd_accel
+        bear = ind.ema9 < ind.ema21 < ind.ema50 > 0 and 28 <= ind.rsi_14 < 50 and ind.macd_hist < 0 and macd_accel
         # Fire ONLY on first bar of alignment (state change, not persistent state)
         if bull and not was_bull: return "LONG",  5, "EMA_TREND"
         if bear and not was_bear: return "SHORT", 5, "EMA_TREND"
@@ -3584,6 +3619,10 @@ class FuturesAgent(BaseAgent):
         else:
             expiry = near_exp
         return f"{underlying}{expiry.strftime('%y%b').upper()}FUT"
+
+    def _pos_matches_sym(self, pos: dict, snap_sym: str) -> bool:
+        ts = pos.get("tradingsymbol", "")
+        return ts == snap_sym or ts.startswith(snap_sym)
 
     def should_exit_position(self, pos: dict, ind: LiveIndicators) -> tuple[bool, str]:
         entry = pos.get("average_price", 0.0)
@@ -4470,10 +4509,11 @@ class PairsAgent(BaseAgent):
     def __init__(self):
         super().__init__()
         from collections import deque
-        self._prices:  dict = {}
-        self._ratios:  dict = {p: deque(maxlen=self.RATIO_WINDOW) for p in self.PAIRS}
-        self._zscores: dict = {}
-        self._cool_ts: dict = {}
+        self._prices:       dict = {}
+        self._ratios:       dict = {p: deque(maxlen=self.RATIO_WINDOW) for p in self.PAIRS}
+        self._zscores:      dict = {}
+        self._cool_ts:      dict = {}
+        self._entered_pair: dict = {}  # symbol → pair-tuple that triggered entry
 
     def _ctx_bonus(self, action: str, ind: LiveIndicators, zscore: float) -> int:
         ctx    = 0
@@ -4587,15 +4627,22 @@ class PairsAgent(BaseAgent):
             tgt_pct = max(atr * self.TGT_ATR / ltp * 100, settings.tgt_pct_pairs)
 
             if total > best_score:
-                best_score    = total
-                best_action   = action
-                best_cool_key = cool_key
+                best_score      = total
+                best_action     = action
+                best_cool_key   = cool_key
+                best_pair_tuple = pair
+                # Compute absolute SL/target prices so base_agent._try_enter places
+                # the SL-M at the correct level (not the global default).
+                _sl  = round(ltp * (1 - sl_pct / 100) if action == "BUY" else ltp * (1 + sl_pct / 100), 2)
+                _tgt = round(ltp * (1 + tgt_pct / 100) if action == "BUY" else ltp * (1 - tgt_pct / 100), 2)
                 best_signal = {
                     "side":          "LONG" if action == "BUY" else "SHORT",
                     "pair":          f"{a}/{b}",
                     "zscore":        round(zscore, 2),
                     "score":         total,
                     "size_factor":   sf,
+                    "stop_loss":     _sl,
+                    "target":        _tgt,
                     "stop_loss_pct": sl_pct,
                     "target_pct":    tgt_pct,
                     "trigger": (
@@ -4607,6 +4654,9 @@ class PairsAgent(BaseAgent):
         if best_score < settings.min_score_pairs or best_action == "HOLD":
             return "HOLD", None
         if best_cool_key:
+            # Track which pair this entry is for — used in should_exit_position to
+            # avoid exiting based on a DIFFERENT pair's z-score for the same symbol.
+            self._entered_pair[best_cool_key[0]] = best_pair_tuple
             self._cool_ts[best_cool_key] = now
         return best_action, best_signal
 
@@ -4628,8 +4678,14 @@ class PairsAgent(BaseAgent):
         if chg >= tgt_pct:
             return True, f"Pairs TGT +{chg:.1f}%"
 
+        # Only check z-score for the specific pair that triggered this entry.
+        # Without this guard, a symbol appearing in multiple pairs (e.g. HDFCBANK
+        # in both HDFCBANK/ICICIBANK and HDFCBANK/AXISBANK) could be exited by the
+        # WRONG pair's z-score reversion.
+        _active_pair = self._entered_pair.get(symbol)
         for pair, zscore in self._zscores.items():
-            a, b = pair
+            if _active_pair is not None and pair != _active_pair:
+                continue
             if symbol not in pair:
                 continue
             # Z-score reverted: spread closed → lock profit

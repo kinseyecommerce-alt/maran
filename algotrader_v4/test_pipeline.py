@@ -11502,6 +11502,159 @@ run("atomic_bracket: _on_tsl_target_hit T2 uses quantity_remaining not original 
 
 
 # ══════════════════════════════════════════════════════════════════════════
+# 114. BATCH 17 — STRATEGY AGENTS F&O EXIT + PAIRS + LATENCY GUARD FIXES
+# ══════════════════════════════════════════════════════════════════════════
+section("114. BATCH 17 — STRATEGY AGENTS F&O EXIT + PAIRS + LATENCY GUARD FIXES")
+
+def t_base_agent_pos_matches_sym_default():
+    """BaseAgent._pos_matches_sym default: exact tradingsymbol match only."""
+    import inspect
+    from agents.base_agent import BaseAgent
+    src = inspect.getsource(BaseAgent._pos_matches_sym)
+    assert "tradingsymbol" in src and "snap_sym" in src, "method must compare tradingsymbol to snap_sym"
+    # The base (equity) implementation must NOT do startswith — only the override does.
+    # We verify by checking that the default returns False for prefix-only match.
+    class _Eq(BaseAgent):
+        name = "_eq"
+        product = "MIS"
+        def evaluate_tick(self, s): return "HOLD", None
+        def should_exit_position(self, p, i): return False, ""
+    eq = _Eq.__new__(_Eq)
+    BaseAgent.__init__(eq)
+    assert eq._pos_matches_sym({"tradingsymbol": "NIFTY"}, "NIFTY"), "exact match should be True"
+    assert not eq._pos_matches_sym({"tradingsymbol": "NIFTY2607051850CE"}, "NIFTY"), \
+        "base default must NOT accept prefix match — F&O override needed"
+
+def t_options_agent_pos_matches_sym_prefix():
+    """OptionsAgent._pos_matches_sym accepts tradingsymbol that starts with underlying."""
+    from agents.strategy_agents import OptionsAgent
+    oa = OptionsAgent()
+    assert oa._pos_matches_sym({"tradingsymbol": "NIFTY2607051850CE"}, "NIFTY"), \
+        "contract prefix must match underlying"
+    assert oa._pos_matches_sym({"tradingsymbol": "NIFTY"}, "NIFTY"), "exact also accepted"
+    assert not oa._pos_matches_sym({"tradingsymbol": "BANKNIFTY2607040000CE"}, "NIFTY"), \
+        "BANKNIFTY contract must not match NIFTY"
+    assert oa._pos_matches_sym({"tradingsymbol": "BANKNIFTY2607040000CE"}, "BANKNIFTY"), \
+        "BANKNIFTY contract must match BANKNIFTY"
+
+def t_futures_agent_pos_matches_sym_prefix():
+    """FuturesAgent._pos_matches_sym accepts futures contract names starting with underlying."""
+    from agents.strategy_agents import FuturesAgent
+    fa = FuturesAgent()
+    assert fa._pos_matches_sym({"tradingsymbol": "TATASTEEL25JUNFUT"}, "TATASTEEL"), \
+        "TATASTEEL futures must match underlying TATASTEEL"
+    assert not fa._pos_matches_sym({"tradingsymbol": "TATASTEEL25JUNFUT"}, "SBIN"), \
+        "TATASTEEL futures must not match unrelated underlying SBIN"
+    assert fa._pos_matches_sym({"tradingsymbol": "SBIN25JUNFUT"}, "SBIN"), \
+        "SBIN futures must match underlying SBIN"
+
+def t_base_agent_check_exits_uses_pos_matches_sym():
+    """_check_exits_on_tick uses _pos_matches_sym, not pos.tradingsymbol != sym directly."""
+    import inspect
+    from agents.base_agent import BaseAgent
+    src = inspect.getsource(BaseAgent._check_exits_on_tick)
+    assert "_pos_matches_sym" in src, "_check_exits_on_tick must call self._pos_matches_sym"
+    assert "tradingsymbol" not in src.split("_pos_matches_sym")[0].split("for pos")[1].split("\n")[1], \
+        "raw tradingsymbol comparison must not precede the _pos_matches_sym call"
+
+def t_options_ctx_bonus_passes_underlying_to_days_to_expiry():
+    """OptionsAgent._ctx_bonus passes snap.symbol to _days_to_expiry (not bare ())."""
+    import inspect
+    from agents.strategy_agents import OptionsAgent
+    src = inspect.getsource(OptionsAgent._ctx_bonus)
+    # Must not have a bare _days_to_expiry() call (without argument)
+    import re
+    bare_calls = re.findall(r'_days_to_expiry\(\)', src)
+    assert len(bare_calls) == 0, \
+        f"_ctx_bonus still has {len(bare_calls)} bare _days_to_expiry() calls — must pass snap.symbol"
+
+def t_options_should_exit_uses_parsed_underlying_for_dte():
+    """OptionsAgent.should_exit_position extracts underlying via parse_nfo_symbol for DTE."""
+    import inspect
+    from agents.strategy_agents import OptionsAgent
+    src = inspect.getsource(OptionsAgent.should_exit_position)
+    assert "parse_nfo_symbol" in src or "_parse" in src, \
+        "should_exit_position must use parse_nfo_symbol to extract underlying for DTE"
+    assert "_days_to_expiry()" not in src, \
+        "should_exit_position must not call bare _days_to_expiry() — must pass underlying"
+
+def t_options_try_enter_has_latency_guard_check():
+    """OptionsAgent._try_enter checks _latency_cooldown_until (mirrors base_agent guard)."""
+    import inspect
+    from agents.strategy_agents import OptionsAgent
+    src = inspect.getsource(OptionsAgent._try_enter)
+    assert "_latency_cooldown_until" in src, \
+        "OptionsAgent._try_enter must check self._latency_cooldown_until"
+    assert "use_latency_guard" in src, \
+        "OptionsAgent._try_enter must guard check on settings.use_latency_guard"
+
+def t_options_try_enter_measures_and_updates_latency():
+    """OptionsAgent._try_enter updates _last_order_latency_ms and _latency_cooldown_until."""
+    import inspect
+    from agents.strategy_agents import OptionsAgent
+    src = inspect.getsource(OptionsAgent._try_enter)
+    assert "_last_order_latency_ms" in src, \
+        "OptionsAgent._try_enter must update self._last_order_latency_ms"
+    assert "max_order_latency_ms" in src, \
+        "OptionsAgent._try_enter must check max_order_latency_ms budget"
+
+def t_futures_ema_trend_bear_rsi_excludes_50():
+    """FuturesAgent _pat_ema_trend bear condition: RSI upper bound is < 50 (not <= 50)."""
+    import inspect, re
+    from agents.strategy_agents import FuturesAgent
+    src = inspect.getsource(FuturesAgent._pat_ema_trend)
+    # Must have < 50 (strict) for bear RSI upper bound
+    bear_lines = [l for l in src.splitlines() if "bear" in l and "rsi_14" in l]
+    assert bear_lines, "bear RSI condition not found in _pat_ema_trend"
+    bear_line = bear_lines[0]
+    assert "< 50" in bear_line or "<50" in bear_line, \
+        f"Bear RSI must use strict < 50, got: {bear_line.strip()}"
+    assert "<= 50" not in bear_line and "<=50" not in bear_line, \
+        f"Bear RSI must NOT use <= 50 (overlaps with bull's >= 50), got: {bear_line.strip()}"
+
+def t_pairs_agent_has_entered_pair_dict():
+    """PairsAgent.__init__ initialises _entered_pair tracking dict."""
+    from agents.strategy_agents import PairsAgent
+    pa = PairsAgent()
+    assert hasattr(pa, "_entered_pair"), "PairsAgent must have _entered_pair attribute"
+    assert isinstance(pa._entered_pair, dict), "_entered_pair must be a dict"
+
+def t_pairs_should_exit_only_checks_entered_pair_zscore():
+    """PairsAgent.should_exit_position only checks the entered pair's z-score, not all pairs."""
+    import inspect
+    from agents.strategy_agents import PairsAgent
+    src = inspect.getsource(PairsAgent.should_exit_position)
+    assert "_active_pair" in src or "_entered_pair" in src, \
+        "should_exit_position must filter by the entered pair, not iterate all zscores blindly"
+    # Must guard the pair iteration so wrong pair's zscore is skipped
+    assert "continue" in src, "must skip pairs that don't match the entered pair"
+
+def t_pairs_signal_has_absolute_stop_loss_and_target():
+    """PairsAgent.evaluate_tick signal dict includes absolute 'stop_loss' and 'target' keys."""
+    import inspect
+    from agents.strategy_agents import PairsAgent
+    src = inspect.getsource(PairsAgent.evaluate_tick)
+    # Best signal dict must contain stop_loss and target (absolute prices)
+    assert '"stop_loss"' in src or "'stop_loss'" in src, \
+        "evaluate_tick signal must include absolute 'stop_loss' price"
+    assert '"target"' in src or "'target'" in src, \
+        "evaluate_tick signal must include absolute 'target' price"
+
+run("base_agent: _pos_matches_sym default is exact tradingsymbol match (no startswith)",  t_base_agent_pos_matches_sym_default)
+run("options_agent: _pos_matches_sym accepts F&O contract prefix for underlying",         t_options_agent_pos_matches_sym_prefix)
+run("futures_agent: _pos_matches_sym accepts futures contract prefix for underlying",     t_futures_agent_pos_matches_sym_prefix)
+run("base_agent: _check_exits_on_tick uses _pos_matches_sym (not raw tradingsymbol !=)", t_base_agent_check_exits_uses_pos_matches_sym)
+run("options_agent: _ctx_bonus passes snap.symbol to _days_to_expiry (not bare ())",     t_options_ctx_bonus_passes_underlying_to_days_to_expiry)
+run("options_agent: should_exit_position extracts underlying via parse_nfo_symbol for DTE", t_options_should_exit_uses_parsed_underlying_for_dte)
+run("options_agent: _try_enter checks _latency_cooldown_until (latency guard active)",   t_options_try_enter_has_latency_guard_check)
+run("options_agent: _try_enter measures latency and updates _last_order_latency_ms",     t_options_try_enter_measures_and_updates_latency)
+run("futures_agent: _pat_ema_trend bear RSI upper bound is strict < 50 (not <= 50)",     t_futures_ema_trend_bear_rsi_excludes_50)
+run("pairs_agent: __init__ creates _entered_pair dict for pair-specific exit tracking",  t_pairs_agent_has_entered_pair_dict)
+run("pairs_agent: should_exit_position only checks entered pair's z-score (not all)",    t_pairs_should_exit_only_checks_entered_pair_zscore)
+run("pairs_agent: evaluate_tick signal includes absolute stop_loss and target prices",   t_pairs_signal_has_absolute_stop_loss_and_target)
+
+
+# ══════════════════════════════════════════════════════════════════════════
 # FINAL SUMMARY
 # ══════════════════════════════════════════════════════════════════════════
 failed = summary()

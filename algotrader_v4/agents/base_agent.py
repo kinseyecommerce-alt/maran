@@ -386,6 +386,13 @@ class BaseAgent(ABC):
     def should_exit_position(self, position: dict, ind: LiveIndicators) -> tuple[bool, str]:
         ...
 
+    def _pos_matches_sym(self, pos: dict, snap_sym: str) -> bool:
+        """Return True if this kite position belongs to the current tick's symbol.
+        Equity agents: exact tradingsymbol match.
+        F&O agents override this to also accept contract symbols that start with
+        the underlying (e.g. "NIFTY2607051850CE" for snap_sym="NIFTY")."""
+        return pos.get("tradingsymbol") == snap_sym
+
     # ── Backtest filter ───────────────────────────────────────────────────
 
     def filter_watchlist(self, watchlist: list[dict]) -> list[dict]:
@@ -1458,7 +1465,7 @@ class BaseAgent(ABC):
             None, kite_client.positions_cached
         )
         for pos in _exit_pos_data.get("net", []):
-            if pos.get("tradingsymbol") != sym or pos.get("quantity", 0) == 0:
+            if not self._pos_matches_sym(pos, sym) or pos.get("quantity", 0) == 0:
                 continue
             # Ownership gate: in LIVE, kite.positions() also returns bracket-managed
             # positions and the account holder's MANUAL trades. Only flatten positions
