@@ -137,9 +137,10 @@ def get_kelly_fraction(agent_name: str) -> float:
     """
     try:
         from adaptive_engine import adaptive_engine as _ae
-        prefix = f"{agent_name}::"
-        params_list = [v for k, v in _ae._params.items() if k.startswith(prefix)]
-        trades_total = sum(len(t) for k, t in _ae._trades.items() if k.startswith(prefix))
+        with _ae._lock:
+            prefix = f"{agent_name}::"
+            params_list = [v for k, v in _ae._params.items() if k.startswith(prefix)]
+            trades_total = sum(len(t) for k, t in _ae._trades.items() if k.startswith(prefix))
         if trades_total < 10 or not params_list:
             return 0.0
         n = len(params_list)
@@ -300,7 +301,7 @@ class RiskManager:
         return True, "OK"
 
     def _check_daily_loss(self) -> tuple[bool, str]:
-        if self.daily_realised_pnl < -settings.max_daily_loss:
+        if self.daily_realised_pnl <= -settings.max_daily_loss:
             return False, (
                 f"Daily loss limit ₹{settings.max_daily_loss:.0f} breached "
                 f"(current P&L ₹{self.daily_realised_pnl:.0f})"

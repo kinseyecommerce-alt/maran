@@ -412,8 +412,8 @@ class KiteClient:
         """
         delay = _RETRY_BASE_SEC
         for attempt in range(_RETRY_MAX + 1):
-            placed_after = time.time() - 2.0   # small clock-skew window
             _rest_bucket.acquire()
+            placed_after = time.time() - 2.0   # small clock-skew window (captured after rate-limit)
             try:
                 order_id = self.kite.place_order(
                     variety=KiteConnect.VARIETY_REGULAR,

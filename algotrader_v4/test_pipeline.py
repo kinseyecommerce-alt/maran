@@ -1646,7 +1646,7 @@ run("agent signal flows into order pipeline",              t_agent_evaluate_then
 section("ASYNC TESTS")
 
 async def run_async():
-    from atomic_bracket import AtomicBracketEngine, BracketStatus
+    from atomic_bracket import AtomicBracketEngine as AtomicBracketEngine, BracketStatus
 
     await arun("TSL: steady price keeps position open", t_tsl_steady_price())
     await arun("TSL: crash below SL triggers close",    t_tsl_price_below_sl())
@@ -1711,7 +1711,7 @@ async def run_async():
         """When the T2 MARKET exit order fails the bracket must stay ACTIVE
         and the guard/trade-recorder/TSL must NOT be released.
         """
-        from atomic_bracket import AtomicBracketEngine, BracketStatus, BracketOrder
+        from atomic_bracket import AtomicBracketEngine as AtomicBracketEngine, BracketStatus, BracketOrder
         from trailing_sl_engine import PositionSL, SLStatus, TrailingSLEngine
         from unittest.mock import patch
 
@@ -6437,7 +6437,7 @@ section("57. ATOMIC BRACKET — double-SL guard + last-retry logging")
 def t_atomic_bracket_no_double_sl_when_cancel_fails():
     """_on_tsl_sl_moved must NOT place a new SL when cancel_order raises."""
     import asyncio, inspect
-    from atomic_bracket import AtomicBracketEngine, BracketOrder, BracketStatus
+    from atomic_bracket import AtomicBracketEngine as AtomicBracketEngine, BracketOrder, BracketStatus
     import time
 
     engine = AtomicBracketEngine()
@@ -6483,7 +6483,7 @@ run("atomic_bracket: no double-SL when cancel_order fails", t_atomic_bracket_no_
 def t_atomic_bracket_place_sl_logs_last_error():
     """_place_sl_order must log an error on the final retry failure."""
     import asyncio, inspect
-    from atomic_bracket import AtomicBracketEngine, BracketOrder, BracketStatus
+    from atomic_bracket import AtomicBracketEngine as AtomicBracketEngine, BracketOrder, BracketStatus
     import time
 
     src = inspect.getsource(AtomicBracketEngine._place_sl_order)
@@ -7327,7 +7327,7 @@ section("72. ATOMIC BRACKET — silent swallow of cancel_order failures")
 def t_atomic_bracket_cancel_entry_timeout_logs():
     """Silent `except Exception: pass` on entry cancel replaced with logger.warning."""
     import inspect
-    from atomic_bracket import AtomicBracketEngine
+    from atomic_bracket import AtomicBracketEngine as AtomicBracketEngine
 
     # Find the block: fill_price is None → cancel entry → except Exception
     src = inspect.getsource(AtomicBracketEngine.execute)
@@ -7353,7 +7353,7 @@ run("atomic_bracket: cancel_order failure on entry timeout logs warning (not sil
 def t_atomic_bracket_cancel_sl_tsl_exit_logs():
     """Silent `except Exception: pass` on SL-M cancel after TSL exit replaced with logger.warning."""
     import inspect
-    from atomic_bracket import AtomicBracketEngine
+    from atomic_bracket import AtomicBracketEngine as AtomicBracketEngine
 
     src = inspect.getsource(AtomicBracketEngine._on_tsl_sl_hit)
     assert "logger.warning" in src, (
@@ -7367,7 +7367,7 @@ run("atomic_bracket: cancel_order failure on TSL exit logs warning", t_atomic_br
 def t_atomic_bracket_cancel_sl_target_exit_logs():
     """Silent `except Exception: pass` on SL-M cancel after T2 target exit replaced with logger.warning."""
     import inspect
-    from atomic_bracket import AtomicBracketEngine
+    from atomic_bracket import AtomicBracketEngine as AtomicBracketEngine
 
     src = inspect.getsource(AtomicBracketEngine._on_tsl_target_hit)
     assert "logger.warning" in src, (
@@ -7969,7 +7969,7 @@ def t_atomic_bracket_broadcast_logs_exception():
     """Silent except: pass on ws_broadcast hides connection drops; operators
     can't distinguish a closed socket from a working one."""
     import inspect
-    from atomic_bracket import AtomicBracketEngine
+    from atomic_bracket import AtomicBracketEngine as AtomicBracketEngine
 
     src = inspect.getsource(AtomicBracketEngine._broadcast_update)
     assert "pass" not in src.split("except")[-1].split("\n")[0], (
@@ -11863,6 +11863,127 @@ run("kotak: _headers() acquires _token_lock to read _access_token + _sid",      
 run("l2_fill: estimate_fill returns neutral when ltp=inf (not NaN downstream)",          t_l2_fill_rejects_inf_ltp)
 run("l2_fill: estimate_fill returns neutral when ltp=-inf",                               t_l2_fill_rejects_neg_inf_ltp)
 run("l2_fill: guard uses math.isfinite, not math.isnan (catches both nan and inf)",      t_l2_fill_guard_uses_isfinite)
+
+
+# ══════════════════════════════════════════════════════════════════════════
+# 116. BATCH-19 PRE-DEPLOYMENT BUG-FIX REGRESSION TESTS
+# ══════════════════════════════════════════════════════════════════════════
+
+# ── main.py auth fixes ────────────────────────────────────────────────────
+
+def t_risk_stress_test_in_sensitive_gets():
+    """/risk/stress-test is in _SENSITIVE_GETS (requires auth)."""
+    import inspect, main as m
+    assert "/risk/stress-test" in m._SENSITIVE_GETS, \
+        "/risk/stress-test must be in _SENSITIVE_GETS to require authentication"
+
+def t_risk_var_in_sensitive_gets():
+    """/risk/var is in _SENSITIVE_GETS (requires auth)."""
+    import main as m
+    assert "/risk/var" in m._SENSITIVE_GETS, \
+        "/risk/var must be in _SENSITIVE_GETS to require authentication"
+
+def t_compliance_sebi_report_in_sensitive_gets():
+    """/compliance/sebi-report is in _SENSITIVE_GETS (requires auth)."""
+    import main as m
+    assert "/compliance/sebi-report" in m._SENSITIVE_GETS, \
+        "/compliance/sebi-report must be in _SENSITIVE_GETS — SEBI audit data is sensitive"
+
+def t_readiness_checks_anthropic_api_key():
+    """ready_for_live logic includes anthropic_api_key check."""
+    import inspect, main as m
+    src = inspect.getsource(m.readiness)
+    assert "anthropic_api_key" in src, \
+        "readiness() ready_for_live must check anthropic_api_key"
+
+def t_readiness_checks_jwt_secret_key():
+    """ready_for_live logic includes jwt_secret_key check."""
+    import inspect, main as m
+    src = inspect.getsource(m.readiness)
+    lines = [l for l in src.splitlines() if "ready_for_live" in l and "all(" in l]
+    # Find the block — jwt_secret_key must appear in the all([...]) block
+    assert "jwt_secret_key" in src, \
+        "readiness() ready_for_live must check jwt_secret_key"
+
+# ── atomic_bracket.py emergency reverse ──────────────────────────────────
+
+def t_emergency_reverse_returns_bool():
+    """_emergency_reverse() returns bool (True on success, False on failure)."""
+    import inspect
+    from atomic_bracket import AtomicBracketEngine as AtomicBracket
+    src = inspect.getsource(AtomicBracket._emergency_reverse)
+    assert "return True" in src, "_emergency_reverse must return True on success"
+    assert "return False" in src, "_emergency_reverse must return False on failure"
+
+def t_emergency_reverse_failure_holds_claim():
+    """When emergency reverse fails, order_guard.release_claim() is NOT called."""
+    import inspect
+    from atomic_bracket import AtomicBracketEngine as AtomicBracket
+    src = inspect.getsource(AtomicBracket.execute)
+    # The release_claim must be conditional on reverse succeeding
+    # i.e. release_claim only called inside 'if reverse_ok:' block
+    assert "reverse_ok" in src, \
+        "execute must capture reverse_ok from _emergency_reverse"
+    assert "if reverse_ok" in src, \
+        "order_guard.release_claim must be inside 'if reverse_ok' block"
+
+def t_tsl_sl_replacement_failure_clears_order_id():
+    """TSL _on_tsl_sl_moved clears bracket.sl_order_id when replacement SL fails."""
+    import inspect
+    from atomic_bracket import AtomicBracketEngine as AtomicBracket
+    src = inspect.getsource(AtomicBracket._on_tsl_sl_moved)
+    assert 'sl_order_id = ""' in src or "sl_order_id = ''" in src, \
+        "_on_tsl_sl_moved must clear bracket.sl_order_id when _place_sl_order fails"
+
+# ── risk_manager.py Kelly lock ────────────────────────────────────────────
+
+def t_get_kelly_fraction_acquires_adaptive_engine_lock():
+    """get_kelly_fraction() reads _ae._params/_trades inside _ae._lock."""
+    import inspect
+    import risk_manager as rm
+    src = inspect.getsource(rm.get_kelly_fraction)
+    assert "_lock" in src, \
+        "get_kelly_fraction must acquire adaptive_engine._lock before reading _params/_trades"
+    assert "with _ae._lock" in src, \
+        "get_kelly_fraction must use 'with _ae._lock:' context manager"
+
+def t_check_daily_loss_uses_lte():
+    """_check_daily_loss uses <= (not <) so limit is hit at exact boundary."""
+    import inspect
+    from risk_manager import RiskManager
+    src = inspect.getsource(RiskManager._check_daily_loss)
+    assert "<= -settings.max_daily_loss" in src or "<=-settings.max_daily_loss" in src, \
+        "_check_daily_loss must use <= for daily loss comparison (not strict <)"
+    assert "< -settings.max_daily_loss" not in src, \
+        "_check_daily_loss must NOT use strict < (inconsistent with record_trade halt)"
+
+# ── kite_client.py reconciliation window ─────────────────────────────────
+
+def t_kite_placed_after_captured_after_rate_limiter():
+    """place_order() captures placed_after AFTER _rest_bucket.acquire() to avoid narrow window."""
+    import inspect
+    from kite_client import KiteClient
+    src = inspect.getsource(KiteClient._place_live_reconcile)
+    lines = src.splitlines()
+    acquire_idx = next((i for i, l in enumerate(lines) if "_rest_bucket.acquire()" in l), -1)
+    placed_after_idx = next((i for i, l in enumerate(lines) if "placed_after" in l), -1)
+    assert acquire_idx >= 0 and placed_after_idx >= 0, \
+        "_rest_bucket.acquire() and placed_after must both exist in _place_live_reconcile"
+    assert placed_after_idx > acquire_idx, \
+        "placed_after must be captured AFTER _rest_bucket.acquire() to prevent narrow window"
+
+
+run("main: /risk/stress-test in _SENSITIVE_GETS (requires auth)",                         t_risk_stress_test_in_sensitive_gets)
+run("main: /risk/var in _SENSITIVE_GETS (requires auth)",                                  t_risk_var_in_sensitive_gets)
+run("main: /compliance/sebi-report in _SENSITIVE_GETS (requires auth)",                   t_compliance_sebi_report_in_sensitive_gets)
+run("main: readiness() ready_for_live checks anthropic_api_key",                          t_readiness_checks_anthropic_api_key)
+run("main: readiness() ready_for_live checks jwt_secret_key",                             t_readiness_checks_jwt_secret_key)
+run("bracket: _emergency_reverse() returns bool (True=ok, False=failed)",                 t_emergency_reverse_returns_bool)
+run("bracket: emergency reverse failure holds order_guard claim (no release_claim)",      t_emergency_reverse_failure_holds_claim)
+run("bracket: TSL SL replacement failure clears bracket.sl_order_id",                    t_tsl_sl_replacement_failure_clears_order_id)
+run("risk: get_kelly_fraction acquires adaptive_engine._lock before reading params",      t_get_kelly_fraction_acquires_adaptive_engine_lock)
+run("risk: _check_daily_loss uses <= (consistent with record_trade halt trigger)",        t_check_daily_loss_uses_lte)
+run("kite: placed_after captured AFTER _rest_bucket.acquire() (no narrow window)",       t_kite_placed_after_captured_after_rate_limiter)
 
 
 # ══════════════════════════════════════════════════════════════════════════

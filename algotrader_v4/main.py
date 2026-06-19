@@ -91,7 +91,10 @@ _SENSITIVE_GETS = frozenset({
     "/portfolio/performance-report",   # full P&L history — requires auth
     "/config/god-mode/status",         # exposes live risk profile — requires auth
     "/risk/status",                    # exposes daily P&L limits
+    "/risk/stress-test",               # exposes position beta + shock impact
+    "/risk/var",                       # exposes portfolio VaR/CVaR
     "/settings/trading-limits",        # exposes risk config
+    "/compliance/sebi-report",         # SEBI daily activity audit trail
     # QA-fix: additional sensitive GETs missing from original set
     "/portfolio/trades/history",       # full trade records with P&L per trade
     "/portfolio/trades/export",        # same data as CSV
@@ -1968,6 +1971,7 @@ def readiness():
     ready_for_live = all([
         checks["kite_api_key"], checks["kite_api_secret"],
         checks["kite_access_token"], checks["kite_initialised"],
+        checks["anthropic_api_key"], checks["jwt_secret_key"],
     ])
     missing = [k for k, v in checks.items() if not v]
     return {

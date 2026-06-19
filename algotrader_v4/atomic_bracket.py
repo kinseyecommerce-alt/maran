@@ -262,8 +262,15 @@ class AtomicBracketEngine:
         sl_placed = await self._place_sl_order(bracket)
         if not sl_placed:
             logger.critical("Bracket {} — SL FAILED. REVERSING!", bracket_id)
-            await self._emergency_reverse(bracket)
-            order_guard.release_claim(symbol, strategy, side)
+            reverse_ok = await self._emergency_reverse(bracket)
+            if reverse_ok:
+                # Position successfully closed — release symbol so others can trade it
+                order_guard.release_claim(symbol, strategy, side)
+            else:
+                # Reverse also failed — keep claim to block duplicate entry on this symbol
+                logger.critical(
+                    "Bracket {} — emergency reverse FAILED; holding order_guard claim "
+                    "on {} to prevent duplicate entry into unprotected position", bracket_id, symbol)
             bracket.status = BracketStatus.FAILED
             await self._broadcast_update(bracket)
             return None
@@ -325,7 +332,9 @@ class AtomicBracketEngine:
                         self.SL_RETRY_MAX, bracket.symbol, bracket.strategy, exc)
         return False
 
-    async def _emergency_reverse(self, bracket: BracketOrder) -> None:
+    async def _emergency_reverse(self, bracket: BracketOrder) -> bool:
+        """Attempt to close the entry position after SL placement failure.
+        Returns True if reversal succeeded, False otherwise."""
         reverse_side = "SELL" if bracket.side == "BUY" else "BUY"
         try:
             await asyncio.get_running_loop().run_in_executor(
@@ -333,6 +342,7 @@ class AtomicBracketEngine:
                     tradingsymbol=bracket.symbol, exchange=bracket.exchange,
                     transaction_type=reverse_side, quantity=bracket.quantity,
                     order_type="MARKET", product=bracket.product, tag="BRK-EMERGENCY-REVERSE"))
+            return True
         except Exception as exc:
             logger.critical("Emergency reverse ALSO FAILED: {}", exc)
             # Alert + kill switch: unprotected position exists with no SL
@@ -354,6 +364,7 @@ class AtomicBracketEngine:
                 )
             except Exception as ks_exc:
                 logger.critical("Kill switch trigger ALSO FAILED: {}", ks_exc)
+            return False
 
     async def _on_tsl_sl_hit(self, pos, ltp: float, pnl: float) -> None:
         bracket = self._find_by_symbol_strategy(pos.symbol, pos.strategy)
@@ -518,7 +529,13 @@ class AtomicBracketEngine:
                     "Cancel old SL {} failed — skipping replacement to avoid double-SL: {}",
                     bracket.sl_order_id, cancel_exc)
             if cancel_ok:
-                await self._place_sl_order(bracket)
+                sl_replaced = await self._place_sl_order(bracket)
+                if not sl_replaced:
+                    logger.critical(
+                        "TSL SL replacement failed for {} {} — position has no working SL; "
+                        "clearing sl_order_id to surface the gap",
+                        bracket.symbol, bracket.strategy)
+                    bracket.sl_order_id = ""
         await self._broadcast_update(bracket)
 
     def _find_by_symbol_strategy(self, symbol: str, strategy: str) -> Optional[BracketOrder]:
