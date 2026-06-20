@@ -316,6 +316,77 @@ _breaker_until:   float = 0.0
 # Eager initialization avoids the lazy check-then-set race of the old asyncio.Lock pattern.
 _breaker_lock = threading.Lock()
 
+# ── 5-minute regime cache: moves Claude out of the per-tick hot path ──────────
+# The gate's decisive value is regime/context veto (BEAR+BUY, news risk, events).
+# These signals change at minute+ cadence, not tick-by-tick. Cache the full
+# GateDecision for 5 minutes; on cache hit, _apply_tick_adjustments() (sync,
+# <1ms) handles fresh per-tick mechanical tweaks (RSI extremes, session time).
+_REGIME_CACHE_TTL: float = 300.0  # seconds — aligns with macro/regime refresh
+_regime_cache: dict[tuple, tuple] = {}
+_regime_cache_lock = threading.Lock()
+
+
+def get_regime_decision(
+    symbol: str, strategy: str, direction: str
+) -> Optional[GateDecision]:
+    """Return cached GateDecision or None if absent/stale. Sync, 0ms."""
+    import time as _t
+    key = (symbol, strategy, direction)
+    with _regime_cache_lock:
+        entry = _regime_cache.get(key)
+    if entry is None:
+        return None
+    ts, decision = entry
+    if _t.monotonic() - ts > _REGIME_CACHE_TTL:
+        return None
+    return decision
+
+
+def store_regime_decision(
+    symbol: str, strategy: str, direction: str, decision: GateDecision,
+) -> None:
+    """Write a fresh GateDecision into the regime cache. Sync, <1ms."""
+    import time as _t
+    key = (symbol, strategy, direction)
+    with _regime_cache_lock:
+        _regime_cache[key] = (_t.monotonic(), decision)
+
+
+def _apply_tick_adjustments(
+    decision: GateDecision, snap, signal: dict,
+) -> GateDecision:
+    """
+    Apply per-tick mechanical adjustments to a cached regime decision.
+    No I/O — runs in <1ms. Handles RSI extremes and session-time size scaling
+    without a new API call.
+    """
+    from dataclasses import replace as _replace
+    ind = snap.indicators
+    sf  = decision.size_factor
+    sl  = decision.adjusted_sl_pct
+
+    # RSI overbought BUY or oversold SELL: reduce position size
+    if ind.rsi_14 > 80 or ind.rsi_14 < 20:
+        sf = min(sf, 0.5)
+
+    # Near session boundaries: first 15 min after open, last 20 min before squareoff
+    try:
+        from ist_clock import minutes_since_open as _mso
+        min_open = _mso()
+        min_sq   = _minutes_to_squareoff()
+        if min_open < 15 or min_sq < 20:
+            sf = min(sf, 0.75)
+    except Exception:
+        pass
+
+    # Fall back to signal's SL if cache has none
+    if sl is None:
+        sl = signal.get("stop_loss_pct")
+
+    if sf == decision.size_factor and sl == decision.adjusted_sl_pct:
+        return decision  # unchanged — return same object
+    return _replace(decision, size_factor=sf, adjusted_sl_pct=sl)
+
 
 def _record_gate_failure() -> None:
     global _consec_failures, _breaker_until

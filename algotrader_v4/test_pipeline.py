@@ -11986,6 +11986,237 @@ run("risk: _check_daily_loss uses <= (consistent with record_trade halt trigger)
 run("kite: placed_after captured AFTER _rest_bucket.acquire() (no narrow window)",       t_kite_placed_after_captured_after_rate_limiter)
 
 
+# ─────────────────────────────────────────────────────────────────────────────
+section("117. GAP-1: CLAUDE REGIME CACHE — 5-minute hot-path bypass")
+# ─────────────────────────────────────────────────────────────────────────────
+
+def t_regime_cache_constants_exist():
+    import claude_trade_gate as _ctg
+    assert hasattr(_ctg, "_REGIME_CACHE_TTL"), "_REGIME_CACHE_TTL missing"
+    assert _ctg._REGIME_CACHE_TTL == 300.0,    "_REGIME_CACHE_TTL must be 300 s"
+    assert hasattr(_ctg, "_regime_cache"),      "_regime_cache dict missing"
+    assert hasattr(_ctg, "_regime_cache_lock"), "_regime_cache_lock missing"
+
+def t_get_regime_decision_returns_none_on_empty():
+    import claude_trade_gate as _ctg
+    # Fresh import → cache is empty → must return None
+    result = _ctg.get_regime_decision("RELIANCE", "intraday", "BUY")
+    assert result is None, "empty cache must return None"
+
+def t_store_and_retrieve_regime_decision():
+    import claude_trade_gate as _ctg
+    from claude_trade_gate import GateDecision
+    decision = GateDecision(confidence=75, enter=True, size_factor=0.75,
+                            reason="cache test")
+    _ctg.store_regime_decision("TESTCACHE", "intraday", "BUY", decision)
+    retrieved = _ctg.get_regime_decision("TESTCACHE", "intraday", "BUY")
+    assert retrieved is not None, "stored decision must be retrievable"
+    assert retrieved.confidence == 75
+    assert retrieved.enter is True
+
+def t_regime_cache_key_is_directional():
+    """BUY and SELL decisions must be stored independently."""
+    import claude_trade_gate as _ctg
+    from claude_trade_gate import GateDecision
+    _ctg.store_regime_decision("DIRTEST", "intraday", "BUY",
+                               GateDecision(confidence=80, enter=True, reason="buy"))
+    _ctg.store_regime_decision("DIRTEST", "intraday", "SELL",
+                               GateDecision(confidence=40, enter=False, reason="sell"))
+    buy_d  = _ctg.get_regime_decision("DIRTEST", "intraday", "BUY")
+    sell_d = _ctg.get_regime_decision("DIRTEST", "intraday", "SELL")
+    assert buy_d is not None  and buy_d.enter  is True
+    assert sell_d is not None and sell_d.enter is False
+
+def t_regime_cache_expires_after_ttl():
+    """Entries older than _REGIME_CACHE_TTL must return None."""
+    import time, claude_trade_gate as _ctg, threading
+    from claude_trade_gate import GateDecision
+    decision = GateDecision(confidence=70, enter=True, reason="ttl test")
+    key = ("TTLTEST", "scalping", "BUY")
+    # Manually insert an already-expired entry (ts = now - TTL - 1)
+    with _ctg._regime_cache_lock:
+        _ctg._regime_cache[key] = (time.monotonic() - _ctg._REGIME_CACHE_TTL - 1, decision)
+    result = _ctg.get_regime_decision("TTLTEST", "scalping", "BUY")
+    assert result is None, "expired cache entry must return None"
+
+def t_apply_tick_adjustments_rsi_overbought():
+    """RSI > 80 on a BUY signal must cap size_factor at 0.5."""
+    import claude_trade_gate as _ctg
+    from claude_trade_gate import GateDecision
+    from unittest.mock import MagicMock
+    decision = GateDecision(confidence=80, enter=True, size_factor=1.0)
+    snap = MagicMock()
+    snap.indicators.rsi_14 = 85.0   # overbought
+    signal = {}
+    adjusted = _ctg._apply_tick_adjustments(decision, snap, signal)
+    assert adjusted.size_factor <= 0.5, (
+        f"RSI=85 BUY must cap size_factor ≤ 0.5, got {adjusted.size_factor}"
+    )
+
+def t_apply_tick_adjustments_normal_rsi_unchanged():
+    """Normal RSI (50) must not change size_factor."""
+    import claude_trade_gate as _ctg
+    from claude_trade_gate import GateDecision
+    from unittest.mock import MagicMock
+    decision = GateDecision(confidence=80, enter=True, size_factor=1.0)
+    snap = MagicMock()
+    snap.indicators.rsi_14 = 50.0   # neutral RSI
+    signal = {}
+    adjusted = _ctg._apply_tick_adjustments(decision, snap, signal)
+    # size_factor may be unchanged or adjusted only by session time; must not exceed original
+    assert adjusted.size_factor <= decision.size_factor
+
+def t_base_agent_imports_cache_functions():
+    """base_agent._run_loop source must reference get_regime_decision (cache-first gate)."""
+    import inspect
+    from agents.base_agent import BaseAgent
+    src = inspect.getsource(BaseAgent._run_loop)
+    assert "get_regime_decision" in src,   "base_agent must use regime cache lookup"
+    assert "store_regime_decision" in src, "base_agent must store gate result in regime cache"
+
+run("gate: _regime_cache / _regime_cache_lock / _REGIME_CACHE_TTL=300 exist",             t_regime_cache_constants_exist)
+run("gate: get_regime_decision returns None on empty cache",                               t_get_regime_decision_returns_none_on_empty)
+run("gate: store then get_regime_decision returns correct GateDecision",                   t_store_and_retrieve_regime_decision)
+run("gate: BUY and SELL cache keys are independent (no direction collision)",              t_regime_cache_key_is_directional)
+run("gate: expired entry (ts > _REGIME_CACHE_TTL) returns None",                          t_regime_cache_expires_after_ttl)
+run("gate: _apply_tick_adjustments caps size_factor ≤ 0.5 when RSI > 80",                 t_apply_tick_adjustments_rsi_overbought)
+run("gate: _apply_tick_adjustments leaves size_factor unchanged at neutral RSI=50",        t_apply_tick_adjustments_normal_rsi_unchanged)
+run("base_agent: _run_loop uses regime cache (get/store_regime_decision present)",         t_base_agent_imports_cache_functions)
+
+# ─────────────────────────────────────────────────────────────────────────────
+section("118. GAP-2: NSE BHAVCOPY — survivorship-bias-free daily data")
+# ─────────────────────────────────────────────────────────────────────────────
+
+def t_bhavcopy_loader_importable():
+    import bhavcopy_loader
+    assert hasattr(bhavcopy_loader, "load_symbol")
+    assert hasattr(bhavcopy_loader, "bhavcopy_loader")
+
+def t_bhavcopy_url_format():
+    """URL must match the NSE archives pattern."""
+    from datetime import date
+    import bhavcopy_loader as _bl
+    url = _bl._bhav_url(date(2024, 1, 15))
+    assert "archives.nseindia.com" in url
+    assert "EQUITIES" in url
+    assert "2024" in url
+    assert "JAN" in url
+    assert "cm15JAN2024bhav.csv.zip" in url
+
+def t_bhavcopy_cache_path_structure():
+    """Cache path must be under logs/bhavcopy/{year}/{mon}/."""
+    from datetime import date
+    import bhavcopy_loader as _bl
+    p = _bl._cache_path(date(2024, 3, 7))
+    assert "bhavcopy" in str(p)
+    assert "2024" in str(p)
+    assert "MAR" in str(p)
+    assert p.name.startswith("cm07MAR2024")
+
+def t_bhavcopy_load_symbol_returns_df():
+    """load_symbol must return a DataFrame even when network unavailable (empty)."""
+    from datetime import date
+    import pandas as pd
+    from bhavcopy_loader import load_symbol
+    # Use a recent past date; network may not be available so we accept empty
+    df = load_symbol("RELIANCE", date(2020, 1, 1), date(2020, 1, 2))
+    assert isinstance(df, pd.DataFrame)
+    if not df.empty:
+        assert set(["date", "open", "high", "low", "close", "volume"]).issubset(df.columns)
+
+def t_bhavcopy_trading_days_excludes_weekends():
+    from datetime import date
+    from bhavcopy_loader import _trading_days
+    days = _trading_days(date(2024, 1, 1), date(2024, 1, 7))  # Mon 1 → Sun 7
+    for d in days:
+        assert d.weekday() < 5, f"Weekend {d} must not appear in trading days"
+
+def t_market_data_historical_tries_bhavcopy_for_daily():
+    """YFinanceClient.historical source must mention bhavcopy_loader for daily interval."""
+    import inspect
+    from market_data import YFinanceClient
+    src = inspect.getsource(YFinanceClient.historical)
+    assert "bhavcopy" in src.lower(), (
+        "YFinanceClient.historical must try bhavcopy_loader for 1d interval"
+    )
+
+run("bhavcopy: module importable with load_symbol and singleton",                          t_bhavcopy_loader_importable)
+run("bhavcopy: URL matches NSE archives pattern for 2024-01-15",                           t_bhavcopy_url_format)
+run("bhavcopy: cache path is under logs/bhavcopy/{year}/{mon}/",                           t_bhavcopy_cache_path_structure)
+run("bhavcopy: load_symbol returns DataFrame (empty ok when network unavailable)",         t_bhavcopy_load_symbol_returns_df)
+run("bhavcopy: _trading_days excludes weekends",                                           t_bhavcopy_trading_days_excludes_weekends)
+run("market_data: YFinanceClient.historical references bhavcopy_loader for daily",         t_market_data_historical_tries_bhavcopy_for_daily)
+
+# ─────────────────────────────────────────────────────────────────────────────
+section("119. GAP-3: FII/DII SCHEDULING + INDIA VIX")
+# ─────────────────────────────────────────────────────────────────────────────
+
+def t_india_vix_fetcher_exists():
+    """macro_signals must have _fetch_india_vix_nse() as primary VIX source."""
+    import macro_signals as _ms
+    assert callable(getattr(_ms, "_fetch_india_vix_nse", None)), (
+        "_fetch_india_vix_nse must exist in macro_signals"
+    )
+
+def t_macro_refresh_uses_india_vix_first():
+    """macro_signals.refresh() source must try India VIX before US ^VIX."""
+    import inspect, macro_signals as _ms
+    src = inspect.getsource(_ms.MacroSignals.refresh)
+    assert "_fetch_india_vix_nse" in src, (
+        "MacroSignals.refresh must call _fetch_india_vix_nse() as primary VIX source"
+    )
+    # India VIX call must appear before the ^VIX fallback
+    idx_india = src.find("_fetch_india_vix_nse")
+    idx_us    = src.find("^VIX")
+    if idx_us != -1:
+        assert idx_india < idx_us, "India VIX must be tried before US ^VIX fallback"
+
+def t_master_agent_has_fii_dii_job():
+    """MasterAgent must have _refresh_fii_dii_job async method."""
+    import inspect, master_agent_v5 as _ma
+    assert hasattr(_ma.MasterAgent, "_refresh_fii_dii_job"), (
+        "MasterAgent must have _refresh_fii_dii_job scheduled method"
+    )
+    src = inspect.getsource(_ma.MasterAgent._refresh_fii_dii_job)
+    assert "refresh_fii_dii" in src, "_refresh_fii_dii_job must call refresh_fii_dii()"
+
+def t_master_agent_has_macro_refresh_job():
+    """MasterAgent must have _refresh_macro_job async method."""
+    import inspect, master_agent_v5 as _ma
+    assert hasattr(_ma.MasterAgent, "_refresh_macro_job"), (
+        "MasterAgent must have _refresh_macro_job scheduled method"
+    )
+    src = inspect.getsource(_ma.MasterAgent._refresh_macro_job)
+    assert "macro_signals" in src, "_refresh_macro_job must call macro_signals.refresh()"
+
+def t_master_agent_schedules_fii_dii_at_1930():
+    """_refresh_fii_dii_job must be scheduled via APScheduler in start()."""
+    import inspect, master_agent_v5 as _ma
+    src = inspect.getsource(_ma.MasterAgent.start)
+    assert "_refresh_fii_dii_job" in src, (
+        "MasterAgent.start must register _refresh_fii_dii_job in the scheduler"
+    )
+    assert "19" in src, "FII/DII job must fire at 19:xx IST"
+
+def t_master_agent_schedules_macro_every_5min():
+    """_refresh_macro_job must be registered as an interval job."""
+    import inspect, master_agent_v5 as _ma
+    src = inspect.getsource(_ma.MasterAgent.start)
+    assert "_refresh_macro_job" in src, (
+        "MasterAgent.start must register _refresh_macro_job in the scheduler"
+    )
+    # Interval job with 5 minutes
+    assert "minutes" in src or "300" in src, (
+        "_refresh_macro_job must use interval=minutes (5-min cadence)"
+    )
+
+run("macro: _fetch_india_vix_nse() exists as primary India VIX source",                   t_india_vix_fetcher_exists)
+run("macro: MacroSignals.refresh() tries India VIX before US ^VIX fallback",              t_macro_refresh_uses_india_vix_first)
+run("master: MasterAgentV5._refresh_fii_dii_job calls refresh_fii_dii()",                 t_master_agent_has_fii_dii_job)
+run("master: MasterAgentV5._refresh_macro_job calls macro_signals.refresh()",             t_master_agent_has_macro_refresh_job)
+run("master: _refresh_fii_dii_job scheduled in start() at 19:30 IST",                    t_master_agent_schedules_fii_dii_at_1930)
+run("master: _refresh_macro_job scheduled as 5-min interval job",                         t_master_agent_schedules_macro_every_5min)
+
 # ══════════════════════════════════════════════════════════════════════════
 # FINAL SUMMARY
 # ══════════════════════════════════════════════════════════════════════════
