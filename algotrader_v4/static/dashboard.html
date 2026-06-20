@@ -249,6 +249,24 @@
     .kite-dot { width: 7px; height: 7px; border-radius: 50%; background: rgba(255,255,255,0.4); }
     .kite-dot.connected    { background: #6EE7B7; box-shadow: 0 0 6px #6EE7B7; }
     .kite-dot.disconnected { background: #FCA5A5; }
+    /* Connection status bar */
+    #connections-bar { display: flex; align-items: center; gap: 6px; }
+    .conn-chip {
+      display: flex; align-items: center; gap: 5px;
+      font-size: 11px; color: rgba(255,255,255,0.8);
+      padding: 3px 9px;
+      background: rgba(255,255,255,0.10);
+      border-radius: 20px;
+      border: 1px solid rgba(255,255,255,0.15);
+      white-space: nowrap;
+    }
+    .conn-dot {
+      width: 7px; height: 7px; border-radius: 50%;
+      background: rgba(255,255,255,0.35); flex-shrink: 0;
+    }
+    .conn-dot.ok   { background: #6EE7B7; box-shadow: 0 0 5px #6EE7B7; }
+    .conn-dot.warn { background: #FDE68A; box-shadow: 0 0 5px #FDE68A; }
+    .conn-dot.err  { background: #FCA5A5; }
 
     .kill-btn {
       display: flex; align-items: center; gap: 6px;
@@ -1074,6 +1092,7 @@
       .stat-grid { grid-template-columns: 1fr; }
       .adaptive-summary { grid-template-columns: 1fr; }
       .topbar-right .kite-indicator { display: none; }
+      .topbar-right #connections-bar { display: none; }
       .kill-btn span { display: none; }
     }
 
@@ -1261,11 +1280,25 @@
         <div class="pnl-chip" id="pnl-chip">
           <span id="topbar-pnl-text">P&amp;L: ₹—</span>
         </div>
-        <div class="kite-indicator">
-          <div class="kite-dot" id="kite-status-dot"></div>
-          <span id="kite-status-text">Kite</span>
+        <div id="connections-bar">
+          <!-- Kite broker chip (always shown) -->
+          <div class="conn-chip" id="conn-kite" title="Zerodha Kite broker">
+            <div class="conn-dot" id="kite-status-dot"></div>
+            <span id="kite-status-text">Kite</span>
+          </div>
+          <!-- TrueData feed chip (shown when use_truedata_websocket=true) -->
+          <div class="conn-chip" id="conn-truedata" style="display:none" title="TrueData live feed">
+            <div class="conn-dot" id="td-status-dot"></div>
+            <span id="td-status-text">TrueData</span>
+          </div>
+          <!-- Claude AI gate chip (always shown) -->
+          <div class="conn-chip" id="conn-claude" title="Claude AI trade gate">
+            <div class="conn-dot" id="claude-status-dot"></div>
+            <span>Claude</span>
+          </div>
+          <!-- Secondary broker chips (shown when multi-broker enabled) -->
+          <div id="secondary-broker-chips" style="display:contents"></div>
         </div>
-        <div id="multi-broker-chips" style="display:none;gap:4px;align-items:center;"></div>
         <button class="notif-bell" id="notif-bell" title="Trade notifications" onclick="toggleNotifications()">
           <i data-lucide="bell"></i>
           <div class="notif-badge" id="notif-badge">0</div>
@@ -3759,26 +3792,76 @@ async function fetchMultiBrokerStatus() {
 }
 
 function renderKiteStatus(data) {
-  const dot   = document.getElementById('kite-status-dot');
-  const txt   = document.getElementById('kite-status-text');
+  // Settings page elements (kite-dot class for settings panel)
   const sdot  = document.getElementById('settings-kite-dot');
   const stxt  = document.getElementById('settings-kite-status');
-
   if (data.connected) {
-    dot.className  = 'kite-dot connected';
-    txt.textContent = `Kite: ${data.account_id || 'Connected'}`;
-    sdot.className  = 'kite-dot connected';
-    stxt.textContent = 'Connected';
-    document.getElementById('settings-kite-uid').textContent   = data.account_id || '—';
-    document.getElementById('settings-kite-name').textContent  = data.name       || '—';
-    document.getElementById('settings-kite-email').textContent = data.email      || '—';
+    if (sdot) sdot.className  = 'kite-dot connected';
+    if (stxt) stxt.textContent = 'Connected';
+    const uid = document.getElementById('settings-kite-uid');   if (uid)  uid.textContent  = data.account_id || '—';
+    const nm  = document.getElementById('settings-kite-name');  if (nm)   nm.textContent   = data.name       || '—';
+    const em  = document.getElementById('settings-kite-email'); if (em)   em.textContent   = data.email      || '—';
   } else {
-    dot.className  = 'kite-dot disconnected';
-    txt.textContent = 'Kite: Disconnected';
-    sdot.className  = 'kite-dot disconnected';
-    stxt.textContent = 'Disconnected';
+    if (sdot) sdot.className  = 'kite-dot disconnected';
+    if (stxt) stxt.textContent = 'Disconnected';
   }
   state.kiteConnected = data.connected;
+}
+
+async function updateConnectionsBar() {
+  try {
+    const d = await api('GET', '/connections/status');
+    if (!d) return;
+
+    // Kite chip
+    const kiteDot = document.getElementById('kite-status-dot');
+    const kiteTxt = document.getElementById('kite-status-text');
+    if (kiteDot) kiteDot.className = 'conn-dot ' + (d.kite.connected ? 'ok' : 'err');
+    if (kiteTxt) kiteTxt.textContent = d.kite.connected ? `Kite${d.kite.account_id ? ' · ' + d.kite.account_id : ''}` : 'Kite';
+    // Also update settings page Kite dot (legacy kite-dot class)
+    const sdot = document.getElementById('settings-kite-dot');
+    if (sdot) sdot.className = 'kite-dot ' + (d.kite.connected ? 'connected' : 'disconnected');
+    const stxt = document.getElementById('settings-kite-status');
+    if (stxt) stxt.textContent = d.kite.connected ? 'Connected' : 'Disconnected';
+    state.kiteConnected = d.kite.connected;
+
+    // TrueData chip
+    const tdChip = document.getElementById('conn-truedata');
+    const tdDot  = document.getElementById('td-status-dot');
+    const tdTxt  = document.getElementById('td-status-text');
+    if (d.truedata.active) {
+      if (tdChip) tdChip.style.display = '';
+      if (tdDot)  tdDot.className = 'conn-dot ' + (d.truedata.connected ? 'ok' : 'err');
+      if (tdTxt)  tdTxt.textContent = d.truedata.connected ? 'TrueData' : 'TrueData';
+    } else if (d.truedata.configured) {
+      // Configured but WS not active (PAPER mode or not started)
+      if (tdChip) tdChip.style.display = '';
+      if (tdDot)  tdDot.className = 'conn-dot warn';
+      if (tdTxt)  tdTxt.textContent = 'TrueData';
+    } else {
+      if (tdChip) tdChip.style.display = 'none';
+    }
+
+    // Claude chip
+    const claudeDot = document.getElementById('claude-status-dot');
+    if (claudeDot) claudeDot.className = 'conn-dot ' + (d.claude.available ? 'ok' : 'err');
+
+    // Secondary broker chips
+    const sec = document.getElementById('secondary-broker-chips');
+    if (sec) {
+      sec.innerHTML = '';
+      for (const b of (d.secondary || [])) {
+        const chip = document.createElement('div');
+        chip.className = 'conn-chip';
+        chip.title = b.name + ' (secondary broker)';
+        const dot = document.createElement('div');
+        dot.className = 'conn-dot ' + (b.connected ? 'ok' : 'err');
+        chip.appendChild(dot);
+        chip.appendChild(document.createTextNode(b.name.charAt(0).toUpperCase() + b.name.slice(1)));
+        sec.appendChild(chip);
+      }
+    }
+  } catch (_) {}
 }
 
 /* ═══════════════════════════════════════════════════════════════
@@ -3912,7 +3995,7 @@ async function fetchKiteStatus() {
       const stxt = document.getElementById('settings-kite-status');
       if (stxt) stxt.textContent = d.connected ? `Connected (${d.user_id || 'OK'})` : 'Not connected';
     }
-    updateKiteStatus();
+    updateConnectionsBar();
   } catch (e) {
     const stxt = document.getElementById('settings-kite-status');
     if (stxt) stxt.textContent = 'Error: ' + e.message;
@@ -4613,6 +4696,7 @@ async function pollAll() {
     fetchDirectives(),
     fetchGateLog(),
     fetchKite(),
+    updateConnectionsBar(),
     fetchAdaptive(),
     fetchTradingLimits(),
     fetchAgentEnables(),
@@ -5094,9 +5178,9 @@ async function init() {
   // Initial Black Swan status (in case active before page load)
   fetchBlackSwanStatus();
 
-  // Multi-broker chip display (polled every 30s; only visible when enabled)
-  fetchMultiBrokerStatus();
-  setInterval(fetchMultiBrokerStatus, 30000);
+  // Connection status bar — initial paint + refresh every 10s
+  updateConnectionsBar();
+  setInterval(updateConnectionsBar, 10000);
 
   // Notifications + mobile nav
   await _initNotifications();

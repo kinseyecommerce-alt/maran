@@ -1243,7 +1243,49 @@ def broker_status():
     return result
 
 
-@app.get("/black-swan/status", tags=["Risk"])
+@app.get("/connections/status", tags=["System"])
+def connections_status():
+    """Single-call summary of all live connection states (data feed, broker, AI gate, secondary brokers)."""
+    # Kite broker
+    kite_creds = kite_client.validate_credentials()
+
+    # TrueData WebSocket
+    td_active    = bool(getattr(tick_engine, '_is_truedata_ws', False))
+    td_connected = False
+    if td_active:
+        try:
+            from truedata_client import truedata_ticker
+            td_connected = truedata_ticker.is_connected
+        except Exception:
+            pass
+
+    # Claude AI gate (available = API key present)
+    claude_ok = bool(settings.anthropic_api_key)
+
+    # Secondary brokers
+    secondary: list[dict] = []
+    if settings.enable_multi_broker:
+        try:
+            from broker_router import broker_router as _br
+            for _name, _cli in _br._secondaries:
+                try:
+                    _c = _cli.validate_credentials()
+                    secondary.append({"name": _name, "connected": bool(_c.get("initialised"))})
+                except Exception:
+                    secondary.append({"name": _name, "connected": False})
+        except Exception:
+            pass
+
+    return {
+        "kite":      {"connected": bool(kite_creds.get("kite_initialised")),
+                      "account_id": kite_creds.get("account_id", "")},
+        "truedata":  {"active": td_active, "connected": td_connected,
+                      "configured": bool(settings.truedata_username)},
+        "claude":    {"available": claude_ok},
+        "secondary": secondary,
+    }
+
+
 def black_swan_status():
     from market_regime import regime_detector, Regime
     from trailing_sl_engine import trailing_sl_engine as _tsl
