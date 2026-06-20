@@ -11860,6 +11860,53 @@ run("upstox: set_access_token() acquires _token_lock before writing _access_toke
 run("upstox: _get/_post/_put/_delete all use _current_token() (lock-protected read)",    t_upstox_http_methods_use_current_token)
 run("kotak: _token_lock = Lock() present in __init__",                                   t_kotak_token_lock_exists)
 run("kotak: _headers() acquires _token_lock to read _access_token + _sid",               t_kotak_headers_acquires_lock)
+
+def t_kotak_paper_positions_returns_copy():
+    """positions() in PAPER mode must return a list copy, not the live reference."""
+    import inspect, brokers.kotak_broker as kb
+    src = inspect.getsource(kb.KotakBroker.positions)
+    assert "list(self._paper_positions)" in src, (
+        "positions() must return list(self._paper_positions) in PAPER mode, not the live reference"
+    )
+
+def t_kotak_update_paper_position_under_lock():
+    """_update_paper_position must be called inside _paper_orders_lock in _paper_place."""
+    import inspect, brokers.kotak_broker as kb
+    src = inspect.getsource(kb.KotakBroker._paper_place)
+    lock_block  = src.find("with self._paper_orders_lock")
+    update_call = src.find("_update_paper_position")
+    assert lock_block != -1 and update_call != -1, "_paper_place must acquire lock and call _update_paper_position"
+    # The _update_paper_position call must appear after (i.e., inside) the lock block
+    assert update_call > lock_block, "_update_paper_position must be called inside _paper_orders_lock block"
+
+def t_kotak_concurrent_paper_orders_consistent():
+    """Concurrent _paper_place calls for the same symbol produce consistent position quantity."""
+    import threading
+    import brokers.kotak_broker as kb
+    from unittest.mock import patch
+    with patch("config.settings") as ms:
+        ms.trading_mode = "PAPER"
+        broker = kb.KotakBroker.__new__(kb.KotakBroker)
+        broker._paper_orders    = {}
+        broker._paper_orders_lock = __import__("threading").Lock()
+        broker._paper_positions = []
+        errors: list = []
+        def _place():
+            try:
+                broker._paper_place("RELIANCE", "NSE", "BUY", 1, "MARKET", "MIS", 2500.0, 0.0, "t")
+            except Exception as e:
+                errors.append(e)
+        threads = [threading.Thread(target=_place) for _ in range(10)]
+        for t_ in threads: t_.start()
+        for t_ in threads: t_.join()
+        assert not errors, f"Concurrent paper place raised: {errors}"
+        total_qty = sum(p["quantity"] for p in broker._paper_positions if p["tradingsymbol"] == "RELIANCE")
+        assert total_qty == 10, f"Expected qty=10 after 10 concurrent BUYs, got {total_qty}"
+
+run("kotak: positions() PAPER mode returns a copy, not the live _paper_positions list",   t_kotak_paper_positions_returns_copy)
+run("kotak: _update_paper_position is called inside _paper_orders_lock in _paper_place",  t_kotak_update_paper_position_under_lock)
+run("kotak: 10 concurrent paper BUY orders for same symbol produce qty=10 (no race)",     t_kotak_concurrent_paper_orders_consistent)
+
 run("l2_fill: estimate_fill returns neutral when ltp=inf (not NaN downstream)",          t_l2_fill_rejects_inf_ltp)
 run("l2_fill: estimate_fill returns neutral when ltp=-inf",                               t_l2_fill_rejects_neg_inf_ltp)
 run("l2_fill: guard uses math.isfinite, not math.isnan (catches both nan and inf)",      t_l2_fill_guard_uses_isfinite)
