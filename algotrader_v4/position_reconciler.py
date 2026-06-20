@@ -118,7 +118,14 @@ class PositionReconciler:
             tracked_symbols.add(trade_sym)
 
             qr = pos["quantity_remaining"]
-            expected = qr if qr else pos["quantity"]
+            # Use `is not None` not truthiness: qr=0 means TSL fully exited
+            # this position via partial exits; treating it as pos["quantity"]
+            # would cause a false FULL_EXTERNAL_EXIT on the next reconcile tick.
+            expected = qr if qr is not None else pos["quantity"]
+            if expected == 0:
+                # Our side is already at zero — nothing to reconcile.
+                tracked_symbols.add(trade_sym)
+                continue
             broker_qty = abs(broker.get(trade_sym, 0))
 
             if broker_qty == 0 and expected > 0:
