@@ -1363,12 +1363,17 @@ def patch_capital_allocation(req: CapitalAllocationRequest):
 
 @app.post("/settings/credentials", tags=["Settings"])
 def update_credentials(req: CredentialsUpdateRequest):
-    """Update API credentials in-memory. Restart reverts to env values."""
+    """Update API credentials. TrueData creds persisted to SQLite; Kite to accounts store."""
+    from state_store import set_kv
     if req.kite_api_key      is not None: settings.kite_api_key      = req.kite_api_key
     if req.kite_api_secret   is not None: settings.kite_api_secret   = req.kite_api_secret
     if req.anthropic_api_key is not None: settings.anthropic_api_key = req.anthropic_api_key
-    if req.truedata_username is not None: settings.truedata_username = req.truedata_username
-    if req.truedata_password is not None: settings.truedata_password = req.truedata_password
+    if req.truedata_username is not None:
+        settings.truedata_username = req.truedata_username
+        set_kv("truedata_username", req.truedata_username)
+    if req.truedata_password is not None:
+        settings.truedata_password = req.truedata_password
+        set_kv("truedata_password", req.truedata_password)
     # Mirror into the accounts store so the active account stays in sync
     if req.kite_api_key is not None or req.kite_api_secret is not None:
         active = kite_accounts.get_active()
@@ -2754,6 +2759,17 @@ async def on_startup():
         if saved_token:
             settings.kite_access_token = saved_token
             logger.info("[startup] Kite access token restored from state_store")
+    # Restore TrueData credentials entered via UI (not in .env)
+    if not settings.truedata_username:
+        _td_user = get_kv("truedata_username", "")
+        if _td_user:
+            settings.truedata_username = _td_user
+            logger.info("[startup] TrueData username restored from state_store")
+    if not settings.truedata_password:
+        _td_pass = get_kv("truedata_password", "")
+        if _td_pass:
+            settings.truedata_password = _td_pass
+            logger.info("[startup] TrueData password restored from state_store")
     today_pnl = get_daily_pnl()
     if today_pnl != 0:
         risk_manager.daily_realised_pnl = today_pnl

@@ -12218,6 +12218,74 @@ run("master: _refresh_fii_dii_job scheduled in start() at 19:30 IST",           
 run("master: _refresh_macro_job scheduled as 5-min interval job",                         t_master_agent_schedules_macro_every_5min)
 
 # ══════════════════════════════════════════════════════════════════════════
+# 120. TRUEDATA CREDENTIAL PERSISTENCE
+# ══════════════════════════════════════════════════════════════════════════
+
+def t_update_credentials_imports_set_kv():
+    """update_credentials() must import and call set_kv for TrueData creds."""
+    import inspect, main as _main
+    src = inspect.getsource(_main.update_credentials)
+    assert "set_kv" in src, "update_credentials must call set_kv to persist TrueData creds"
+
+def t_update_credentials_persists_truedata_username():
+    """update_credentials() must call set_kv('truedata_username', ...) when username is provided."""
+    import inspect, main as _main
+    src = inspect.getsource(_main.update_credentials)
+    assert "truedata_username" in src and "set_kv" in src, (
+        "set_kv must be called with 'truedata_username' key"
+    )
+    assert src.index("set_kv") < len(src), "set_kv call must exist in update_credentials"
+
+def t_update_credentials_persists_truedata_password():
+    """update_credentials() must call set_kv('truedata_password', ...) when password is provided."""
+    import inspect, main as _main
+    src = inspect.getsource(_main.update_credentials)
+    assert "truedata_password" in src and "set_kv" in src, (
+        "set_kv must be called with 'truedata_password' key"
+    )
+
+def t_startup_restores_truedata_username_from_db():
+    """on_startup() must restore truedata_username from state_store if not in env."""
+    import inspect, main as _main
+    src = inspect.getsource(_main.on_startup)
+    assert "truedata_username" in src, (
+        "on_startup must restore truedata_username from state_store"
+    )
+    assert "get_kv" in src, "on_startup must use get_kv to restore TrueData credentials"
+
+def t_startup_restores_truedata_password_from_db():
+    """on_startup() must restore truedata_password from state_store if not in env."""
+    import inspect, main as _main
+    src = inspect.getsource(_main.on_startup)
+    assert "truedata_password" in src, (
+        "on_startup must restore truedata_password from state_store"
+    )
+
+def t_set_kv_roundtrip_truedata():
+    """state_store set_kv/get_kv round-trip works for TrueData-style values."""
+    from pathlib import Path
+    import tempfile, os
+    with tempfile.TemporaryDirectory() as tmpdir:
+        import state_store as _ss
+        orig_path = _ss.DB_PATH
+        _ss.DB_PATH = Path(tmpdir) / "test_td.db"
+        try:
+            _ss.init_db()
+            _ss.set_kv("truedata_username", "tduser@example.com")
+            _ss.set_kv("truedata_password", "s3cr3t!")
+            assert _ss.get_kv("truedata_username") == "tduser@example.com"
+            assert _ss.get_kv("truedata_password") == "s3cr3t!"
+        finally:
+            _ss.DB_PATH = orig_path
+
+run("credentials: update_credentials imports and uses set_kv",                             t_update_credentials_imports_set_kv)
+run("credentials: update_credentials persists truedata_username to SQLite",                t_update_credentials_persists_truedata_username)
+run("credentials: update_credentials persists truedata_password to SQLite",                t_update_credentials_persists_truedata_password)
+run("credentials: _startup restores truedata_username from state_store on restart",        t_startup_restores_truedata_username_from_db)
+run("credentials: _startup restores truedata_password from state_store on restart",        t_startup_restores_truedata_password_from_db)
+run("credentials: state_store set_kv/get_kv round-trip for TrueData values",              t_set_kv_roundtrip_truedata)
+
+# ══════════════════════════════════════════════════════════════════════════
 # FINAL SUMMARY
 # ══════════════════════════════════════════════════════════════════════════
 failed = summary()
