@@ -211,7 +211,12 @@ def _parse_block_deals(raw: Optional[dict]) -> dict[str, dict]:
     for sym in all_syms:
         b = buy_qty.get(sym, 0)
         s = sell_qty.get(sym, 0)
-        net_direction = "BUY" if b >= s else "SELL"
+        if b > s:
+            net_direction = "BUY"
+        elif s > b:
+            net_direction = "SELL"
+        else:
+            net_direction = "NEUTRAL"
         result[sym] = {
             "direction": net_direction,
             "qty":       b + s,
