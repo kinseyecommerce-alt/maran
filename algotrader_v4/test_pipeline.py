@@ -11860,6 +11860,53 @@ run("upstox: set_access_token() acquires _token_lock before writing _access_toke
 run("upstox: _get/_post/_put/_delete all use _current_token() (lock-protected read)",    t_upstox_http_methods_use_current_token)
 run("kotak: _token_lock = Lock() present in __init__",                                   t_kotak_token_lock_exists)
 run("kotak: _headers() acquires _token_lock to read _access_token + _sid",               t_kotak_headers_acquires_lock)
+
+def t_kotak_paper_positions_returns_copy():
+    """positions() in PAPER mode must return a list copy, not the live reference."""
+    import inspect, brokers.kotak_broker as kb
+    src = inspect.getsource(kb.KotakBroker.positions)
+    assert "list(self._paper_positions)" in src, (
+        "positions() must return list(self._paper_positions) in PAPER mode, not the live reference"
+    )
+
+def t_kotak_update_paper_position_under_lock():
+    """_update_paper_position must be called inside _paper_orders_lock in _paper_place."""
+    import inspect, brokers.kotak_broker as kb
+    src = inspect.getsource(kb.KotakBroker._paper_place)
+    lock_block  = src.find("with self._paper_orders_lock")
+    update_call = src.find("_update_paper_position")
+    assert lock_block != -1 and update_call != -1, "_paper_place must acquire lock and call _update_paper_position"
+    # The _update_paper_position call must appear after (i.e., inside) the lock block
+    assert update_call > lock_block, "_update_paper_position must be called inside _paper_orders_lock block"
+
+def t_kotak_concurrent_paper_orders_consistent():
+    """Concurrent _paper_place calls for the same symbol produce consistent position quantity."""
+    import threading
+    import brokers.kotak_broker as kb
+    from unittest.mock import patch
+    with patch("config.settings") as ms:
+        ms.trading_mode = "PAPER"
+        broker = kb.KotakBroker.__new__(kb.KotakBroker)
+        broker._paper_orders    = {}
+        broker._paper_orders_lock = __import__("threading").Lock()
+        broker._paper_positions = []
+        errors: list = []
+        def _place():
+            try:
+                broker._paper_place("RELIANCE", "NSE", "BUY", 1, "MARKET", "MIS", 2500.0, 0.0, "t")
+            except Exception as e:
+                errors.append(e)
+        threads = [threading.Thread(target=_place) for _ in range(10)]
+        for t_ in threads: t_.start()
+        for t_ in threads: t_.join()
+        assert not errors, f"Concurrent paper place raised: {errors}"
+        total_qty = sum(p["quantity"] for p in broker._paper_positions if p["tradingsymbol"] == "RELIANCE")
+        assert total_qty == 10, f"Expected qty=10 after 10 concurrent BUYs, got {total_qty}"
+
+run("kotak: positions() PAPER mode returns a copy, not the live _paper_positions list",   t_kotak_paper_positions_returns_copy)
+run("kotak: _update_paper_position is called inside _paper_orders_lock in _paper_place",  t_kotak_update_paper_position_under_lock)
+run("kotak: 10 concurrent paper BUY orders for same symbol produce qty=10 (no race)",     t_kotak_concurrent_paper_orders_consistent)
+
 run("l2_fill: estimate_fill returns neutral when ltp=inf (not NaN downstream)",          t_l2_fill_rejects_inf_ltp)
 run("l2_fill: estimate_fill returns neutral when ltp=-inf",                               t_l2_fill_rejects_neg_inf_ltp)
 run("l2_fill: guard uses math.isfinite, not math.isnan (catches both nan and inf)",      t_l2_fill_guard_uses_isfinite)
@@ -12216,6 +12263,74 @@ run("master: MasterAgentV5._refresh_fii_dii_job calls refresh_fii_dii()",       
 run("master: MasterAgentV5._refresh_macro_job calls macro_signals.refresh()",             t_master_agent_has_macro_refresh_job)
 run("master: _refresh_fii_dii_job scheduled in start() at 19:30 IST",                    t_master_agent_schedules_fii_dii_at_1930)
 run("master: _refresh_macro_job scheduled as 5-min interval job",                         t_master_agent_schedules_macro_every_5min)
+
+# ══════════════════════════════════════════════════════════════════════════
+# 120. TRUEDATA CREDENTIAL PERSISTENCE
+# ══════════════════════════════════════════════════════════════════════════
+
+def t_update_credentials_imports_set_kv():
+    """update_credentials() must import and call set_kv for TrueData creds."""
+    import inspect, main as _main
+    src = inspect.getsource(_main.update_credentials)
+    assert "set_kv" in src, "update_credentials must call set_kv to persist TrueData creds"
+
+def t_update_credentials_persists_truedata_username():
+    """update_credentials() must call set_kv('truedata_username', ...) when username is provided."""
+    import inspect, main as _main
+    src = inspect.getsource(_main.update_credentials)
+    assert "truedata_username" in src and "set_kv" in src, (
+        "set_kv must be called with 'truedata_username' key"
+    )
+    assert src.index("set_kv") < len(src), "set_kv call must exist in update_credentials"
+
+def t_update_credentials_persists_truedata_password():
+    """update_credentials() must call set_kv('truedata_password', ...) when password is provided."""
+    import inspect, main as _main
+    src = inspect.getsource(_main.update_credentials)
+    assert "truedata_password" in src and "set_kv" in src, (
+        "set_kv must be called with 'truedata_password' key"
+    )
+
+def t_startup_restores_truedata_username_from_db():
+    """on_startup() must restore truedata_username from state_store if not in env."""
+    import inspect, main as _main
+    src = inspect.getsource(_main.on_startup)
+    assert "truedata_username" in src, (
+        "on_startup must restore truedata_username from state_store"
+    )
+    assert "get_kv" in src, "on_startup must use get_kv to restore TrueData credentials"
+
+def t_startup_restores_truedata_password_from_db():
+    """on_startup() must restore truedata_password from state_store if not in env."""
+    import inspect, main as _main
+    src = inspect.getsource(_main.on_startup)
+    assert "truedata_password" in src, (
+        "on_startup must restore truedata_password from state_store"
+    )
+
+def t_set_kv_roundtrip_truedata():
+    """state_store set_kv/get_kv round-trip works for TrueData-style values."""
+    from pathlib import Path
+    import tempfile, os
+    with tempfile.TemporaryDirectory() as tmpdir:
+        import state_store as _ss
+        orig_path = _ss.DB_PATH
+        _ss.DB_PATH = Path(tmpdir) / "test_td.db"
+        try:
+            _ss.init_db()
+            _ss.set_kv("truedata_username", "tduser@example.com")
+            _ss.set_kv("truedata_password", "s3cr3t!")
+            assert _ss.get_kv("truedata_username") == "tduser@example.com"
+            assert _ss.get_kv("truedata_password") == "s3cr3t!"
+        finally:
+            _ss.DB_PATH = orig_path
+
+run("credentials: update_credentials imports and uses set_kv",                             t_update_credentials_imports_set_kv)
+run("credentials: update_credentials persists truedata_username to SQLite",                t_update_credentials_persists_truedata_username)
+run("credentials: update_credentials persists truedata_password to SQLite",                t_update_credentials_persists_truedata_password)
+run("credentials: _startup restores truedata_username from state_store on restart",        t_startup_restores_truedata_username_from_db)
+run("credentials: _startup restores truedata_password from state_store on restart",        t_startup_restores_truedata_password_from_db)
+run("credentials: state_store set_kv/get_kv round-trip for TrueData values",              t_set_kv_roundtrip_truedata)
 
 # ══════════════════════════════════════════════════════════════════════════
 # FINAL SUMMARY

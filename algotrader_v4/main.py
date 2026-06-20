@@ -1243,7 +1243,49 @@ def broker_status():
     return result
 
 
-@app.get("/black-swan/status", tags=["Risk"])
+@app.get("/connections/status", tags=["System"])
+def connections_status():
+    """Single-call summary of all live connection states (data feed, broker, AI gate, secondary brokers)."""
+    # Kite broker
+    kite_creds = kite_client.validate_credentials()
+
+    # TrueData WebSocket
+    td_active    = bool(getattr(tick_engine, '_is_truedata_ws', False))
+    td_connected = False
+    if td_active:
+        try:
+            from truedata_client import truedata_ticker
+            td_connected = truedata_ticker.is_connected
+        except Exception:
+            pass
+
+    # Claude AI gate (available = API key present)
+    claude_ok = bool(settings.anthropic_api_key)
+
+    # Secondary brokers
+    secondary: list[dict] = []
+    if settings.enable_multi_broker:
+        try:
+            from broker_router import broker_router as _br
+            for _name, _cli in _br._secondaries:
+                try:
+                    _c = _cli.validate_credentials()
+                    secondary.append({"name": _name, "connected": bool(_c.get("initialised"))})
+                except Exception:
+                    secondary.append({"name": _name, "connected": False})
+        except Exception:
+            pass
+
+    return {
+        "kite":      {"connected": bool(kite_creds.get("kite_initialised")),
+                      "account_id": kite_creds.get("account_id", "")},
+        "truedata":  {"active": td_active, "connected": td_connected,
+                      "configured": bool(settings.truedata_username)},
+        "claude":    {"available": claude_ok},
+        "secondary": secondary,
+    }
+
+
 def black_swan_status():
     from market_regime import regime_detector, Regime
     from trailing_sl_engine import trailing_sl_engine as _tsl
@@ -1363,12 +1405,17 @@ def patch_capital_allocation(req: CapitalAllocationRequest):
 
 @app.post("/settings/credentials", tags=["Settings"])
 def update_credentials(req: CredentialsUpdateRequest):
-    """Update API credentials in-memory. Restart reverts to env values."""
+    """Update API credentials. TrueData creds persisted to SQLite; Kite to accounts store."""
+    from state_store import set_kv
     if req.kite_api_key      is not None: settings.kite_api_key      = req.kite_api_key
     if req.kite_api_secret   is not None: settings.kite_api_secret   = req.kite_api_secret
     if req.anthropic_api_key is not None: settings.anthropic_api_key = req.anthropic_api_key
-    if req.truedata_username is not None: settings.truedata_username = req.truedata_username
-    if req.truedata_password is not None: settings.truedata_password = req.truedata_password
+    if req.truedata_username is not None:
+        settings.truedata_username = req.truedata_username
+        set_kv("truedata_username", req.truedata_username)
+    if req.truedata_password is not None:
+        settings.truedata_password = req.truedata_password
+        set_kv("truedata_password", req.truedata_password)
     # Mirror into the accounts store so the active account stays in sync
     if req.kite_api_key is not None or req.kite_api_secret is not None:
         active = kite_accounts.get_active()
@@ -2754,6 +2801,17 @@ async def on_startup():
         if saved_token:
             settings.kite_access_token = saved_token
             logger.info("[startup] Kite access token restored from state_store")
+    # Restore TrueData credentials entered via UI (not in .env)
+    if not settings.truedata_username:
+        _td_user = get_kv("truedata_username", "")
+        if _td_user:
+            settings.truedata_username = _td_user
+            logger.info("[startup] TrueData username restored from state_store")
+    if not settings.truedata_password:
+        _td_pass = get_kv("truedata_password", "")
+        if _td_pass:
+            settings.truedata_password = _td_pass
+            logger.info("[startup] TrueData password restored from state_store")
     today_pnl = get_daily_pnl()
     if today_pnl != 0:
         risk_manager.daily_realised_pnl = today_pnl

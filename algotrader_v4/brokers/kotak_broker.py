@@ -382,7 +382,8 @@ class KotakBroker(BaseBroker):
 
     def positions(self) -> dict:
         if settings.trading_mode == "PAPER":
-            return {"net": self._paper_positions, "day": self._paper_positions}
+            with self._paper_orders_lock:
+                return {"net": list(self._paper_positions), "day": list(self._paper_positions)}
         try:
             data = self._get("/trade/api/v1/positions")
             raw  = data.get("data", {}).get("net", []) or data.get("data", []) or []
@@ -466,13 +467,14 @@ class KotakBroker(BaseBroker):
         }
         with self._paper_orders_lock:
             self._paper_orders[order_id] = record
-        if status == "COMPLETE":
-            self._update_paper_position(record)
+            if status == "COMPLETE":
+                self._update_paper_position(record)
         logger.info("[KOTAK-PAPER] {} {} {} qty={} @ ₹{} | id={}",
                     transaction_type, tradingsymbol, order_type, quantity, price, order_id)
         return order_id
 
     def _update_paper_position(self, order: dict) -> None:
+        """Update paper positions. Must be called with _paper_orders_lock held."""
         sym       = order["tradingsymbol"]
         qty_delta = order["quantity"] if order["transaction_type"] == "BUY" else -order["quantity"]
         for pos in self._paper_positions:
