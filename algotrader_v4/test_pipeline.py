@@ -12425,8 +12425,8 @@ def t_scalping_skip_gate_in_base_agent_source():
         "base_agent must check settings.scalping_skip_gate to bypass the Claude gate "
         "for scalping — 400-800ms gate latency causes slippage on 2-12 min holds"
     )
-    assert "self.strategy == \"scalping\"" in src or "self.strategy == 'scalping'" in src, (
-        "scalping gate skip must guard on strategy == 'scalping'"
+    assert "self.name == \"scalping\"" in src or "self.name == 'scalping'" in src, (
+        "scalping gate skip must guard on self.name == 'scalping' (agents use self.name, not self.strategy)"
     )
 
 def t_warm_connections_exists_on_kite_client():

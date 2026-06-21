@@ -632,7 +632,7 @@ class BaseAgent(ABC):
                         # The score threshold (0-10) already encodes edge; AI veto adds
                         # nothing a tight SL doesn't already handle.
                         _scalp_skip = (
-                            self.strategy == "scalping"
+                            self.name == "scalping"
                             and getattr(settings, "scalping_skip_gate", True)
                         )
                         if _scalp_skip:
