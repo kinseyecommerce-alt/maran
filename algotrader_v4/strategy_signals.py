@@ -50,7 +50,7 @@ def _signals_intraday(df: pd.DataFrame) -> pd.Series:
     vwap   = ta.volume.VolumeWeightedAveragePrice(high, low, close, vol).volume_weighted_average_price()
     vol_ma = vol.rolling(20).mean()
     macd_h = ta.trend.MACD(close).macd_diff()
-    for i in range(2, len(df)):
+    for i in range(20, len(df)):
         if (close.iloc[i-1] < vwap.iloc[i-1] and close.iloc[i] > vwap.iloc[i]
                 and ema9.iloc[i] > ema21.iloc[i] and 45 < rsi.iloc[i] < 67
                 and macd_h.iloc[i] > 0 and vol.iloc[i] > vol_ma.iloc[i] * 1.25):
@@ -65,7 +65,7 @@ def _signals_swing(df: pd.DataFrame) -> pd.Series:
         return s
     ema50  = ta.trend.EMAIndicator(close, 50).ema_indicator()
     ema20  = ta.trend.EMAIndicator(close, 20).ema_indicator()
-    ema200 = ta.trend.EMAIndicator(close, min(200, len(df) - 1)).ema_indicator()
+    ema200 = ta.trend.EMAIndicator(close, 200).ema_indicator()
     rsi    = ta.momentum.RSIIndicator(close, 14).rsi()
     adx    = ta.trend.ADXIndicator(high, low, close, 14).adx()
     for i in range(55, len(df)):
@@ -85,7 +85,7 @@ def _signals_futures(df: pd.DataFrame) -> pd.Series:
     ema21  = ta.trend.EMAIndicator(close, 21).ema_indicator()
     adx    = ta.trend.ADXIndicator(high, low, close, 14).adx()
     vol_ma = vol.rolling(20).mean()
-    for i in range(2, len(df)):
+    for i in range(20, len(df)):
         bull = ema9.iloc[i-1] < ema21.iloc[i-1] and ema9.iloc[i] > ema21.iloc[i]
         if bull and adx.iloc[i] > 23 and vol.iloc[i] > vol_ma.iloc[i] * 1.3:
             s.iloc[i] = 1
@@ -150,7 +150,7 @@ def _signals_iron_condor(df: pd.DataFrame) -> pd.Series:
     adx  = ta.trend.ADXIndicator(high, low, close, 14).adx()
     bb   = ta.volatility.BollingerBands(close, 20, 2)
     bb_mavg = bb.bollinger_mavg()
-    bb_w = (bb.bollinger_hband() - bb.bollinger_lband()) / bb_mavg.where(bb_mavg != 0) * 100
+    bb_w = (bb.bollinger_hband() - bb.bollinger_lband()) / bb_mavg.replace(0, float("nan")) * 100
     rsi  = ta.momentum.RSIIndicator(close, 14).rsi()
     for i in range(20, len(df)):
         if adx.iloc[i] < 20 and bb_w.iloc[i] < 2.5 and 38 < rsi.iloc[i] < 62:

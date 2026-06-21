@@ -10519,7 +10519,9 @@ def t_strategy_signals_bollinger_zero_guard():
     import inspect
     import strategy_signals as _ss
     src = inspect.getsource(_ss._signals_iron_condor)
-    assert "bb_mavg" in src and ("bb_mavg != 0" in src or ".where(" in src), (
+    assert "bb_mavg" in src and (
+        "bb_mavg != 0" in src or ".where(" in src or ".replace(0," in src
+    ), (
         "_signals_iron_condor must guard bollinger_mavg() == 0 before division — "
         "zero-priced or halted symbols produce bb_mavg=0 and divide-by-zero"
     )
@@ -13074,6 +13076,154 @@ run("god_mode: capital allocations sum ≤ 100% (was 130%: 60+30+15+25)",       
 run("god_mode: enable() snapshots agent enable states to _agent_baseline",             t_god_mode_enable_snapshots_agent_states)
 run("god_mode: disable() restores agent enable states from _agent_baseline",           t_god_mode_disable_restores_agent_states)
 run("auto_backtest_runner: Sharpe uses sqrt(252) annualisation, not sqrt(N trades)",   t_auto_backtest_runner_sharpe_uses_sqrt_252)
+
+# ══════════════════════════════════════════════════════════════════════════
+# 25. BATCH 25 — portfolio_backtest, strategy_signals, phase6_resilience,
+#                position_reconciler, iv_surface BUG-FIX REGRESSION TESTS
+# ══════════════════════════════════════════════════════════════════════════
+section("25. BATCH 25 — portfolio/signals/phase6/reconciler/iv_surface FIXES")
+
+# ── portfolio_backtest ─────────────────────────────────────────────────────
+
+def t_portfolio_backtest_no_lookahead_uses_prev_bar_signal():
+    """BUG FIX: Entry must use the PREVIOUS bar's signal and the CURRENT bar's open
+    price.  Using sig.loc[ts] (same-bar close) to decide AND close[ts] as entry
+    price is look-ahead bias: we act on information not yet available at bar open."""
+    import portfolio_backtest as _pb
+    src = _inspect.getsource(_pb.PortfolioBacktest._simulate_portfolio)
+    assert "bar_pos - 1" in src, \
+        "_simulate_portfolio must look up the previous bar's signal (common_idx[bar_pos-1])"
+    assert 'df.loc[ts, "open"]' in src or "df.loc[ts, 'open']" in src, \
+        "_simulate_portfolio must enter at the current bar's open, not close"
+
+def t_portfolio_backtest_eod_pnl_in_equity_curve():
+    """BUG FIX: EOD force-close P&L must be reflected in equity_curve[-1].
+    Previously the force-close loop appended trades but never updated cumulative_pnl
+    or equity_curve, so the returned equity curve silently diverged from total_net_pnl."""
+    import portfolio_backtest as _pb
+    src = _inspect.getsource(_pb.PortfolioBacktest._simulate_portfolio)
+    assert "eod_pnl" in src, \
+        "_simulate_portfolio must accumulate EOD close P&L in eod_pnl"
+    assert "equity_curve[-1] = cumulative_pnl" in src, \
+        "_simulate_portfolio must update equity_curve[-1] after EOD closes"
+
+def t_portfolio_backtest_drawdown_uses_equity_curve():
+    """BUG FIX: Max drawdown must be computed on the time-ordered equity curve,
+    not on np.cumsum(pnls).  Trade-sequence cumsum ignores concurrent open positions
+    and intraday drawdowns between trade closes, understating peak-to-trough depth."""
+    import portfolio_backtest as _pb
+    src = _inspect.getsource(_pb.PortfolioBacktest._compute_metrics)
+    assert "np.cumsum(pnls)" not in src, \
+        "_compute_metrics must not use np.cumsum(pnls) for drawdown — use equity_curve"
+    assert "equity_curve" in src, \
+        "_compute_metrics must compute drawdown from the time-ordered equity_curve"
+
+# ── strategy_signals ───────────────────────────────────────────────────────
+
+def t_strategy_signals_intraday_loop_starts_at_20():
+    """BUG FIX: _signals_intraday loop must start at bar 20 (not 2).
+    vol_ma = vol.rolling(20).mean() is NaN for bars 0–18; starting at 2 means
+    bars 2–18 compare vol against NaN which always evaluates to False — silently
+    suppressing valid signals on early bars and producing misleading debug output."""
+    import strategy_signals as _ss
+    src = _inspect.getsource(_ss._signals_intraday)
+    assert "range(20," in src, \
+        "_signals_intraday must start loop at index 20 (first valid vol_ma bar)"
+    assert "range(2," not in src, \
+        "_signals_intraday must not start at 2 — vol_ma is NaN for bars 0–18"
+
+def t_strategy_signals_futures_loop_starts_at_20():
+    """BUG FIX: _signals_futures loop must start at bar 20 (not 2).
+    vol_ma = vol.rolling(20).mean() is NaN for bars 0–18; comparing vol against NaN
+    silently suppresses crossover signals on bars 2–18."""
+    import strategy_signals as _ss
+    src = _inspect.getsource(_ss._signals_futures)
+    assert "range(20," in src, \
+        "_signals_futures must start loop at index 20 (first valid vol_ma bar)"
+    assert "range(2," not in src, \
+        "_signals_futures must not start at 2 — vol_ma is NaN for bars 0–18"
+
+def t_strategy_signals_swing_ema200_always_uses_period_200():
+    """BUG FIX: EMAIndicator(close, min(200, len(df)-1)) produces EMA(79) when
+    len(df)==80, mislabelled and stored as ema200. The 'close > ema200' condition
+    then compares against a fast 79-period MA, firing trend signals that a real
+    200-period MA would have filtered out. Use period=200 unconditionally — the
+    ta library handles warm-up gracefully."""
+    import strategy_signals as _ss
+    src = _inspect.getsource(_ss._signals_swing)
+    assert "min(200, len(df)" not in src, \
+        "_signals_swing must not use min(200, len(df)-1) — always use period 200"
+    assert "EMAIndicator(close, 200)" in src, \
+        "_signals_swing must use EMAIndicator(close, 200) for ema200"
+
+def t_strategy_signals_iron_condor_bb_width_nan_safe():
+    """BUG FIX: bb_mavg.where(bb_mavg != 0) preserves NaN rows (since NaN != 0 is
+    True in pandas). replace(0, nan) is explicit and correct: only divide-by-zero
+    rows are replaced; NaN-propagation in bb_w is intentional (signal suppressed)."""
+    import strategy_signals as _ss
+    src = _inspect.getsource(_ss._signals_iron_condor)
+    assert "bb_mavg.where(bb_mavg != 0)" not in src, \
+        "_signals_iron_condor must use .replace(0, float('nan')) not .where(bb_mavg != 0)"
+    assert ".replace(0," in src, \
+        "_signals_iron_condor must use .replace(0, ...) to guard zero bb_mavg denominator"
+
+# ── phase6_resilience ──────────────────────────────────────────────────────
+
+def t_phase6_resilience_curl_guarded_by_api_key():
+    """BUG FIX: phase6_resilience.py ran curl sub-processes unconditionally even when
+    API_KEY was not set (api_key=None). With no server running, curl stdout has no
+    newline, so rsplit('\\n', 1) raises ValueError: not enough values to unpack,
+    crashing the test script before the results summary is printed."""
+    import phase6_resilience as _p6
+    src = _inspect.getsource(_p6)
+    assert "if api_key is not None:" in src, \
+        "phase6_resilience.py must guard curl sub-process calls with 'if api_key is not None:'"
+
+# ── position_reconciler ────────────────────────────────────────────────────
+
+def t_position_reconciler_missing_tradingsymbol_skips():
+    """BUG FIX: When _tsl_sl_orders has no record for an order_id (SL-M order
+    placement failed at broker), entry.get('tradingsymbol') returns None.  The old
+    fallback 'or pos[\"symbol\"]' used the UNDERLYING symbol (e.g. 'INFY') but the
+    broker position uses the CONTRACT ('INFY2606041650CE').  This caused
+    broker['INFY']==0 to fire _handle_full_external_exit, silently deregistering
+    the live F&O position from the entire TSL/risk system."""
+    import position_reconciler as _pr
+    src = _inspect.getsource(_pr.PositionReconciler.reconcile_once)
+    assert 'or pos["symbol"]' not in src and "or pos['symbol']" not in src, \
+        "reconcile_once must not fall back to pos['symbol'] when tradingsymbol is missing"
+    assert "continue" in src, \
+        "reconcile_once must skip positions with no tradingsymbol (continue) to avoid false exit"
+
+# ── iv_surface ─────────────────────────────────────────────────────────────
+
+def t_iv_surface_gex_uses_conditional_normalisation():
+    """BUG FIX: The original GEX computation always divided raw iv by 100.  The smile
+    computation conditionally divides (only when iv_raw > 1).  For decimal-format chains
+    (iv=0.225 for 22.5%), the GEX was computing (0.225/100)^2 ≈ 5e-6 instead of
+    (0.225)^2 ≈ 0.051 — a 10,000x error that made gex_net collapse to near-zero for all
+    chains, rendering the GEX='LONG'/'SHORT' label meaningless."""
+    import iv_surface as _iv
+    src = _inspect.getsource(_iv.build_surface)
+    # Old code: one-liner with unconditional / 100 in a generator comprehension.
+    # New code: explicit loop with conditional normalisation (c_raw / 100 if c_raw > 1.0)
+    assert '/ 100) ** 2)' not in src, \
+        "build_surface GEX must not unconditionally divide iv by 100 in a generator"
+    assert "c_raw > 1.0" in src, \
+        "build_surface GEX must apply conditional normalisation: 'c_raw > 1.0' check"
+    assert "gex_terms" in src, \
+        "build_surface must accumulate GEX terms in gex_terms list with consistent normalisation"
+
+run("portfolio_backtest: entry uses previous bar signal + current bar open (no look-ahead)", t_portfolio_backtest_no_lookahead_uses_prev_bar_signal)
+run("portfolio_backtest: EOD force-close P&L added to equity_curve[-1]",                    t_portfolio_backtest_eod_pnl_in_equity_curve)
+run("portfolio_backtest: max drawdown uses time-ordered equity_curve not trade cumsum",      t_portfolio_backtest_drawdown_uses_equity_curve)
+run("strategy_signals: _signals_intraday loop starts at 20 (not 2) for valid vol_ma",      t_strategy_signals_intraday_loop_starts_at_20)
+run("strategy_signals: _signals_futures loop starts at 20 (not 2) for valid vol_ma",       t_strategy_signals_futures_loop_starts_at_20)
+run("strategy_signals: _signals_swing EMA200 always uses period 200 (not min(200,n-1))",   t_strategy_signals_swing_ema200_always_uses_period_200)
+run("strategy_signals: iron_condor bb_width denominator uses .replace(0, nan)",             t_strategy_signals_iron_condor_bb_width_nan_safe)
+run("phase6_resilience: curl calls guarded by 'if api_key is not None' (no ValueError)",   t_phase6_resilience_curl_guarded_by_api_key)
+run("position_reconciler: missing tradingsymbol → skip (no false FULL_EXTERNAL_EXIT)",      t_position_reconciler_missing_tradingsymbol_skips)
+run("iv_surface: GEX uses conditional /100 normalisation matching smile computation",        t_iv_surface_gex_uses_conditional_normalisation)
 
 # ══════════════════════════════════════════════════════════════════════════
 # FINAL SUMMARY

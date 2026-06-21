@@ -253,7 +253,14 @@ class PortfolioBacktest:
                 if sig is None:
                     continue
                 try:
-                    sig_val = sig.loc[ts] if ts in sig.index else 0
+                    # Use previous bar's signal to avoid look-ahead bias:
+                    # signal fires on bar i-1 (its close is known), we enter
+                    # at bar i's open (the earliest price available that bar).
+                    if bar_pos == 0:
+                        sig_val = 0
+                    else:
+                        prev_ts = common_idx[bar_pos - 1]
+                        sig_val = sig.loc[prev_ts] if prev_ts in sig.index else 0
                 except Exception:
                     sig_val = 0
                 if sig_val != 1:
@@ -262,7 +269,7 @@ class PortfolioBacktest:
                 df = symbol_dfs[sym]
                 if ts not in df.index:
                     continue
-                entry_price = float(df.loc[ts, "close"])
+                entry_price = float(df.loc[ts, "open"] if "open" in df.columns else df.loc[ts, "close"])
                 if entry_price <= 0:
                     continue
                 entry_fill = entry_price * (1 + slip) if apply_costs else entry_price
@@ -285,6 +292,7 @@ class PortfolioBacktest:
 
         # Force-close any still-open positions at the last bar
         if len(common_idx) > 0:
+            eod_pnl  = 0.0
             last_ts  = common_idx[-1]
             last_bar = len(common_idx) - 1
             for sym, pos in list(open_positions.items()):
@@ -302,16 +310,21 @@ class PortfolioBacktest:
                         cost = compute_tx_costs(qty, pos["entry_fill"], exit_fill, product)
                     except Exception:
                         pass
+                net_pnl = gross_pnl - cost
+                eod_pnl += net_pnl
                 trades.append({
                     "symbol":      sym,
                     "entry":       round(pos["entry_fill"], 4),
                     "exit":        round(exit_fill, 4),
                     "pnl":         gross_pnl,
-                    "net_pnl":     gross_pnl - cost,
+                    "net_pnl":     net_pnl,
                     "cost":        cost,
                     "bars":        last_bar - pos["entry_bar_idx"],
                     "exit_reason": "EOD",
                 })
+            cumulative_pnl += eod_pnl
+            if equity_curve:
+                equity_curve[-1] = cumulative_pnl
 
         n_bars = len(common_idx)
         util_avg = total_util_sum / n_bars if n_bars > 0 else 0.0
@@ -355,12 +368,18 @@ class PortfolioBacktest:
         else:
             sharpe = 0.0
 
-        # Drawdown on cumulative trade P&L
-        cum = np.cumsum(pnls)
-        peak = np.maximum.accumulate(cum)
-        dd   = peak - cum
-        max_dd = float(np.max(dd)) if len(dd) else 0.0
-        peak_max = float(peak.max()) if len(peak) else 0.0
+        # Drawdown on time-ordered equity curve (not trade-sequence P&L).
+        # Trade sequence is position-close order which does not reflect concurrent
+        # open positions; the equity curve tracks portfolio value bar-by-bar.
+        if equity_curve:
+            eq_arr   = np.array(equity_curve, dtype=float)
+            peak     = np.maximum.accumulate(eq_arr)
+            dd       = peak - eq_arr
+            max_dd   = float(np.max(dd))
+            peak_max = float(peak.max())
+        else:
+            max_dd   = 0.0
+            peak_max = 0.0
         max_dd_pct = (max_dd / total_capital) * 100 if total_capital > 0 else 0.0
 
         n_trades  = max(len(pnls), 1)

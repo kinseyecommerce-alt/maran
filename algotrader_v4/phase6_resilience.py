@@ -312,40 +312,41 @@ if not api_key:
     api_key = None
 base_url = "http://localhost:8000"
 
-# 7a: Correct key allows PATCH
-r = subprocess.run(
-    ["curl", "-s", "-w", "\n%{http_code}", "-X", "PATCH",
-     "-H", f"X-API-Key: {api_key}",
-     "-H", "Content-Type: application/json",
-     "-d", '{"max_trades_intraday": 8}',
-     f"{base_url}/settings/trading-limits"],
-    capture_output=True, text=True, timeout=5
-)
-body, code = r.stdout.rsplit('\n', 1)
-report("Correct API key allows PATCH", code == "200", f"HTTP {code}")
+if api_key is not None:
+    # 7a: Correct key allows PATCH
+    r = subprocess.run(
+        ["curl", "-s", "-w", "\n%{http_code}", "-X", "PATCH",
+         "-H", f"X-API-Key: {api_key}",
+         "-H", "Content-Type: application/json",
+         "-d", '{"max_trades_intraday": 8}',
+         f"{base_url}/settings/trading-limits"],
+        capture_output=True, text=True, timeout=5
+    )
+    body, code = r.stdout.rsplit('\n', 1)
+    report("Correct API key allows PATCH", code == "200", f"HTTP {code}")
 
-# 7b: Wrong key blocks PATCH
-r2 = subprocess.run(
-    ["curl", "-s", "-w", "\n%{http_code}", "-X", "PATCH",
-     "-H", "X-API-Key: WRONG_KEY_123",
-     "-H", "Content-Type: application/json",
-     "-d", '{"max_trades_intraday": 99}',
-     f"{base_url}/settings/trading-limits"],
-    capture_output=True, text=True, timeout=5
-)
-body2, code2 = r2.stdout.rsplit('\n', 1)
-report("Wrong API key blocked (401)", code2 == "401", f"HTTP {code2}")
+    # 7b: Wrong key blocks PATCH
+    r2 = subprocess.run(
+        ["curl", "-s", "-w", "\n%{http_code}", "-X", "PATCH",
+         "-H", "X-API-Key: WRONG_KEY_123",
+         "-H", "Content-Type: application/json",
+         "-d", '{"max_trades_intraday": 99}',
+         f"{base_url}/settings/trading-limits"],
+        capture_output=True, text=True, timeout=5
+    )
+    body2, code2 = r2.stdout.rsplit('\n', 1)
+    report("Wrong API key blocked (401)", code2 == "401", f"HTTP {code2}")
 
-# 7c: No key blocks PATCH
-r3 = subprocess.run(
-    ["curl", "-s", "-w", "\n%{http_code}", "-X", "PATCH",
-     "-H", "Content-Type: application/json",
-     "-d", '{"max_trades_intraday": 99}',
-     f"{base_url}/settings/trading-limits"],
-    capture_output=True, text=True, timeout=5
-)
-body3, code3 = r3.stdout.rsplit('\n', 1)
-report("Missing API key blocked (401)", code3 == "401", f"HTTP {code3}")
+    # 7c: No key blocks PATCH
+    r3 = subprocess.run(
+        ["curl", "-s", "-w", "\n%{http_code}", "-X", "PATCH",
+         "-H", "Content-Type: application/json",
+         "-d", '{"max_trades_intraday": 99}',
+         f"{base_url}/settings/trading-limits"],
+        capture_output=True, text=True, timeout=5
+    )
+    body3, code3 = r3.stdout.rsplit('\n', 1)
+    report("Missing API key blocked (401)", code3 == "401", f"HTTP {code3}")
 
 
 print("\n" + "=" * 60)

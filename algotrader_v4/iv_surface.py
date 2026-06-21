@@ -112,14 +112,22 @@ def build_surface(symbol: str, chain: list[dict], spot: float) -> SkewData:
         direction = "NEUTRAL"
 
     # Net GEX proxy: Σ call_oi×iv² – Σ put_oi×iv²  (dimensionless relative measure)
-    # Use iv=0 for zero/missing IV to avoid inflating GEX for deep-OTM options
-    gex_net = sum(
-        int(float((row.get("CE") or {}).get("oi", 0) or 0))
-        * ((float((row.get("CE") or {}).get("iv") or 0) / 100) ** 2)
-        - int(float((row.get("PE") or {}).get("oi", 0) or 0))
-        * ((float((row.get("PE") or {}).get("iv") or 0) / 100) ** 2)
-        for row in chain if int(float(row.get("strike", 0))) > 0
-    )
+    # Apply the same conditional normalisation used for smile/call_ivs/put_ivs:
+    # divide by 100 only when iv_raw > 1 (percentage format); leave decimal IVs
+    # unchanged.  Always dividing by 100 produces a ~10,000× error for decimal-
+    # format chains (0.225 → 0.00225 instead of 0.225).
+    gex_terms = []
+    for row in chain:
+        if int(float(row.get("strike", 0))) <= 0:
+            continue
+        c_raw = float((row.get("CE") or {}).get("iv") or 0)
+        p_raw = float((row.get("PE") or {}).get("iv") or 0)
+        c_iv  = c_raw / 100.0 if c_raw > 1.0 else c_raw
+        p_iv  = p_raw / 100.0 if p_raw > 1.0 else p_raw
+        c_oi  = int(float((row.get("CE") or {}).get("oi", 0) or 0))
+        p_oi  = int(float((row.get("PE") or {}).get("oi", 0) or 0))
+        gex_terms.append(c_oi * c_iv ** 2 - p_oi * p_iv ** 2)
+    gex_net = sum(gex_terms)
 
     sd = SkewData(
         symbol=symbol, spot=spot, atm_iv=round(atm_iv, 4),

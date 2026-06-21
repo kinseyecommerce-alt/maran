@@ -112,9 +112,19 @@ class PositionReconciler:
         for pos in tracked:
             with _tsl_sl_orders_lock:
                 entry = dict(_tsl_sl_orders.get(pos["order_id"]) or {})
-            # The broker instrument: option/futures contract for F&O,
-            # the underlying itself for equity.
-            trade_sym = entry.get("tradingsymbol") or pos["symbol"]
+            trade_sym = entry.get("tradingsymbol")
+            if not trade_sym:
+                # SL-M order was never placed (entry failed at broker) so the
+                # _tsl_sl_orders record has no tradingsymbol.  Falling back to
+                # pos["symbol"] (the underlying, e.g. "INFY") would cause
+                # broker_qty["INFY"] == 0 to trigger a false FULL_EXTERNAL_EXIT
+                # on the live F&O contract.  Skip until the SL entry is filled.
+                logger.debug(
+                    "[Reconciler] no tradingsymbol for order {} (symbol={}) — "
+                    "skipping until SL entry is populated",
+                    pos["order_id"], pos["symbol"])
+                tracked_symbols.add(pos["symbol"])
+                continue
             tracked_symbols.add(trade_sym)
 
             qr = pos["quantity_remaining"]
