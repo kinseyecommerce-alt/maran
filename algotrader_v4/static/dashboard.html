@@ -1407,6 +1407,46 @@
             </div>
           </div>
 
+          <!-- ── L2 Order Book (real Kite WebSocket depth) ── -->
+          <div class="card" id="ob-panel">
+            <div class="chart-header">
+              <div>
+                <div class="chart-title"><i data-lucide="layers" style="width:14px;height:14px;vertical-align:-2px;margin-right:4px;"></i> Order Book <span style="font-size:11px;color:var(--text-muted);font-weight:400;">(live L2 · top 5)</span></div>
+                <div class="chart-sub" id="ob-sub">Select a symbol in the chart above</div>
+              </div>
+              <button style="background:var(--bg-hover);border:1px solid var(--border);color:var(--text-primary);border-radius:6px;padding:4px 10px;font-size:12px;cursor:pointer;" onclick="obRefresh()">Refresh</button>
+            </div>
+            <!-- Imbalance bar -->
+            <div style="display:flex;align-items:center;gap:8px;margin-bottom:10px;">
+              <span style="font-size:11px;color:var(--buy);min-width:30px;text-align:right" id="ob-bid-pct">—</span>
+              <div style="flex:1;height:6px;border-radius:3px;background:var(--bg-hover);overflow:hidden;position:relative;">
+                <div id="ob-imbalance-bar" style="height:100%;width:50%;background:linear-gradient(to right,#34D399,#F87171);border-radius:3px;transition:width 0.3s"></div>
+              </div>
+              <span style="font-size:11px;color:var(--sell);min-width:30px;" id="ob-ask-pct">—</span>
+            </div>
+            <!-- Bid/Ask ladder -->
+            <div style="display:grid;grid-template-columns:1fr auto auto 1fr;gap:2px 8px;font-size:12px;">
+              <span style="color:var(--text-muted);font-size:10px;padding-bottom:4px;">Qty</span>
+              <span style="color:var(--buy);font-size:10px;padding-bottom:4px;">Bid</span>
+              <span style="color:var(--sell);font-size:10px;padding-bottom:4px;">Ask</span>
+              <span style="color:var(--text-muted);font-size:10px;padding-bottom:4px;text-align:right;">Qty</span>
+              <template id="ob-row-tpl">
+                <span class="ob-bid-qty" style="color:var(--text-secondary);text-align:right">—</span>
+                <span class="ob-bid-px"  style="color:var(--buy);font-family:var(--font-mono)">—</span>
+                <span class="ob-ask-px"  style="color:var(--sell);font-family:var(--font-mono)">—</span>
+                <span class="ob-ask-qty" style="color:var(--text-secondary)">—</span>
+              </template>
+            </div>
+            <div id="ob-ladder" style="display:grid;grid-template-columns:1fr auto auto 1fr;gap:3px 8px;font-size:12px;margin-top:2px;">
+              <!-- filled by obRender() -->
+            </div>
+            <div style="display:flex;gap:14px;margin-top:8px;font-size:11px;">
+              <span>Spread: <b id="ob-spread" style="color:var(--text-primary)">—</b></span>
+              <span id="ob-wall-above" style="color:var(--sell);display:none">⚡ Sell wall above</span>
+              <span id="ob-wall-below" style="color:var(--buy);display:none">⚡ Buy wall below</span>
+            </div>
+          </div>
+
           <div class="card">
             <div class="card-title"><i data-lucide="activity"></i> Market Regime</div>
             <div class="regime-badge regime-UNKNOWN" id="regime-badge">UNKNOWN</div>
@@ -3198,6 +3238,82 @@ const analyticsChart = makeEquityChart('analytics-chart');
     document.getElementById('tv-symbol-select')?.addEventListener('change', () => window.tvRefresh());
     _initChart();
   });
+})();
+
+// ── L2 Order Book panel ──────────────────────────────────────────────
+(function () {
+  let _obSym = '', _obTimer = null;
+
+  function obRender(d) {
+    const ladder = document.getElementById('ob-ladder');
+    if (!ladder) return;
+    const bids = d.bids || [], asks = d.asks || [];
+    const rows = Math.max(bids.length, asks.length, 1);
+    let html = '';
+    for (let i = 0; i < rows; i++) {
+      const b = bids[i] || {}, a = asks[i] || {};
+      const bPx  = b.price ? b.price.toFixed(2) : '—';
+      const aPx  = a.price ? a.price.toFixed(2) : '—';
+      const bQty = b.qty   != null ? b.qty : '—';
+      const aQty = a.qty   != null ? a.qty : '—';
+      html += `<span style="color:var(--text-secondary);text-align:right">${bQty}</span>
+               <span style="color:var(--buy);font-family:var(--font-mono)">${bPx}</span>
+               <span style="color:var(--sell);font-family:var(--font-mono)">${aPx}</span>
+               <span style="color:var(--text-secondary)">${aQty}</span>`;
+    }
+    ladder.innerHTML = html;
+
+    // Imbalance bar: bid_pct drives the green portion width
+    const bT = d.bid_total || 0, aT = d.ask_total || 0, tot = bT + aT;
+    const bidPct = tot > 0 ? Math.round(bT / tot * 100) : 50;
+    const bar = document.getElementById('ob-imbalance-bar');
+    if (bar) bar.style.width = bidPct + '%';
+    const bPctEl = document.getElementById('ob-bid-pct');
+    const aPctEl = document.getElementById('ob-ask-pct');
+    if (bPctEl) bPctEl.textContent = bidPct + '%';
+    if (aPctEl) aPctEl.textContent = (100 - bidPct) + '%';
+
+    // Spread + wall alerts
+    const spreadEl = document.getElementById('ob-spread');
+    if (spreadEl) spreadEl.textContent = d.spread != null ? d.spread.toFixed(2) : '—';
+    const wallA = document.getElementById('ob-wall-above');
+    const wallB = document.getElementById('ob-wall-below');
+    if (wallA) wallA.style.display = d.wall_above ? '' : 'none';
+    if (wallB) wallB.style.display = d.wall_below ? '' : 'none';
+
+    const sub = document.getElementById('ob-sub');
+    if (sub) sub.textContent = `${d.symbol} · LTP ${d.ltp} · Bid ${d.bid} / Ask ${d.ask}`;
+  }
+
+  async function _fetchDepth(sym) {
+    if (!sym) return;
+    const token = localStorage.getItem('jwt_token');
+    const hdrs  = token ? { Authorization: `Bearer ${token}` } : {};
+    try {
+      const r = await fetch(`/market/depth/${sym}`, { headers: hdrs });
+      if (!r.ok) return;
+      const d = await r.json();
+      obRender(d);
+    } catch(e) { console.error('[ob]', e); }
+  }
+
+  window.obRefresh = function() {
+    const sym = document.getElementById('tv-symbol-select')?.value;
+    if (!sym) return;
+    if (sym !== _obSym) {
+      _obSym = sym;
+      clearInterval(_obTimer);
+      _obTimer = setInterval(() => _fetchDepth(_obSym), 2000); // 2-second refresh
+    }
+    _fetchDepth(sym);
+  };
+
+  // Auto-trigger when chart symbol changes
+  const origTvRefresh = window.tvRefresh;
+  window.tvRefresh = function() {
+    origTvRefresh && origTvRefresh();
+    window.obRefresh();
+  };
 })();
 
 function updateCharts() {

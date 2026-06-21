@@ -873,6 +873,51 @@ def market_candles(symbol: str, tf: str = "1min"):
     ]
     return {"symbol": symbol, "tf": tf, "bars": bars}
 
+@app.get("/market/depth/{symbol}", tags=["Market"])
+def market_depth(symbol: str):
+    """Return real-time Level-2 order book (top-5 bid/ask) for a symbol.
+    Source: Kite WebSocket FULL-mode tick — live in LIVE trading mode.
+    In PAPER mode returns simulated zeros (no WebSocket feed active)."""
+    symbol = _clean_symbol(symbol)
+    tick = tick_engine._latest_tick.get(symbol)
+    if tick is None:
+        raise HTTPException(404, f"No tick data for {symbol} — add it to a watchlist first")
+
+    bid_depth = getattr(tick, "bid_depth", []) or []
+    ask_depth = getattr(tick, "ask_depth", []) or []
+
+    # Normalise: TickBuffer stores tuples (price, qty); REST tick path stores dicts
+    def _normalise(levels):
+        out = []
+        for lvl in levels[:5]:
+            if isinstance(lvl, (list, tuple)):
+                p, q = (lvl[0], lvl[1]) if len(lvl) >= 2 else (0.0, 0)
+            else:
+                p, q = float(lvl.get("price", 0)), int(lvl.get("quantity", 0))
+            out.append({"price": round(float(p), 2), "qty": int(q)})
+        return out
+
+    bids = _normalise(bid_depth)
+    asks = _normalise(ask_depth)
+    bid_total = sum(b["qty"] for b in bids)
+    ask_total = sum(a["qty"] for a in asks)
+    imbalance = round(bid_total / (bid_total + ask_total), 3) if (bid_total + ask_total) > 0 else 0.5
+
+    return {
+        "symbol":     symbol,
+        "ltp":        round(tick.ltp, 2),
+        "bid":        round(tick.bid, 2),
+        "ask":        round(tick.ask, 2),
+        "spread":     round(tick.ask - tick.bid, 2),
+        "bids":       bids,
+        "asks":       asks,
+        "bid_total":  bid_total,
+        "ask_total":  ask_total,
+        "imbalance":  imbalance,
+        "wall_above": getattr(tick_engine._latest_ind.get(symbol), "wall_above", False),
+        "wall_below": getattr(tick_engine._latest_ind.get(symbol), "wall_below", False),
+    }
+
 
 # ── Agents ────────────────────────────────────────────────────────────────────
 @app.get("/agents", tags=["Agents"])
