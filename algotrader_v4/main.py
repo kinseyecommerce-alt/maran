@@ -845,6 +845,34 @@ async def option_chain(symbol: str):
     if not data: raise HTTPException(404, f"Option chain not available for {symbol}")
     return data
 
+@app.get("/market/candles/{symbol}", tags=["Market"])
+def market_candles(symbol: str, tf: str = "1min"):
+    """Return OHLCV candles for a symbol. tf=1min (default) or 5min.
+    Each bar: {time (Unix sec), open, high, low, close, volume}.
+    Used by the TradingView Lightweight Charts panel in the dashboard."""
+    symbol = _clean_symbol(symbol)
+    tf = tf if tf in ("1min", "5min") else "1min"
+    if tf == "1min":
+        bufs = tick_engine._bufs_1min
+    else:
+        bufs = tick_engine._bufs_5min
+    buf = bufs.get(symbol)
+    if buf is None:
+        raise HTTPException(404, f"No candle data for {symbol} — add it to a watchlist first")
+    candles = buf.candles()
+    bars = [
+        {
+            "time":   int(c.ts.timestamp()),
+            "open":   round(c.open,  2),
+            "high":   round(c.high,  2),
+            "low":    round(c.low,   2),
+            "close":  round(c.close, 2),
+            "volume": c.volume,
+        }
+        for c in candles
+    ]
+    return {"symbol": symbol, "tf": tf, "bars": bars}
+
 
 # ── Agents ────────────────────────────────────────────────────────────────────
 @app.get("/agents", tags=["Agents"])

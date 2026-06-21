@@ -12465,6 +12465,80 @@ run("scalping latency: warm_connections() is a no-op in PAPER mode (safe at star
 run("scalping latency: on_startup calls warm_connections to avoid first-order handshake", t_main_calls_warm_connections)
 
 # ══════════════════════════════════════════════════════════════════════════
+# 123. TRADINGVIEW CANDLESTICK CHART — /market/candles endpoint + dashboard JS
+# ══════════════════════════════════════════════════════════════════════════
+
+def t_candles_endpoint_registered():
+    """GET /market/candles/{symbol} must be registered in main.py."""
+    import inspect, main as _main
+    src = inspect.getsource(_main)
+    assert "/market/candles/" in src, (
+        "main.py must expose GET /market/candles/{symbol} for the TradingView chart panel"
+    )
+
+def t_candles_endpoint_returns_bars():
+    """market_candles() raises HTTP 4xx for an unknown/invalid symbol — never 200."""
+    import main as _m
+    from config import settings
+    orig = settings.trading_mode
+    try:
+        settings.trading_mode = "PAPER"
+        # Unknown symbol must raise 4xx (404 if symbol valid but not tracked,
+        # 422 if symbol fails _clean_symbol validation — both are correct rejections)
+        from fastapi import HTTPException
+        try:
+            _m.market_candles("UNKNOWN_XYZ_9999", tf="1min")
+            assert False, "Expected HTTPException (4xx) for unknown symbol"
+        except HTTPException as e:
+            assert e.status_code in (404, 422), (
+                f"Expected 404 or 422 for unknown symbol, got {e.status_code}"
+            )
+    finally:
+        settings.trading_mode = orig
+
+def t_candles_endpoint_tf_validation():
+    """market_candles() silently coerces invalid tf to '1min'."""
+    import inspect, main as _m
+    src = inspect.getsource(_m.market_candles)
+    assert "1min" in src and "5min" in src, (
+        "market_candles must validate tf parameter and default to '1min'"
+    )
+
+def t_dashboard_has_lightweight_charts():
+    """dashboard.html must load the TradingView Lightweight Charts library."""
+    import pathlib
+    path = pathlib.Path(__file__).parent / "static" / "dashboard.html"
+    html = path.read_text()
+    assert "lightweight-charts" in html.lower(), (
+        "dashboard.html must include the TradingView Lightweight Charts script tag"
+    )
+
+def t_dashboard_has_tv_chart_container():
+    """dashboard.html must have the #tv-chart-container div for the chart."""
+    import pathlib
+    path = pathlib.Path(__file__).parent / "static" / "dashboard.html"
+    html = path.read_text()
+    assert "tv-chart-container" in html, (
+        "dashboard.html must have <div id='tv-chart-container'> for the candlestick chart"
+    )
+
+def t_dashboard_tv_symbol_select():
+    """dashboard.html must have symbol and timeframe selects for the chart panel."""
+    import pathlib
+    path = pathlib.Path(__file__).parent / "static" / "dashboard.html"
+    html = path.read_text()
+    assert "tv-symbol-select" in html and "tv-tf-select" in html, (
+        "dashboard.html must have tv-symbol-select and tv-tf-select controls"
+    )
+
+run("tradingview chart: GET /market/candles/{symbol} endpoint registered in main.py",     t_candles_endpoint_registered)
+run("tradingview chart: market_candles() raises 404 for unknown symbol",                   t_candles_endpoint_returns_bars)
+run("tradingview chart: market_candles() validates tf and defaults to 1min",               t_candles_endpoint_tf_validation)
+run("tradingview chart: dashboard.html loads lightweight-charts library",                  t_dashboard_has_lightweight_charts)
+run("tradingview chart: dashboard.html has #tv-chart-container div",                       t_dashboard_has_tv_chart_container)
+run("tradingview chart: dashboard.html has symbol and tf selector controls",               t_dashboard_tv_symbol_select)
+
+# ══════════════════════════════════════════════════════════════════════════
 # FINAL SUMMARY
 # ══════════════════════════════════════════════════════════════════════════
 failed = summary()
