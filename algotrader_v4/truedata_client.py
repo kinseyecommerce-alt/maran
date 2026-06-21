@@ -159,7 +159,7 @@ class TrueDataTicker:
         max_backoff = 60.0
         consecutive_failures = 0
 
-        while self._connected or consecutive_failures == 0:
+        while True:   # retry indefinitely; graceful stop() exits via `return` inside the loop
             td = _get_td()
             if td is None:
                 consecutive_failures += 1

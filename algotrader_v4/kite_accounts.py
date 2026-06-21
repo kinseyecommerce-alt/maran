@@ -77,8 +77,10 @@ def _load() -> None:
         try:
             raw = json.loads(_STORE_PATH.read_text())
             _accounts = {name: _decrypt_fields(acc) for name, acc in raw.items()}
-        except Exception:
+        except Exception as exc:
+            logger.error("[kite_accounts] CRITICAL: failed to load accounts: {} — not overwriting file", exc)
             _accounts = {}
+            return   # leave _loaded = False so next call retries; prevents silent credential wipe
     _loaded = True
 
 

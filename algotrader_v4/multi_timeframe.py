@@ -67,13 +67,20 @@ def _trend_direction(df: pd.DataFrame, fast: int = 9, slow: int = 21) -> Directi
 
 
 def _aggregate(df_1m: pd.DataFrame, minutes: int) -> pd.DataFrame:
-    """Aggregate 1-min OHLCV into N-minute bars."""
+    """Aggregate 1-min OHLCV into N-minute bars, right-aligned to the most recent candle.
+
+    Right-alignment ensures the most recent bar is always a complete N-minute bar.
+    The oldest incomplete period (n % minutes candles) is dropped from the left.
+    """
     n = len(df_1m)
     if n < minutes:
         return pd.DataFrame(columns=df_1m.columns)
     bars = []
-    for i in range(0, n - minutes + 1, minutes):
+    start = n % minutes  # drop leftover oldest candles so last bar is always complete
+    for i in range(start, n, minutes):
         chunk = df_1m.iloc[i:i + minutes]
+        if len(chunk) < minutes:
+            break
         bars.append({
             "open":   float(chunk["open"].iloc[0]),
             "high":   float(chunk["high"].max()),

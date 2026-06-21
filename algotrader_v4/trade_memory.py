@@ -126,8 +126,9 @@ def _trim_file_to_max_entries() -> None:
     """Keep only the last MAX_ENTRIES lines in MEMORY_FILE. Caller must hold _trim_lock."""
     try:
         lines = MEMORY_FILE.read_text(encoding="utf-8").splitlines()
-        if len(lines) > MAX_ENTRIES:
-            content = "\n".join(lines[-MAX_ENTRIES:]) + "\n"
+        valid_lines = [ln for ln in lines if ln.strip()]   # skip blank / partial-write lines
+        if len(valid_lines) > MAX_ENTRIES:
+            content = "\n".join(valid_lines[-MAX_ENTRIES:]) + "\n"
             tmp = MEMORY_FILE.with_suffix(".tmp")
             tmp.write_text(content, encoding="utf-8")
             tmp.replace(MEMORY_FILE)   # atomic rename — safe on crash mid-write

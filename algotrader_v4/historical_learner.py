@@ -177,11 +177,13 @@ async def learn(symbols: list[str], strategies: list[str],
         print(f"  Skipping {skipped} already-completed backtests (--resume)\n")
 
     milestone_pct = 0
+    newly_done = 0   # count only freshly completed (not pre-skipped) for accurate ETA
     for coro in asyncio.as_completed(tasks):
         sym, strat, passed, status = await coro
         done += 1
+        newly_done += 1
         elapsed = time.time() - t_start
-        rate    = done / elapsed if elapsed > 0 else 1
+        rate    = newly_done / elapsed if elapsed > 0 else 1
         eta_s   = int((total - done) / rate) if rate > 0 else 0
         eta     = f"{eta_s//60}m{eta_s%60:02d}s"
 
@@ -194,7 +196,7 @@ async def learn(symbols: list[str], strategies: list[str],
             adaptive_engine._save_state()
 
         # Telegram milestone every 25%
-        pct = done * 100 // total
+        pct = (done * 100 // total) if total > 0 else 100
         if pct >= milestone_pct + 25:
             milestone_pct = (pct // 25) * 25
             pass_counts = {s: len(v) for s, v in approved.items()}

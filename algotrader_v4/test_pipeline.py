@@ -11160,11 +11160,14 @@ def t_platform_scheduler_profile_in_executor():
     )
 
 def t_platform_scheduler_master_start_in_thread():
+    # BUG FIX (Batch 23): master.start() calls tick_engine.start_loop() which uses
+    # asyncio.get_running_loop() — running it in asyncio.to_thread (a threadpool worker
+    # with no event loop) raises RuntimeError.  Must be called directly from the async context.
     import inspect, platform_scheduler as ps
     src = inspect.getsource(ps.PlatformScheduler._auto_start_bot)
-    assert "asyncio.to_thread" in src and "master.start" in src, (
-        "_auto_start must wrap master.start() in asyncio.to_thread — "
-        "master.start() is synchronous and blocks the event loop during strategy warmup"
+    assert "asyncio.to_thread(master.start" not in src, (
+        "_auto_start must NOT wrap master.start() in asyncio.to_thread — "
+        "master.start() calls tick_engine.start_loop() which requires a running event loop"
     )
 
 def t_twap_engine_cancelled_error_propagated():
@@ -12694,6 +12697,383 @@ run("gamma_scalp: _d1 returns 0.0 for S<=0 (prevents math.log domain error)",   
 run("gamma_scalp: iv=0 from API not replaced by 25% fallback (only None/missing is)",    t_gamma_scalp_zero_iv_not_replaced)
 run("correlation_guard: get_correlation snapshots _corr_matrix under _matrix_lock",      t_correlation_guard_matrix_read_under_lock)
 run("event_calendar: future event at +2h wins over same-day past event at -9h",          t_event_calendar_future_event_wins_over_past)
+
+# ══════════════════════════════════════════════════════════════════════════
+# 23. BATCH 23 — twap_executor, platform_scheduler, signal_engine,
+#                ml_signal_filter, ml_signal_scorer, multi_timeframe,
+#                trade_memory, historical_learner, truedata_client
+# ══════════════════════════════════════════════════════════════════════════
+section("23. BATCH 23 — NETWORK/ENGINE/ML BUG-FIX REGRESSION TESTS")
+
+import asyncio as _asyncio
+import inspect as _inspect
+
+# ── twap_executor fixes ────────────────────────────────────────────────────
+
+def t_twap_executor_lock_not_lazy():
+    """BUG FIX: _start_lock must be initialised in __init__ (not lazily) to prevent
+    two concurrent callers getting different Lock instances."""
+    import twap_executor as _te
+    src = _inspect.getsource(_te.TWAPExecutor.__init__)
+    assert "asyncio.Lock()" in src, "__init__ must create asyncio.Lock() directly"
+    assert "None" not in src.split("asyncio.Lock()")[0].split("_start_lock")[-1], \
+        "_start_lock should not be assigned None in __init__"
+
+def t_twap_executor_run_slices_finally():
+    """BUG FIX: _run_slices must use try/finally so _active is cleaned up on CancelledError."""
+    import twap_executor as _te
+    src = _inspect.getsource(_te.TWAPExecutor._run_slices)
+    assert "finally:" in src, "_run_slices must have a finally block to pop _active on cancellation"
+    assert "self._active.pop" in src, "_run_slices must pop from _active in finally block"
+
+def t_twap_executor_place_single_timeout():
+    """BUG FIX: _place_single must wrap run_in_executor with asyncio.wait_for timeout."""
+    import twap_executor as _te
+    src = _inspect.getsource(_te.TWAPExecutor._place_single)
+    assert "wait_for" in src, "_place_single must use asyncio.wait_for to prevent tick-loop hang"
+    assert "timeout=30" in src, "_place_single timeout must be 30s (matching twap_engine.py)"
+
+# ── platform_scheduler fixes ───────────────────────────────────────────────
+
+def t_platform_scheduler_no_to_thread_for_master_start():
+    """BUG FIX: master.start() is synchronous and must not be called via asyncio.to_thread
+    (which would run it in a thread without an event loop, crashing asyncio internals)."""
+    import platform_scheduler as _ps
+    src = _inspect.getsource(_ps.PlatformScheduler._auto_start_bot)
+    assert "asyncio.to_thread(master.start" not in src, \
+        "master.start must NOT be called via asyncio.to_thread (no event loop in thread)"
+
+def t_platform_scheduler_options_error_warning():
+    """BUG FIX: Options cache errors must be logged at WARNING, not DEBUG, so they
+    are visible in production log level."""
+    import platform_scheduler as _ps
+    src = _inspect.getsource(_ps.PlatformScheduler._options_cache_refresh)
+    assert "logger.warning" in src, \
+        "Options cache refresh errors must be logger.warning, not logger.debug"
+
+# ── signal_engine fixes ────────────────────────────────────────────────────
+
+def t_signal_engine_adx_nan_guard():
+    """BUG FIX: ADX NaN must be checked before computing signal to avoid 'N/A' value
+    paired with 'Neutral' signal (contradictory and misleading for Claude)."""
+    import signal_engine as _se
+    src = _inspect.getsource(_se.SignalEngine._compute_indicators)
+    # The guard must check pd.isna(adx) before assigning adx_sig
+    adx_section = src[src.find("ADX"):]
+    assert "pd.isna(adx)" in adx_section, \
+        "ADX NaN must be guarded with pd.isna(adx) before computing adx_sig"
+    # The old broken pattern: adx_sig = 'BUY' if adx > 25 else 'Neutral' (before NaN check)
+    assert "adx_sig = \"BUY\" if adx > 25" not in adx_section.split("pd.isna(adx)")[0], \
+        "adx_sig must NOT be computed before the pd.isna(adx) check"
+
+# ── ml_signal_filter fixes ─────────────────────────────────────────────────
+
+def t_ml_signal_filter_uses_rlock():
+    """BUG FIX: MLSignalFilter must use threading.RLock so filter_signal can hold the
+    lock while _build_features/_encode re-acquire it (prevents encoder race with _retrain)."""
+    import ml_signal_filter as _mf
+    src = _inspect.getsource(_mf.MLSignalFilter.__init__)
+    assert "RLock" in src, "MLSignalFilter._lock must be threading.RLock() (reentrant)"
+
+def t_ml_signal_filter_sqlite_context_manager():
+    """BUG FIX: _load_trade_history must use 'with sqlite3.connect' context manager
+    so the connection is closed even when the query raises an exception."""
+    import ml_signal_filter as _mf
+    src = _inspect.getsource(_mf.MLSignalFilter._load_trade_history)
+    assert "with sqlite3.connect" in src, \
+        "_load_trade_history must use 'with sqlite3.connect(...)' context manager"
+    assert "con.close()" not in src, \
+        "Explicit con.close() should not be present when using context manager"
+
+def t_ml_signal_filter_atomic_model_save():
+    """BUG FIX: Model must be saved atomically via .tmp rename to prevent a crash
+    mid-write from producing a corrupt .pkl that mismatches the in-memory model."""
+    import ml_signal_filter as _mf
+    src = _inspect.getsource(_mf.MLSignalFilter._retrain)
+    assert ".tmp" in src, "_retrain must write to a .tmp file"
+    assert ".replace(" in src, "_retrain must atomically rename .tmp → .pkl"
+    assert "with open(_MODEL_PATH, \"wb\")" not in src, \
+        "_retrain must not write directly to _MODEL_PATH (use tmp → replace)"
+
+def t_ml_signal_filter_no_dead_import():
+    """BUG FIX: record_outcome must not have a dead try/import block that silently
+    swallows state_store errors."""
+    import ml_signal_filter as _mf
+    src = _inspect.getsource(_mf.MLSignalFilter.record_outcome)
+    assert "from state_store" not in src, \
+        "record_outcome must not contain dead import of state_store"
+
+# ── ml_signal_scorer fixes ─────────────────────────────────────────────────
+
+def t_ml_signal_scorer_has_lock():
+    """BUG FIX: MLSignalScorer must have a threading.Lock to protect concurrent
+    access to _loaded set and _models dict from multiple agent threads."""
+    import ml_signal_scorer as _ms
+    assert hasattr(_ms.ml_signal_scorer, "_lock"), \
+        "MLSignalScorer must have a _lock attribute"
+    import threading
+    assert type(_ms.ml_signal_scorer._lock).__name__ == "lock", \
+        "MLSignalScorer._lock must be a threading.Lock instance"
+
+def t_ml_signal_scorer_score_under_lock():
+    """BUG FIX: score() must check/load symbol under lock to prevent double-load
+    races when multiple agent threads score the same new symbol concurrently."""
+    import ml_signal_scorer as _ms
+    src = _inspect.getsource(_ms.MLSignalScorer.score)
+    assert "self._lock" in src, "score() must access _loaded/_models under self._lock"
+
+def t_ml_signal_scorer_feature12_clamped():
+    """BUG FIX: Feature 12 (MACD/ATR) must be clamped with np.clip(-3,3) like
+    feature 4, to prevent silent NaN→0 substitution in zero-volatility conditions."""
+    import ml_signal_scorer as _ms
+    src = _inspect.getsource(_ms.MLSignalScorer._features_from_snap)
+    # Feature 12 line should have np.clip
+    lines = src.splitlines()
+    feat12_lines = [ln for ln in lines if "12." in ln or ("macd" in ln.lower() and "atr" in ln.lower() and "clip" in ln)]
+    assert any("clip" in ln for ln in feat12_lines), \
+        "Feature 12 (MACD/ATR) must use np.clip to clamp like feature 4"
+
+# ── multi_timeframe fixes ──────────────────────────────────────────────────
+
+def t_multi_timeframe_aggregate_right_aligned():
+    """BUG FIX: _aggregate must right-align bars so most-recent candle is always in
+    a complete bar. With 88 candles × 15-min bars, candles 75-87 must not be dropped."""
+    import multi_timeframe as _mtf
+    import pandas as pd
+    import numpy as np
+
+    # Create 88 1-min candles with predictable close values (0..87)
+    df = pd.DataFrame({
+        "open":   np.zeros(88),
+        "high":   np.zeros(88),
+        "low":    np.zeros(88),
+        "close":  np.arange(88, dtype=float),  # close[i] == i
+        "volume": np.ones(88),
+    })
+    result = _mtf._aggregate(df, 15)
+    # Should get 5 complete 15-min bars (88 // 15 = 5, remainder 13 dropped from left)
+    assert len(result) == 5, f"Expected 5 bars from 88 candles × 15-min, got {len(result)}"
+    # The last bar's close must be the last candle's close (87.0), not an earlier candle
+    last_close = float(result["close"].iloc[-1])
+    assert last_close == 87.0, f"Last bar close must be candle #87 (got {last_close})"
+
+def t_multi_timeframe_aggregate_exact_multiple():
+    """_aggregate with exact multiple (90 candles × 15-min) should produce 6 complete bars."""
+    import multi_timeframe as _mtf
+    import pandas as pd
+    import numpy as np
+
+    df = pd.DataFrame({
+        "open":   np.zeros(90),
+        "high":   np.zeros(90),
+        "low":    np.zeros(90),
+        "close":  np.arange(90, dtype=float),
+        "volume": np.ones(90),
+    })
+    result = _mtf._aggregate(df, 15)
+    assert len(result) == 6, f"Expected 6 bars from 90 candles × 15-min, got {len(result)}"
+    assert float(result["close"].iloc[-1]) == 89.0, "Last bar must end at candle #89"
+
+# ── trade_memory fixes ─────────────────────────────────────────────────────
+
+def t_trade_memory_trim_filters_blank_lines():
+    """BUG FIX: _trim_file_to_max_entries must filter blank lines so partial-write
+    entries from concurrent writes don't displace valid entries."""
+    import trade_memory as _tm
+    src = _inspect.getsource(_tm._trim_file_to_max_entries)
+    assert "valid_lines" in src, \
+        "_trim_file_to_max_entries must filter blank lines using a valid_lines filter"
+    assert "ln.strip()" in src, \
+        "_trim_file_to_max_entries must strip blank lines before trimming"
+
+# ── historical_learner fixes ───────────────────────────────────────────────
+
+def t_historical_learner_eta_uses_newly_done():
+    """BUG FIX: ETA must be computed from newly_done (not done which includes pre-skipped
+    items) so --resume runs don't show wildly underestimated ETA."""
+    import historical_learner as _hl
+    src = _inspect.getsource(_hl.learn)
+    assert "newly_done" in src, \
+        "learn() must track newly_done separately from done for accurate ETA"
+
+def t_historical_learner_pct_zero_division_guard():
+    """BUG FIX: pct calculation must guard against ZeroDivisionError when total==0
+    (e.g., empty symbol list passed via --symbols)."""
+    import historical_learner as _hl
+    src = _inspect.getsource(_hl.learn)
+    # Must have a guard: 'if total > 0' or 'if total else'
+    assert ("if total > 0" in src or "if total else" in src or "if total" in src), \
+        "pct = done * 100 // total must guard against total == 0"
+
+# ── truedata_client fixes ──────────────────────────────────────────────────
+
+def t_truedata_reconnect_loop_uses_while_true():
+    """BUG FIX: TrueDataTicker._run must use 'while True' so the reconnect loop
+    does not exit after the first _get_td() failure (old: 'while self._connected or
+    consecutive_failures == 0' exits immediately after the first failure)."""
+    import truedata_client as _tc
+    src = _inspect.getsource(_tc.TrueDataTicker._run)
+    assert "while True:" in src, \
+        "TrueDataTicker._run must use 'while True' for unlimited reconnect retries"
+    assert "while self._connected or consecutive_failures == 0" not in src, \
+        "Old broken condition 'while self._connected or consecutive_failures == 0' must be removed"
+
+run("twap_executor: _start_lock initialised in __init__ (not lazy None)",              t_twap_executor_lock_not_lazy)
+run("twap_executor: _run_slices uses try/finally to clean _active on CancelledError",  t_twap_executor_run_slices_finally)
+run("twap_executor: _place_single wrapped with asyncio.wait_for(timeout=30s)",         t_twap_executor_place_single_timeout)
+run("platform_scheduler: master.start() not wrapped in asyncio.to_thread",             t_platform_scheduler_no_to_thread_for_master_start)
+run("platform_scheduler: options cache error logged at WARNING not DEBUG",             t_platform_scheduler_options_error_warning)
+run("signal_engine: ADX NaN guard checks pd.isna before computing adx_sig",           t_signal_engine_adx_nan_guard)
+run("ml_signal_filter: uses threading.RLock (reentrant) for filter_signal/_encode",   t_ml_signal_filter_uses_rlock)
+run("ml_signal_filter: _load_trade_history uses context manager (no fd leak)",         t_ml_signal_filter_sqlite_context_manager)
+run("ml_signal_filter: _retrain saves model atomically via .tmp→replace rename",       t_ml_signal_filter_atomic_model_save)
+run("ml_signal_filter: record_outcome has no dead state_store import block",           t_ml_signal_filter_no_dead_import)
+run("ml_signal_scorer: has threading.Lock to protect _loaded/_models",                t_ml_signal_scorer_has_lock)
+run("ml_signal_scorer: score() checks _loaded under self._lock",                      t_ml_signal_scorer_score_under_lock)
+run("ml_signal_scorer: feature 12 (MACD/ATR) clamped with np.clip like feature 4",   t_ml_signal_scorer_feature12_clamped)
+run("multi_timeframe: _aggregate right-aligns bars (88 candles × 15min → 5 complete)", t_multi_timeframe_aggregate_right_aligned)
+run("multi_timeframe: _aggregate exact multiple (90 × 15min → 6 bars, last=89.0)",    t_multi_timeframe_aggregate_exact_multiple)
+run("trade_memory: _trim uses valid_lines filter to skip blank/partial-write lines",   t_trade_memory_trim_filters_blank_lines)
+run("historical_learner: ETA uses newly_done (not done) for accurate --resume ETA",   t_historical_learner_eta_uses_newly_done)
+run("historical_learner: pct = done*100//total guarded against ZeroDivisionError",    t_historical_learner_pct_zero_division_guard)
+run("truedata_client: _run uses 'while True' so reconnect loop never exits early",    t_truedata_reconnect_loop_uses_while_true)
+
+# ══════════════════════════════════════════════════════════════════════════
+# 24. BATCH 24 — paper_trade_sim, profit_optimizer, adaptive_engine,
+#                kite_accounts, god_mode, auto_backtest_runner
+# ══════════════════════════════════════════════════════════════════════════
+section("24. BATCH 24 — MISC/UTILS BUG-FIX REGRESSION TESTS")
+
+# ── paper_trade_sim ────────────────────────────────────────────────────────
+
+def t_paper_trade_sim_kill_switch_enum():
+    """BUG FIX: sebi_compliance._state must be set to KillSwitchState.ACTIVE (enum),
+    not the string 'ACTIVE'. String assignment corrupts the type and silently disables
+    all kill-switch comparisons for the rest of the process lifetime."""
+    import paper_trade_sim as _pts
+    src = _inspect.getsource(_pts)
+    assert "KillSwitchState.ACTIVE" in src, \
+        "paper_trade_sim must assign KillSwitchState.ACTIVE (not the string 'ACTIVE')"
+    assert "sebi_compliance._state = \"ACTIVE\"" not in src, \
+        "String literal 'ACTIVE' must not be assigned to sebi_compliance._state"
+
+# ── profit_optimizer ───────────────────────────────────────────────────────
+
+def t_profit_optimizer_settings_patch_under_lock():
+    """BUG FIX: The backtest loop (combo scoring) must run inside the _opt_lock so live
+    trading cannot observe patched settings (patched SL/target values) mid-run."""
+    import profit_optimizer as _po
+    src = _inspect.getsource(_po.phase1_optimise)
+    # try/finally restore must now be inside the lock context
+    assert "finally:" in src, \
+        "phase1_optimise must use try/finally to guarantee settings restore"
+    # The restore call must be inside the lock
+    lines = src.splitlines()
+    finally_idx = next(i for i, ln in enumerate(lines) if "finally:" in ln)
+    restore_idx = next(i for i, ln in enumerate(lines) if "_restore_settings" in ln)
+    assert restore_idx > finally_idx, \
+        "_restore_settings must be in the finally block (after 'finally:')"
+
+# ── adaptive_engine ────────────────────────────────────────────────────────
+
+def t_adaptive_engine_on_regime_change_uses_lock():
+    """BUG FIX: on_regime_change must hold self._lock when mutating AdaptiveParams
+    objects to prevent races with record_trade() which also writes params under _lock."""
+    import adaptive_engine as _ae
+    src = _inspect.getsource(_ae.AdaptiveLearningEngine.on_regime_change)
+    assert "with self._lock:" in src, \
+        "on_regime_change must hold self._lock when iterating and mutating self._params"
+
+def t_adaptive_engine_save_state_inside_regime_lock():
+    """BUG FIX: _save_state() inside on_regime_change must be called while holding
+    self._lock to prevent a torn write where the file reflects partly-updated params."""
+    import adaptive_engine as _ae
+    src = _inspect.getsource(_ae.AdaptiveLearningEngine.on_regime_change)
+    # _save_state must appear after 'with self._lock:' and before the block ends
+    lock_idx = src.find("with self._lock:")
+    save_idx = src.find("self._save_state()")
+    assert lock_idx >= 0 and save_idx > lock_idx, \
+        "_save_state() in on_regime_change must be called inside the self._lock block"
+
+# ── kite_accounts ──────────────────────────────────────────────────────────
+
+def t_kite_accounts_load_failure_leaves_loaded_false():
+    """BUG FIX: When _load() fails to decrypt accounts.json (e.g. corrupt file or
+    wrong key), it must NOT set _loaded=True. Setting _loaded=True on failure causes
+    the next write (_save) to atomically overwrite the file with an empty dict,
+    permanently destroying all stored credentials."""
+    import kite_accounts as _ka
+    src = _inspect.getsource(_ka._load)
+    # The except block must have a return BEFORE _loaded = True
+    lines = src.splitlines()
+    in_except = False
+    has_return_before_loaded = False
+    for i, ln in enumerate(lines):
+        if "except" in ln:
+            in_except = True
+        if in_except and "return" in ln:
+            has_return_before_loaded = True
+            break
+        if "_loaded = True" in ln:
+            in_except = False  # reached assignment outside except
+    assert has_return_before_loaded, \
+        "_load() except block must 'return' before reaching '_loaded = True'"
+
+# ── god_mode ────────────────────────────────────────────────────────────────
+
+def t_god_mode_capital_allocation_sum_lte_100():
+    """BUG FIX: God Mode capital allocations must sum to ≤ 100% to prevent deploying
+    more than total account equity (was 130%: 60+30+15+25), which causes margin calls."""
+    import god_mode as _gm
+    overrides = _gm._GOD_OVERRIDES
+    capital_keys = ["intraday_capital_pct", "options_capital_pct",
+                    "futures_capital_pct",  "swing_capital_pct"]
+    total_pct = sum(overrides.get(k, 0.0) for k in capital_keys)
+    assert total_pct <= 100.0, \
+        f"God Mode capital pcts must sum ≤ 100% (got {total_pct}%): {[overrides.get(k) for k in capital_keys]}"
+
+def t_god_mode_enable_snapshots_agent_states():
+    """BUG FIX: enable() must snapshot per-agent enabled states before overriding them
+    so disable() can restore exactly which agents were active before God Mode."""
+    import god_mode as _gm
+    src = _inspect.getsource(_gm.GodModeManager.enable)
+    assert "_agent_baseline" in src, \
+        "enable() must populate self._agent_baseline before enabling all agents"
+    assert "is_agent_enabled" in src, \
+        "enable() must call bot_state.is_agent_enabled() to snapshot pre-activation states"
+
+def t_god_mode_disable_restores_agent_states():
+    """BUG FIX: disable() must restore per-agent enabled states from _agent_baseline
+    so agents disabled before God Mode are properly disabled after deactivation."""
+    import god_mode as _gm
+    src = _inspect.getsource(_gm.GodModeManager.disable)
+    assert "_agent_baseline" in src, \
+        "disable() must iterate self._agent_baseline to restore per-agent states"
+    assert "set_agent_enabled" in src, \
+        "disable() must call bot_state.set_agent_enabled() to restore each agent's state"
+
+# ── auto_backtest_runner ───────────────────────────────────────────────────
+
+def t_auto_backtest_runner_sharpe_uses_sqrt_252():
+    """BUG FIX: Sharpe must be annualised with sqrt(252) (fixed factor), not sqrt(N)
+    (trade count). Using sqrt(N) makes Sharpe grow with more backtested trades,
+    making strategies tested over longer periods appear stronger with no real edge."""
+    import auto_backtest_runner as _abr
+    src = _inspect.getsource(_abr._compute_metrics)
+    assert "sqrt(252)" in src or "math.sqrt(252)" in src, \
+        "_compute_metrics must use sqrt(252) for Sharpe annualization, not sqrt(len(arr))"
+    assert "sqrt(len(arr))" not in src and "np.sqrt(len(arr))" not in src, \
+        "_compute_metrics must not use sqrt(len(arr)) — it makes Sharpe grow with trade count"
+
+run("paper_trade_sim: kill switch set to KillSwitchState.ACTIVE (not string 'ACTIVE')", t_paper_trade_sim_kill_switch_enum)
+run("profit_optimizer: backtest loop runs inside _opt_lock with try/finally restore",   t_profit_optimizer_settings_patch_under_lock)
+run("adaptive_engine: on_regime_change holds self._lock when mutating params",          t_adaptive_engine_on_regime_change_uses_lock)
+run("adaptive_engine: _save_state() in on_regime_change called inside self._lock",      t_adaptive_engine_save_state_inside_regime_lock)
+run("kite_accounts: _load() returns early on failure (not setting _loaded=True)",       t_kite_accounts_load_failure_leaves_loaded_false)
+run("god_mode: capital allocations sum ≤ 100% (was 130%: 60+30+15+25)",               t_god_mode_capital_allocation_sum_lte_100)
+run("god_mode: enable() snapshots agent enable states to _agent_baseline",             t_god_mode_enable_snapshots_agent_states)
+run("god_mode: disable() restores agent enable states from _agent_baseline",           t_god_mode_disable_restores_agent_states)
+run("auto_backtest_runner: Sharpe uses sqrt(252) annualisation, not sqrt(N trades)",   t_auto_backtest_runner_sharpe_uses_sqrt_252)
 
 # ══════════════════════════════════════════════════════════════════════════
 # FINAL SUMMARY

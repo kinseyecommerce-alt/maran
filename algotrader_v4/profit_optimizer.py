@@ -134,24 +134,23 @@ def phase1_optimise(verbose: bool = True) -> dict[str, dict]:
 
         for combo in combos:
             params = dict(zip(keys, combo))
+            combo_scores = []
             with _opt_lock:
-                # Temporarily patch settings — lock prevents concurrent optimization
-                # runs from interleaving patch/restore and corrupting live settings.
+                # Temporarily patch settings inside the lock so the live trading engine
+                # never reads patched values, and restore is guaranteed via try/finally.
                 orig = {k: getattr(settings, _attr_name(strategy, k), None) for k in keys}
                 _patch_settings(strategy, params)
-
-            combo_scores = []
-            for sym in symbols:
                 try:
-                    r = _ENGINE.run(sym, strategy, use_walk_forward=True,
-                                    lookback_days=settings.bt_lookback_days,
-                                    n_folds=settings.bt_wf_folds)
-                    combo_scores.append(_score(r))
-                except Exception as exc:
-                    logger.debug("Phase 1: backtest failed for {} [{}] — skipping: {}", sym, strategy, exc)
-
-            with _opt_lock:
-                _restore_settings(strategy, orig)
+                    for sym in symbols:
+                        try:
+                            r = _ENGINE.run(sym, strategy, use_walk_forward=True,
+                                            lookback_days=settings.bt_lookback_days,
+                                            n_folds=settings.bt_wf_folds)
+                            combo_scores.append(_score(r))
+                        except Exception as exc:
+                            logger.debug("Phase 1: backtest failed for {} [{}] — skipping: {}", sym, strategy, exc)
+                finally:
+                    _restore_settings(strategy, orig)
 
             if not combo_scores:
                 continue

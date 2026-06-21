@@ -271,19 +271,20 @@ class AdaptiveLearningEngine:
     def on_regime_change(self, old_regime: str, new_regime: str, vix: float) -> None:
         volatile_regime = new_regime in ("BEAR_VOLATILE", "HIGH_VOLATILE")
         bear_regime     = new_regime in ("BEAR_TREND", "BEAR_VOLATILE")
-        for key, params in list(self._params.items()):  # list() snapshot safe for concurrent callers
-            strategy, symbol = key.split("::", maxsplit=1)
-            if volatile_regime:
-                params.size_factor = min(params.size_factor, 0.5)
-                params.sl_pct = round(params.sl_pct * 1.2, 2)
-            if bear_regime and "swing" in strategy:
-                params.status = "CAUTIOUS"
-                params.size_factor = 0.25  # floor matches _adapt_parameters minimum; 0.0 causes zero-qty orders
-            if new_regime == "BULL_TREND" and old_regime != "BULL_TREND":
-                params.size_factor = max(0.75, params.size_factor)
-            if strategy in ("iron_condor", "short_straddle") and volatile_regime:
-                self._queue_rebacktest(strategy, symbol, f"regime→{new_regime}")
-        self._save_state()
+        with self._lock:
+            for key, params in list(self._params.items()):
+                strategy, symbol = key.split("::", maxsplit=1)
+                if volatile_regime:
+                    params.size_factor = min(params.size_factor, 0.5)
+                    params.sl_pct = round(params.sl_pct * 1.2, 2)
+                if bear_regime and "swing" in strategy:
+                    params.status = "CAUTIOUS"
+                    params.size_factor = 0.25  # floor matches _adapt_parameters minimum; 0.0 causes zero-qty orders
+                if new_regime == "BULL_TREND" and old_regime != "BULL_TREND":
+                    params.size_factor = max(0.75, params.size_factor)
+                if strategy in ("iron_condor", "short_straddle") and volatile_regime:
+                    self._queue_rebacktest(strategy, symbol, f"regime→{new_regime}")
+            self._save_state()
 
     def get_params(self, strategy: str, symbol: str) -> AdaptiveParams:
         key = f"{strategy}::{symbol}"

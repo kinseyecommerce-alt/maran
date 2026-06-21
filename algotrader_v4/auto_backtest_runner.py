@@ -29,6 +29,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import math
 import time
 from dataclasses import dataclass, field
 from datetime import datetime, date
@@ -292,7 +293,10 @@ def _compute_metrics(symbol, strategy, trades):
     cum = np.cumsum(pnls); peak = np.maximum.accumulate(cum)
     dd_pct = float(np.max(peak - cum)) / max(abs(peak.max()), 1) * 100 if len(cum) else 0
     arr = np.array(pnls)
-    sharpe = float(arr.mean() / arr.std() * np.sqrt(len(arr))) if arr.std() > 0 else 0.0
+    # Annualise with sqrt(252): treats each trade as one daily P&L observation.
+    # Using sqrt(N) would make Sharpe grow with trade count (not edge), making
+    # strategies with more backtested trades appear stronger — a comparison error.
+    sharpe = float(arr.mean() / arr.std() * math.sqrt(252)) if arr.std() > 0 else 0.0
     loss_sum = sum(abs(l) for l in losses)
     pf = sum(wins) / loss_sum if (losses and loss_sum > 0) else 0.0
     score = (win_rate * 0.35 + min(sharpe, 3) / 3 * 35 + max(0, 100 - dd_pct) * 0.20 + min(pf, 3) / 3 * 10)

@@ -63,11 +63,11 @@ _GOD_OVERRIDES: dict[str, Any] = {
     "cooldown_momentum":         90,
     "cooldown_pairs":            60,
 
-    # Capital allocation — deploy more capital
-    "intraday_capital_pct":     60.0,
-    "options_capital_pct":      30.0,
-    "futures_capital_pct":      15.0,
-    "swing_capital_pct":        25.0,
+    # Capital allocation — deploy more capital (must sum to ≤ 100%)
+    "intraday_capital_pct":     55.0,
+    "options_capital_pct":      25.0,
+    "futures_capital_pct":      10.0,
+    "swing_capital_pct":        10.0,
 
     # Risk per trade — bigger position sizing (1.5% ATR exposure vs 0.5%)
     "risk_per_trade_pct":        1.5,
@@ -109,6 +109,7 @@ class GodModeManager:
     _active: bool = False
     _baseline: dict[str, Any] = field(default_factory=dict)
     _overrides_applied: dict[str, Any] = field(default_factory=dict)
+    _agent_baseline: dict[str, bool] = field(default_factory=dict)
 
     # Maximum allowable daily loss while in God Mode: 10% of total capital.
     # Computed dynamically so it scales with the user's account size.
@@ -141,7 +142,9 @@ class GodModeManager:
             self._overrides_applied["max_daily_loss"] = god_loss
             changes["max_daily_loss"] = (old_loss, god_loss)
 
-            # Enable every agent (snapshot keys to avoid dict-size-change during iteration)
+            # Snapshot per-agent enabled states before overriding so disable() can restore them
+            self._agent_baseline = {a: bot_state.is_agent_enabled(a) for a in list(bot_state._agent_enabled)}
+            # Enable every agent
             for agent in list(bot_state._agent_enabled):
                 bot_state.set_agent_enabled(agent, True)
 
@@ -165,6 +168,11 @@ class GodModeManager:
                     current = getattr(settings, key)
                     setattr(settings, key, old_val)
                     restored[key] = (current, old_val)
+
+            # Restore per-agent enabled states that were overridden on activation
+            for agent, was_enabled in self._agent_baseline.items():
+                bot_state.set_agent_enabled(agent, was_enabled)
+            self._agent_baseline.clear()
 
             self._active = False
             self._baseline.clear()

@@ -33,7 +33,7 @@ class MLSignalFilter:
     def __init__(self) -> None:
         self._model   = None          # sklearn GBM
         self._encoder = {}            # categorical → int mapping
-        self._lock    = threading.Lock()
+        self._lock    = threading.RLock()   # reentrant: filter_signal holds lock while _encode re-acquires it
         self._new_since_train = 0
         self._load()
         if self._model is None:
@@ -64,11 +64,15 @@ class MLSignalFilter:
             if self._model is None:
                 return True, 0.5
             m = self._model   # capture reference while holding lock
+            try:
+                features = self._build_features(
+                    rsi, adx, volume_ratio, macd_hist, bb_width,
+                    atr_pct, score, session, agent, direction,
+                )
+            except Exception as exc:
+                logger.debug("[MLFilter] feature build error: {}", exc)
+                return True, 0.5
         try:
-            features = self._build_features(
-                rsi, adx, volume_ratio, macd_hist, bb_width,
-                atr_pct, score, session, agent, direction,
-            )
             prob = float(m.predict_proba([features])[0][1])
             return prob >= min_prob, prob
         except Exception as exc:
@@ -77,11 +81,6 @@ class MLSignalFilter:
 
     def record_outcome(self, won: bool) -> None:
         """Call after a trade closes to trigger retraining from SQLite trade history."""
-        try:
-            from state_store import state_store as _ss
-            _ss  # just verify import works
-        except Exception:
-            pass
         with self._lock:
             self._new_since_train += 1
             if self._new_since_train >= _RETRAIN_EVERY:
@@ -140,8 +139,10 @@ class MLSignalFilter:
                 self._model = clf
                 enc_snapshot = dict(self._encoder)   # snapshot under lock before disk write
             _MODEL_PATH.parent.mkdir(parents=True, exist_ok=True)
-            with open(_MODEL_PATH, "wb") as f:
+            tmp = _MODEL_PATH.with_suffix(".tmp")
+            with open(tmp, "wb") as f:
                 pickle.dump((clf, enc_snapshot), f)
+            tmp.replace(_MODEL_PATH)   # atomic rename — crash-safe
             wins = sum(y)
             logger.info("[MLFilter] retrained on {} trades | win rate {:.0f}%",
                         len(y), 100 * wins / max(len(y), 1))
@@ -155,12 +156,11 @@ class MLSignalFilter:
             db_path = Path(__file__).parent / "logs" / "algotrader.db"
             if not db_path.exists():
                 return []
-            con = sqlite3.connect(db_path)
-            con.row_factory = sqlite3.Row
-            rows = con.execute(
-                "SELECT * FROM trades ORDER BY exit_time DESC LIMIT 500"
-            ).fetchall()
-            con.close()
+            with sqlite3.connect(db_path) as con:
+                con.row_factory = sqlite3.Row
+                rows = con.execute(
+                    "SELECT * FROM trades ORDER BY exit_time DESC LIMIT 500"
+                ).fetchall()
             return [dict(r) for r in rows]
         except Exception:
             return []
