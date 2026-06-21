@@ -627,9 +627,27 @@ class BaseAgent(ABC):
                         _bypass_score = getattr(settings, "gate_bypass_min_score", 9)
                         _sig_score    = signal.get("score", 0)
 
+                        # Scalping fast-path: skip the 400-800ms API call entirely.
+                        # Scalping holds 2-12 min — gate latency is meaningful slippage.
+                        # The score threshold (0-10) already encodes edge; AI veto adds
+                        # nothing a tight SL doesn't already handle.
+                        _scalp_skip = (
+                            self.strategy == "scalping"
+                            and getattr(settings, "scalping_skip_gate", True)
+                        )
+                        if _scalp_skip:
+                            record_gate_decision(True)
+                            _activity(
+                                agent=self.name, event="GATE_BYPASS",
+                                symbol=snap.symbol, side=action,
+                                price=snap.tick.ltp,
+                                pattern=signal.get("pattern", ""),
+                                gate_conf=100,
+                            )
+
                         # High-conviction bypass: skip the 8-20s Opus API call for the
                         # strongest signals (score ≥ gate_bypass_min_score).
-                        if _sig_score >= _bypass_score:
+                        elif _sig_score >= _bypass_score:
                             logger.debug(
                                 "[{}] {} gate bypass score={} ≥ {} — auto-approve",
                                 self.name, snap.symbol, _sig_score, _bypass_score,

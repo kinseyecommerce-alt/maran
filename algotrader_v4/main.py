@@ -2893,6 +2893,10 @@ async def on_startup():
         from position_reconciler import position_reconciler
         asyncio.create_task(position_reconciler.run_loop(), name="position_reconciler").add_done_callback(_log_task_exc)
 
+    # Pre-warm Kite HTTP connection pool — avoids ~50 ms TCP handshake on first live order.
+    loop = asyncio.get_running_loop()
+    loop.run_in_executor(None, kite_client.warm_connections)
+
     # Pre-warm the Claude gate connection so the first real trade doesn't pay
     # the cold-start TCP/TLS handshake cost (~300-500 ms).
     asyncio.create_task(_prewarm_gate(), name="prewarm_gate").add_done_callback(_log_task_exc)
