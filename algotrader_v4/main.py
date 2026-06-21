@@ -108,6 +108,7 @@ _SENSITIVE_GETS = frozenset({
     "/symbols/selected",               # live per-strategy watchlists
     "/admin/users",                    # friend instance list — admin only
     "/portfolio/greeks",               # live options greeks — exposes position details
+    "/portfolio/implementation-shortfall",  # slippage analytics leaks order timing
 })
 
 @app.middleware("http")
@@ -204,6 +205,7 @@ _RATE_LIMITS = {
     "/orders/squareoff": 5,
     "/orders/multi-leg": 10,
     "/sebi/kill-switch": 3,
+    "/twap/place": 5,
 }
 
 @app.middleware("http")
@@ -785,7 +787,10 @@ async def stop_bot():
     return {"status": "stopped"}
 
 @app.post("/bot/test-order", tags=["Bot"])
-async def test_order(symbol: str = "SBIN", qty: int = 1):
+async def test_order(
+    symbol: str = Query(default="SBIN"),
+    qty: int = Query(default=1, gt=0, le=10),
+):
     """Place 1-share MARKET BUY to verify Kite connectivity, then immediately cancel."""
     if sebi_compliance._state.value == "KILLED":
         raise HTTPException(status_code=503, detail="Kill switch active — test order blocked")
@@ -3119,7 +3124,7 @@ async def prometheus_metrics():
 
 
 @app.get("/risk/stress-test", tags=["Risk"])
-async def stress_test(shock_pct: float = -5.0):
+async def stress_test(shock_pct: float = Query(default=-5.0, ge=-50.0, le=50.0)):
     """Simulate a market shock (default -5% Nifty) and compute portfolio impact."""
     from trailing_sl_engine import trailing_sl_engine as _tsl
     from risk_manager import _BETA_MAP
@@ -3185,7 +3190,8 @@ async def implementation_shortfall(days: int = 30):
             "total_shortfall_inr": round(sum(inr_list), 0),
         }
     except Exception as e:
-        return {"error": str(e)}
+        logger.error("implementation-shortfall error: {}", e)
+        raise HTTPException(500, "Unable to compute implementation shortfall")
 
 
 @app.post("/notifications/test", tags=["Operations"])
@@ -3197,7 +3203,8 @@ async def test_notification(body: dict = Body(default={"message": "AlgoTrader te
         _notifier.send(subject=msg, body="This is a test notification from AlgoTrader Pro.", level="INFO")
         return {"status": "sent", "message": msg}
     except Exception as e:
-        return {"status": "error", "detail": str(e)}
+        logger.error("Notification test failed: {}", e)
+        return {"status": "error", "detail": "Notification dispatch failed — check server logs"}
 
 
 
@@ -3408,15 +3415,16 @@ async def get_twap_status():
 
 @app.post("/twap/place", tags=["Orders"])
 async def place_twap_order(
-    symbol: str,
-    qty: int,
-    direction: str,
-    exchange: str = "NSE",
-    product: str = "MIS",
-    duration_sec: float = None,
-    slices: int = None,
+    symbol: str = Query(...),
+    qty: int = Query(..., gt=0, le=10_000),
+    direction: Literal["BUY", "SELL"] = Query(...),
+    exchange: Literal["NSE", "BSE", "NFO", "BFO", "CDS", "MCX"] = Query(default="NSE"),
+    product: Literal["MIS", "CNC", "NRML"] = Query(default="MIS"),
+    duration_sec: float = Query(default=None, ge=1.0, le=3600.0),
+    slices: int = Query(default=None, ge=1, le=100),
 ):
     """Manually place a TWAP order for a large lot. direction: BUY or SELL."""
+    symbol = _clean_symbol(symbol)
     from twap_executor import twap_executor
     loop = asyncio.get_running_loop()
     ids = await twap_executor.place_twap(

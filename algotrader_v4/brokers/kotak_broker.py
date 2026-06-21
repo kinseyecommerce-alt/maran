@@ -86,9 +86,9 @@ def _kotak_pos_to_kite(p: dict) -> dict:
     buy_qty  = int(p.get("flBuyQty",  0))
     sell_qty = int(p.get("flSellQty", 0))
     if buy_qty > 0:
-        avg = float(p.get("buyAmt", 0)) / buy_qty
+        avg = float(p.get("buyAmt") or 0) / buy_qty
     elif sell_qty > 0:
-        avg = float(p.get("sellAmt", 0)) / sell_qty
+        avg = float(p.get("sellAmt") or 0) / sell_qty
     else:
         avg = 0.0
     return {
@@ -311,6 +311,10 @@ class KotakBroker(BaseBroker):
         }
         data = self._post("/trade/api/v1/order", payload)
         order_id = data.get("data", {}).get("nOrdNo") or data.get("nOrdNo", "")
+        if not order_id:
+            raise RuntimeError(
+                f"[Kotak] place_order returned empty order_id — response: {data}"
+            )
         logger.info("[Kotak] {} {} {} qty={} price={} | id={}",
                     transaction_type, tradingsymbol, order_type, quantity, price, order_id)
         return str(order_id)
@@ -432,10 +436,14 @@ class KotakBroker(BaseBroker):
         on_close_cb: Any = None,
     ) -> Any:
         from brokers.kotak_ticker import KotakTicker
+        with self._token_lock:
+            token = self._access_token
+            sid   = self._sid
+            ckey  = self._consumer_key
         return KotakTicker(
-            access_token=self._access_token,
-            sid=self._sid,
-            consumer_key=self._consumer_key,
+            access_token=token,
+            sid=sid,
+            consumer_key=ckey,
             token_to_symbol=token_to_symbol,
             on_tick_cb=on_tick_cb,
             on_connect_cb=on_connect_cb,
@@ -472,6 +480,39 @@ class KotakBroker(BaseBroker):
         logger.info("[KOTAK-PAPER] {} {} {} qty={} @ ₹{} | id={}",
                     transaction_type, tradingsymbol, order_type, quantity, price, order_id)
         return order_id
+
+    def check_paper_triggers(self, symbol: str, ltp: float) -> None:
+        """Check pending SL/SL-M paper orders for *symbol* and fill them at *ltp*."""
+        with self._paper_orders_lock:
+            for order in self._paper_orders.values():
+                if order["tradingsymbol"] != symbol:
+                    continue
+                if order["status"] != "TRIGGER PENDING":
+                    continue
+                tp = order.get("trigger_price", 0.0)
+                if tp <= 0:
+                    continue
+                triggered = (
+                    (order["transaction_type"] == "SELL" and ltp <= tp)
+                    or (order["transaction_type"] == "BUY" and ltp >= tp)
+                )
+                if triggered:
+                    order["status"] = "COMPLETE"
+                    order["price"]  = ltp
+                    self._update_paper_position(order)
+                    logger.info(
+                        "[KOTAK-PAPER] Trigger hit — {} {} {} qty={} trigger=₹{} fill=₹{}",
+                        order["transaction_type"], symbol,
+                        order["order_type"], order["quantity"], tp, ltp,
+                    )
+
+    def update_paper_pnl(self, symbol: str, ltp: float) -> None:
+        """Update last_price and P&L for every paper position matching *symbol*."""
+        with self._paper_orders_lock:
+            for pos in self._paper_positions:
+                if pos["tradingsymbol"] == symbol:
+                    pos["last_price"] = ltp
+                    pos["pnl"] = round((ltp - pos["average_price"]) * pos["quantity"], 2)
 
     def _update_paper_position(self, order: dict) -> None:
         """Update paper positions. Must be called with _paper_orders_lock held."""

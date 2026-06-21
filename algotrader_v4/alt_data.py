@@ -348,6 +348,9 @@ class AltDataEngine:
         """Manually override FII/DII sentiment (testing / manual input)."""
         with self._lock:
             self._fii_sentiment = max(-1.0, min(1.0, score))
+            self._fii_dii.setdefault("fii_net", 0.0)
+            self._fii_dii.setdefault("dii_net", 0.0)
+            self._fii_dii.setdefault("date", "")
             self._fii_dii["sentiment_score"] = self._fii_sentiment
             self._fii_dii["source"] = "manual"
 

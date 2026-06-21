@@ -107,7 +107,8 @@ def calculate_greeks(
     e_rT    = math.exp(-r * T)
     nd1     = _n(d1)
 
-    gamma   = nd1 / (spot * iv * sqrt_T)
+    _gamma_denom = spot * iv * sqrt_T
+    gamma   = nd1 / _gamma_denom if _gamma_denom > 1e-10 else 0.0
     vega    = spot * nd1 * sqrt_T / 100.0   # per 1% IV
 
     if option_type == "CE":

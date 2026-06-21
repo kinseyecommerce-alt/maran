@@ -375,7 +375,7 @@ class UpstoxBroker(BaseBroker):
     def orders(self) -> list[dict]:
         if settings.trading_mode == "PAPER":
             with self._paper_lock:
-                return list(self._paper_orders)
+                return [dict(o) for o in self._paper_orders]
 
         try:
             data = self._get("/order/retrieve-all")
@@ -463,8 +463,10 @@ class UpstoxBroker(BaseBroker):
         Returns an UpstoxTicker instance wired to the given callbacks.
         """
         from brokers.upstox_ticker import UpstoxTicker
+        with self._token_lock:
+            token = self._access_token
         ticker = UpstoxTicker(
-            access_token=self._access_token,
+            access_token=token,
             token_to_symbol=token_to_symbol,
             on_tick_cb=on_tick_cb,
             on_connect_cb=on_connect_cb,
@@ -538,8 +540,8 @@ class UpstoxBroker(BaseBroker):
             "exchange":      order["exchange"],
             "product":       order["product"],
             "quantity":      qty_delta,
-            "average_price": order["price"],
-            "last_price":    order["price"],
+            "average_price": order["price"] if order["price"] > 0 else order.get("trigger_price", 0.0),
+            "last_price":    order["price"] if order["price"] > 0 else order.get("trigger_price", 0.0),
             "pnl":           0.0,
         })
 

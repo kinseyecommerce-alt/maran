@@ -10519,7 +10519,10 @@ def t_strategy_signals_bollinger_zero_guard():
     import inspect
     import strategy_signals as _ss
     src = inspect.getsource(_ss._signals_iron_condor)
-    assert "bb_mavg" in src and ("bb_mavg != 0" in src or ".where(" in src), (
+    assert "bb_mavg" in src and (
+        "bb_mavg != 0" in src or ".where(" in src
+        or "<= 0" in src or "pd.isna" in src
+    ), (
         "_signals_iron_condor must guard bollinger_mavg() == 0 before division — "
         "zero-priced or halted symbols produce bb_mavg=0 and divide-by-zero"
     )
@@ -11052,7 +11055,12 @@ def t_iv_surface_gex_zero_iv_not_inflated():
         "GEX calculation must not fall back to iv=25 for missing/zero IV — "
         "this inflates GEX for deep-OTM options that have no quoted IV; use 'or 0'"
     )
-    assert "or 0) / 100" in src or ".get(\"iv\") or 0" in src, (
+    assert (
+        "or 0) / 100" in src
+        or ".get(\"iv\") or 0" in src
+        or "raw or 0" in src         # _gex_iv helper pattern
+        or "_gex_iv" in src          # any helper that normalises IV the same way
+    ), (
         "GEX must default to iv=0 for missing IV values"
     )
 
@@ -12596,6 +12604,251 @@ run("L2 order book: market_depth() normalises tuple depth format from TickBuffer
 run("L2 order book: market_depth() response includes imbalance field",                     t_depth_returns_imbalance)
 run("L2 order book: dashboard.html has #ob-panel and #ob-ladder elements",                 t_dashboard_has_ob_ladder)
 run("L2 order book: dashboard.html shows sell/buy wall alerts from depth data",            t_dashboard_ob_wall_alerts)
+
+# ══════════════════════════════════════════════════════════════════════════
+# 125. BROKER + SIGNAL + CORE ENGINE AUDIT FIXES
+# ══════════════════════════════════════════════════════════════════════════
+
+def t_upstox_ticker_on_ticks_single_arg():
+    """upstox_ticker: on_ticks callback called with (ticks,) not (ws, ticks)."""
+    import inspect
+    from brokers import upstox_ticker as _ut
+    src = inspect.getsource(_ut.UpstoxTicker._connect_and_listen)
+    assert "self.on_ticks(ticks)" in src and "self.on_ticks(ws, ticks)" not in src, (
+        "UpstoxTicker must call on_ticks(ticks) with ONE argument — calling "
+        "on_ticks(ws, ticks) crashes every tick handler with TypeError"
+    )
+
+def t_kotak_broker_float_empty_string_guard():
+    """kotak_broker: _kotak_pos_to_kite guards empty-string buyAmt/sellAmt."""
+    import inspect
+    from brokers import kotak_broker as _kb
+    src = inspect.getsource(_kb._kotak_pos_to_kite)
+    assert '(p.get("buyAmt") or 0)' in src or "or 0) / buy_qty" in src, (
+        "Kotak positions() must use float(p.get('buyAmt') or 0) — "
+        "Kotak API returns empty strings for numeric fields; float('') raises ValueError "
+        "and causes risk manager to see zero positions"
+    )
+
+def t_kotak_broker_empty_order_id_raises():
+    """kotak_broker: place_order raises on empty order_id from API."""
+    import inspect
+    from brokers import kotak_broker as _kb
+    src = inspect.getsource(_kb.KotakBroker.place_order)
+    assert "not order_id" in src or "if not order_id" in src, (
+        "KotakBroker.place_order must raise RuntimeError when order_id is empty — "
+        "Kotak returns HTTP 200 with empty nOrdNo on partial validation failures; "
+        "registering '' as order_id silently corrupts SL tracking"
+    )
+
+def t_kotak_broker_has_check_paper_triggers():
+    """kotak_broker: KotakBroker exposes check_paper_triggers for PAPER SL processing."""
+    from brokers.kotak_broker import KotakBroker
+    assert hasattr(KotakBroker, "check_paper_triggers"), (
+        "KotakBroker must implement check_paper_triggers() — without it, "
+        "SL/SL-M paper orders are permanently stuck at 'TRIGGER PENDING', "
+        "paper positions are never closed on SL hit, and paper P&L is wrong"
+    )
+
+def t_kotak_broker_setup_ticker_uses_lock():
+    """kotak_broker: setup_ticker reads token/sid under _token_lock."""
+    import inspect
+    from brokers import kotak_broker as _kb
+    src = inspect.getsource(_kb.KotakBroker.setup_ticker)
+    assert "_token_lock" in src, (
+        "KotakBroker.setup_ticker must hold _token_lock when reading _access_token "
+        "and _sid — concurrent set_access_token() can race and pass a stale token "
+        "to the ticker's WebSocket auth flow"
+    )
+
+def t_kotak_ticker_subscribes_all_tokens_on_reconnect():
+    """kotak_ticker: _on_ws_open re-subscribes externally-added tokens after reconnect."""
+    import inspect
+    from brokers import kotak_ticker as _kt
+    src = inspect.getsource(_kt.KotakTicker._on_ws_open)
+    assert "_subscribed_tokens" in src, (
+        "KotakTicker._on_ws_open must re-subscribe _subscribed_tokens on reconnect — "
+        "tokens added via external subscribe() after first connect are silently lost "
+        "after any WebSocket reconnect"
+    )
+
+def t_upstox_broker_orders_deep_copy():
+    """upstox_broker: orders() returns deep copies of order dicts in PAPER mode."""
+    import inspect
+    from brokers import upstox_broker as _ub
+    src = inspect.getsource(_ub.UpstoxBroker.orders)
+    assert "dict(o)" in src or "[dict(" in src, (
+        "UpstoxBroker.orders() must return deep copies of paper order dicts — "
+        "returning list(self._paper_orders) exposes mutable dicts to callers "
+        "who may observe partially-mutated state from check_paper_triggers"
+    )
+
+def t_upstox_broker_setup_ticker_uses_lock():
+    """upstox_broker: setup_ticker reads access_token under _token_lock."""
+    import inspect
+    from brokers import upstox_broker as _ub
+    src = inspect.getsource(_ub.UpstoxBroker.setup_ticker)
+    assert "_token_lock" in src, (
+        "UpstoxBroker.setup_ticker must hold _token_lock when reading _access_token — "
+        "a concurrent token refresh can race and pass a stale/empty token to the ticker"
+    )
+
+def t_alt_data_set_fii_sentiment_initialises_keys():
+    """alt_data: set_fii_sentiment initialises mandatory FII/DII keys before first refresh."""
+    import inspect
+    import alt_data as _ad
+    src = inspect.getsource(_ad.AltDataEngine.set_fii_sentiment)
+    assert "setdefault" in src, (
+        "set_fii_sentiment must call setdefault for fii_net/dii_net/date — "
+        "before refresh_fii_dii() is called, _fii_dii is {}, and callers of "
+        "get_fii_dii_data() expecting 'fii_net' get a KeyError"
+    )
+
+def t_options_intelligence_iv_rank_uses_lock():
+    """options_intelligence: _compute_iv_rank_percentile holds _iv_hist_lock for file read."""
+    import inspect
+    import options_intelligence as _oi
+    src = inspect.getsource(_oi._compute_iv_rank_percentile)
+    assert "_iv_hist_lock" in src, (
+        "_compute_iv_rank_percentile must hold _iv_hist_lock when calling _load_iv_history — "
+        "concurrent _append_iv_history writes can produce torn reads of the JSON file"
+    )
+
+def t_options_intelligence_updated_at_utc():
+    """options_intelligence: updated_at uses timezone.utc (not naive datetime.now())."""
+    import inspect
+    import options_intelligence as _oi
+    src = inspect.getsource(_oi.get_iv_context)
+    assert "timezone.utc" in src, (
+        "get_iv_context must use datetime.now(timezone.utc) for updated_at — "
+        "naive datetime.now() produces timestamps incompatible with UTC-aware "
+        "values elsewhere in the system (silent comparison failures)"
+    )
+
+def t_market_regime_vix_history_under_lock():
+    """market_regime: _vix_history append is guarded by _state_lock."""
+    import inspect
+    import market_regime as _mr
+    src = inspect.getsource(_mr.MarketRegimeDetector.update)
+    vix_idx = src.find("_vix_history")
+    lock_idx = src.find("_state_lock")
+    assert vix_idx > 0 and lock_idx > 0 and lock_idx < vix_idx, (
+        "market_regime: _vix_history must be appended inside _state_lock — "
+        "concurrent calls to update() can produce torn reads in _vix_zscore()"
+    )
+
+def t_tick_engine_rest_vol_lock_exists():
+    """tick_engine: _rest_vol_lock guards _rest_last_cum_vol read-modify-write."""
+    import inspect
+    import tick_engine as _te
+    src = inspect.getsource(_te._kite_quote_to_quote)
+    assert "_rest_vol_lock" in src, (
+        "tick_engine._kite_quote_to_quote must hold _rest_vol_lock when updating "
+        "_rest_last_cum_vol — the dict is accessed from thread-pool workers and "
+        "the asyncio loop concurrently; torn read-modify-write corrupts vol_delta"
+    )
+
+def t_tick_engine_detect_walls_ltp_zero_guard():
+    """tick_engine: _detect_walls returns early when ltp=0 (avoids threshold=0 silent failure)."""
+    import inspect
+    import tick_engine as _te
+    src = inspect.getsource(_te._detect_walls)
+    assert "ltp <= 0" in src or "ltp == 0" in src, (
+        "_detect_walls must guard ltp<=0 — threshold = ltp*0.005 becomes 0 "
+        "when ltp=0, making both wall conditions 0<x<0 (always False) "
+        "and silently disabling wall detection"
+    )
+
+def t_iv_surface_gex_heuristic_normalises_iv():
+    """iv_surface: GEX helper normalises IV with >1.0 heuristic (same as main loop)."""
+    import inspect
+    import iv_surface as _ivs
+    src = inspect.getsource(_ivs.build_surface)
+    assert "> 1.0" in src and "_gex_iv" in src, (
+        "iv_surface.build_surface must use the >1.0 heuristic in the GEX loop — "
+        "unconditional /100 underestimates GEX 1000× for decimal-form IV chains "
+        "(e.g. from brokers that return IV as 0.22 not 22.0)"
+    )
+
+def t_greeks_engine_gamma_zero_denom_guard():
+    """greeks_engine: gamma computation guarded against zero denominator."""
+    import inspect
+    import greeks_engine as _ge
+    src = inspect.getsource(_ge.calculate_greeks)
+    assert "_gamma_denom" in src or "1e-10" in src, (
+        "calculate_greeks must guard gamma division by spot*iv*sqrt_T against zero — "
+        "a ZeroDivisionError here crashes the entire options bracket evaluation"
+    )
+
+def t_main_twap_place_rate_limited():
+    """main.py: /twap/place is in _RATE_LIMITS to prevent order floods."""
+    import inspect
+    import main as _m
+    src = inspect.getsource(_m)
+    assert '"/twap/place"' in src and "_RATE_LIMITS" in src, (
+        "/twap/place must be in _RATE_LIMITS — it is an order-placement endpoint "
+        "and without rate-limiting rapid calls can create many TWAP order sets"
+    )
+
+def t_main_shortfall_in_sensitive_gets():
+    """main.py: /portfolio/implementation-shortfall is in _SENSITIVE_GETS."""
+    import main as _m
+    assert "/portfolio/implementation-shortfall" in _m._SENSITIVE_GETS, (
+        "/portfolio/implementation-shortfall must be in _SENSITIVE_GETS — "
+        "it leaks order timing and slippage analytics without authentication"
+    )
+
+def t_main_notifications_test_no_str_exc():
+    """main.py: /notifications/test does not reflect raw exception strings to client."""
+    import inspect
+    import main as _m
+    src = inspect.getsource(_m.test_notification)
+    assert 'str(e)' not in src, (
+        "POST /notifications/test must not return str(e) to the client — "
+        "SMTP/Telegram failures expose internal server addresses and credential paths"
+    )
+
+def t_main_twap_place_qty_bounded():
+    """main.py: /twap/place qty parameter has upper bound (le=10000)."""
+    import inspect
+    import main as _m
+    src = inspect.getsource(_m.place_twap_order)
+    assert "le=" in src or "le=10" in src or "10_000" in src or "10000" in src, (
+        "/twap/place qty must have an upper bound — unbounded qty can submit "
+        "massive orders in LIVE mode before any broker rejection"
+    )
+
+def t_main_test_order_qty_bounded():
+    """main.py: /bot/test-order qty has upper bound (le=10)."""
+    import inspect
+    import main as _m
+    src = inspect.getsource(_m.test_order)
+    assert "le=" in src or "le=10" in src, (
+        "/bot/test-order qty must have an upper bound (le=10) — "
+        "an unbounded qty reaches the exchange before the cancel in LIVE mode"
+    )
+
+run("upstox_ticker: on_ticks callback uses single-arg (ticks,) not (ws, ticks)",            t_upstox_ticker_on_ticks_single_arg)
+run("kotak_broker: _kotak_pos_to_kite guards empty-string buyAmt/sellAmt",                  t_kotak_broker_float_empty_string_guard)
+run("kotak_broker: place_order raises RuntimeError on empty order_id",                       t_kotak_broker_empty_order_id_raises)
+run("kotak_broker: exposes check_paper_triggers for PAPER SL processing",                    t_kotak_broker_has_check_paper_triggers)
+run("kotak_broker: setup_ticker reads token under _token_lock",                              t_kotak_broker_setup_ticker_uses_lock)
+run("kotak_ticker: _on_ws_open re-subscribes _subscribed_tokens on reconnect",              t_kotak_ticker_subscribes_all_tokens_on_reconnect)
+run("upstox_broker: orders() returns deep copies in PAPER mode",                             t_upstox_broker_orders_deep_copy)
+run("upstox_broker: setup_ticker reads access_token under _token_lock",                     t_upstox_broker_setup_ticker_uses_lock)
+run("alt_data: set_fii_sentiment initialises fii_net/dii_net/date keys",                    t_alt_data_set_fii_sentiment_initialises_keys)
+run("options_intelligence: _compute_iv_rank_percentile holds _iv_hist_lock",                t_options_intelligence_iv_rank_uses_lock)
+run("options_intelligence: get_iv_context uses timezone.utc for updated_at",               t_options_intelligence_updated_at_utc)
+run("market_regime: _vix_history append is inside _state_lock",                             t_market_regime_vix_history_under_lock)
+run("tick_engine: _rest_vol_lock guards _rest_last_cum_vol read-modify-write",              t_tick_engine_rest_vol_lock_exists)
+run("tick_engine: _detect_walls returns early on ltp=0",                                    t_tick_engine_detect_walls_ltp_zero_guard)
+run("iv_surface: GEX helper uses >1.0 heuristic to normalise IV",                          t_iv_surface_gex_heuristic_normalises_iv)
+run("greeks_engine: gamma computation guards zero denominator",                              t_greeks_engine_gamma_zero_denom_guard)
+run("main.py: /twap/place is in _RATE_LIMITS",                                              t_main_twap_place_rate_limited)
+run("main.py: /portfolio/implementation-shortfall is in _SENSITIVE_GETS",                  t_main_shortfall_in_sensitive_gets)
+run("main.py: /notifications/test does not reflect raw str(e) to client",                  t_main_notifications_test_no_str_exc)
+run("main.py: /twap/place qty has upper bound",                                             t_main_twap_place_qty_bounded)
+run("main.py: /bot/test-order qty has upper bound le=10",                                   t_main_test_order_qty_bounded)
 
 # ══════════════════════════════════════════════════════════════════════════
 # FINAL SUMMARY

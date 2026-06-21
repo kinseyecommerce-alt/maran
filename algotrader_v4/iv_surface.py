@@ -112,12 +112,16 @@ def build_surface(symbol: str, chain: list[dict], spot: float) -> SkewData:
         direction = "NEUTRAL"
 
     # Net GEX proxy: Σ call_oi×iv² – Σ put_oi×iv²  (dimensionless relative measure)
-    # Use iv=0 for zero/missing IV to avoid inflating GEX for deep-OTM options
+    # Use same heuristic as main loop: iv>1 means %-encoded, else already decimal.
+    def _gex_iv(raw) -> float:
+        v = float(raw or 0)
+        return v / 100.0 if v > 1.0 else v
+
     gex_net = sum(
         int(float((row.get("CE") or {}).get("oi", 0) or 0))
-        * ((float((row.get("CE") or {}).get("iv") or 0) / 100) ** 2)
+        * (_gex_iv((row.get("CE") or {}).get("iv", 0)) ** 2)
         - int(float((row.get("PE") or {}).get("oi", 0) or 0))
-        * ((float((row.get("PE") or {}).get("iv") or 0) / 100) ** 2)
+        * (_gex_iv((row.get("PE") or {}).get("iv", 0)) ** 2)
         for row in chain if int(float(row.get("strike", 0))) > 0
     )
 

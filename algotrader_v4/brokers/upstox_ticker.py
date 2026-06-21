@@ -156,7 +156,7 @@ class UpstoxTicker:
                     data = json.loads(message)
                 ticks = self._parse_ticks(data)
                 if ticks and self.on_ticks:
-                    self.on_ticks(ws, ticks)
+                    self.on_ticks(ticks)
             except Exception as exc:
                 logger.debug("[UpstoxTicker] Message parse error: {}", exc)
 
@@ -277,7 +277,13 @@ class UpstoxTicker:
         return ticks
 
     def is_connected(self) -> bool:
-        return self._running and self._ws is not None
+        ws = self._ws
+        return (
+            self._running
+            and ws is not None
+            and getattr(ws, "sock", None) is not None
+            and getattr(ws.sock, "connected", False)
+        )
 
     # ── KiteTicker-compatible interface ──────────────────────────────────────
 
