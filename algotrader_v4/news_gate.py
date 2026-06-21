@@ -87,7 +87,8 @@ class NewsGate:
             )
             headers = {"User-Agent": "Mozilla/5.0", "Accept": "application/json"}
             try:
-                async with httpx.AsyncClient(timeout=8.0) as client:
+                _timeout = httpx.Timeout(connect=4.0, read=8.0, write=4.0, pool=2.0)
+                async with httpx.AsyncClient(timeout=_timeout) as client:
                     resp = await client.get(url, headers=headers)
                     resp.raise_for_status()
                     announcements = resp.json()
@@ -102,7 +103,7 @@ class NewsGate:
                     if not sym:
                         continue
                     subject = str(ann.get("subject") or ann.get("desc") or "")
-                    if self._score_text(subject) <= -1.0:
+                    if self._score_text(subject) < -1.0:
                         self.block(sym, f"NSE: {subject[:80]}")
                 except Exception as exc:
                     logger.debug("NewsGate: announcement parse error: {}", exc)

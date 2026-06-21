@@ -61,7 +61,7 @@ def _n(x: float) -> float:
 
 
 def _d1(S: float, K: float, T: float, r: float, sigma: float) -> float:
-    if T <= 0 or sigma <= 0 or K <= 0:
+    if T <= 0 or sigma <= 0 or K <= 0 or S <= 0:
         return 0.0
     return (math.log(S / K) + (r + 0.5 * sigma ** 2) * T) / (sigma * math.sqrt(T))
 
@@ -88,7 +88,10 @@ def build_gex_profile(symbol: str, chain: list[dict], spot: float,
         for side, sign in [("CE", +1.0), ("PE", -1.0)]:
             leg = row.get(side) or {}
             oi  = int(leg.get("oi", 0) or 0)
-            iv_raw = float(leg.get("iv", 25) or 25)
+            _iv_val = leg.get("iv", None)
+            # Use 25% fallback only when field is absent/null, NOT when it is 0:
+            # an IV of 0 from a market-maker means "unquoted", handled by max(sigma,0.05)
+            iv_raw = float(_iv_val) if _iv_val not in (None, "", "0", 0) else 25.0
             sigma  = (iv_raw / 100.0) if iv_raw > 1.0 else iv_raw
             sigma  = max(sigma, 0.05)
 

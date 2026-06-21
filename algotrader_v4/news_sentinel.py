@@ -60,9 +60,13 @@ class NewsSentinel:
                 if time.time() - ts < _CACHE_TTL_SECONDS:
                     logger.debug("[NewsSentinel] {}: {} headlines (cached)", symbol, len(headlines))
                     return headlines
+            # Write an in-flight placeholder so concurrent callers for the same
+            # symbol see a fresh (empty) entry and don't fire duplicate RSS fetches.
+            self._cache[sym_upper] = (time.time(), [])
             # Purge stale entries to prevent unbounded growth
             cutoff = time.time() - _CACHE_TTL_SECONDS
-            stale = [k for k, (t, _) in self._cache.items() if t < cutoff]
+            stale = [k for k, (t, _) in self._cache.items()
+                     if t < cutoff and k != sym_upper]
             for k in stale:
                 del self._cache[k]
 
@@ -111,9 +115,9 @@ class NewsSentinel:
                     headline = self._extract_headline(item, sym_lower)
                     if headline and headline not in results:
                         results.append(headline)
-                    if len(results) >= max_headlines * 2:
-                        # Gather a wider pool then trim
-                        break
+                        if len(results) >= max_headlines * 2:
+                            # Gathered a wide enough pool; trim on return
+                            break
 
             except Exception as exc:
                 logger.debug("[NewsSentinel] feed {} error: {}", feed_url, exc)

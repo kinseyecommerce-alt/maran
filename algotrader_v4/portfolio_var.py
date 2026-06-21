@@ -26,8 +26,8 @@ class PortfolioVaR:
                     continue
                 rets = np.diff(closes) / closes[:-1]
                 result[sym] = rets
-            except Exception:
-                pass
+            except Exception as exc:
+                logger.debug("[PortfolioVaR] _fetch_returns failed for {}: {}", sym, exc)
         return result
 
     def compute(self, positions: list[dict]) -> dict:

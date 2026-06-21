@@ -158,10 +158,11 @@ def _parse_delivery(raw: Optional[dict]) -> dict[str, float]:
         )
 
         try:
-            del_qty    = float(del_qty)
-            traded_qty = float(traded_qty)
+            del_qty    = float(str(del_qty).strip()   if str(del_qty).strip()    not in ("", "-", "N/A") else 0)
+            traded_qty = float(str(traded_qty).strip() if str(traded_qty).strip() not in ("", "-", "N/A") else 0)
             if traded_qty > 0:
-                result[symbol] = round((del_qty / traded_qty) * 100.0, 2)
+                pct = (del_qty / traded_qty) * 100.0
+                result[symbol] = round(min(100.0, max(0.0, pct)), 2)
         except (TypeError, ValueError):
             continue
 
@@ -194,8 +195,10 @@ def _parse_block_deals(raw: Optional[dict]) -> dict[str, dict]:
             continue
 
         try:
-            qty   = int(float(rec.get("quantity") or rec.get("qty") or 0))
-            price = float(rec.get("tradePrice") or rec.get("trade_price") or 0)
+            raw_qty   = rec.get("quantity") if rec.get("quantity") is not None else rec.get("qty")
+            raw_price = rec.get("tradePrice") if rec.get("tradePrice") is not None else rec.get("trade_price")
+            qty   = int(float(raw_qty   or 0))
+            price = float(raw_price or 0)
         except (TypeError, ValueError):
             qty, price = 0, 0.0
 
@@ -296,8 +299,8 @@ def _build_cache_entry(
 
     deal = deal_map.get(sym_upper)
     has_block_deal       = deal is not None
-    block_deal_direction = deal["direction"] if deal else None
-    block_deal_qty       = deal["qty"]       if deal else 0
+    block_deal_direction = deal.get("direction") if deal else None
+    block_deal_qty       = deal.get("qty", 0)    if deal else 0
 
     institutional_score = _compute_institutional_score(
         delivery_score, delivery_pct, has_block_deal, block_deal_direction
@@ -376,6 +379,7 @@ async def refresh_daily(symbols: Optional[list[str]] = None) -> None:
                 "institutional_flow: all NSE data sources returned empty — "
                 "refresh not marked complete; will retry on next call"
             )
+            return   # skip the build loop — nothing useful to cache
         logger.info(
             "institutional_flow: refresh complete — {} symbols cached, "
             "{} with delivery data, {} with deal data",
@@ -427,9 +431,10 @@ async def get_institutional_score(symbol: str) -> dict:
     if entry:
         return entry
 
-    # Cache miss or stale — try a targeted refresh before falling back to defaults
+    # Cache miss or stale — do a full refresh so all symbols benefit (not just this one).
+    # Triggering per-symbol refresh for each concurrent miss would cause N×3 NSE calls.
     try:
-        await refresh_daily(symbols=[sym_upper])
+        await refresh_daily()
         with _cache_lock:
             entry = _cache.get(sym_upper)
         if entry:

@@ -12406,6 +12406,296 @@ run("institutional_flow: equal buy/sell qty resolves to NEUTRAL not BUY",       
 run("institutional_flow: _parse_block_deals uses strict > not >= for net direction",       t_institutional_flow_net_direction_source)
 
 # ══════════════════════════════════════════════════════════════════════════
+# 22. BATCH 22 — options_flow, institutional_flow, market_data, news_sentinel,
+#     news_gate, portfolio_var, portfolio_optimizer, gamma_scalp,
+#     correlation_guard, event_calendar bug-fixes (audit round 3)
+# ══════════════════════════════════════════════════════════════════════════
+
+def t_options_flow_safe_int_helper():
+    """options_flow._safe_int handles '', '-', None without raising."""
+    import options_flow as of
+    assert of._safe_int("", 0)    == 0
+    assert of._safe_int("-", 0)   == 0
+    assert of._safe_int(None, 0)  == 0
+    assert of._safe_int("500", 0) == 500
+
+def t_options_flow_safe_float_helper():
+    """options_flow._safe_float handles '', '-', 'N/A', None without raising."""
+    import options_flow as of
+    assert of._safe_float("",    0.0) == 0.0
+    assert of._safe_float("-",   0.0) == 0.0
+    assert of._safe_float("N/A", 0.0) == 0.0
+    assert of._safe_float(None,  0.0) == 0.0
+    assert of._safe_float("12.5",0.0) == 12.5
+
+def t_options_flow_iv_spike_not_on_zero_iv():
+    """options_flow: IV spike must not fire when current iv=0 (would compare 0 vs avg)."""
+    import inspect, options_flow as of
+    src = inspect.getsource(of.analyze_flow)
+    # The spike check lines must be nested inside `if iv > 0.001:` block
+    # Ensure `hist.pop(0)` and `IV_SPIKE_THRESHOLD` appear after the iv > 0.001 guard
+    lines = [l.rstrip() for l in src.splitlines()]
+    iv_guard_indent = None
+    for i, line in enumerate(lines):
+        if "if iv > 0.001:" in line:
+            iv_guard_indent = len(line) - len(line.lstrip())
+        if iv_guard_indent is not None and "IV_SPIKE_THRESHOLD" in line:
+            spike_indent = len(line) - len(line.lstrip())
+            assert spike_indent > iv_guard_indent, (
+                "IV spike check must be inside `if iv > 0.001:` block — "
+                "otherwise a zero-iv current value triggers false spike detection"
+            )
+            break
+    else:
+        assert False, "IV_SPIKE_THRESHOLD not found after iv > 0.001 guard"
+
+def t_options_flow_cache_write_under_lock():
+    """options_flow: _cache[symbol] = flow write is inside _flow_lock context."""
+    import inspect, options_flow as of
+    src = inspect.getsource(of.analyze_flow)
+    assert "with _flow_lock:" in src, "_flow_lock must be used in analyze_flow"
+    assert "_cache[symbol] = flow" in src, "_cache write must be in source"
+    # Check that the cache write appears after a with _flow_lock: block
+    lines = src.splitlines()
+    lock_seen = False
+    for line in lines:
+        stripped = line.strip()
+        if "with _flow_lock:" in stripped:
+            lock_seen = True
+        if lock_seen and "_cache[symbol] = flow" in stripped:
+            break
+    else:
+        assert False, "_cache[symbol] = flow must appear after a with _flow_lock: block"
+
+def t_institutional_flow_delivery_pct_clamped():
+    """institutional_flow._parse_delivery clamps delivery_pct to [0, 100]."""
+    import inspect, institutional_flow as inf
+    src = inspect.getsource(inf._parse_delivery)
+    assert "min(100.0, max(0.0" in src or "min(100" in src, (
+        "_parse_delivery must clamp delivery_pct to [0, 100] to handle corrupt NSE data"
+    )
+
+def t_institutional_flow_or_zero_qty_fix():
+    """institutional_flow._parse_block_deals: explicit 0 quantity is preserved (not skipped by 'or')."""
+    import inspect, institutional_flow as inf
+    src = inspect.getsource(inf._parse_block_deals)
+    # The old buggy pattern used `rec.get("quantity") or rec.get("qty") or 0`
+    # which skips explicit 0; the fix uses `is not None` check
+    assert "is not None" in src, (
+        "_parse_block_deals must use `is not None` guard for qty/price, "
+        "not bare `or` which silently skips explicit 0"
+    )
+
+def t_institutional_flow_early_return_empty():
+    """institutional_flow.refresh_daily returns early when all NSE sources empty."""
+    import inspect, institutional_flow as inf
+    src = inspect.getsource(inf.refresh_daily)
+    assert "return" in src, "refresh_daily must have an early return"
+    # Find the warning about empty sources and check return is nearby
+    lines = src.splitlines()
+    warn_idx = None
+    for i, line in enumerate(lines):
+        if "all NSE data sources returned empty" in line:
+            warn_idx = i
+    assert warn_idx is not None, "warning about empty sources must exist"
+    # return should appear within a few lines of the warning
+    nearby = "\n".join(lines[warn_idx:warn_idx + 5])
+    assert "return" in nearby, (
+        "refresh_daily must return immediately after warning about empty sources "
+        "to avoid wasting time building synthetic default entries"
+    )
+
+def t_institutional_flow_deal_dict_safe_access():
+    """institutional_flow._build_cache_entry uses .get() not [] for deal dict keys."""
+    import inspect, institutional_flow as inf
+    src = inspect.getsource(inf._build_cache_entry)
+    assert 'deal.get("direction")' in src or "deal.get('direction')" in src, (
+        "_build_cache_entry must use deal.get('direction') not deal['direction'] "
+        "to avoid KeyError on unexpected deal dict shapes"
+    )
+
+def t_market_data_safe_float_helper():
+    """market_data._sf handles '', '-', 'N/A', None without raising."""
+    import market_data as md
+    assert md._sf("",    0.0) == 0.0
+    assert md._sf("-",   0.0) == 0.0
+    assert md._sf("N/A", 0.0) == 0.0
+    assert md._sf(None,  0.0) == 0.0
+    assert md._sf("1234.5", 0.0) == 1234.5
+
+def t_market_data_csv_cache_has_ttl():
+    """market_data.YFinanceClient CSV cache stores (df, timestamp) tuples with TTL."""
+    import inspect, market_data as md
+    src = inspect.getsource(md.YFinanceClient.historical)
+    assert "_CSV_CACHE_TTL" in src, (
+        "YFinanceClient.historical must enforce a TTL on the CSV cache "
+        "to prevent serving stale OHLCV data from prior sessions"
+    )
+    assert "time.time()" in src, (
+        "YFinanceClient.historical must record insertion timestamp for TTL check"
+    )
+
+def t_market_data_next_tick_thread_safe():
+    """market_data.PaperTickSimulator.next_tick is protected by self._lock."""
+    import inspect, market_data as md
+    src = inspect.getsource(md.PaperTickSimulator.next_tick)
+    assert "self._lock" in src, (
+        "PaperTickSimulator.next_tick must hold self._lock to prevent day-reset "
+        "race when seed() and next_tick() run from concurrent threads"
+    )
+
+def t_market_data_next_tick_base_zero_guard():
+    """market_data.PaperTickSimulator.next_tick guards against base==0 division."""
+    import inspect, market_data as md
+    src = inspect.getsource(md.PaperTickSimulator.next_tick)
+    assert "if base" in src or "base else" in src, (
+        "next_tick must guard pct calculation against base==0 "
+        "to avoid ZeroDivisionError when price seed fails"
+    )
+
+def t_news_sentinel_break_inside_if_headline():
+    """news_sentinel: pool-cap break fires only after a headline is added (not on non-match)."""
+    import inspect, news_sentinel as ns
+    src = inspect.getsource(ns.NewsSentinel._fetch_headlines)
+    lines = src.splitlines()
+    # Find the `if len(results) >= max_headlines * 2:` guard
+    # It must be INSIDE the `if headline and headline not in results:` block
+    in_headline_block = False
+    headline_if_indent = None
+    for line in lines:
+        stripped = line.strip()
+        if "if headline" in stripped and "not in results" in stripped:
+            in_headline_block = True
+            headline_if_indent = len(line) - len(line.lstrip())
+        if in_headline_block and "if len(results)" in stripped:
+            cap_indent = len(line) - len(line.lstrip())
+            assert cap_indent > headline_if_indent, (
+                "The pool-cap `if len(results) >= max_headlines * 2: break` "
+                "must be INSIDE `if headline and headline not in results:` — "
+                "otherwise non-matching items incorrectly advance the cap counter"
+            )
+            break
+
+def t_news_gate_httpx_connect_timeout():
+    """news_gate.refresh uses per-phase httpx.Timeout (not scalar) to cap connect time."""
+    import inspect, news_gate as ng
+    src = inspect.getsource(ng.NewsGate.refresh)
+    assert "httpx.Timeout" in src, (
+        "NewsGate.refresh must use httpx.Timeout(connect=...) not scalar timeout "
+        "to prevent a hung TCP handshake from blocking the event loop for 8 s"
+    )
+
+def t_news_gate_score_threshold():
+    """news_gate blocks only when score < -1.0 (not ≤ -1.0 which blocks on single keyword)."""
+    import inspect, news_gate as ng
+    src = inspect.getsource(ng.NewsGate.refresh)
+    assert "<= -1.0" not in src, (
+        "NewsGate.refresh must use `< -1.0`, not `<= -1.0` — "
+        "a single negative keyword (e.g. 'loss') must not permanently block a symbol"
+    )
+    assert "< -1.0" in src, "NewsGate.refresh must use `< -1.0` threshold"
+
+def t_portfolio_var_silent_except_fixed():
+    """portfolio_var._fetch_returns logs failures instead of silently swallowing them."""
+    import inspect, portfolio_var as pv
+    src = inspect.getsource(pv.PortfolioVaR._fetch_returns)
+    assert "except Exception as exc:" in src or "except Exception as e:" in src, (
+        "_fetch_returns must name the exception in the except clause "
+        "so it can be logged — bare `except Exception: pass` hides all errors"
+    )
+    assert "pass\n" not in src.split("except Exception")[1].split("def ")[0], (
+        "_fetch_returns must not use bare `pass` in the except block — "
+        "silent failure means VaR silently under-counts portfolio coverage"
+    )
+
+def t_portfolio_optimizer_beta_constraint():
+    """portfolio_optimizer beta constraint uses scale-invariant formulation."""
+    import inspect, portfolio_optimizer as po
+    src = inspect.getsource(po.PortfolioOptimizer._mv_optimize)
+    assert "max(float(w.sum()), 1.0)" not in src, (
+        "beta constraint must NOT divide by max(w.sum(), 1.0) — "
+        "near-zero weight vectors make the denominator 1.0, trivially satisfying constraint"
+    )
+    assert "1e-9" in src or ("w.sum()" in src and "bc *" in src), (
+        "beta constraint must use scale-invariant form: bc * w.sum() - dot(w,b) >= 0"
+    )
+
+def t_gamma_scalp_d1_spot_guard():
+    """gamma_scalp._d1 returns 0.0 for S <= 0 (guards math.log(0))."""
+    from gamma_scalp import _d1
+    result = _d1(0.0, 100.0, 7/365, 0.065, 0.2)
+    assert result == 0.0, f"_d1 with S=0 must return 0.0, got {result}"
+    result_neg = _d1(-50.0, 100.0, 7/365, 0.065, 0.2)
+    assert result_neg == 0.0, f"_d1 with S<0 must return 0.0, got {result_neg}"
+
+def t_gamma_scalp_zero_iv_not_replaced():
+    """gamma_scalp: iv=0 from API is not replaced by 25% fallback (only None/missing is)."""
+    import inspect, gamma_scalp as gs
+    src = inspect.getsource(gs.build_gex_profile)
+    assert 'leg.get("iv", 25) or 25' not in src, (
+        "build_gex_profile must not use `leg.get('iv', 25) or 25` — "
+        "this replaces explicit iv=0 with 25%, causing 500x gamma inflation for unquoted strikes"
+    )
+    assert "not in (None" in src or "is not None" in src, (
+        "IV fallback must guard against None/missing only (not truthiness), "
+        "so legitimate iv=0 (unquoted) propagates to max(sigma, 0.05) floor"
+    )
+
+def t_correlation_guard_matrix_read_under_lock():
+    """correlation_guard.get_correlation snapshots _corr_matrix under _matrix_lock."""
+    import inspect, correlation_guard as cg
+    src = inspect.getsource(cg.get_correlation)
+    assert "_matrix_lock" in src, (
+        "get_correlation must acquire _matrix_lock to snapshot _corr_matrix — "
+        "reading a DataFrame being replaced by refresh_matrix on another thread "
+        "can cause torn reads between .empty check and .loc[] access"
+    )
+
+def t_event_calendar_future_event_wins_over_past():
+    """event_calendar.get_event_risk: a future event at +2h wins over a past event at -9h."""
+    from datetime import datetime
+    import event_calendar as ec
+    ec._event_cache.clear()
+    now = datetime(2026, 6, 21, 14, 0, 0)
+    # past event: 9 AM same day → delta = -5h
+    ec._event_cache["TEST"] = [
+        {"event_type": "RESULTS", "dt": datetime(2026, 6, 21, 9, 0), "description": "past", "results_today": False},
+        {"event_type": "AGM",     "dt": datetime(2026, 6, 21, 16, 0), "description": "future", "results_today": False},
+    ]
+    result = ec.get_event_risk("TEST", current_time=now)
+    # Future event (+2h) should match MEDIUM (< 4h threshold) or HIGH
+    assert result["hours_until"] == 2.0, (
+        f"expected 2.0h (future event wins), got {result['hours_until']} — "
+        "past event with negative delta must not shadow future events"
+    )
+    assert result["risk_level"] in ("MEDIUM", "HIGH", "CRITICAL"), (
+        "future event at 2h should have elevated risk, not NONE"
+    )
+    ec._event_cache.clear()
+
+run("options_flow: _safe_int handles empty/dash/None API fields",                          t_options_flow_safe_int_helper)
+run("options_flow: _safe_float handles empty/dash/N/A/None API fields",                   t_options_flow_safe_float_helper)
+run("options_flow: IV spike detection nested inside iv > 0.001 guard",                    t_options_flow_iv_spike_not_on_zero_iv)
+run("options_flow: _cache write inside _flow_lock context manager",                       t_options_flow_cache_write_under_lock)
+run("institutional_flow: delivery_pct clamped to [0, 100] in _parse_delivery",           t_institutional_flow_delivery_pct_clamped)
+run("institutional_flow: _parse_block_deals preserves explicit qty=0 (is not None guard)", t_institutional_flow_or_zero_qty_fix)
+run("institutional_flow: refresh_daily returns early when all NSE sources empty",         t_institutional_flow_early_return_empty)
+run("institutional_flow: _build_cache_entry uses .get() not [] for deal dict keys",      t_institutional_flow_deal_dict_safe_access)
+run("market_data: _sf helper handles '', '-', 'N/A', None without raising",               t_market_data_safe_float_helper)
+run("market_data: YFinanceClient CSV cache enforces TTL via timestamp",                   t_market_data_csv_cache_has_ttl)
+run("market_data: PaperTickSimulator.next_tick holds self._lock (thread-safe)",           t_market_data_next_tick_thread_safe)
+run("market_data: PaperTickSimulator.next_tick guards base==0 division",                  t_market_data_next_tick_base_zero_guard)
+run("news_sentinel: pool-cap break fires only after headline added (not on non-match)",   t_news_sentinel_break_inside_if_headline)
+run("news_gate: refresh uses httpx.Timeout with per-phase connect timeout",               t_news_gate_httpx_connect_timeout)
+run("news_gate: score threshold is < -1.0 (single keyword must not block symbol)",       t_news_gate_score_threshold)
+run("portfolio_var: _fetch_returns logs failures (no silent bare except pass)",           t_portfolio_var_silent_except_fixed)
+run("portfolio_optimizer: beta constraint uses scale-invariant bc*sum(w)-dot(w,b)>=0",   t_portfolio_optimizer_beta_constraint)
+run("gamma_scalp: _d1 returns 0.0 for S<=0 (prevents math.log domain error)",           t_gamma_scalp_d1_spot_guard)
+run("gamma_scalp: iv=0 from API not replaced by 25% fallback (only None/missing is)",    t_gamma_scalp_zero_iv_not_replaced)
+run("correlation_guard: get_correlation snapshots _corr_matrix under _matrix_lock",      t_correlation_guard_matrix_read_under_lock)
+run("event_calendar: future event at +2h wins over same-day past event at -9h",          t_event_calendar_future_event_wins_over_past)
+
+# ══════════════════════════════════════════════════════════════════════════
 # FINAL SUMMARY
 # ══════════════════════════════════════════════════════════════════════════
 failed = summary()

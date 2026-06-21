@@ -39,6 +39,28 @@ from pathlib import Path
 from config import settings
 
 
+# ── Safe conversion helpers for NSE API fields ────────────────────────────────
+# NSE India can return "", "-", or "N/A" instead of numeric 0 for illiquid
+# or pre-market symbols; bare float()/int() raise ValueError in those cases.
+
+def _sf(v, default: float = 0.0) -> float:
+    """Safe float: returns default for None, '', '-', 'N/A'."""
+    if v is None:
+        return default
+    s = str(v).strip()
+    if s in ("", "-", "N/A", "--"):
+        return default
+    try:
+        return float(s)
+    except (TypeError, ValueError):
+        return default
+
+
+def _si(v, default: int = 0) -> int:
+    """Safe int: returns default for None, '', '-', 'N/A'."""
+    return int(_sf(v, float(default)))
+
+
 # ── NSE session headers (required to avoid 401 from NSE) ────────────────────
 NSE_HEADERS = {
     "User-Agent": (
@@ -198,24 +220,24 @@ class NSEClient:
             depth = data.get("marketDeptOrderBook", {})
             bids  = depth.get("bid", [{}])
             asks  = depth.get("ask", [{}])
-            ltp   = float(pd_.get("lastPrice", 0))
-            bid   = float(bids[0].get("price", ltp)) if bids else ltp
-            ask   = float(asks[0].get("price", ltp)) if asks else ltp
+            ltp   = _sf(pd_.get("lastPrice"), 0.0)
+            bid   = _sf(bids[0].get("price"), ltp) if bids else ltp
+            ask   = _sf(asks[0].get("price"), ltp) if asks else ltp
             return Quote(
                 symbol=symbol.upper(), ltp=ltp,
-                open_=float(pd_.get("open", ltp)),
-                high=float(pd_.get("intraDayHighLow", {}).get("max", ltp)),
-                low=float(pd_.get("intraDayHighLow", {}).get("min", ltp)),
-                prev_close=float(pd_.get("previousClose", ltp)),
-                change=float(pd_.get("change", 0)),
-                change_pct=float(pd_.get("pChange", 0)),
-                volume=int(data.get("securityWiseDP", {}).get("quantityTraded", 0)),
+                open_=_sf(pd_.get("open"), ltp),
+                high=_sf(pd_.get("intraDayHighLow", {}).get("max"), ltp),
+                low=_sf(pd_.get("intraDayHighLow", {}).get("min"), ltp),
+                prev_close=_sf(pd_.get("previousClose"), ltp),
+                change=_sf(pd_.get("change"), 0.0),
+                change_pct=_sf(pd_.get("pChange"), 0.0),
+                volume=_si(data.get("securityWiseDP", {}).get("quantityTraded"), 0),
                 bid=bid, ask=ask,
-                total_buy_qty=int(depth.get("totalBuyQuantity", 0)),
-                total_sell_qty=int(depth.get("totalSellQuantity", 0)),
+                total_buy_qty=_si(depth.get("totalBuyQuantity"), 0),
+                total_sell_qty=_si(depth.get("totalSellQuantity"), 0),
             )
         except Exception as exc:
-            logger.debug("NSE quote parse error {}: {}", symbol, exc)
+            logger.warning("NSE quote parse error {}: {}", symbol, exc)
             return None
 
     async def index_quote(self, index_name: str) -> Optional[Quote]:
@@ -224,15 +246,15 @@ class NSEClient:
             return None
         for item in data.get("data", []):
             if item.get("indexSymbol", "").upper() == index_name.upper():
-                ltp = float(item.get("last", 0))
+                ltp = _sf(item.get("last"), 0.0)
                 return Quote(
                     symbol=index_name, ltp=ltp,
-                    open_=float(item.get("open", ltp)),
-                    high=float(item.get("dayHigh", ltp)),
-                    low=float(item.get("dayLow",  ltp)),
-                    prev_close=float(item.get("previousClose", ltp)),
-                    change=float(item.get("change", 0)),
-                    change_pct=float(item.get("percentChange", 0)),
+                    open_=_sf(item.get("open"), ltp),
+                    high=_sf(item.get("dayHigh"), ltp),
+                    low=_sf(item.get("dayLow"),  ltp),
+                    prev_close=_sf(item.get("previousClose"), ltp),
+                    change=_sf(item.get("change"), 0.0),
+                    change_pct=_sf(item.get("percentChange"), 0.0),
                     volume=0, bid=ltp, ask=ltp,
                 )
         return None
@@ -266,8 +288,10 @@ import threading as _threading
 class YFinanceClient:
     # In-memory CSV cache: avoids re-reading the same file from disk on every
     # signal-generation call in the tick path. Key: (symbol, timeframe).
-    _csv_cache: dict[tuple[str, str], pd.DataFrame] = {}
+    # Value: (DataFrame, insert_timestamp) — TTL enforced to prevent stale OHLCV.
+    _csv_cache: dict[tuple[str, str], tuple[pd.DataFrame, float]] = {}
     _csv_cache_lock: _threading.Lock = _threading.Lock()
+    _CSV_CACHE_TTL: float = 3600.0  # 1 hour — intraday data stales within a session
 
     @staticmethod
     def _ticker(symbol: str, exchange: str = "NSE") -> str:
@@ -278,17 +302,20 @@ class YFinanceClient:
         _CACHE_ALIASES = {"60m": "1h", "60min": "1h", "1hour": "1h"}
         _cache_tf = _CACHE_ALIASES.get(interval, interval)
         mem_key = (symbol, _cache_tf)
+        now = time.time()
         with self._csv_cache_lock:
-            cached = self._csv_cache.get(mem_key)
-        if cached is not None:
-            return cached.copy()
+            entry = self._csv_cache.get(mem_key)
+        if entry is not None:
+            df_cached, ts = entry
+            if now - ts < self._CSV_CACHE_TTL:
+                return df_cached.copy()
         _cache = Path(f"logs/historical_data/{symbol}/{_cache_tf}.csv")
         if _cache.exists():
             df = pd.read_csv(_cache, parse_dates=["date"])
             cols = [c for c in ("date", "open", "high", "low", "close", "volume") if c in df.columns]
             df = df[cols].dropna().sort_values("date").reset_index(drop=True)
             with self._csv_cache_lock:
-                self._csv_cache[mem_key] = df
+                self._csv_cache[mem_key] = (df, time.time())
             return df.copy()
 
         from config import settings as _s
@@ -378,6 +405,7 @@ class PaperTickSimulator:
         self._day_low:    dict[str, float] = {}
         self._prev_close: dict[str, float] = {}
         self._session_date = None
+        self._lock = _threading.Lock()  # seed() and next_tick() called from concurrent threads
 
     def seed(self, symbols: list[str], exchanges: dict[str, str]) -> None:
         import concurrent.futures as _cf
@@ -411,56 +439,57 @@ class PaperTickSimulator:
             pool.shutdown(wait=False)
 
     def next_tick(self, symbol: str) -> Quote:
-        today = _now_ist().date()
-        if today != self._session_date:
-            # New session — reset day state and re-base change_pct at current prices
-            self._session_date = today
-            self._day_open.clear()
-            self._day_high.clear()
-            self._day_low.clear()
-            self._prev_close.clear()
-            for k in [k for k in self._prices if k.endswith("__base__")]:
-                del self._prices[k]
+        with self._lock:
+            today = _now_ist().date()
+            if today != self._session_date:
+                # New session — reset day state and re-base change_pct at current prices
+                self._session_date = today
+                self._day_open.clear()
+                self._day_high.clear()
+                self._day_low.clear()
+                self._prev_close.clear()
+                for k in [k for k in self._prices if k.endswith("__base__")]:
+                    del self._prices[k]
 
-        price = self._prices.get(symbol, 1000.0)
-        # Scale GBM sigma by sqrt(dt) so per-second realized vol is constant
-        # regardless of tick_interval_ms (0.00008 per-second sigma baseline).
-        dt = settings.tick_interval_ms / 1000.0
-        shock = random.gauss(0, 0.00008 * math.sqrt(dt))
-        price = max(price * math.exp(shock), 1.0)
-        self._prices[symbol] = price
+            price = self._prices.get(symbol, 1000.0)
+            # Scale GBM sigma by sqrt(dt) so per-second realized vol is constant
+            # regardless of tick_interval_ms (0.00008 per-second sigma baseline).
+            dt = settings.tick_interval_ms / 1000.0
+            shock = random.gauss(0, 0.00008 * math.sqrt(dt))
+            price = max(price * math.exp(shock), 1.0)
+            self._prices[symbol] = price
 
-        # Session baseline (= prev_close): set once per symbol per session
-        base = self._prices.setdefault(symbol + "__base__", price)
-        if symbol not in self._day_open:
-            self._day_open[symbol]   = round(price, 2)   # fixed day open
-            self._day_high[symbol]   = round(price, 2)
-            self._day_low[symbol]    = round(price, 2)
-            self._prev_close[symbol] = round(base, 2)    # fixed prev_close
-        # True running day high/low
-        if price > self._day_high[symbol]:
-            self._day_high[symbol] = round(price, 2)
-        if price < self._day_low[symbol]:
-            self._day_low[symbol] = round(price, 2)
+            # Session baseline (= prev_close): set once per symbol per session
+            base = self._prices.setdefault(symbol + "__base__", price)
+            if symbol not in self._day_open:
+                self._day_open[symbol]   = round(price, 2)   # fixed day open
+                self._day_high[symbol]   = round(price, 2)
+                self._day_low[symbol]    = round(price, 2)
+                self._prev_close[symbol] = round(base, 2)    # fixed prev_close
+            # True running day high/low
+            if price > self._day_high[symbol]:
+                self._day_high[symbol] = round(price, 2)
+            if price < self._day_low[symbol]:
+                self._day_low[symbol] = round(price, 2)
 
-        spread = round(price * 0.0002, 2)
-        # Lognormal volume with occasional bursts (~5% of ticks get 3–8x) so
-        # volume_ratio carries information instead of hovering at ≈1.
-        vol_tick = int(random.lognormvariate(6.2, 0.6)) + 1
-        if random.random() < 0.05:
-            vol_tick = int(vol_tick * random.uniform(3.0, 8.0))
+            spread = round(price * 0.0002, 2)
+            # Lognormal volume with occasional bursts (~5% of ticks get 3–8x) so
+            # volume_ratio carries information instead of hovering at ≈1.
+            vol_tick = int(random.lognormvariate(6.2, 0.6)) + 1
+            if random.random() < 0.05:
+                vol_tick = int(vol_tick * random.uniform(3.0, 8.0))
 
-        prev_close = self._prev_close[symbol]
-        pct        = round((price / base - 1) * 100, 2)
-        return Quote(
-            symbol=symbol, ltp=round(price, 2),
-            open_=self._day_open[symbol], high=self._day_high[symbol],
-            low=self._day_low[symbol],    prev_close=prev_close,
-            change=round(price - prev_close, 2), change_pct=pct,
-            volume=vol_tick,
-            bid=round(price - spread / 2, 2),
-            ask=round(price + spread / 2, 2),
-        )
+            prev_close = self._prev_close[symbol]
+            pct        = round((price / base - 1) * 100, 2) if base else 0.0
+            return Quote(
+                symbol=symbol, ltp=round(price, 2),
+                open_=self._day_open[symbol], high=self._day_high[symbol],
+                low=self._day_low[symbol],    prev_close=prev_close,
+                change=round(price - prev_close, 2), change_pct=pct,
+                volume=vol_tick,
+                bid=round(price - spread / 2, 2),
+                ask=round(price + spread / 2, 2),
+            )
 
 
 # ── Singletons ─────────────────────────────────────────────────────────────────

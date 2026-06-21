@@ -72,14 +72,24 @@ def get_event_risk(symbol: str, current_time: Optional[datetime] = None) -> dict
         if not events:
             return dict(_SAFE_RESULT)
 
-        # Find the soonest upcoming event
+        # Find the soonest upcoming (or same-day) event.
+        # Skip events that have already passed UNLESS results_today is set —
+        # a past event with delta_hours < 0 whose results have been announced
+        # is no longer predictive for new trades, so future events must take
+        # priority.  results_today=True events are treated as hours=0 (block).
         min_hours: float = float("inf")
         worst_event: Optional[dict] = None
         for ev in events:
             dt: datetime = ev["dt"]
             delta_hours = (dt - now).total_seconds() / 3600.0
-            if delta_hours < min_hours:   # include same-day past events (midnight-stored)
-                min_hours = delta_hours
+            if delta_hours < 0:
+                if not ev.get("results_today"):
+                    continue   # already past, not blocking new trades
+                clamped = 0.0  # results announced today — still block
+            else:
+                clamped = delta_hours
+            if clamped < min_hours:
+                min_hours = clamped
                 worst_event = ev
 
         if worst_event is None:
