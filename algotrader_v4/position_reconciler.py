@@ -194,30 +194,33 @@ class PositionReconciler:
         trailing_sl_engine.deregister(pos["order_id"])
         with _tsl_sl_orders_lock:
             _tsl_sl_orders.pop(pos["order_id"], None)
+        tsl_pos = pos.get("_ref")
+        entry_px = getattr(tsl_pos, "entry_price", 0.0) if tsl_pos else 0.0
+        estimated_pnl = 0.0
+        if entry_px > 0:
+            try:
+                from tick_engine import tick_engine as _te
+                ltp = (_te.all_latest().get(trade_sym) or {}).get("ltp") or 0.0
+            except Exception:
+                ltp = 0.0
+            if ltp > 0:
+                side_sign = 1 if pos["side"] == "BUY" else -1
+                estimated_pnl = (ltp - entry_px) * expected * side_sign
+            else:
+                logger.warning(
+                    "[Reconciler] no ltp for {} — daily loss tracking may be inaccurate", trade_sym)
+
+        # Guard release and position count must succeed/fail together — separate
+        # try/except blocks allow one to succeed while the other fails, desynchronising
+        # risk state (allow_new_trades counter becomes wrong).
+        guard_released = False
         try:
-            tsl_pos = pos.get("_ref")
-            entry_px = getattr(tsl_pos, "entry_price", 0.0) if tsl_pos else 0.0
-            estimated_pnl = 0.0
-            if entry_px > 0:
-                try:
-                    from tick_engine import tick_engine as _te
-                    ltp = (_te.all_latest().get(trade_sym) or {}).get("ltp") or 0.0
-                except Exception:
-                    ltp = 0.0
-                if ltp > 0:
-                    side_sign = 1 if pos["side"] == "BUY" else -1
-                    estimated_pnl = (ltp - entry_px) * expected * side_sign
-                else:
-                    logger.warning(
-                        "[Reconciler] no ltp for {} — daily loss tracking may be inaccurate", trade_sym)
             order_guard.release_order(pos["symbol"], pos["strategy"], pos["side"], pnl=estimated_pnl)
-        except Exception as exc:
-            logger.warning("[Reconciler] guard release failed for {}: {}",
-                           pos["symbol"], exc)
-        try:
+            guard_released = True
             risk_manager.position_closed()
-        except Exception:
-            pass
+        except Exception as exc:
+            logger.warning("[Reconciler] cleanup failed for {} (guard_released={}): {}",
+                           pos["symbol"], guard_released, exc)
 
         self.stats.full_exits += 1
         return {"type": "FULL_EXTERNAL_EXIT", "symbol": trade_sym,

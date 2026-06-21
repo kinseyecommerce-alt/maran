@@ -298,6 +298,9 @@ class AtomicBracketEngine:
                 o = kite_client._paper_orders.get(oid)
                 if o and o["status"] == "COMPLETE":
                     return float(o.get("price") or bracket.signal_price)
+                if o and o["status"] in ("REJECTED", "CANCELLED"):
+                    return None
+                continue  # PAPER: _paper_orders is authoritative; skip order_history
             try:
                 history = await asyncio.get_running_loop().run_in_executor(
                     None, lambda: kite_client.order_history(oid))
@@ -307,7 +310,7 @@ class AtomicBracketEngine:
                     if h.get("status") in ("REJECTED", "CANCELLED"):
                         return None
             except Exception as exc:
-                logger.debug("Fill poll error: {}", exc)
+                logger.warning("Fill poll error (oid={}): {}", oid, exc)
         return None
 
     async def _place_sl_order(self, bracket: BracketOrder) -> bool:

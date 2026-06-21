@@ -69,6 +69,10 @@ def _signals_swing(df: pd.DataFrame) -> pd.Series:
     rsi    = ta.momentum.RSIIndicator(close, 14).rsi()
     adx    = ta.trend.ADXIndicator(high, low, close, 14).adx()
     for i in range(55, len(df)):
+        if pd.isna(ema200.iloc[i]) or pd.isna(ema50.iloc[i]) or pd.isna(ema20.iloc[i]):
+            continue
+        if ema50.iloc[i] == 0:
+            continue
         if (abs(close.iloc[i] - ema50.iloc[i]) / ema50.iloc[i] < 0.018
                 and ema20.iloc[i] > ema50.iloc[i] and close.iloc[i] > ema200.iloc[i]
                 and 38 < rsi.iloc[i] < 60 and adx.iloc[i] > 20):
@@ -149,11 +153,16 @@ def _signals_iron_condor(df: pd.DataFrame) -> pd.Series:
         return s
     adx  = ta.trend.ADXIndicator(high, low, close, 14).adx()
     bb   = ta.volatility.BollingerBands(close, 20, 2)
-    bb_mavg = bb.bollinger_mavg()
-    bb_w = (bb.bollinger_hband() - bb.bollinger_lband()) / bb_mavg.where(bb_mavg != 0) * 100
+    bb_mavg  = bb.bollinger_mavg()
+    bb_upper = bb.bollinger_hband()
+    bb_lower = bb.bollinger_lband()
     rsi  = ta.momentum.RSIIndicator(close, 14).rsi()
     for i in range(20, len(df)):
-        if adx.iloc[i] < 20 and bb_w.iloc[i] < 2.5 and 38 < rsi.iloc[i] < 62:
+        mavg = bb_mavg.iloc[i]
+        if mavg <= 0 or pd.isna(mavg):
+            continue
+        bb_w_i = (bb_upper.iloc[i] - bb_lower.iloc[i]) / mavg * 100
+        if adx.iloc[i] < 20 and bb_w_i < 2.5 and 38 < rsi.iloc[i] < 62:
             s.iloc[i] = 1
     return s
 
