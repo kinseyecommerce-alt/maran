@@ -12539,6 +12539,65 @@ run("tradingview chart: dashboard.html has #tv-chart-container div",            
 run("tradingview chart: dashboard.html has symbol and tf selector controls",               t_dashboard_tv_symbol_select)
 
 # ══════════════════════════════════════════════════════════════════════════
+# 124. L2 ORDER BOOK — GET /market/depth/{symbol} + dashboard panel
+# ══════════════════════════════════════════════════════════════════════════
+
+def t_depth_endpoint_registered():
+    """GET /market/depth/{symbol} must be registered in main.py."""
+    import inspect, main as _m
+    src = inspect.getsource(_m)
+    assert "/market/depth/" in src, (
+        "main.py must expose GET /market/depth/{symbol} to serve real L2 order book data"
+    )
+
+def t_depth_endpoint_raises_4xx_unknown():
+    """market_depth() raises HTTP 4xx for symbol with no tick data."""
+    import main as _m
+    from fastapi import HTTPException
+    try:
+        _m.market_depth("UNKNOWN_XYZ_999")
+        assert False, "Expected HTTPException"
+    except HTTPException as e:
+        assert e.status_code in (404, 422)
+
+def t_depth_normalise_tuple_format():
+    """market_depth() normalises (price, qty) tuple format from TickBuffer into dicts."""
+    import inspect, main as _m
+    src = inspect.getsource(_m.market_depth)
+    assert "isinstance" in src and "tuple" in src, (
+        "market_depth() must handle tuple (price,qty) format from TickBuffer._detect_walls"
+    )
+
+def t_depth_returns_imbalance():
+    """market_depth() response must include 'imbalance' field (0–1 bid pressure ratio)."""
+    import inspect, main as _m
+    src = inspect.getsource(_m.market_depth)
+    assert "imbalance" in src, "market_depth() must return imbalance field"
+
+def t_dashboard_has_ob_ladder():
+    """dashboard.html must have #ob-ladder for the order book bid/ask rows."""
+    import pathlib
+    html = (pathlib.Path(__file__).parent / "static" / "dashboard.html").read_text()
+    assert "ob-ladder" in html and "ob-panel" in html, (
+        "dashboard.html must have #ob-panel and #ob-ladder for the L2 order book"
+    )
+
+def t_dashboard_ob_wall_alerts():
+    """dashboard.html must show wall alerts (wall_above / wall_below) from depth endpoint."""
+    import pathlib
+    html = (pathlib.Path(__file__).parent / "static" / "dashboard.html").read_text()
+    assert "ob-wall-above" in html and "ob-wall-below" in html, (
+        "dashboard.html must have wall alert elements fed from /market/depth"
+    )
+
+run("L2 order book: GET /market/depth/{symbol} endpoint registered in main.py",           t_depth_endpoint_registered)
+run("L2 order book: market_depth() raises 4xx for unknown symbol",                         t_depth_endpoint_raises_4xx_unknown)
+run("L2 order book: market_depth() normalises tuple depth format from TickBuffer",         t_depth_normalise_tuple_format)
+run("L2 order book: market_depth() response includes imbalance field",                     t_depth_returns_imbalance)
+run("L2 order book: dashboard.html has #ob-panel and #ob-ladder elements",                 t_dashboard_has_ob_ladder)
+run("L2 order book: dashboard.html shows sell/buy wall alerts from depth data",            t_dashboard_ob_wall_alerts)
+
+# ══════════════════════════════════════════════════════════════════════════
 # FINAL SUMMARY
 # ══════════════════════════════════════════════════════════════════════════
 failed = summary()
