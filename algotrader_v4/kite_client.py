@@ -258,6 +258,18 @@ class KiteClient:
         ticker.on_close = _on_close
         return ticker
 
+    def warm_connections(self) -> None:
+        """Pre-warm the Kite HTTP connection pool so the first live order does not
+        pay the TCP handshake (~50 ms) cost. A lightweight `profile` call is made;
+        errors are swallowed — warmup failure must never block startup."""
+        if settings.trading_mode == "PAPER" or self._kite is None:
+            return
+        try:
+            _with_retry(lambda: self._kite.profile(), label="warm")
+            logger.info("[kite] connection pool warmed — first order will not pay TCP handshake")
+        except Exception as exc:
+            logger.debug("[kite] warm_connections skipped: {}", exc)
+
     def validate_credentials(self) -> dict:
         """Return status of all required credentials and Kite initialisation."""
         return {

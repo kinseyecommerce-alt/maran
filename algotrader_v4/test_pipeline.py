@@ -12406,6 +12406,65 @@ run("institutional_flow: equal buy/sell qty resolves to NEUTRAL not BUY",       
 run("institutional_flow: _parse_block_deals uses strict > not >= for net direction",       t_institutional_flow_net_direction_source)
 
 # ══════════════════════════════════════════════════════════════════════════
+# 122. SCALPING LATENCY — gate skip, warm_connections, scalping_skip_gate config
+# ══════════════════════════════════════════════════════════════════════════
+
+def t_scalping_skip_gate_in_config():
+    """config.py must expose scalping_skip_gate defaulting to True."""
+    from config import Settings
+    s = Settings()
+    assert hasattr(s, "scalping_skip_gate"), "Settings must have scalping_skip_gate field"
+    assert s.scalping_skip_gate is True, "scalping_skip_gate must default to True"
+
+def t_scalping_skip_gate_in_base_agent_source():
+    """base_agent._try_enter must have a scalping fast-path that skips the Claude gate."""
+    import inspect
+    from agents import base_agent as _ba
+    src = inspect.getsource(_ba)
+    assert "scalping_skip_gate" in src, (
+        "base_agent must check settings.scalping_skip_gate to bypass the Claude gate "
+        "for scalping — 400-800ms gate latency causes slippage on 2-12 min holds"
+    )
+    assert "self.strategy == \"scalping\"" in src or "self.strategy == 'scalping'" in src, (
+        "scalping gate skip must guard on strategy == 'scalping'"
+    )
+
+def t_warm_connections_exists_on_kite_client():
+    """kite_client.KiteClient must expose warm_connections() for startup connection pooling."""
+    import kite_client as kc
+    assert hasattr(kc.KiteClient, "warm_connections"), (
+        "KiteClient must have warm_connections() to pre-warm the HTTP pool "
+        "and eliminate the ~50ms TCP handshake cost on the first live order"
+    )
+
+def t_warm_connections_safe_in_paper_mode():
+    """warm_connections() must be a no-op in PAPER mode (no API credentials needed)."""
+    import kite_client as kc
+    from config import settings
+    orig_mode = settings.trading_mode
+    try:
+        settings.trading_mode = "PAPER"
+        # Must not raise — no Kite object needed in PAPER mode
+        kc.kite_client.warm_connections()
+    finally:
+        settings.trading_mode = orig_mode
+
+def t_main_calls_warm_connections():
+    """main.py on_startup must invoke kite_client.warm_connections for connection pooling."""
+    import inspect, main as _main
+    src = inspect.getsource(_main.on_startup)
+    assert "warm_connections" in src, (
+        "on_startup() must call kite_client.warm_connections() to pre-warm the "
+        "HTTP connection pool before the first live order"
+    )
+
+run("scalping latency: scalping_skip_gate setting exists and defaults to True",           t_scalping_skip_gate_in_config)
+run("scalping latency: base_agent has scalping fast-path to skip Claude gate",            t_scalping_skip_gate_in_base_agent_source)
+run("scalping latency: KiteClient.warm_connections() exists for HTTP pool warmup",        t_warm_connections_exists_on_kite_client)
+run("scalping latency: warm_connections() is a no-op in PAPER mode (safe at startup)",   t_warm_connections_safe_in_paper_mode)
+run("scalping latency: on_startup calls warm_connections to avoid first-order handshake", t_main_calls_warm_connections)
+
+# ══════════════════════════════════════════════════════════════════════════
 # FINAL SUMMARY
 # ══════════════════════════════════════════════════════════════════════════
 failed = summary()
