@@ -324,12 +324,13 @@ class YFinanceClient:
         # Only applies to daily interval — intraday still uses yfinance/TrueData.
         if interval in ("1d", "daily"):
             try:
-                from datetime import date as _date, timedelta as _td
+                from datetime import timedelta as _td
+                from ist_clock import now_ist as _now_ist
                 from bhavcopy_loader import load_symbol as _bhav_load
                 _days_map = {"5d": 5, "15d": 15, "30d": 30, "60d": 60,
                              "90d": 90, "180d": 180, "1y": 365, "2y": 730, "5y": 1825}
                 _lookback = _days_map.get(period, 90)
-                _to   = _date.today() - _td(days=1)
+                _to   = _now_ist().date() - _td(days=1)
                 _from = _to - _td(days=_lookback)
                 _df = _bhav_load(symbol, _from, _to)
                 if not _df.empty:

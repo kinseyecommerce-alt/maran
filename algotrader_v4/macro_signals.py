@@ -63,7 +63,10 @@ def _fetch_india_vix_nse() -> Optional[float]:
         for item in data.get("data", []):
             name = item.get("indexSymbol", "").upper()
             if "INDIA VIX" in name or name == "INDIAVIX":
-                return float(item.get("last", 0) or 0) or None
+                last_val = item.get("last")
+                if last_val is not None and last_val != "":
+                    return float(last_val)
+                return None
     except Exception as exc:
         logger.debug("India VIX NSE fetch failed: {}", exc)
     return None

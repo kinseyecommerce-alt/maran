@@ -39,6 +39,8 @@ import threading
 import time
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
+
+from ist_clock import now_ist
 from enum import Enum
 from typing import Optional
 
@@ -156,7 +158,7 @@ REGIME_PLANS: dict[Regime, StrategyPlan] = {
 @dataclass
 class RegimeSignals:
     """Raw signals used to classify the regime."""
-    timestamp:         datetime = field(default_factory=datetime.now)
+    timestamp:         datetime = field(default_factory=now_ist)
 
     # NIFTY trend
     nifty_ltp:         float = 0.0

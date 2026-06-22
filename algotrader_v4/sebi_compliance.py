@@ -23,6 +23,8 @@ from collections import defaultdict
 from dataclasses import dataclass, field
 from datetime import datetime, date
 from enum import Enum
+
+from ist_clock import now_ist
 from pathlib import Path
 import threading
 from threading import Lock
@@ -272,6 +274,9 @@ class SEBICompliance:
             self._kill_reason = reason
         self._persist_state(reason)
         logger.critical("SEBI KILL SWITCH TRIGGERED: {}", reason)
+        self._record_audit("system", "ALL", "ALL", "HALT", 0, "MARKET",
+                           0.0, "kill_switch", "KILL_SWITCH",
+                           "KILL_SWITCH_TRIGGERED", reason, "KILL_SWITCH")
         # Wire to risk manager so check_before_order() also blocks immediately.
         try:
             from risk_manager import risk_manager as _rm
@@ -305,6 +310,9 @@ class SEBICompliance:
             self._pause_reason = reason
         self._persist_state(reason)
         logger.warning("SEBI: Trading paused — {}", reason)
+        self._record_audit("system", "ALL", "ALL", "HALT", 0, "MARKET",
+                           0.0, "pause_trading", "PAUSED",
+                           "TRADING_PAUSED", reason, "PAUSE")
 
     def resume_trading(self) -> tuple[bool, str]:
         """Returns (success, message). Kill switch requires reset_kill_switch() first."""
@@ -317,6 +325,9 @@ class SEBICompliance:
             self._pause_reason = ""
         self._persist_state()
         logger.info("SEBI: Trading resumed")
+        self._record_audit("system", "ALL", "ALL", "RESUME", 0, "MARKET",
+                           0.0, "resume_trading", "ACTIVE",
+                           "TRADING_RESUMED", "Trading resumed", "RESUME")
         return True, "ACTIVE"
 
     def reset_kill_switch(self, secret: str = "") -> tuple[bool, str]:
@@ -431,12 +442,17 @@ class SEBICompliance:
                                    signal_source, regime, "REJECTED", reason, algo_id)
                 return False, algo_id, reason
 
-            # Reg 3: order-to-trade ratio — warn if > 10:1
+            # Reg 3: order-to-trade ratio — reject if > 10:1 (SEBI requirement)
             self._orders_placed += 1
             if self._orders_executed > 0:
                 otr = self._orders_placed / self._orders_executed
                 if otr > 10:
-                    logger.warning("SEBI OTR warning: {:.1f} (limit 10:1)", otr)
+                    reason = f"Order-to-trade ratio {otr:.1f}:1 exceeds SEBI limit 10:1"
+                    logger.warning("SEBI OTR block: {}", reason)
+                    self._record_audit(strategy, symbol, exchange, transaction_type,
+                                       quantity, order_type, price_at_signal,
+                                       signal_source, regime, "REJECTED", reason, algo_id)
+                    return False, algo_id, reason
 
             self._record_audit(strategy, symbol, exchange, transaction_type,
                                quantity, order_type, price_at_signal,
@@ -460,7 +476,7 @@ class SEBICompliance:
         order_id: str = "",
     ) -> None:
         rec = AuditRecord(
-            timestamp=datetime.now().isoformat(),
+            timestamp=now_ist().isoformat(),
             strategy=strategy, symbol=symbol, exchange=exchange,
             transaction_type=transaction_type, quantity=quantity,
             order_type=order_type, price=price,
@@ -468,7 +484,7 @@ class SEBICompliance:
             decision=decision, reason=reason,
             algo_id=algo_id, order_id=order_id,
         )
-        today = date.today().isoformat()
+        today = now_ist().date().isoformat()
         self._audit_log[today].append(rec)
 
         # Disk write in a daemon thread so file I/O never holds self._lock,
@@ -537,7 +553,7 @@ class SEBICompliance:
     def get_disclosure_document(self) -> dict:
         return {
             "document_type": "SEBI Algo Trading Disclosure",
-            "generated_at":  datetime.now().isoformat(),
+            "generated_at":  now_ist().isoformat(),
             "broker":        "Zerodha Broking Ltd",
             "exchange_membership": ["NSE", "BSE"],
             "algo_strategies": [
@@ -559,7 +575,7 @@ class SEBICompliance:
     # ── Status ─────────────────────────────────────────────────────────────────
     def status(self) -> dict:
         with self._lock:
-            today   = date.today().isoformat()
+            today   = now_ist().date().isoformat()
             records = self._audit_log.get(today, [])
             otr = (round(self._orders_placed / self._orders_executed, 2)
                    if self._orders_executed else 0)
@@ -582,7 +598,7 @@ class SEBICompliance:
         """Generate a SEBI-compliant daily activity report."""
         import datetime
         if date_str is None:
-            date_str = datetime.date.today().isoformat()
+            date_str = now_ist().date().isoformat()
         with self._lock:
             today_records = self._audit_log.get(date_str, [])
             today_entries = [r.__dict__ for r in today_records]
@@ -602,7 +618,7 @@ class SEBICompliance:
             "audit_entries":     today_entries[:200],
             "total_entries":     len(today_entries),
             "entries_truncated": len(today_entries) > 200,
-            "generated_at":      datetime.datetime.utcnow().isoformat() + "Z",
+            "generated_at":      now_ist().isoformat(),
         }
 
     def reset_daily(self) -> None:

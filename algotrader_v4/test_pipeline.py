@@ -13786,6 +13786,155 @@ run("backtest_engine: BacktestEngine.run acquires _cache_lock", t_backtest_engin
 run("ml_signal_filter: inference error logged at WARNING not DEBUG", t_ml_filter_inference_error_is_warning)
 
 # ══════════════════════════════════════════════════════════════════════════
+# 33. RUTHLESS AUDIT BATCH 33 (tick_engine, sebi, alt_data, risk, TSL, kite, macro)
+# ══════════════════════════════════════════════════════════════════════════
+import inspect as _inspect33
+
+def t_tick_engine_rest_vol_lock():
+    """tick_engine must protect _rest_last_cum_vol with _rest_vol_lock to prevent thread races."""
+    import tick_engine as _te
+    assert hasattr(_te, "_rest_vol_lock"), "_rest_vol_lock must exist at module level in tick_engine"
+    src = _inspect33.getsource(_te._kite_quote_to_quote)
+    assert "_rest_vol_lock" in src, "_kite_quote_to_quote must acquire _rest_vol_lock"
+
+def t_tick_engine_indicator_error_is_warning():
+    """tick_engine indicator compute errors must be logged at WARNING not DEBUG."""
+    import tick_engine as _te
+    src = _inspect33.getsource(_te.IndicatorCalc.compute)
+    assert "logger.warning" in src, "IndicatorCalc.compute must log at WARNING on exception"
+    assert 'logger.debug("Indicator compute' not in src, \
+        "indicator compute error must not stay at DEBUG"
+
+def t_tick_engine_all_latest_uses_get():
+    """tick_engine.all_latest() must use dict.get() to prevent KeyError on concurrent symbol removal."""
+    import tick_engine as _te
+    src = _inspect33.getsource(_te.TickEngine.all_latest)
+    assert "self._latest_tick.get(sym)" in src, \
+        "all_latest must use .get(sym) to guard against concurrent symbol removal"
+    assert "self._latest_ind.get(sym)" in src, \
+        "all_latest must use .get(sym) for _latest_ind"
+
+def t_sebi_compliance_uses_now_ist():
+    """sebi_compliance._record_audit must use now_ist() for IST-correct audit timestamps."""
+    import sebi_compliance as _sc
+    src = _inspect33.getsource(_sc.SEBICompliance._record_audit)
+    assert "now_ist()" in src, "_record_audit must use now_ist() not datetime.now()"
+    assert "datetime.now()" not in src, "_record_audit must not use datetime.now() — UTC is 5.5h behind IST"
+
+def t_sebi_compliance_otr_blocks_order():
+    """SEBI OTR > 10:1 must reject orders (return False), not merely log a warning."""
+    import sebi_compliance as _sc
+    src = _inspect33.getsource(_sc.SEBICompliance.pre_order_check)
+    assert "return False, algo_id, reason" in src, \
+        "OTR violation must return False to block the order"
+    assert "SEBI OTR block" in src or "OTR" in src, \
+        "OTR block reason must be logged"
+
+def t_sebi_kill_switch_logged_to_audit():
+    """trigger_kill_switch must record an audit log entry — kill-switch events must be in audit trail."""
+    import sebi_compliance as _sc
+    src = _inspect33.getsource(_sc.SEBICompliance.trigger_kill_switch)
+    assert "_record_audit" in src, \
+        "trigger_kill_switch must call _record_audit to preserve event in compliance trail"
+
+def t_sebi_pause_resume_logged_to_audit():
+    """pause_trading and resume_trading must record audit log entries."""
+    import sebi_compliance as _sc
+    for fn_name in ("pause_trading", "resume_trading"):
+        fn = getattr(_sc.SEBICompliance, fn_name)
+        src = _inspect33.getsource(fn)
+        assert "_record_audit" in src, \
+            f"{fn_name} must call _record_audit for regulatory audit trail"
+
+def t_alt_data_uses_now_ist():
+    """alt_data event-day methods must use now_ist() not datetime.now()/date.today()."""
+    import alt_data as _ad
+    for fn_name in ("is_event_day", "days_to_next_event", "next_fno_expiry", "is_earnings_period"):
+        fn = getattr(_ad.AltDataEngine, fn_name, None)
+        if fn is None:
+            continue
+        src = _inspect33.getsource(fn)
+        assert "date.today()" not in src, \
+            f"{fn_name} must not call date.today() — use now_ist() for IST correctness"
+        assert "datetime.now()" not in src, \
+            f"{fn_name} must not call datetime.now() — use now_ist() for IST correctness"
+
+def t_risk_manager_loss_notification_logs_critical():
+    """risk_manager._send_loss_limit_notification must log CRITICAL on exception — silent pass loses kill alerts."""
+    import risk_manager as _rm
+    src = _inspect33.getsource(_rm.RiskManager._send_loss_limit_notification)
+    assert "logger.critical" in src, \
+        "_send_loss_limit_notification must log CRITICAL on exception, not pass silently"
+    assert "except Exception:\n            pass" not in src, \
+        "_send_loss_limit_notification must not swallow exception with bare pass"
+
+def t_risk_manager_kelly_failure_is_warning():
+    """risk_manager Kelly fraction calculation failure must be logged at WARNING not DEBUG."""
+    import risk_manager as _rm
+    src = _inspect33.getsource(_rm.get_kelly_fraction)
+    assert "logger.warning" in src, "Kelly fraction failure must be logged at WARNING"
+    assert 'logger.debug("[RiskManager] Kelly' not in src, \
+        "Kelly failure must not stay at DEBUG — it indicates a broken adaptive engine"
+
+def t_trailing_sl_no_double_fire_on_callback_failure():
+    """TSL: SL callback failure must deregister position (not revert to ACTIVE) to prevent double-exit."""
+    import trailing_sl_engine as _tsl
+    src = _inspect33.getsource(_tsl.TrailingSLEngine._evaluate_locked)
+    assert "pos.status = SLStatus.ACTIVE" not in src, \
+        "SL callback failure must NOT revert status to ACTIVE — that causes double-fire on next tick"
+    assert "self._positions.pop(pos.order_id, None)" in src, \
+        "Position must be deregistered even if SL callback raises"
+
+def t_kite_client_token_persist_logs_warning():
+    """kite_client.set_access_token must log WARNING if token persistence fails, not silently pass."""
+    import kite_client as _kc
+    src = _inspect33.getsource(_kc.KiteClient.set_access_token)
+    assert "logger.warning" in src, \
+        "set_access_token must log a warning when state_store persistence fails"
+    assert "except Exception:\n            pass" not in src, \
+        "set_access_token must not swallow token persistence exception silently"
+
+def t_kite_paper_placed_at_uses_ist():
+    """kite_client paper order placed_at must use IST timezone not naive datetime.now()."""
+    import kite_client as _kc
+    src = _inspect33.getsource(_kc.KiteClient._paper_place)
+    assert "datetime.now()" not in src, \
+        "_paper_place must not use datetime.now() — paper order timestamps must be IST"
+    assert "_IST" in src, "_paper_place must use _IST timezone for placed_at timestamp"
+
+def t_macro_signals_vix_preserves_zero():
+    """macro_signals VIX fetch must not discard zero VIX — the pattern 'or 0) or None' returns None for 0.0."""
+    import macro_signals as _ms
+    src = _inspect33.getsource(_ms._fetch_india_vix_nse)
+    assert ") or None" not in src, \
+        "_fetch_india_vix_nse must not use 'float(...) or None' — this discards 0.0 VIX readings"
+    assert "last_val is not None" in src, \
+        "VIX None check must test for None explicitly, not use truthiness"
+
+def t_order_guard_persist_failure_is_warning():
+    """order_guard trade count persistence failure must log at WARNING not DEBUG."""
+    import order_guard as _og
+    src = _inspect33.getsource(_og.OrderGuard._persist_trade_count)
+    assert "logger.warning" in src, "_persist_trade_count must log at WARNING not DEBUG"
+    assert "logger.debug" not in src, "_persist_trade_count must not stay at DEBUG"
+
+run("tick_engine: _rest_last_cum_vol protected by _rest_vol_lock", t_tick_engine_rest_vol_lock)
+run("tick_engine: indicator compute errors logged at WARNING not DEBUG", t_tick_engine_indicator_error_is_warning)
+run("tick_engine: all_latest() uses .get() to prevent KeyError race", t_tick_engine_all_latest_uses_get)
+run("sebi_compliance: _record_audit uses now_ist() not datetime.now()", t_sebi_compliance_uses_now_ist)
+run("sebi_compliance: OTR > 10:1 blocks order (returns False)", t_sebi_compliance_otr_blocks_order)
+run("sebi_compliance: kill-switch triggers audit log entry", t_sebi_kill_switch_logged_to_audit)
+run("sebi_compliance: pause/resume logged to audit trail", t_sebi_pause_resume_logged_to_audit)
+run("alt_data: all event-day methods use now_ist() not datetime.now()", t_alt_data_uses_now_ist)
+run("risk_manager: loss notification failure logged CRITICAL not pass", t_risk_manager_loss_notification_logs_critical)
+run("risk_manager: Kelly fraction failure logged WARNING not DEBUG", t_risk_manager_kelly_failure_is_warning)
+run("trailing_sl_engine: SL callback failure deregisters position (no double-fire)", t_trailing_sl_no_double_fire_on_callback_failure)
+run("kite_client: token persistence failure logged WARNING not pass", t_kite_client_token_persist_logs_warning)
+run("kite_client: paper order placed_at uses IST timezone", t_kite_paper_placed_at_uses_ist)
+run("macro_signals: VIX zero value preserved (not discarded by 'or None')", t_macro_signals_vix_preserves_zero)
+run("order_guard: trade count persist failure logged WARNING not DEBUG", t_order_guard_persist_failure_is_warning)
+
+# ══════════════════════════════════════════════════════════════════════════
 # FINAL SUMMARY
 # ══════════════════════════════════════════════════════════════════════════
 failed = summary()

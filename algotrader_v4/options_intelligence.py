@@ -20,6 +20,7 @@ from typing import Optional
 
 from loguru import logger
 
+from ist_clock import now_ist
 from market_data import nse_client
 
 
@@ -74,7 +75,7 @@ def _append_iv_history(symbol: str, atm_iv: float) -> None:
 def _append_iv_history_locked(symbol: str, atm_iv: float) -> None:
     history = _load_iv_history()
     entries = history.get(symbol, [])
-    today_str = date.today().isoformat()
+    today_str = now_ist().date().isoformat()
 
     # Replace today's entry if it already exists
     entries = [e for e in entries if e.get("date") != today_str]
@@ -457,7 +458,7 @@ async def get_iv_context(symbol: str) -> dict:
             "expiry":        parsed["expiry"],
             "total_ce_oi":   parsed["total_ce_oi"],
             "total_pe_oi":   parsed["total_pe_oi"],
-            "updated_at":    datetime.now().isoformat(),
+            "updated_at":    now_ist().isoformat(),
         }
 
         # Store in in-memory cache

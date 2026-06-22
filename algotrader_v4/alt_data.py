@@ -12,6 +12,8 @@ from datetime import date, datetime, timedelta
 from typing import Optional
 from loguru import logger
 
+from ist_clock import now_ist
+
 # ── News / headline sentiment keywords ────────────────────────────────────────
 
 _POS_KEYWORDS = [
@@ -63,7 +65,7 @@ def _rbi_mpc_dates(year: int) -> list[date]:
 def _within_earnings_window(row: dict, days: int = 2) -> bool:
     try:
         event_date = date.fromisoformat(row["date"])
-        return abs((event_date - date.today()).days) <= days
+        return abs((event_date - now_ist().date()).days) <= days
     except (ValueError, KeyError, TypeError):
         return False
 
@@ -180,7 +182,7 @@ class AltDataEngine:
         Check whether dt (default: today) is an economic event day.
         Returns (True, event_name) or (False, "").
         """
-        d = (dt or datetime.now()).date()
+        d = (dt or now_ist()).date()
         year = d.year
 
         # F&O expiry
@@ -209,7 +211,7 @@ class AltDataEngine:
 
     def days_to_next_event(self, dt: Optional[datetime] = None) -> int:
         """Return calendar days until the next economic event."""
-        d = (dt or datetime.now()).date()
+        d = (dt or now_ist()).date()
         for ahead in range(1, 45):
             check = d + timedelta(days=ahead)
             flag, _ = self.is_event_day(datetime.combine(check, datetime.min.time()))
@@ -219,7 +221,7 @@ class AltDataEngine:
 
     def next_fno_expiry(self, dt: Optional[datetime] = None) -> date:
         """Return the next F&O expiry date on or after dt."""
-        d = (dt or datetime.now()).date()
+        d = (dt or now_ist()).date()
         exp = _last_thursday(d.year, d.month)
         if exp < d:
             # Already past — go to next month
@@ -362,8 +364,7 @@ class AltDataEngine:
 
     def is_earnings_period(self, symbol: str, days_ahead: int = 2) -> bool:
         """True if symbol has earnings announced within ±days_ahead calendar days."""
-        from datetime import date, timedelta
-        today = date.today()
+        today = now_ist().date()
         for row in self._load_earnings_calendar():
             if row.get("symbol", "").upper() != symbol.upper():
                 continue
