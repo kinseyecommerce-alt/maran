@@ -13508,6 +13508,67 @@ run("upstox_broker: squareoff continues and returns completed ids after one fail
 run("upstox_broker: place_order has no dead 'trading_mode != PAPER' check after PAPER return", t_upstox_broker_place_order_no_dead_mode_check)
 
 # ══════════════════════════════════════════════════════════════════════════
+# 28. BASE_AGENT TSL CALLBACK + EXIT INSTRUMENT (Batch 28)
+# ══════════════════════════════════════════════════════════════════════════
+
+import inspect as _inspect28
+
+
+def t_base_agent_on_sl_moved_cancel_fail_returns_early():
+    """BUG FIX (CRITICAL): when modify_order fails AND cancel_order also fails,
+    the original code fell through and placed a NEW SL-M without removing the
+    old one — two live SL-M orders for the same position. Both would trigger
+    on price decline, executing 2x the position size and flipping to a naked short.
+
+    Fix: set _cancel_ok=False; only place new SL-M if cancel succeeded."""
+    import agents.base_agent as _ba
+    src = _inspect28.getsource(_ba._setup_tsl_callbacks)
+    # The fix introduces _cancel_ok flag and guards place_order with 'if not _cancel_ok: return'
+    assert "_cancel_ok" in src, \
+        "_on_sl_moved must track cancel success via _cancel_ok flag"
+    assert "if not _cancel_ok:" in src, \
+        "_on_sl_moved must return early when cancel fails (prevents double-stop)"
+    # The place_order call must only appear AFTER the cancel guard
+    cancel_ok_pos  = src.find("if not _cancel_ok:")
+    place_order_pos = src.find("lambda: kite_client.place_order(")
+    assert cancel_ok_pos < place_order_pos, \
+        "_on_sl_moved: 'if not _cancel_ok' guard must appear before the new SL-M place_order call"
+
+
+def t_base_agent_on_sl_moved_no_place_when_cancel_fails():
+    """Source check: the structure must be cancel → check → place, not cancel → place."""
+    import agents.base_agent as _ba
+    src = _inspect28.getsource(_ba._setup_tsl_callbacks)
+    # Must have 'return' after the cancel failure log (guards the place_order)
+    # Check that 'return' appears between the cancel except block and place_order
+    cancel_fail_pos = src.find("cancel_order failed for")
+    return_after_cancel = src.find("return", cancel_fail_pos)
+    place_order_in_moved = src.find("lambda: kite_client.place_order(")
+    assert return_after_cancel < place_order_in_moved, \
+        "_on_sl_moved: 'return' must appear after cancel failure, before new SL-M placement"
+
+
+def t_base_agent_check_exits_uses_position_tradingsymbol():
+    """BUG FIX: _check_exits_on_tick was placing the exit order with tradingsymbol=sym
+    (snap.symbol = underlying). For F&O positions, pos.tradingsymbol is the CONTRACT
+    (e.g. 'NIFTY2607051850CE') — using sym would try to exit the index, not the contract.
+    Fix: exit uses pos.get('tradingsymbol', sym)."""
+    import agents.base_agent as _ba
+    src = _inspect28.getsource(_ba.BaseAgent._check_exits_on_tick)
+    # Old code: tradingsymbol=sym
+    # New code: _exit_sym = pos.get("tradingsymbol", sym) then tradingsymbol=_exit_sym
+    assert "pos.get(\"tradingsymbol\", sym)" in src or "pos.get('tradingsymbol', sym)" in src, \
+        "_check_exits_on_tick exit must use pos.get('tradingsymbol', sym) not bare sym"
+    # Ensure 'tradingsymbol=sym,' (old bare form) is NOT present in this method
+    assert "tradingsymbol=sym," not in src, \
+        "_check_exits_on_tick must not use 'tradingsymbol=sym' directly for exit order"
+
+
+run("base_agent: _on_sl_moved tracks _cancel_ok before placing new SL-M",            t_base_agent_on_sl_moved_cancel_fail_returns_early)
+run("base_agent: _on_sl_moved returns early when cancel fails (no double-stop)",      t_base_agent_on_sl_moved_no_place_when_cancel_fails)
+run("base_agent: _check_exits_on_tick uses pos tradingsymbol for F&O exit order",     t_base_agent_check_exits_uses_position_tradingsymbol)
+
+# ══════════════════════════════════════════════════════════════════════════
 # FINAL SUMMARY
 # ══════════════════════════════════════════════════════════════════════════
 failed = summary()
