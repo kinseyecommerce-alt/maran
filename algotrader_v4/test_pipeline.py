@@ -13693,6 +13693,38 @@ run("simulation: AgentTracker blocks re-entry within post-exit cooldown window",
 run("simulation: _POST_EXIT_COOLDOWN_SECS covers all 5 agents", t_post_exit_cooldown_table_covers_all_agents)
 
 # ══════════════════════════════════════════════════════════════════════════
+# 31. INTRADAY FII PATTERN SILENT DEAD-CODE BUG (Batch 31)
+# ══════════════════════════════════════════════════════════════════════════
+import inspect as _inspect31
+import agents.strategy_agents as _sa31
+
+def t_intraday_fii_pattern_uses_float_directly():
+    """IntradayAgent._pat_fii_institutional must NOT call .get() on the float return of get_fii_sentiment()."""
+    src = _inspect31.getsource(_sa31.IntradayAgent._pat_fii_institutional)
+    assert "fii_net_score" not in src, \
+        "_pat_fii_institutional must not access .get('fii_net_score') — get_fii_sentiment() returns a float"
+    assert ".get(" not in src, \
+        "_pat_fii_institutional must not call .get() on the float return value"
+
+def t_intraday_fii_sell_threshold_is_negative():
+    """IntradayAgent SELL condition must check fii < -0.35 (negative FII), not fii < 0.35."""
+    src = _inspect31.getsource(_sa31.IntradayAgent._pat_fii_institutional)
+    assert "fii < -" in src, \
+        "SELL threshold must be fii < -0.35 (negative institutional flow), not fii < 0.35"
+    assert "fii < 0.35" not in src, \
+        "fii < 0.35 would fire SELL on neutral FII — must be fii < -0.35"
+
+def t_intraday_fii_no_falsy_check():
+    """IntradayAgent must not check 'if not sent' on float — float 0.0 is valid neutral sentiment."""
+    src = _inspect31.getsource(_sa31.IntradayAgent._pat_fii_institutional)
+    assert "if not sent" not in src, \
+        "'if not sent' would short-circuit on 0.0 (neutral FII) — check removed"
+
+run("intraday_fii: _pat_fii_institutional uses float directly (no .get())", t_intraday_fii_pattern_uses_float_directly)
+run("intraday_fii: SELL threshold is fii < -0.35 not fii < 0.35", t_intraday_fii_sell_threshold_is_negative)
+run("intraday_fii: no falsy 'if not sent' check on float return", t_intraday_fii_no_falsy_check)
+
+# ══════════════════════════════════════════════════════════════════════════
 # FINAL SUMMARY
 # ══════════════════════════════════════════════════════════════════════════
 failed = summary()

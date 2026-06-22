@@ -436,15 +436,12 @@ class IntradayAgent(BaseAgent):
         """Strong FII institutional flow + EMA alignment + ADX — smart money entry."""
         try:
             from alt_data import alt_data_engine
-            sent = alt_data_engine.get_fii_sentiment()
-            if not sent:
-                return "", 0, ""
-            fii = sent.get("fii_net_score", 0.5)
+            fii = alt_data_engine.get_fii_sentiment()  # float in [-1.0, 1.0]
             adx = getattr(ind, 'adx_14', 0.0)
             if (fii > 0.65 and ind.ema9 > ind.ema21 > 0 and adx >= 20
                     and ind.vwap and ltp > ind.vwap and ind.volume_ratio >= 1.2):
                 return "BUY", 5, "FII_INSTITUTIONAL"
-            if (fii < 0.35 and ind.ema9 < ind.ema21 > 0 and adx >= 20
+            if (fii < -0.35 and ind.ema9 < ind.ema21 > 0 and adx >= 20
                     and ind.vwap and ltp < ind.vwap and ind.volume_ratio >= 1.2):
                 return "SELL", 5, "FII_INSTITUTIONAL"
         except Exception:
