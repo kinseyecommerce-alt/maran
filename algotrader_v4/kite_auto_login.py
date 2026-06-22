@@ -91,7 +91,7 @@ def run_kite_auto_login() -> str:
 
             request_token = _extract_request_token(page.url)
             if not request_token:
-                raise RuntimeError(f"No request_token in redirect URL: {page.url}")
+                raise RuntimeError("Kite did not include request_token in redirect URL")
 
         finally:
             browser.close()

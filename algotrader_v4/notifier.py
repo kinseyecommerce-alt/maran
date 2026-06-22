@@ -35,27 +35,41 @@ class Notifier:
         """
         Try email (if configured) AND telegram (if configured).
         Swallows all errors; logs outcome at DEBUG.
+        Escalates to CRITICAL if both configured channels fail.
         """
         full_subject = f"[AlgoTrader][{level}] {subject}"
         full_body = body or subject
 
+        email_configured = bool(getattr(settings, "alert_email", "") and getattr(settings, "smtp_user", ""))
+        telegram_configured = bool(getattr(settings, "telegram_bot_token", "")
+                                   and getattr(settings, "telegram_chat_id", ""))
+        email_ok = False
+        telegram_ok = False
+
         # Email
-        if getattr(settings, "alert_email", "") and getattr(settings, "smtp_user", ""):
+        if email_configured:
             try:
                 self.send_email(full_subject, full_body)
                 logger.debug("Notifier: email sent — {}", full_subject)
+                email_ok = True
             except Exception as exc:
                 logger.warning("Notifier: email failed — {}: {}", full_subject, exc)
 
         # Telegram
-        if (getattr(settings, "telegram_bot_token", "")
-                and getattr(settings, "telegram_chat_id", "")):
+        if telegram_configured:
             try:
                 msg = f"{full_subject}\n\n{full_body}" if full_body != full_subject else full_subject
                 self.send_telegram(msg)
                 logger.debug("Notifier: telegram sent — {}", full_subject)
+                telegram_ok = True
             except Exception as exc:
                 logger.warning("Notifier: telegram failed — {}: {}", full_subject, exc)
+
+        # Both channels were configured but both failed — alert may be lost
+        if (email_configured or telegram_configured) and not email_ok and not telegram_ok:
+            logger.critical(
+                "Notifier: ALL channels failed for [{}] — alert may be lost", full_subject
+            )
 
     def send_email(self, subject: str, body: str) -> None:
         """SMTP/TLS using smtplib; smtp_user → alert_email."""

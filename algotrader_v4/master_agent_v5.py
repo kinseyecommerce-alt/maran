@@ -161,6 +161,9 @@ class MasterAgent:
     # ── Lifecycle ──────────────────────────────────────────────────────────────
 
     def start(self, strategies: list[str], watchlist: list[dict]) -> dict:
+        if self.running and self._scheduler.running:
+            logger.warning("[master_v5] Bot already running — skipping duplicate start()")
+            return {}
         self.running = True
 
         # Pre-flight: verify Kite connection before committing to a live run
@@ -223,25 +226,34 @@ class MasterAgent:
 
         sq_h, sq_m = [int(x) for x in settings.squareoff_time.split(":")]
         self._scheduler.add_job(self._master_review,   "interval", seconds=60,  id="master_review",
-                                 max_instances=1, coalesce=True)
+                                 max_instances=1, coalesce=True, misfire_grace_time=120)
         self._scheduler.add_job(self._auto_squareoff,  "cron", hour=sq_h, minute=sq_m,
-                                 day_of_week="mon-fri", id="squareoff")
+                                 day_of_week="mon-fri", id="squareoff",
+                                 misfire_grace_time=600)
         self._scheduler.add_job(self._daily_reset,     "cron", hour=9, minute=15,
-                                 day_of_week="mon-fri", id="daily_reset")
+                                 day_of_week="mon-fri", id="daily_reset",
+                                 misfire_grace_time=600)
         self._scheduler.add_job(self._nightly_adaptive,"cron", hour=21, minute=0,
-                                 day_of_week="mon-fri", id="nightly_adaptive")
+                                 day_of_week="mon-fri", id="nightly_adaptive",
+                                 misfire_grace_time=1800)
         self._scheduler.add_job(self._weekly_backtest, "cron", hour=20, minute=0,
-                                 day_of_week="sun", id="weekly_backtest")
+                                 day_of_week="sun", id="weekly_backtest",
+                                 misfire_grace_time=3600)
         self._scheduler.add_job(self._weekly_memory_synthesis, "cron", hour=21, minute=0,
-                                 day_of_week="sun", id="weekly_memory")
+                                 day_of_week="sun", id="weekly_memory",
+                                 misfire_grace_time=3600)
         self._scheduler.add_job(self._portfolio_optimize_job, "interval", minutes=15,
-                                 id="portfolio_optimize", max_instances=1, coalesce=True)
+                                 id="portfolio_optimize", max_instances=1, coalesce=True,
+                                 misfire_grace_time=300)
         self._scheduler.add_job(self._weekly_db_cleanup, "cron", hour=22, minute=30,
-                                 day_of_week="sun", id="weekly_db_cleanup")
+                                 day_of_week="sun", id="weekly_db_cleanup",
+                                 misfire_grace_time=3600)
         self._scheduler.add_job(self._refresh_fii_dii_job, "cron", hour=19, minute=30,
-                                 day_of_week="mon-fri", id="refresh_fii_dii")
+                                 day_of_week="mon-fri", id="refresh_fii_dii",
+                                 misfire_grace_time=1800)
         self._scheduler.add_job(self._refresh_macro_job,   "interval", minutes=5,
-                                 id="refresh_macro", max_instances=1, coalesce=True)
+                                 id="refresh_macro", max_instances=1, coalesce=True,
+                                 misfire_grace_time=120)
         self._scheduler.start()
         logger.info("[master_v5] started — tick-driven 1s")
         _fire(send_telegram(
@@ -259,8 +271,8 @@ class MasterAgent:
             a.stop()
         try:
             self._scheduler.shutdown(wait=False)
-        except Exception:
-            pass
+        except Exception as exc:
+            logger.warning("[master_v5] Scheduler shutdown error: {}", exc)
         await send_telegram("<b>AlgoTrader Pro v5 stopped</b>")
         from n8n_bridge import notify as _n8n
         _fire(_n8n("system", {"type": "bot_stopped"}))
@@ -480,12 +492,15 @@ class MasterAgent:
             # all_params keys are "strategy::symbol"; values are AdaptiveParams.to_dict()
             # summary.items() yields top-level aggregates (total_pairs, active, …) — the
             # sharpe_20 field lives one level deeper inside all_params.
-            for key, data in summary.get("all_params", {}).items():
+            all_params = summary.get("all_params", {})
+            seen_keys: set[str] = set()
+            for key, data in all_params.items():
                 if not isinstance(data, dict):
                     continue
                 sharpe = data.get("sharpe_20", None)
                 if sharpe is None:
                     continue
+                seen_keys.add(key)
                 count = self._rolling_sharpe_below_count.get(key, 0)
                 if sharpe < threshold:
                     count += 1
@@ -502,6 +517,10 @@ class MasterAgent:
                         _fire(send_telegram(msg))
                 else:
                     self._rolling_sharpe_below_count[key] = 0
+            # Prune stale keys no longer present in adaptive summary (prevents unbounded growth)
+            for stale in list(self._rolling_sharpe_below_count.keys()):
+                if stale not in seen_keys:
+                    del self._rolling_sharpe_below_count[stale]
         except Exception as exc:
             logger.debug("[master] Sharpe check error: {}", exc)
 

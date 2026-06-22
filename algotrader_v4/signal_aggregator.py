@@ -34,9 +34,9 @@ class SignalAggregator:
         key = (symbol, direction)
         score = int(score) if score is not None else 0
         with self._lock:
-            # Expire old entries
+            # Expire old entries — use .get() to avoid creating a defaultdict entry prematurely
             window = now - timedelta(seconds=CONSENSUS_WINDOW_SECS)
-            active = [(a, s, ts) for a, s, ts in self._signals[key] if ts > window]
+            active = [(a, s, ts) for a, s, ts in self._signals.get(key, []) if ts > window]
             # Remove duplicate from same agent (keep latest)
             active = [(a, s, ts) for a, s, ts in active if a != agent]
             active.append((agent, score, now))

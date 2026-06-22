@@ -606,7 +606,7 @@ def get_performance_report(
             "total_net_pnl": 0.0, "total_gross_pnl": 0.0, "total_costs": 0.0,
             "max_drawdown_pct": 0.0, "sharpe_ratio": None,
             "calmar_ratio": None, "monthly_breakdown": [], "by_strategy": {},
-            "report_generated_at": datetime.now().isoformat(),
+            "report_generated_at": datetime.now(timezone.utc).isoformat(),
         }
 
     wins      = [r for r in rows if r.get("net_pnl", 0) > 0]
@@ -698,7 +698,7 @@ def get_performance_report(
         "calmar_ratio":    calmar,
         "monthly_breakdown": monthly_breakdown,
         "by_strategy":    by_strategy,
-        "report_generated_at": datetime.now().isoformat(),
+        "report_generated_at": datetime.now(timezone.utc).isoformat(),
     }
 
 

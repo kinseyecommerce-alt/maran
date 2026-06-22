@@ -10169,15 +10169,16 @@ def t_platform_scheduler_options_overlap_guard():
     )
 
 def t_symbol_scanner_ema_nan_guard():
-    """symbol_scanner: trend_direction assignment must guard EMA values for NaN."""
+    """symbol_scanner: trend_direction assignment must guard EMA values for NaN/inf."""
     import inspect
     import symbol_scanner as _sc
     src = inspect.getsource(_sc.SymbolScanner._score_symbol)
-    # NaN identity check: x == x is False only for NaN
+    # Accept NaN identity check (x == x), math.isnan, or math.isfinite (preferred)
     assert ("ema9 == sc.ema9" in src or "ema21 == sc.ema21" in src or
-            "isnan" in src or "ema9 and sc.ema9 == sc.ema9" in src), (
+            "isnan" in src or "isfinite" in src or
+            "ema9 and sc.ema9 == sc.ema9" in src), (
         "symbol_scanner._score_symbol trend_direction check must guard EMA values for NaN "
-        "using identity check (x == x) or math.isnan — EMAIndicator can return NaN "
+        "using identity check (x == x), math.isnan, or math.isfinite — EMAIndicator can return NaN "
         "for insufficient data and NaN is truthy"
     )
 
@@ -13933,6 +13934,169 @@ run("kite_client: token persistence failure logged WARNING not pass", t_kite_cli
 run("kite_client: paper order placed_at uses IST timezone", t_kite_paper_placed_at_uses_ist)
 run("macro_signals: VIX zero value preserved (not discarded by 'or None')", t_macro_signals_vix_preserves_zero)
 run("order_guard: trade count persist failure logged WARNING not DEBUG", t_order_guard_persist_failure_is_warning)
+
+# ══════════════════════════════════════════════════════════════════════════
+# 34. RUTHLESS AUDIT BATCH 34 (credential leak, scheduler races, memory leaks, UTC/IST)
+# ══════════════════════════════════════════════════════════════════════════
+import inspect as _inspect34
+
+def t_kite_auto_login_no_token_in_error():
+    """kite_auto_login must NOT include page.url in the request_token missing error (credential leak)."""
+    import kite_auto_login as _kal
+    src = _inspect34.getsource(_kal.run_kite_auto_login)
+    # The error raised when request_token is missing must not embed page.url
+    for line in src.splitlines():
+        if "request_token" in line.lower() and "raise" in line and "page.url" in line:
+            raise AssertionError(
+                f"kite_auto_login leaks request_token via page.url in error message: {line.strip()}"
+            )
+
+def t_master_agent_duplicate_start_guard():
+    """master_agent_v5.start() must have an early-return guard when already running."""
+    import master_agent_v5 as _ma
+    src = _inspect34.getsource(_ma.MasterAgent.start)
+    assert "already running" in src or ("self.running" in src and "return" in src), \
+        "MasterAgent.start() must guard against duplicate invocations when bot is already running"
+
+def t_master_agent_misfire_grace_time():
+    """master_agent_v5 APScheduler jobs must set misfire_grace_time to prevent silent skips."""
+    import master_agent_v5 as _ma
+    src = _inspect34.getsource(_ma.MasterAgent.start)
+    assert "misfire_grace_time" in src, \
+        "MasterAgent.start() must set misfire_grace_time on APScheduler jobs"
+
+def t_master_agent_shutdown_not_silent():
+    """master_agent_v5 scheduler shutdown exception must not be silently swallowed."""
+    import master_agent_v5 as _ma
+    src = _inspect34.getsource(_ma.MasterAgent.stop)
+    assert "except Exception:\n            pass" not in src, \
+        "MasterAgent.stop() must not silently swallow scheduler shutdown exceptions"
+    assert "logger.warning" in src or "logger.error" in src, \
+        "MasterAgent.stop() must log scheduler shutdown exceptions"
+
+def t_master_agent_rolling_sharpe_prunes_stale():
+    """master_agent_v5 must prune stale keys from _rolling_sharpe_below_count."""
+    import master_agent_v5 as _ma
+    src = _inspect34.getsource(_ma.MasterAgent._check_rolling_sharpe)
+    assert "_rolling_sharpe_below_count" in src, \
+        "_check_rolling_sharpe must reference _rolling_sharpe_below_count"
+    assert "del self._rolling_sharpe_below_count" in src or \
+           "stale" in src or \
+           "seen_keys" in src, \
+        "_check_rolling_sharpe must prune stale keys from _rolling_sharpe_below_count to prevent memory leak"
+
+def t_main_rate_store_lock_exists():
+    """main.py must have a threading.Lock protecting _rate_store to prevent race conditions."""
+    import main as _main
+    assert hasattr(_main, "_rate_store_lock"), \
+        "main.py must define _rate_store_lock (threading.Lock) to guard _rate_store"
+    import threading
+    assert isinstance(_main._rate_store_lock, type(threading.Lock())), \
+        "_rate_store_lock must be a threading.Lock instance"
+
+def t_main_regime_broadcast_uses_now_ist():
+    """main.py regime broadcast must use now_ist() not datetime.utcnow()."""
+    import main as _main
+    src = _inspect34.getsource(_main.regime_refresh)
+    assert "utcnow" not in src, \
+        "regime_refresh must not use datetime.utcnow() — use now_ist() for IST timestamps"
+
+def t_platform_scheduler_options_cache_no_overlap():
+    """platform_scheduler options_cache job must have max_instances=1 and coalesce=True."""
+    import platform_scheduler as _ps
+    src = _inspect34.getsource(_ps.PlatformScheduler.start)
+    # Find the options_cache job definition
+    assert "options_cache" in src, "options_cache job must exist in start()"
+    cache_block = src[src.find("options_cache"):]
+    assert "max_instances=1" in cache_block[:500], \
+        "options_cache job must set max_instances=1 to prevent concurrent execution"
+    assert "coalesce=True" in cache_block[:500], \
+        "options_cache job must set coalesce=True to prevent queued missed-fire pile-up"
+
+def t_notifier_both_channels_fail_is_critical():
+    """notifier.send() must log CRITICAL when all configured channels fail."""
+    import notifier as _notifier
+    src = _inspect34.getsource(_notifier.Notifier.send)
+    assert "logger.critical" in src, \
+        "Notifier.send() must log CRITICAL when all notification channels fail — alert may be lost"
+
+def t_signal_aggregator_register_uses_get():
+    """signal_aggregator.register() must use .get() not direct dict access to avoid premature defaultdict entries."""
+    import signal_aggregator as _sa
+    src = _inspect34.getsource(_sa.SignalAggregator.register)
+    assert "self._signals[key]" not in src or ".get(" in src, \
+        "register() must use self._signals.get(key, []) not self._signals[key] to avoid memory leak"
+    assert ".get(key" in src or ".get(symbol" in src, \
+        "register() must use .get() for _signals lookup"
+
+def t_state_store_report_generated_at_is_utc():
+    """state_store get_performance_report must include timezone in report_generated_at."""
+    import state_store as _ss
+    src = _inspect34.getsource(_ss.get_performance_report)
+    # datetime.now() without tz is naive — must have timezone.utc or now_ist
+    naive_uses = [ln for ln in src.splitlines()
+                  if "datetime.now()" in ln and "report_generated_at" in ln]
+    assert not naive_uses, \
+        f"get_performance_report uses naive datetime.now() for report_generated_at: {naive_uses}"
+    assert "timezone.utc" in src or "now_ist" in src, \
+        "get_performance_report must use timezone-aware datetime for report_generated_at"
+
+def t_claude_trade_gate_log_uses_ist():
+    """claude_trade_gate gate log timestamp must use _now_ist() not datetime.now()."""
+    import claude_trade_gate as _ctg
+    src = _inspect34.getsource(_ctg.assess)
+    assert 'datetime.now().strftime' not in src, \
+        "claude_trade_gate.assess() gate log must use _now_ist() not datetime.now() for IST timestamp"
+
+def t_symbol_scanner_ema_uses_isfinite():
+    """symbol_scanner EMA validity check must use math.isfinite not truthiness (fails for ema=0.0)."""
+    import symbol_scanner as _sym
+    src = _inspect34.getsource(_sym.SymbolScanner._score_symbol)
+    assert "math.isfinite" in src, \
+        "_score_symbol must use math.isfinite() for EMA validity — truthiness fails for 0.0"
+    assert "sc.ema9 and sc.ema9 == sc.ema9" not in src, \
+        "_score_symbol must not use truthiness (sc.ema9) for EMA validity check — fails for 0.0"
+
+def t_greeks_atm_strike_never_zero():
+    """greeks_engine.atm_strike must never return 0 even for very small spot prices."""
+    from greeks_engine import atm_strike
+    assert atm_strike(spot=20, step=50) >= 50, \
+        "atm_strike(spot=20) must return at least one step (50), not 0"
+    assert atm_strike(spot=1, step=50) >= 50, \
+        "atm_strike(spot=1) must return at least one step (50), not 0"
+    assert atm_strike(spot=24.9, step=50) >= 50, \
+        "atm_strike(spot=24.9) must return at least one step (50), not 0"
+
+def t_atomic_bracket_sl_verification_logs_warning():
+    """atomic_bracket SL verification failure must log a warning not silently pass."""
+    import atomic_bracket as _ab
+    src = _inspect34.getsource(_ab.AtomicBracketEngine._on_tsl_sl_hit)
+    assert "logger.warning" in src, \
+        "_on_tsl_sl_hit must log a WARNING when SL verification fails, not silently pass"
+    # Verify the specific SL verification exception handler is not a bare pass
+    lines = src.splitlines()
+    for i, line in enumerate(lines):
+        if "SL verification" in line or ("_sl_exc" in line and "except" in line):
+            context = "\n".join(lines[i:i+5])
+            assert "pass" not in context or "logger" in context, \
+                f"SL verification exception handler must not silently pass: {context}"
+            break
+
+run("kite_auto_login: request_token not leaked in redirect error message", t_kite_auto_login_no_token_in_error)
+run("master_agent_v5: duplicate start() guard prevents double-scheduling", t_master_agent_duplicate_start_guard)
+run("master_agent_v5: APScheduler jobs set misfire_grace_time", t_master_agent_misfire_grace_time)
+run("master_agent_v5: scheduler shutdown exception logged not swallowed", t_master_agent_shutdown_not_silent)
+run("master_agent_v5: _rolling_sharpe_below_count prunes stale strategy keys", t_master_agent_rolling_sharpe_prunes_stale)
+run("main.py: _rate_store_lock (threading.Lock) guards rate limiter dict", t_main_rate_store_lock_exists)
+run("main.py: regime broadcast uses now_ist() not datetime.utcnow()", t_main_regime_broadcast_uses_now_ist)
+run("platform_scheduler: options_cache job has max_instances=1 + coalesce=True", t_platform_scheduler_options_cache_no_overlap)
+run("notifier: all channels failing escalates to CRITICAL not WARNING", t_notifier_both_channels_fail_is_critical)
+run("signal_aggregator: register() uses .get() not direct key access", t_signal_aggregator_register_uses_get)
+run("state_store: report_generated_at uses timezone-aware datetime", t_state_store_report_generated_at_is_utc)
+run("claude_trade_gate: gate log timestamp uses _now_ist() not datetime.now()", t_claude_trade_gate_log_uses_ist)
+run("symbol_scanner: EMA validity check uses math.isfinite not truthiness", t_symbol_scanner_ema_uses_isfinite)
+run("greeks_engine: atm_strike(spot<25) returns >= one step (not 0)", t_greeks_atm_strike_never_zero)
+run("atomic_bracket: SL verification failure logs WARNING not silent pass", t_atomic_bracket_sl_verification_logs_warning)
 
 # ══════════════════════════════════════════════════════════════════════════
 # FINAL SUMMARY

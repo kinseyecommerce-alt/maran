@@ -47,7 +47,7 @@ class PlatformScheduler:
         )
         self._sched.add_job(
             self._options_cache_refresh, "interval",
-            minutes=5, id="options_cache",
+            minutes=5, id="options_cache", max_instances=1, coalesce=True,
         )
         self._sched.start()
         logger.info("[platform] scheduler started (Kite@08:50, Report@09:00, Data@09:10, Start@09:16 IST)")

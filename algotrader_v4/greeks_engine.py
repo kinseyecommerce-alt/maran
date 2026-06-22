@@ -65,7 +65,7 @@ def implied_volatility(
         price = bs_price(S, K, T, r, sigma, opt)
         d1, _ = _d1d2(S, K, T, r, sigma)
         vega_val = S * _n(d1) * math.sqrt(T)
-        if abs(vega_val) < 1e-10:
+        if abs(vega_val) < 1e-6:
             break
         diff = price - market_price
         if abs(diff) < tol:
@@ -180,8 +180,8 @@ def strike_market_price(
 
 
 def atm_strike(spot: float, step: int = 50) -> int:
-    """Round spot to nearest strike step."""
-    return int(round(spot / step) * step)
+    """Round spot to nearest strike step. Always returns at least one step."""
+    return max(step, int(round(spot / step) * step))
 
 
 def select_strike_by_delta(
