@@ -1313,7 +1313,7 @@ class OptionsAgent(BaseAgent):
         try:
             import math as _m
             from options_intelligence import get_cached as _get_oc
-            _oc  = _get_oc(sym)
+            _oc  = _get_oc(snap.symbol)
             iv_f = ((_oc.atm_iv / 100.0) if _oc and _oc.atm_iv and _oc.atm_iv > 1.0 else 0.20)
             iv_f = max(iv_f, 0.05)
             dte  = self._days_to_expiry(snap.symbol)
@@ -2114,15 +2114,12 @@ class SwingAgent(BaseAgent):
     def _pat_fii_swing(self, sym, snap, ind, ltp):
         try:
             from alt_data import alt_data_engine
-            sent = alt_data_engine.get_fii_sentiment()
-            if not sent:
-                return "", 0, ""
-            fii = sent.get("fii_net_score", 0.5)
+            fii = alt_data_engine.get_fii_sentiment()  # float in [-1.0, 1.0]
             adx = getattr(ind, 'adx_14', 0.0)
             if (fii > 0.65 and ltp > ind.ema200 > 0
                     and ind.ema21 > ind.ema50 > 0 and adx >= 20 and 45 <= ind.rsi_14 <= 65):
                 return "BUY", 5, "FII_SWING"
-            if (fii < 0.35 and ltp < ind.ema200 > 0
+            if (fii < -0.35 and ltp < ind.ema200 > 0
                     and ind.ema21 < ind.ema50 > 0 and adx >= 20 and 35 <= ind.rsi_14 <= 55):
                 return "SELL", 5, "FII_SWING"
         except Exception:
@@ -4337,16 +4334,13 @@ class MomentumAgent(BaseAgent):
         """Heavy FII buying/selling + full 4-EMA stack + ADX ≥25 = institutional momentum."""
         try:
             from alt_data import alt_data_engine
-            sent = alt_data_engine.get_fii_sentiment()
-            if not sent:
-                return "", 0, ""
-            fii = sent.get("fii_net_score", 0.5)
+            fii = alt_data_engine.get_fii_sentiment()  # float in [-1.0, 1.0]
             adx = getattr(ind, "adx_14", 0)
             if (fii > 0.70 and adx >= 25 and ind.macd_hist > 0
                     and ind.ema9 > ind.ema21 > ind.ema50 > 0
                     and ind.ema50 > ind.ema200 > 0):
                 return "BUY",  5, "FII_MOMENTUM"
-            if (fii < 0.30 and adx >= 25 and ind.macd_hist < 0
+            if (fii < -0.30 and adx >= 25 and ind.macd_hist < 0
                     and ind.ema9 < ind.ema21 > 0 and ind.ema21 < ind.ema50
                     and ind.ema50 < ind.ema200 > 0):
                 return "SELL", 5, "FII_MOMENTUM"

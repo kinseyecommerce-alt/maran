@@ -13569,6 +13569,77 @@ run("base_agent: _on_sl_moved returns early when cancel fails (no double-stop)",
 run("base_agent: _check_exits_on_tick uses pos tradingsymbol for F&O exit order",     t_base_agent_check_exits_uses_position_tradingsymbol)
 
 # ══════════════════════════════════════════════════════════════════════════
+# 29. STRATEGY_AGENTS SILENT DEAD-CODE BUGS (Batch 29)
+# ══════════════════════════════════════════════════════════════════════════
+
+import inspect as _inspect29
+
+
+def t_options_ctx_bonus_theta_uses_snap_symbol():
+    """BUG FIX: OptionsAgent._ctx_bonus used bare `sym` (NameError — not in scope)
+    to call get_cached(sym) for theta efficiency. Any NameError inside the
+    try/except swallowed it, meaning the theta bonus (+1) NEVER fired.
+    Fix: use snap.symbol."""
+    import agents.strategy_agents as _sa
+    src = _inspect29.getsource(_sa.OptionsAgent._ctx_bonus)
+    # Must use snap.symbol (not bare sym) in the theta block
+    assert "snap.symbol" in src, \
+        "OptionsAgent._ctx_bonus must call get_cached(snap.symbol), not bare sym"
+    # The old bare `sym` must NOT appear in any get_cached call
+    lines = src.splitlines()
+    for line in lines:
+        if "_get_oc" in line and "sym)" in line:
+            assert "snap.symbol" in line, \
+                f"OptionsAgent._ctx_bonus theta call must use snap.symbol: {line.strip()}"
+
+
+def t_swing_fii_pattern_uses_float_directly():
+    """BUG FIX: SwingAgent._pat_fii_swing called .get('fii_net_score') on the float
+    returned by get_fii_sentiment() → AttributeError silently caught → FII_SWING
+    pattern NEVER fires. Fix: use the returned float directly."""
+    import agents.strategy_agents as _sa
+    src = _inspect29.getsource(_sa.SwingAgent._pat_fii_swing)
+    # The dict-access form must not be present
+    assert "fii_net_score" not in src, \
+        "SwingAgent._pat_fii_swing must not call .get('fii_net_score') on a float"
+    # Bearish threshold must be negative (get_fii_sentiment returns [-1.0, 1.0])
+    assert "fii < -" in src, \
+        "SwingAgent._pat_fii_swing bearish check must use 'fii < -<threshold>' (float API)"
+
+
+def t_momentum_fii_pattern_uses_float_directly():
+    """BUG FIX: MomentumAgent._pat_fii_momentum called .get('fii_net_score') on the
+    float returned by get_fii_sentiment() → AttributeError silently caught → FII_MOMENTUM
+    pattern NEVER fires. Fix: use the returned float directly."""
+    import agents.strategy_agents as _sa
+    src = _inspect29.getsource(_sa.MomentumAgent._pat_fii_momentum)
+    # The dict-access form must not be present
+    assert "fii_net_score" not in src, \
+        "MomentumAgent._pat_fii_momentum must not call .get('fii_net_score') on a float"
+    # Bearish threshold must be negative
+    assert "fii < -" in src, \
+        "MomentumAgent._pat_fii_momentum bearish check must use 'fii < -<threshold>' (float API)"
+
+
+def t_fii_sentiment_return_type_is_float():
+    """Confirm get_fii_sentiment() returns float so callers using .get() were always broken."""
+    import inspect
+    from alt_data import alt_data_engine
+    import typing
+    hints = typing.get_type_hints(alt_data_engine.get_fii_sentiment)
+    ret = hints.get("return", None)
+    # Either annotation is float, or the method actually returns a float at runtime
+    result = alt_data_engine.get_fii_sentiment()
+    assert isinstance(result, float), \
+        f"get_fii_sentiment() must return float, got {type(result).__name__}"
+
+
+run("strategy_agents: OptionsAgent._ctx_bonus uses snap.symbol for theta efficiency",  t_options_ctx_bonus_theta_uses_snap_symbol)
+run("strategy_agents: SwingAgent._pat_fii_swing uses float API (no .get dict call)",   t_swing_fii_pattern_uses_float_directly)
+run("strategy_agents: MomentumAgent._pat_fii_momentum uses float API (no .get call)",  t_momentum_fii_pattern_uses_float_directly)
+run("strategy_agents: get_fii_sentiment() returns float confirming dict callers broke", t_fii_sentiment_return_type_is_float)
+
+# ══════════════════════════════════════════════════════════════════════════
 # FINAL SUMMARY
 # ══════════════════════════════════════════════════════════════════════════
 failed = summary()
