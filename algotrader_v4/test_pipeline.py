@@ -13725,6 +13725,67 @@ run("intraday_fii: SELL threshold is fii < -0.35 not fii < 0.35", t_intraday_fii
 run("intraday_fii: no falsy 'if not sent' check on float return", t_intraday_fii_no_falsy_check)
 
 # ══════════════════════════════════════════════════════════════════════════
+# 32. INFRASTRUCTURE BUGS (Batch 32)
+# ══════════════════════════════════════════════════════════════════════════
+import inspect as _inspect32
+
+def t_event_calendar_uses_ist_now():
+    """event_calendar.get_event_risk must use now_ist() not datetime.now() — UTC servers are 5.5h behind IST."""
+    import event_calendar as _ec
+    src = _inspect32.getsource(_ec.get_event_risk)
+    assert "datetime.now()" not in src, \
+        "get_event_risk must not call datetime.now() — use now_ist() for IST-correct comparisons"
+
+def t_event_calendar_has_ist_import():
+    """event_calendar must import now_ist from ist_clock."""
+    import event_calendar as _ec
+    import ist_clock
+    assert hasattr(_ec, "now_ist"), "event_calendar must import now_ist from ist_clock"
+
+def t_event_calendar_date_today_replaced():
+    """event_calendar helpers must not call date.today() — use now_ist().date() for IST correctness."""
+    import event_calendar as _ec
+    for fn_name in ("_fetch_corporate_actions", "_parse_corporate_actions",
+                    "_parse_event_calendar", "_inject_rbi_dates", "has_results_today"):
+        fn = getattr(_ec, fn_name, None)
+        if fn is None:
+            continue
+        src = _inspect32.getsource(fn)
+        assert "date.today()" not in src, \
+            f"{fn_name} must not call date.today() — use now_ist().date() for IST correctness"
+
+def t_backtest_engine_cache_has_lock():
+    """BacktestEngine must have a _cache_lock to prevent concurrent run() races."""
+    from backtest_engine import BacktestEngine
+    engine = BacktestEngine()
+    assert hasattr(engine, "_cache_lock"), "BacktestEngine must have _cache_lock attribute"
+    import threading
+    assert isinstance(engine._cache_lock, type(threading.Lock())), \
+        "_cache_lock must be a threading.Lock"
+
+def t_backtest_engine_run_uses_cache_lock():
+    """BacktestEngine.run must acquire _cache_lock around cache reads and writes."""
+    from backtest_engine import BacktestEngine
+    src = _inspect32.getsource(BacktestEngine.run)
+    assert "_cache_lock" in src, "BacktestEngine.run must use _cache_lock"
+
+def t_ml_filter_inference_error_is_warning():
+    """ml_signal_filter must log inference errors at WARNING level (not DEBUG) so they surface in prod."""
+    import ml_signal_filter as _mlf
+    src = _inspect32.getsource(_mlf.MLSignalFilter.filter_signal)
+    assert 'logger.warning' in src, \
+        "inference error must be logged at WARNING level so it's visible in production logs"
+    assert 'logger.debug("[MLFilter] inference error' not in src, \
+        "inference error must not stay at DEBUG — production logs often filter DEBUG out"
+
+run("event_calendar: get_event_risk uses now_ist() not datetime.now()", t_event_calendar_uses_ist_now)
+run("event_calendar: imports now_ist from ist_clock", t_event_calendar_has_ist_import)
+run("event_calendar: all helpers use now_ist().date() not date.today()", t_event_calendar_date_today_replaced)
+run("backtest_engine: BacktestEngine has _cache_lock for concurrent run() safety", t_backtest_engine_cache_has_lock)
+run("backtest_engine: BacktestEngine.run acquires _cache_lock", t_backtest_engine_run_uses_cache_lock)
+run("ml_signal_filter: inference error logged at WARNING not DEBUG", t_ml_filter_inference_error_is_warning)
+
+# ══════════════════════════════════════════════════════════════════════════
 # FINAL SUMMARY
 # ══════════════════════════════════════════════════════════════════════════
 failed = summary()

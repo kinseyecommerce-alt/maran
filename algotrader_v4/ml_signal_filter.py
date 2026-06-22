@@ -76,7 +76,7 @@ class MLSignalFilter:
             prob = float(m.predict_proba([features])[0][1])
             return prob >= min_prob, prob
         except Exception as exc:
-            logger.debug("[MLFilter] inference error: {}", exc)
+            logger.warning("[MLFilter] inference error — signal allowed by default: {}", exc)
             return True, 0.5
 
     def record_outcome(self, won: bool) -> None:

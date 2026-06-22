@@ -11,6 +11,7 @@ from typing import Optional
 
 from loguru import logger
 
+from ist_clock import now_ist
 from market_data import nse_client
 
 
@@ -67,7 +68,7 @@ def get_event_risk(symbol: str, current_time: Optional[datetime] = None) -> dict
     by a calendar-data issue.
     """
     try:
-        now = current_time or datetime.now()
+        now = current_time or now_ist().replace(tzinfo=None)
         events = _event_cache.get(symbol, []) + _event_cache.get(_MARKET_KEY, [])
         if not events:
             return dict(_SAFE_RESULT)
@@ -121,7 +122,7 @@ def get_event_risk(symbol: str, current_time: Optional[datetime] = None) -> dict
 
 def has_results_today(symbol: str) -> bool:
     """Return True if *symbol* has earnings / annual results scheduled for today."""
-    today = date.today()
+    today = now_ist().date()
     for ev in _event_cache.get(symbol, []):
         if ev.get("results_today") and ev["dt"].date() == today:
             return True
@@ -156,7 +157,7 @@ async def refresh_calendar() -> None:
 # ── Internal helpers ──────────────────────────────────────────────────────────
 
 async def _fetch_corporate_actions() -> None:
-    today    = date.today()
+    today    = now_ist().date()
     to_date  = today + timedelta(days=7)
     from_str = today.strftime("%d-%m-%Y")
     to_str   = to_date.strftime("%d-%m-%Y")
@@ -178,7 +179,7 @@ async def _fetch_corporate_actions() -> None:
 
 def _parse_corporate_actions(data: list) -> None:
     """Parse the NSE corporate-actions response and insert events into the cache."""
-    today_date = date.today()
+    today_date = now_ist().date()
     for item in data:
         symbol  = (item.get("symbol") or "").strip().upper()
         purpose = (item.get("purpose") or "").strip()
@@ -227,7 +228,7 @@ async def _fetch_event_calendar() -> None:
 
 def _parse_event_calendar(data: list) -> None:
     """Parse the NSE event-calendar response."""
-    today_date = date.today()
+    today_date = now_ist().date()
     for item in data:
         symbol  = (item.get("symbol") or "").strip().upper()
         purpose = (item.get("purpose") or "").strip()
@@ -263,7 +264,7 @@ def _inject_rbi_dates() -> None:
     # Clear stale RBI entries before re-injecting
     macro_events = [e for e in macro_events if e.get("event_type") != "RBI_MPC"]
 
-    today = date.today()
+    today = now_ist().date()
     for date_str in RBI_DATES:
         try:
             ev_date = datetime.strptime(date_str, "%Y-%m-%d")
