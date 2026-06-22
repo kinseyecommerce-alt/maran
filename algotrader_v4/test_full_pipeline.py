@@ -326,6 +326,18 @@ async def run_paper():
     risk_manager.daily_realised_pnl = 0.0
     risk_manager.is_trading_halted = False
 
+    # Reset the SEBI kill switch — a previous test run (e.g. phase6_resilience.py)
+    # may have activated it and persisted KILLED to the DB.  restore_state_from_db()
+    # reloads that state at module import time, so we force-clear it here directly
+    # before placing test orders (bypassing the secret check — this is a test harness).
+    from sebi_compliance import sebi_compliance as _sc, KillSwitchState
+    from state_store import set_kv as _set_kv
+    with _sc._lock:
+        _sc._state       = KillSwitchState.ACTIVE
+        _sc._kill_reason = ""
+    _sc._persist_state()
+    risk_manager.is_trading_halted = False   # mirror trigger_kill_switch in reverse
+
     try:
         await stage_ingestion()
         await stage_agents()
