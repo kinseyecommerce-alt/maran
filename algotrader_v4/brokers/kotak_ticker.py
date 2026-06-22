@@ -81,6 +81,10 @@ class KotakTicker:
 
     def subscribe(self, tokens: list[int | str]) -> None:
         """Subscribe to live ticks for a list of instrument tokens."""
+        # Persist tokens so _on_ws_open re-subscribes them after reconnect
+        for t in tokens:
+            if t not in self._t2s:
+                self._t2s[t] = str(t)
         if not self._ws:
             return
         msg = json.dumps({
@@ -148,23 +152,29 @@ class KotakTicker:
         if msg_type not in ("ud", "sf"):   # ud=update, sf=snapshot full
             return
 
-        ticks: list[dict] = []
-        token  = data.get("tk", "")
+        token = data.get("tk", "")
+        if not token:   # guard: empty token means no usable instrument info
+            return
+
         symbol = self._t2s.get(token) or self._t2s.get(int(token) if token.isdigit() else token, token)
         lp     = data.get("lp", data.get("c", 0))
-        tick   = {
-            "instrument_token": token,
-            "tradingsymbol":    symbol,
-            "last_price":       float(lp) if lp else 0.0,
-            "volume":           int(data.get("v", 0)),
-            "buy_quantity":     int(data.get("tbq", 0)),
-            "sell_quantity":    int(data.get("tsq", 0)),
-            "open":             float(data.get("o", 0)),
-            "high":             float(data.get("h", 0)),
-            "low":              float(data.get("l", 0)),
-            "close":            float(data.get("c", 0)),
-            "change":           float(data.get("pc", 0)),
-        }
-        ticks.append(tick)
-        if ticks and self._on_tick:
-            self._on_tick(ticks)
+        # Kotak sends numeric fields as strings; empty strings must default to 0
+        try:
+            tick = {
+                "instrument_token": token,
+                "tradingsymbol":    symbol,
+                "last_price":       float(lp or 0),
+                "volume":           int(data.get("v",   0) or 0),
+                "buy_quantity":     int(data.get("tbq", 0) or 0),
+                "sell_quantity":    int(data.get("tsq", 0) or 0),
+                "open":             float(data.get("o",  0) or 0),
+                "high":             float(data.get("h",  0) or 0),
+                "low":              float(data.get("l",  0) or 0),
+                "close":            float(data.get("c",  0) or 0),
+                "change":           float(data.get("pc", 0) or 0),
+            }
+        except (ValueError, TypeError) as exc:
+            logger.debug("[KotakTicker] malformed tick for token {}: {}", token, exc)
+            return
+        if self._on_tick:
+            self._on_tick([tick])

@@ -13226,6 +13226,171 @@ run("position_reconciler: missing tradingsymbol → skip (no false FULL_EXTERNAL
 run("iv_surface: GEX uses conditional /100 normalisation matching smile computation",        t_iv_surface_gex_uses_conditional_normalisation)
 
 # ══════════════════════════════════════════════════════════════════════════
+# 26. BROKER + ACTIVITY LOG + N8N BRIDGE (Batch 26)
+# ══════════════════════════════════════════════════════════════════════════
+
+import inspect as _inspect26
+import threading as _threading26
+
+
+def t_activity_log_push_uses_lock():
+    """push() must hold threading.Lock around appendleft to prevent concurrent write races."""
+    import agents.activity_log as _al
+    src = _inspect26.getsource(_al.push)
+    assert "with _lock:" in src, "activity_log.push must hold _lock around appendleft"
+    assert "_log.appendleft" in src, "activity_log.push must call _log.appendleft"
+
+
+def t_activity_log_get_uses_lock():
+    """get() must hold threading.Lock — concurrent clear() can raise RuntimeError during iteration."""
+    import agents.activity_log as _al
+    src = _inspect26.getsource(_al.get)
+    assert "with _lock:" in src, "activity_log.get must hold _lock around list(_log)"
+
+
+def t_activity_log_clear_uses_lock():
+    """clear() must hold threading.Lock to prevent RuntimeError during concurrent get()."""
+    import agents.activity_log as _al
+    src = _inspect26.getsource(_al.clear)
+    assert "with _lock:" in src, "activity_log.clear must hold _lock around _log.clear()"
+
+
+def t_activity_log_push_get_thread_safe():
+    """Concurrent push + get on the activity log must not raise RuntimeError."""
+    import agents.activity_log as _al
+    _al.clear()
+    errors = []
+
+    def _push_loop():
+        for i in range(50):
+            try:
+                _al.push("intraday", "SIGNAL", "RELIANCE", price=100.0 + i)
+            except Exception as exc:
+                errors.append(exc)
+
+    def _get_loop():
+        for _ in range(50):
+            try:
+                _al.get(10)
+            except Exception as exc:
+                errors.append(exc)
+
+    threads = [_threading26.Thread(target=_push_loop) for _ in range(3)]
+    threads += [_threading26.Thread(target=_get_loop) for _ in range(2)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+    assert not errors, f"activity_log thread safety errors: {errors}"
+
+
+def t_kotak_ticker_subscribe_persists_tokens_before_send():
+    """subscribe() must persist tokens to _t2s before the WS guard so reconnect
+    re-subscribe catches all tokens even when WS is not yet open."""
+    from brokers.kotak_ticker import KotakTicker
+    src = _inspect26.getsource(KotakTicker.subscribe)
+    persist_pos = src.find("self._t2s")
+    ws_guard_pos = src.find("if not self._ws")
+    assert persist_pos < ws_guard_pos, \
+        "KotakTicker.subscribe must persist tokens to _t2s before the WS guard"
+
+
+def t_kotak_ticker_on_message_empty_token_guard():
+    """_on_message with empty 'tk' field must return early — empty string key
+    corrupts _t2s and produces malformed tick dicts."""
+    from brokers.kotak_ticker import KotakTicker
+    src = _inspect26.getsource(KotakTicker._on_message)
+    assert "if not token:" in src, \
+        "KotakTicker._on_message must guard 'if not token: return'"
+
+
+def t_kotak_ticker_on_message_safe_float_conversion():
+    """Kotak sends numeric fields as strings; empty strings cause float('') ValueError
+    crashing tick dispatch. Must use 'or 0' fallback and catch ValueError/TypeError."""
+    from brokers.kotak_ticker import KotakTicker
+    src = _inspect26.getsource(KotakTicker._on_message)
+    assert "or 0)" in src, \
+        "KotakTicker._on_message must use 'or 0' fallback for empty-string fields"
+    assert "ValueError, TypeError" in src, \
+        "KotakTicker._on_message must catch ValueError and TypeError"
+
+
+def t_upstox_ticker_on_ticks_single_arg():
+    """CRITICAL: on_ticks must be called with a single (ticks) arg — not (ws, ticks).
+    Passing ws as first arg caused tick_engine to receive the WS object as the tick
+    list, silently dropping all Upstox market data."""
+    from brokers.upstox_ticker import UpstoxTicker
+    src = _inspect26.getsource(UpstoxTicker._connect_and_listen)
+    assert "self.on_ticks(ws," not in src, \
+        "UpstoxTicker must not call self.on_ticks(ws, ticks)"
+    assert "self.on_ticks(ticks)" in src, \
+        "UpstoxTicker must call self.on_ticks(ticks) with single argument"
+
+
+def t_upstox_ticker_ws_none_after_disconnect():
+    """After run_forever() returns, _ws must be set to None so is_connected()
+    returns False on a dead connection."""
+    from brokers.upstox_ticker import UpstoxTicker
+    src = _inspect26.getsource(UpstoxTicker._connect_and_listen)
+    assert "self._ws = None" in src, \
+        "UpstoxTicker._connect_and_listen must set self._ws = None after run_forever returns"
+
+
+def t_upstox_ticker_reconnect_sleep_on_clean_close():
+    """On clean close (no exception), reconnect loop must sleep 1s to prevent
+    tight reconnect spin on network oscillation."""
+    from brokers.upstox_ticker import UpstoxTicker
+    src = _inspect26.getsource(UpstoxTicker._run)
+    assert "time.sleep(1.0)" in src, \
+        "UpstoxTicker._run must sleep 1s before reconnecting on clean close"
+
+
+def t_n8n_bridge_client_not_none_at_import():
+    """_client must be an AsyncClient instance at module load time — not None.
+    Lazy check-then-set init is not coroutine-safe under asyncio concurrency."""
+    import n8n_bridge as _n8n
+    import httpx
+    assert isinstance(_n8n._client, httpx.AsyncClient), \
+        "n8n_bridge._client must be an AsyncClient at import time (not None)"
+
+
+def t_n8n_bridge_get_client_no_lazy_init():
+    """_get_client() must not perform check-then-set on the global — that pattern
+    is not safe under asyncio concurrency."""
+    import n8n_bridge as _n8n
+    src = _inspect26.getsource(_n8n._get_client)
+    assert "global" not in src, \
+        "n8n_bridge._get_client must not use 'global' (eager module-level init)"
+    assert "is None" not in src, \
+        "n8n_bridge._get_client must not check 'is None'"
+
+
+def t_n8n_bridge_final_failure_logged_at_warning():
+    """Final retry failure must be logged at WARNING — permanent delivery failures
+    were invisible when logged at DEBUG."""
+    import n8n_bridge as _n8n
+    src = _inspect26.getsource(_n8n.notify)
+    assert 'logger.debug("[n8n] delivery failed' not in src, \
+        "n8n_bridge: final retry failure must not be at DEBUG"
+    assert 'logger.warning("[n8n] delivery failed' in src, \
+        "n8n_bridge: final retry failure must be at WARNING"
+
+
+run("activity_log: push() holds threading.Lock around appendleft",                    t_activity_log_push_uses_lock)
+run("activity_log: get() holds threading.Lock around list(_log)",                     t_activity_log_get_uses_lock)
+run("activity_log: clear() holds threading.Lock around _log.clear()",                 t_activity_log_clear_uses_lock)
+run("activity_log: concurrent push+get threads do not raise RuntimeError",            t_activity_log_push_get_thread_safe)
+run("kotak_ticker: subscribe() persists tokens to _t2s before WS guard",              t_kotak_ticker_subscribe_persists_tokens_before_send)
+run("kotak_ticker: _on_message guards against empty token field",                     t_kotak_ticker_on_message_empty_token_guard)
+run("kotak_ticker: _on_message uses 'or 0' + ValueError/TypeError catch",             t_kotak_ticker_on_message_safe_float_conversion)
+run("upstox_ticker: on_ticks called with single arg (not (ws, ticks))",               t_upstox_ticker_on_ticks_single_arg)
+run("upstox_ticker: _ws set to None after run_forever returns",                       t_upstox_ticker_ws_none_after_disconnect)
+run("upstox_ticker: _run sleeps 1s on clean close (no tight reconnect spin)",         t_upstox_ticker_reconnect_sleep_on_clean_close)
+run("n8n_bridge: _client is AsyncClient at module load (not None)",                   t_n8n_bridge_client_not_none_at_import)
+run("n8n_bridge: _get_client() has no lazy check-then-set race",                      t_n8n_bridge_get_client_no_lazy_init)
+run("n8n_bridge: final retry failure logged at WARNING not DEBUG",                    t_n8n_bridge_final_failure_logged_at_warning)
+
+# ══════════════════════════════════════════════════════════════════════════
 # FINAL SUMMARY
 # ══════════════════════════════════════════════════════════════════════════
 failed = summary()

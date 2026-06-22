@@ -16,13 +16,11 @@ from config import settings
 from ist_clock import now_ist
 
 # Shared client reuses TCP connections across many notify() calls
-_client: httpx.AsyncClient | None = None
+# Initialised at module load time — avoids check-then-set race in async context.
+_client: httpx.AsyncClient = httpx.AsyncClient(timeout=httpx.Timeout(5.0))
 
 
 def _get_client() -> httpx.AsyncClient:
-    global _client
-    if _client is None or _client.is_closed:
-        _client = httpx.AsyncClient(timeout=httpx.Timeout(5.0))
     return _client
 
 
@@ -67,7 +65,7 @@ async def notify(event_type: str, data: dict) -> None:
             if attempt == 0:
                 await asyncio.sleep(2)
             else:
-                logger.debug("[n8n] delivery failed ({}): {}", event_type, exc)
+                logger.warning("[n8n] delivery failed after {} attempts ({}): {}", attempt + 1, event_type, exc)
         except Exception as exc:
             logger.debug("[n8n] unexpected error ({}): {}", event_type, exc)
             break

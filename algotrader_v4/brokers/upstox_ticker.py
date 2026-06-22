@@ -110,7 +110,9 @@ class UpstoxTicker:
         while self._running:
             try:
                 self._connect_and_listen()
-                retry_delay = 1.0  # reset on clean disconnect
+                retry_delay = 1.0
+                if self._running:
+                    time.sleep(1.0)  # always sleep before reconnect on clean close
             except Exception as exc:
                 if not self._running:
                     break
@@ -156,7 +158,7 @@ class UpstoxTicker:
                     data = json.loads(message)
                 ticks = self._parse_ticks(data)
                 if ticks and self.on_ticks:
-                    self.on_ticks(ws, ticks)
+                    self.on_ticks(ticks)
             except Exception as exc:
                 logger.debug("[UpstoxTicker] Message parse error: {}", exc)
 
@@ -182,6 +184,7 @@ class UpstoxTicker:
             on_close=on_close,
         )
         self._ws.run_forever(ping_interval=30, ping_timeout=10)
+        self._ws = None  # mark disconnected so is_connected() reflects reality
 
     def _parse_ticks(self, data: dict) -> list[dict]:
         """
@@ -283,9 +286,23 @@ class UpstoxTicker:
 
     def subscribe(self, tokens: list) -> None:
         """Subscribe to instrument keys (KiteTicker-compatible API)."""
+        new_tokens = []
         for token in tokens:
             if token not in self._token_to_sym:
                 self._token_to_sym[token] = str(token)
+                new_tokens.append(token)
+        # Send incremental subscription if already connected; otherwise the
+        # tokens will be included in the next on_open subscription message.
+        if new_tokens and self._ws is not None and self._running:
+            try:
+                sub_msg = {
+                    "guid":   "algotrader-sub-incr",
+                    "method": "sub",
+                    "data":   {"mode": "full", "instrumentKeys": new_tokens},
+                }
+                self._ws.send(json.dumps(sub_msg))
+            except Exception as exc:
+                logger.warning("[UpstoxTicker] incremental subscribe failed: {}", exc)
 
     def set_mode(self, mode: str, tokens: list) -> None:
         """Set subscription mode — no-op for Upstox (always full mode)."""

@@ -7,6 +7,8 @@ from __future__ import annotations
 
 from typing import Any, Optional
 
+from loguru import logger
+
 from brokers.base_broker import BaseBroker
 
 
@@ -80,7 +82,11 @@ class ZerodhaBroker(BaseBroker):
         return self._kc.cancel_order(order_id)
 
     def squareoff_all_positions(self) -> list[str]:
-        return self._kc.squareoff_all_positions()
+        try:
+            return self._kc.squareoff_all_positions()
+        except Exception as exc:
+            logger.error("[ZerodhaBroker] squareoff_all_positions failed: {}", exc)
+            return []
 
     # ── Portfolio ─────────────────────────────────────────────────────────────
 
