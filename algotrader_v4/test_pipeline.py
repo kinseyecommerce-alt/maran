@@ -13391,6 +13391,123 @@ run("n8n_bridge: _get_client() has no lazy check-then-set race",                
 run("n8n_bridge: final retry failure logged at WARNING not DEBUG",                    t_n8n_bridge_final_failure_logged_at_warning)
 
 # ══════════════════════════════════════════════════════════════════════════
+# 27. KOTAK + UPSTOX BROKER ADAPTERS (Batch 27)
+# ══════════════════════════════════════════════════════════════════════════
+
+import inspect as _inspect27
+
+
+def t_kotak_broker_squareoff_has_try_except():
+    """BUG FIX: squareoff_all_positions() had no try/except — an exception from
+    one position's place_order aborted the entire emergency squareoff, leaving
+    remaining open positions unprotected."""
+    from brokers.kotak_broker import KotakBroker
+    src = _inspect27.getsource(KotakBroker.squareoff_all_positions)
+    assert "try:" in src, \
+        "KotakBroker.squareoff_all_positions must have try/except to continue on per-position failure"
+    assert "except Exception" in src, \
+        "KotakBroker.squareoff_all_positions must catch Exception per-position"
+
+
+def t_kotak_broker_squareoff_continues_after_failure():
+    """Functional: squareoff_all_positions must return completed order ids even
+    when place_order raises for one position — no mid-loop abort."""
+    import unittest.mock as _mock
+    from config import settings as _s
+    _orig = _s.trading_mode
+    _s.trading_mode = "PAPER"
+    try:
+        from brokers.kotak_broker import KotakBroker
+        broker = KotakBroker()
+        # Inject two fake positions
+        broker._paper_positions = [
+            {"tradingsymbol": "RELIANCE", "exchange": "NSE", "product": "MIS", "quantity": 1, "average_price": 2800.0, "last_price": 2800.0, "pnl": 0.0},
+            {"tradingsymbol": "TCS",      "exchange": "NSE", "product": "MIS", "quantity": 1, "average_price": 3500.0, "last_price": 3500.0, "pnl": 0.0},
+        ]
+        # Make first place_order raise
+        call_count = [0]
+        orig_place = broker.place_order
+        def _bad_first(tradingsymbol, **kw):
+            call_count[0] += 1
+            if call_count[0] == 1:
+                raise RuntimeError("simulated broker error")
+            return orig_place(tradingsymbol=tradingsymbol, **kw)
+        broker.place_order = _bad_first
+        ids = broker.squareoff_all_positions()
+        assert len(ids) == 1, \
+            f"squareoff must return 1 id (second position) after first fails — got {len(ids)}"
+    finally:
+        _s.trading_mode = _orig
+
+
+def t_upstox_broker_squareoff_has_try_except():
+    """BUG FIX: squareoff_all_positions() had no try/except — same mid-loop abort
+    risk as KotakBroker and ZerodhaBroker."""
+    from brokers.upstox_broker import UpstoxBroker
+    src = _inspect27.getsource(UpstoxBroker.squareoff_all_positions)
+    assert "try:" in src, \
+        "UpstoxBroker.squareoff_all_positions must have try/except per-position"
+    assert "except Exception" in src, \
+        "UpstoxBroker.squareoff_all_positions must catch Exception per-position"
+
+
+def t_upstox_broker_squareoff_continues_after_failure():
+    """Functional: squareoff_all_positions continues and returns completed ids
+    even when one position's place_order raises."""
+    from config import settings as _s
+    _orig = _s.trading_mode
+    _s.trading_mode = "PAPER"
+    try:
+        from brokers.upstox_broker import UpstoxBroker
+        broker = UpstoxBroker()
+        broker._paper_positions = [
+            {"tradingsymbol": "RELIANCE", "exchange": "NSE", "product": "MIS", "quantity": 2, "average_price": 2800.0, "last_price": 2800.0, "pnl": 0.0},
+            {"tradingsymbol": "INFY",     "exchange": "NSE", "product": "MIS", "quantity": 1, "average_price": 1500.0, "last_price": 1500.0, "pnl": 0.0},
+        ]
+        call_count = [0]
+        orig_place = broker.place_order
+        def _bad_first(tradingsymbol, **kw):
+            call_count[0] += 1
+            if call_count[0] == 1:
+                raise RuntimeError("simulated broker error")
+            return orig_place(tradingsymbol=tradingsymbol, **kw)
+        broker.place_order = _bad_first
+        ids = broker.squareoff_all_positions()
+        assert len(ids) == 1, \
+            f"squareoff must return 1 id (second position) after first fails — got {len(ids)}"
+    finally:
+        _s.trading_mode = _orig
+
+
+def t_upstox_broker_place_order_no_dead_mode_check():
+    """BUG FIX: place_order() had 'if settings.trading_mode != \"PAPER\":' after
+    an early-return for PAPER mode — the condition was always True at that point
+    (dead code). Removed the dead check; warning is now unconditional in LIVE path."""
+    from brokers.upstox_broker import UpstoxBroker
+    src = _inspect27.getsource(UpstoxBroker.place_order)
+    # After the early PAPER return, there must NOT be another PAPER mode conditional
+    # guarding the instrument_key warning
+    lines = src.splitlines()
+    paper_return_seen = False
+    dead_condition_found = False
+    for line in lines:
+        stripped = line.strip()
+        if "return self._paper_place" in stripped:
+            paper_return_seen = True
+        if paper_return_seen and 'trading_mode != "PAPER"' in stripped:
+            dead_condition_found = True
+            break
+    assert not dead_condition_found, \
+        "UpstoxBroker.place_order must not have dead 'if trading_mode != PAPER' after the PAPER early-return"
+
+
+run("kotak_broker: squareoff_all_positions has try/except per-position",               t_kotak_broker_squareoff_has_try_except)
+run("kotak_broker: squareoff continues and returns completed ids after one failure",   t_kotak_broker_squareoff_continues_after_failure)
+run("upstox_broker: squareoff_all_positions has try/except per-position",              t_upstox_broker_squareoff_has_try_except)
+run("upstox_broker: squareoff continues and returns completed ids after one failure",  t_upstox_broker_squareoff_continues_after_failure)
+run("upstox_broker: place_order has no dead 'trading_mode != PAPER' check after PAPER return", t_upstox_broker_place_order_no_dead_mode_check)
+
+# ══════════════════════════════════════════════════════════════════════════
 # FINAL SUMMARY
 # ══════════════════════════════════════════════════════════════════════════
 failed = summary()

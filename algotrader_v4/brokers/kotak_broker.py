@@ -353,17 +353,20 @@ class KotakBroker(BaseBroker):
             if pos.get("quantity", 0) == 0:
                 continue
             side = "SELL" if pos["quantity"] > 0 else "BUY"
-            oid  = self.place_order(
-                tradingsymbol=pos["tradingsymbol"],
-                exchange=pos.get("exchange", "NSE"),
-                transaction_type=side,
-                quantity=abs(pos["quantity"]),
-                order_type="MARKET",
-                product=pos.get("product", "MIS"),
-                tag="SquareOff",
-            )
-            order_ids.append(oid)
-            logger.info("[Kotak] Square-off {} {} qty={}", side, pos["tradingsymbol"], abs(pos["quantity"]))
+            try:
+                oid = self.place_order(
+                    tradingsymbol=pos["tradingsymbol"],
+                    exchange=pos.get("exchange", "NSE"),
+                    transaction_type=side,
+                    quantity=abs(pos["quantity"]),
+                    order_type="MARKET",
+                    product=pos.get("product", "MIS"),
+                    tag="SquareOff",
+                )
+                order_ids.append(oid)
+                logger.info("[Kotak] Square-off {} {} qty={}", side, pos["tradingsymbol"], abs(pos["quantity"]))
+            except Exception as exc:
+                logger.error("[KotakBroker] squareoff failed for {}: {}", pos.get("tradingsymbol", "?"), exc)
         return order_ids
 
     # ── Portfolio ─────────────────────────────────────────────────────────────
