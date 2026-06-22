@@ -2431,7 +2431,7 @@ class ScalpingAgent(BaseAgent):
 
         # ── Scoring for confidence/size ──────────────────────────────────────
         score, reasons = self._score_setup(snap, ind, ltp, action)
-        if score < settings.min_score_scalping:
+        if score < self.MIN_SCORE:
             return "HOLD", None
 
         # ── Level proximity guard ─────────────────────────────────────────────

@@ -13640,6 +13640,59 @@ run("strategy_agents: MomentumAgent._pat_fii_momentum uses float API (no .get ca
 run("strategy_agents: get_fii_sentiment() returns float confirming dict callers broke", t_fii_sentiment_return_type_is_float)
 
 # ══════════════════════════════════════════════════════════════════════════
+# 30. OVER-TRADING GUARD FIXES (Batch 30)
+# ══════════════════════════════════════════════════════════════════════════
+import inspect as _inspect30
+import agents.strategy_agents as _sa30
+
+def t_scalping_min_score_uses_class_constant():
+    """ScalpingAgent.evaluate_tick must filter at self.MIN_SCORE (5), not settings.min_score_scalping (3)."""
+    src = _inspect30.getsource(_sa30.ScalpingAgent.evaluate_tick)
+    assert "self.MIN_SCORE" in src, "ScalpingAgent must filter at self.MIN_SCORE"
+    assert "settings.min_score_scalping" not in src, \
+        "ScalpingAgent must not use settings.min_score_scalping (would apply threshold 3 instead of 5)"
+
+def t_scalping_min_score_value_is_5():
+    """ScalpingAgent.MIN_SCORE must be 5 (quality-over-quantity gate)."""
+    assert _sa30.ScalpingAgent.MIN_SCORE == 5, \
+        f"ScalpingAgent.MIN_SCORE should be 5, got {_sa30.ScalpingAgent.MIN_SCORE}"
+
+def t_simulation_agent_tracker_has_exit_cooldown():
+    """AgentTracker must record _last_exit_ts on close and block re-entry during cooldown."""
+    import sys, os
+    sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+    from nse_day_simulation import AgentTracker, _POST_EXIT_COOLDOWN_SECS
+    from datetime import datetime
+    t0 = datetime(2026, 6, 22, 10, 0, 0)
+    tracker = AgentTracker("Scalping", "1m")
+    tracker.on_signal("SYM", "BUY", {"stop_loss_pct": 0.5, "target_pct": 1.0}, t0, 1000.0)
+    assert "SYM" in tracker._open
+    # Close immediately via on_price hitting target
+    tracker.on_price("SYM", 1100.0, t0)  # target hit (1% = 1010 → close)
+    assert "SYM" not in tracker._open
+    assert "SYM" in tracker._last_exit_ts
+    # Attempt re-entry immediately (0 seconds elapsed) → must be blocked by cooldown
+    tracker.on_signal("SYM", "BUY", {"stop_loss_pct": 0.5, "target_pct": 1.0}, t0, 1100.0)
+    assert "SYM" not in tracker._open, "Re-entry within cooldown window should be blocked"
+    # After cooldown expires, re-entry is allowed
+    from datetime import timedelta
+    t_after = t0 + timedelta(seconds=_POST_EXIT_COOLDOWN_SECS["Scalping"] + 1)
+    tracker.on_signal("SYM", "BUY", {"stop_loss_pct": 0.5, "target_pct": 1.0}, t_after, 1100.0)
+    assert "SYM" in tracker._open, "Re-entry after cooldown should be allowed"
+
+def t_post_exit_cooldown_table_covers_all_agents():
+    """_POST_EXIT_COOLDOWN_SECS must define cooldowns for all 5 simulation agents."""
+    from nse_day_simulation import _POST_EXIT_COOLDOWN_SECS, AGENT_CLASSES
+    for name, _ in AGENT_CLASSES:
+        assert name in _POST_EXIT_COOLDOWN_SECS, f"No post-exit cooldown defined for {name}"
+        assert _POST_EXIT_COOLDOWN_SECS[name] > 0, f"Cooldown for {name} must be positive"
+
+run("scalping_min_score: evaluate_tick uses self.MIN_SCORE not settings.min_score_scalping", t_scalping_min_score_uses_class_constant)
+run("scalping_min_score: ScalpingAgent.MIN_SCORE == 5", t_scalping_min_score_value_is_5)
+run("simulation: AgentTracker blocks re-entry within post-exit cooldown window", t_simulation_agent_tracker_has_exit_cooldown)
+run("simulation: _POST_EXIT_COOLDOWN_SECS covers all 5 agents", t_post_exit_cooldown_table_covers_all_agents)
+
+# ══════════════════════════════════════════════════════════════════════════
 # FINAL SUMMARY
 # ══════════════════════════════════════════════════════════════════════════
 failed = summary()

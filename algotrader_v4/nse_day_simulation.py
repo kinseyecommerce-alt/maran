@@ -294,18 +294,34 @@ class TradeRecord:
     def won(self): return self.pnl_pct > 0
 
 
+_POST_EXIT_COOLDOWN_SECS: dict[str, int] = {
+    "Scalping":      90,   # matches ScalpingAgent.cooldown_scalping
+    "Intraday":     180,   # matches cooldown_intraday
+    "Futures":      180,   # matches FuturesAgent.COOL_S
+    "Options":      120,   # matches OptionsAgent.COOL_S
+    "Swing":        300,   # swing trades need bigger gap before re-entry
+}
+
+
 class AgentTracker:
     def __init__(self, name: str, tf: str):
         self.name   = name
         self.tf     = tf
         self.trades: list[TradeRecord] = []
-        self._open: dict[str, TradeRecord] = {}   # sym → open trade
+        self._open: dict[str, TradeRecord] = {}       # sym → open trade
+        self._last_exit_ts: dict[str, datetime] = {}  # sym → exit timestamp
 
     def on_signal(self, sym: str, action: str, signal: dict, ts: datetime, ltp: float):
         if sym in self._open:
             return   # already in position
         if action in ("HOLD", None, ""):
             return
+        # Post-exit cooldown — mirrors order_guard.post_exit_cooldown_sec in production
+        last_exit = self._last_exit_ts.get(sym)
+        if last_exit is not None:
+            gap = (ts - last_exit).total_seconds()
+            if gap < _POST_EXIT_COOLDOWN_SECS.get(self.name, 120):
+                return
         # Options signal uses premium-based sl/tgt (30%/65% of premium) which can't be
         # applied to the underlying stock price in simulation — use the stock-price proxy
         if self.name == "Options":
@@ -344,21 +360,26 @@ class AgentTracker:
         if is_long:
             if ltp <= tr.sl_px:
                 tr.close(ltp, ts, "SL_HIT")
+                self._last_exit_ts[sym] = ts
                 del self._open[sym]
             elif ltp >= tr.tgt_px:
                 tr.close(ltp, ts, "TARGET")
+                self._last_exit_ts[sym] = ts
                 del self._open[sym]
         else:
             if ltp >= tr.sl_px:
                 tr.close(ltp, ts, "SL_HIT")
+                self._last_exit_ts[sym] = ts
                 del self._open[sym]
             elif ltp <= tr.tgt_px:
                 tr.close(ltp, ts, "TARGET")
+                self._last_exit_ts[sym] = ts
                 del self._open[sym]
 
     def squareoff_all(self, prices: dict[str, float], ts: datetime):
         for sym, tr in list(self._open.items()):
             tr.close(prices.get(sym, tr.entry_px), ts, "SQUAREOFF")
+            self._last_exit_ts[sym] = ts
         self._open.clear()
 
     def metrics(self) -> dict:
