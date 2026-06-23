@@ -73,7 +73,7 @@ export default function RiskTab() {
       {/* P&L + Positions */}
       <div className="grid grid-cols-2 gap-3">
         <StatCard label="Daily P&L">
-          <div className={`text-2xl font-bold font-mono ${riskStatus?.daily_pnl >= 0 ? 'text-emerald-400' : 'text-rose-400'}`}>
+          <div className={`text-2xl font-bold font-mono ${(riskStatus?.daily_pnl ?? 0) >= 0 ? 'text-emerald-400' : 'text-rose-400'}`}>
             {riskStatus ? (riskStatus.daily_pnl >= 0 ? '+' : '') + fmt(riskStatus.daily_pnl) : '—'}
           </div>
           <div className="text-[11px] text-slate-600 mt-1">Limit: {riskStatus ? fmt(riskStatus.max_daily_loss) : '—'}</div>

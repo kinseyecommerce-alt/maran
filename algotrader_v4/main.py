@@ -189,6 +189,21 @@ async def _ip_whitelist_gate(request: Request, call_next):
     return await call_next(request)
 
 
+# ── Production SPA: strip /api prefix so the React build's /api/* calls route correctly
+# This is the outermost middleware (defined last) so it runs first on every request.
+@app.middleware("http")
+async def _strip_api_prefix(request: Request, call_next):
+    path = request.scope.get("path", "")
+    if path.startswith("/api/"):
+        new_path = path[4:]  # /api/health → /health
+        request.scope["path"] = new_path
+        request.scope["raw_path"] = new_path.encode()
+    elif path == "/api":
+        request.scope["path"] = "/"
+        request.scope["raw_path"] = b"/"
+    return await call_next(request)
+
+
 # ── MED-2: In-memory rate limiter for orders and AI signals ──────────────────
 _rate_store: dict[str, list[float]] = defaultdict(list)
 _rate_store_lock = threading.Lock()
@@ -436,16 +451,21 @@ def login_page():
 
 @app.get("/dashboard", include_in_schema=False)
 def dashboard_page():
-    """Serve the main trading dashboard."""
-    p = _HERE / "static" / "dashboard.html"
-    if not p.exists():
-        return HTMLResponse("<h2>Dashboard not found — run deploy to build static assets.</h2>", status_code=404)
-    return HTMLResponse(p.read_text())
+    """Serve the React SPA (production build)."""
+    _dist_index = _HERE / "frontend" / "dist" / "index.html"
+    if _dist_index.exists():
+        from fastapi.responses import FileResponse
+        return FileResponse(str(_dist_index))
+    return HTMLResponse("<h2>Frontend not built. Run: cd frontend && npm run build</h2>", status_code=503)
 
 @app.get("/", include_in_schema=False)
-def root_redirect():
-    from fastapi.responses import RedirectResponse
-    return RedirectResponse(url="/dashboard")
+def root_page():
+    """Serve the React SPA root."""
+    _dist_index = _HERE / "frontend" / "dist" / "index.html"
+    if _dist_index.exists():
+        from fastapi.responses import FileResponse
+        return FileResponse(str(_dist_index))
+    return HTMLResponse("<h2>Frontend not built. Run: cd frontend && npm run build</h2>", status_code=503)
 
 @app.get("/agents/activity", tags=["Agents"])
 def agent_activity(n: int = 100):
@@ -1877,6 +1897,13 @@ async def ws_endpoint(ws: WebSocket):
     except WebSocketDisconnect:
         if ws in ws_clients:
             ws_clients.remove(ws)
+
+
+# Production alias: Vite dev proxy rewrites /ws-proxy/ws → /ws; in production
+# FastAPI must expose the same path directly so the React build connects correctly.
+@app.websocket("/ws-proxy/ws")
+async def ws_proxy_endpoint(ws: WebSocket):
+    await ws_endpoint(ws)
 
 
 # ── Regime ────────────────────────────────────────────────────────────────────
@@ -3462,3 +3489,21 @@ async def place_twap_order(
         tag="manual-twap", duration_sec=duration_sec, slices=slices, loop=loop,
     )
     return {"symbol": symbol.upper(), "order_ids": ids, "qty": qty}
+
+
+# ── Production SPA: serve the built React app for all non-API routes ──────────
+_DIST = _HERE / "frontend" / "dist"
+if _DIST.exists():
+    # Serve compiled JS/CSS/image assets under /assets (Vite's default output dir)
+    _assets_dir = _DIST / "assets"
+    if _assets_dir.exists():
+        app.mount("/assets", StaticFiles(directory=str(_assets_dir)), name="spa-assets")
+
+@app.get("/{full_path:path}", include_in_schema=False)
+async def spa_fallback(full_path: str):
+    """SPA catch-all — return index.html for every unmatched GET so React Router works."""
+    from fastapi.responses import FileResponse
+    index = _DIST / "index.html"
+    if index.exists():
+        return FileResponse(str(index))
+    return HTMLResponse("<h2>Frontend not built. Run: cd frontend && npm run build</h2>", status_code=503)
