@@ -7,10 +7,11 @@ from __future__ import annotations
 
 import sqlite3
 import threading
-from datetime import datetime
 from pathlib import Path
 from typing import Optional
 from loguru import logger
+
+from ist_clock import now_ist as _now_ist
 
 _DB_PATH = Path("logs/ticks.db")
 
@@ -74,8 +75,8 @@ class TickRecorder:
             try:
                 conn.commit()
                 conn.close()
-            except Exception:
-                pass
+            except Exception as exc:
+                logger.warning("TickRecorder.stop(): final commit/close failed — ticks may be lost: {}", exc)
         logger.info("TickRecorder stopped — recorded {} ticks", sum(counts.values()))
         return counts
 
@@ -91,7 +92,7 @@ class TickRecorder:
             return
         try:
             ts = getattr(tick, "timestamp", None)
-            ts_str = ts.isoformat() if ts else datetime.now().isoformat()
+            ts_str = ts.isoformat() if ts else _now_ist().isoformat()
             with self._lock:
                 if self._conn is None:
                     return

@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import pickle
+import threading
 from pathlib import Path
 
 import numpy as np
@@ -16,6 +17,7 @@ class MLSignalScorer:
     def __init__(self) -> None:
         self._models: dict[str, object] = {}   # symbol -> Pipeline(scaler+clf)
         self._loaded: set[str] = set()
+        self._lock   = threading.Lock()
         _MODEL_DIR.mkdir(parents=True, exist_ok=True)
 
     # ------------------------------------------------------------------
@@ -54,7 +56,7 @@ class MLSignalScorer:
             (bb_upper - ltp) / atr_14,                        # 9. distance to BB upper (matches training)
             (ltp - bb_lower) / atr_14,                        # 10. distance to BB lower (matches training)
             rsi_7 / 100.0,                                    # 11. RSI-7 normalised
-            macd / atr_14,                                    # 12. MACD / ATR
+            np.clip(macd / atr_14, -3, 3),                   # 12. MACD / ATR (clamped, matches feature 4)
         ], dtype=float)
 
         feats = np.nan_to_num(feats, nan=0.0, posinf=5.0, neginf=-5.0)
@@ -128,10 +130,10 @@ class MLSignalScorer:
                 return 1.0
 
             symbol = snap.symbol
-            if symbol not in self._loaded:
-                self.load(symbol)
-
-            model = self._models.get(symbol)
+            with self._lock:
+                if symbol not in self._loaded:
+                    self.load(symbol)
+                model = self._models.get(symbol)
             if model is None:
                 return 0.5
 
@@ -173,8 +175,9 @@ class MLSignalScorer:
             with open(model_path, "wb") as fh:
                 pickle.dump(pipe, fh)
 
-            self._models[symbol] = pipe
-            self._loaded.add(symbol)
+            with self._lock:
+                self._models[symbol] = pipe
+                self._loaded.add(symbol)
             logger.info("MLSignalScorer: trained and saved model for {}", symbol)
             return True
 

@@ -12,6 +12,7 @@ All public functions are synchronous, cache-backed.
 from __future__ import annotations
 
 import math
+import threading
 import time
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -48,11 +49,13 @@ class GEXProfile:
 
 
 _cache: dict[str, GEXProfile] = {}
+_cache_lock = threading.Lock()
 _TTL = 180
 
 
 def get_cached_gex(symbol: str) -> Optional[GEXProfile]:
-    g = _cache.get(symbol.upper())
+    with _cache_lock:
+        g = _cache.get(symbol.upper())
     return g if (g and time.time() - g.updated_at < _TTL) else None
 
 
@@ -61,7 +64,7 @@ def _n(x: float) -> float:
 
 
 def _d1(S: float, K: float, T: float, r: float, sigma: float) -> float:
-    if T <= 0 or sigma <= 0 or K <= 0:
+    if T <= 0 or sigma <= 0 or K <= 0 or S <= 0:
         return 0.0
     return (math.log(S / K) + (r + 0.5 * sigma ** 2) * T) / (sigma * math.sqrt(T))
 
@@ -88,7 +91,10 @@ def build_gex_profile(symbol: str, chain: list[dict], spot: float,
         for side, sign in [("CE", +1.0), ("PE", -1.0)]:
             leg = row.get(side) or {}
             oi  = int(leg.get("oi", 0) or 0)
-            iv_raw = float(leg.get("iv", 25) or 25)
+            _iv_val = leg.get("iv", None)
+            # Use 25% fallback only when field is absent/null, NOT when it is 0:
+            # an IV of 0 from a market-maker means "unquoted", handled by max(sigma,0.05)
+            iv_raw = float(_iv_val) if _iv_val not in (None, "", "0", 0) else 25.0
             sigma  = (iv_raw / 100.0) if iv_raw > 1.0 else iv_raw
             sigma  = max(sigma, 0.05)
 
@@ -104,7 +110,8 @@ def build_gex_profile(symbol: str, chain: list[dict], spot: float,
         empty = GEXProfile(symbol=symbol, spot=spot, net_gex=0.0, regime="NEUTRAL",
                            top_call_wall=None, top_put_wall=None, zero_gamma_level=None,
                            flip_pct=None, pin_risk=False, pin_strike=None)
-        _cache[symbol.upper()] = empty
+        with _cache_lock:
+            _cache[symbol.upper()] = empty
         return empty
 
     net_gex = sum(v[0] for v in strike_gex.values())
@@ -148,7 +155,8 @@ def build_gex_profile(symbol: str, chain: list[dict], spot: float,
         zero_gamma_level=zero_level, flip_pct=flip_pct,
         pin_risk=pin_risk, pin_strike=pin_strike,
     )
-    _cache[symbol.upper()] = profile
+    with _cache_lock:
+        _cache[symbol.upper()] = profile
     return profile
 
 

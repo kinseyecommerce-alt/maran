@@ -27,6 +27,21 @@ IV_SPIKE_THRESHOLD  = 0.15    # 15% relative IV jump
 _TTL = 120                    # 2-minute cache
 
 
+def _safe_float(v, default: float = 0.0) -> float:
+    """Convert API field to float; treats None, '', '-' as default."""
+    if v is None:
+        return default
+    try:
+        return float(str(v).strip()) if str(v).strip() not in ("", "-", "N/A") else default
+    except (TypeError, ValueError):
+        return default
+
+
+def _safe_int(v, default: int = 0) -> int:
+    """Convert API field to int; treats None, '', '-' as default."""
+    return int(_safe_float(v, float(default)))
+
+
 @dataclass
 class OptionsFlow:
     symbol:          str
@@ -53,7 +68,8 @@ _flow_lock = threading.Lock()   # guards _iv_history, _iv_history_date, and _cac
 
 
 def get_cached_flow(symbol: str) -> Optional[OptionsFlow]:
-    f = _cache.get(symbol.upper())
+    with _flow_lock:
+        f = _cache.get(symbol.upper())
     return f if (f and time.time() - f.updated_at < _TTL) else None
 
 
@@ -65,10 +81,14 @@ def analyze_flow(symbol: str, chain: list[dict], spot: float) -> OptionsFlow:
     global _iv_history, _iv_history_date
     symbol = symbol.upper()
     today = _date.today()
+    # Acquire lock for date rollover AND sym_hist initialisation to prevent
+    # two concurrent callers racing on _iv_history.clear() vs .setdefault().
     with _flow_lock:
         if today != _iv_history_date:
             _iv_history.clear()
             _iv_history_date = today
+        sym_hist = _iv_history.setdefault(symbol, {})
+
     unusual_calls: list[dict] = []
     unusual_puts:  list[dict] = []
     blocks:        list[dict] = []
@@ -76,20 +96,18 @@ def analyze_flow(symbol: str, chain: list[dict], spot: float) -> OptionsFlow:
     total_cv = total_pv = 0
     oi_call_delta = oi_put_delta = 0.0
 
-    sym_hist = _iv_history.setdefault(symbol, {})
-
     for row in chain:
-        strike = int(float(row.get("strike", 0)))
+        strike = _safe_int(row.get("strike"), 0)
         if not strike:
             continue
         for side, is_call in [("CE", True), ("PE", False)]:
             leg = row.get(side) or {}
-            oi  = int(leg.get("oi", 0) or 0)
-            vol = int(leg.get("volume", 0) or 0)
-            iv_raw = float(leg.get("iv", 0) or 0)
-            iv  = (iv_raw / 100.0) if iv_raw > 1.0 else iv_raw
-            ltp = float(leg.get("ltp", 0) or 0)
-            oi_chg = int(leg.get("oi_change", 0) or 0)
+            oi     = _safe_int(leg.get("oi"), 0)
+            vol    = _safe_int(leg.get("volume"), 0)
+            iv_raw = _safe_float(leg.get("iv"), 0.0)
+            iv     = (iv_raw / 100.0) if iv_raw > 1.0 else iv_raw
+            ltp    = _safe_float(leg.get("ltp"), 0.0)
+            oi_chg = _safe_int(leg.get("oi_change"), 0)
 
             if is_call:
                 total_cv += vol
@@ -109,20 +127,21 @@ def analyze_flow(symbol: str, chain: list[dict], spot: float) -> OptionsFlow:
                 blocks.append(dict(strike=strike, side=side, lots=vol,
                                    ltp=ltp, iv=round(iv * 100, 1)))
 
-            # IV spike — only track when IV is valid (skip missing/zero-IV strikes)
+            # IV spike — only track and check when IV is valid (skip missing/zero-IV strikes)
             hkey = f"{strike}_{side}"
-            hist = sym_hist.setdefault(hkey, [])
-            if iv > 0.001:
-                hist.append(iv)
-            if len(hist) > 20:
-                hist.pop(0)
-            if len(hist) >= 4:
-                avg = sum(hist[:-1]) / (len(hist) - 1)
-                if avg > 0 and abs(iv - avg) / avg > IV_SPIKE_THRESHOLD:
-                    iv_spikes.append(dict(strike=strike, side=side,
-                                          iv_now=round(iv * 100, 1),
-                                          iv_avg=round(avg * 100, 1),
-                                          change_pct=round((iv - avg) / avg * 100, 1)))
+            with _flow_lock:
+                hist = sym_hist.setdefault(hkey, [])
+                if iv > 0.001:
+                    hist.append(iv)
+                    if len(hist) > 20:
+                        hist.pop(0)
+                if len(hist) >= 4:
+                    avg = sum(hist[:-1]) / (len(hist) - 1)
+                    if avg > 0 and abs(iv - avg) / avg > IV_SPIKE_THRESHOLD:
+                        iv_spikes.append(dict(strike=strike, side=side,
+                                              iv_now=round(iv * 100, 1),
+                                              iv_avg=round(avg * 100, 1),
+                                              change_pct=round((iv - avg) / avg * 100, 1)))
 
     # Sweep: 3+ unusual strikes in same direction
     sweep_detected = len(unusual_calls) >= 3 or len(unusual_puts) >= 3
@@ -144,6 +163,13 @@ def analyze_flow(symbol: str, chain: list[dict], spot: float) -> OptionsFlow:
         score += 10
         if sweep_direction:
             direction = sweep_direction
+            # Re-anchor score to match the sweep direction so score and direction
+            # are never contradictory (e.g. score=35 BEARISH set by CPR, then
+            # sweep overrides direction to BULLISH without adjusting score).
+            if direction == "BULLISH" and score < 50:
+                score = 50 + (score % 10)
+            elif direction == "BEARISH" and score > 50:
+                score = 50 - (score % 10)
 
     score = max(0, min(100, score))
 
@@ -166,7 +192,8 @@ def analyze_flow(symbol: str, chain: list[dict], spot: float) -> OptionsFlow:
         sweep_detected=sweep_detected, sweep_direction=sweep_direction,
         iv_spikes=iv_spikes[:4], smart_bias=smart_bias, oi_momentum=oi_mom,
     )
-    _cache[symbol] = flow
+    with _flow_lock:
+        _cache[symbol] = flow
     return flow
 
 

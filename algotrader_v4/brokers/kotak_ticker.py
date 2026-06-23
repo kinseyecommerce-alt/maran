@@ -59,6 +59,7 @@ class KotakTicker:
         self._ws: Any   = None
         self._thread: threading.Thread | None = None
         self._running   = False
+        self._t2s_lock  = threading.Lock()  # guards _t2s across subscribe/WS threads
 
     # ── Public API ────────────────────────────────────────────────────────────
 
@@ -86,10 +87,13 @@ class KotakTicker:
 
     def subscribe(self, tokens: list[int | str]) -> None:
         """Subscribe to live ticks for a list of instrument tokens."""
+        # Persist tokens so _on_ws_open re-subscribes them after reconnect
+        with self._t2s_lock:
+            for t in tokens:
+                if t not in self._t2s:
+                    self._t2s[t] = str(t)
         self._subscribed_tokens.update(str(t) for t in tokens)
-        with self._lock:
-            ws = self._ws
-        if not ws:
+        if not self._ws:
             return
         msg = json.dumps({
             "type":     "subscribe",
@@ -97,6 +101,7 @@ class KotakTicker:
             "channelNo": 1,
         })
         try:
+            ws = self._ws
             ws.send(msg)
             logger.debug("[KotakTicker] subscribed {} tokens", len(self._subscribed_tokens))
         except Exception as exc:
@@ -110,6 +115,7 @@ class KotakTicker:
             "Sid":           self._sid,
             "neo-fin-key":   "neotradeapi",
         }
+        retry_delay = 1.0
         while self._running:
             try:
                 self._ws = websocket.WebSocketApp(
@@ -121,11 +127,13 @@ class KotakTicker:
                     on_open=self._on_ws_open,
                 )
                 self._ws.run_forever(ping_interval=_PING_INTERVAL)
+                retry_delay = 1.0  # clean close: reset backoff
             except Exception as exc:
                 logger.error("[KotakTicker] connection error: {}", exc)
             if self._running:
-                logger.info("[KotakTicker] reconnecting in 5s…")
-                time.sleep(5)
+                logger.info("[KotakTicker] reconnecting in {}s…", retry_delay)
+                time.sleep(retry_delay)
+                retry_delay = min(retry_delay * 2, 60.0)
 
     def _on_ws_open(self, ws: Any) -> None:
         with self._lock:
@@ -134,7 +142,8 @@ class KotakTicker:
         if self._on_connect:
             self._on_connect(ws, {})
         # Re-subscribe all tokens (registered + externally subscribed) on every connect/reconnect
-        all_tokens = set(str(k) for k in self._t2s.keys()) | self._subscribed_tokens
+        with self._t2s_lock:
+            all_tokens = set(str(k) for k in self._t2s.keys()) | self._subscribed_tokens
         if all_tokens:
             self.subscribe(list(all_tokens))
 
@@ -160,23 +169,30 @@ class KotakTicker:
         if msg_type not in ("ud", "sf"):   # ud=update, sf=snapshot full
             return
 
-        ticks: list[dict] = []
-        token  = data.get("tk", "")
-        symbol = self._t2s.get(token) or self._t2s.get(int(token) if token.isdigit() else token, token)
+        token = data.get("tk", "")
+        if not token:   # guard: empty token means no usable instrument info
+            return
+
+        with self._t2s_lock:
+            symbol = self._t2s.get(token) or self._t2s.get(int(token) if token.isdigit() else token, token)
         lp     = data.get("lp", data.get("c", 0))
-        tick   = {
-            "instrument_token": token,
-            "tradingsymbol":    symbol,
-            "last_price":       float(lp) if lp else 0.0,
-            "volume":           int(data.get("v", 0)),
-            "buy_quantity":     int(data.get("tbq", 0)),
-            "sell_quantity":    int(data.get("tsq", 0)),
-            "open":             float(data.get("o", 0)),
-            "high":             float(data.get("h", 0)),
-            "low":              float(data.get("l", 0)),
-            "close":            float(data.get("c", 0)),
-            "change":           float(data.get("pc", 0)),
-        }
-        ticks.append(tick)
-        if ticks and self._on_tick:
-            self._on_tick(ticks)
+        # Kotak sends numeric fields as strings; empty strings must default to 0
+        try:
+            tick = {
+                "instrument_token": token,
+                "tradingsymbol":    symbol,
+                "last_price":       float(lp or 0),
+                "volume":           int(data.get("v",   0) or 0),
+                "buy_quantity":     int(data.get("tbq", 0) or 0),
+                "sell_quantity":    int(data.get("tsq", 0) or 0),
+                "open":             float(data.get("o",  0) or 0),
+                "high":             float(data.get("h",  0) or 0),
+                "low":              float(data.get("l",  0) or 0),
+                "close":            float(data.get("c",  0) or 0),
+                "change":           float(data.get("pc", 0) or 0),
+            }
+        except (ValueError, TypeError) as exc:
+            logger.debug("[KotakTicker] malformed tick for token {}: {}", token, exc)
+            return
+        if self._on_tick:
+            self._on_tick([tick])

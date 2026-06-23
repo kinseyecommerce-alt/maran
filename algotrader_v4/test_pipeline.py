@@ -9475,23 +9475,27 @@ def t_broker_router_duplicate_primary_order_id_guard():
     )
 
 def t_event_calendar_refresh_clears_stale_entries():
-    """refresh_calendar must call _event_cache.clear() before fetching new data."""
+    """refresh_calendar must discard stale _event_cache before fetching new data (clear or atomic replace)."""
     import inspect
     import event_calendar as _ec
     src = inspect.getsource(_ec.refresh_calendar)
-    assert "_event_cache.clear()" in src, (
-        "refresh_calendar must call _event_cache.clear() to prevent duplicate event accumulation"
+    # Accept either: explicit clear() or atomic dict-replacement pattern
+    assert "_event_cache.clear()" in src or "_event_cache = " in src, (
+        "refresh_calendar must clear or atomically replace _event_cache to prevent stale accumulation"
     )
 
 def t_event_calendar_clear_before_gather():
-    """_event_cache.clear() must appear before asyncio.gather in refresh_calendar."""
+    """Stale cache reset must appear before asyncio.gather in refresh_calendar."""
     import inspect
     import event_calendar as _ec
     src = inspect.getsource(_ec.refresh_calendar)
-    clear_pos  = src.find("_event_cache.clear()")
     gather_pos = src.find("asyncio.gather")
-    assert 0 < clear_pos < gather_pos, (
-        "_event_cache.clear() must run before asyncio.gather in refresh_calendar"
+    # Accept either clear() or the atomic-replace pattern (_event_cache = ...)
+    clear_pos = src.find("_event_cache.clear()")
+    replace_pos = src.find("_event_cache = ")
+    reset_pos = max(clear_pos, replace_pos)   # whichever pattern is present
+    assert 0 < reset_pos < gather_pos, (
+        "Cache reset (_event_cache.clear() or atomic replace) must appear before asyncio.gather in refresh_calendar"
     )
 
 def t_historical_learner_save_progress_atomic():
@@ -10169,15 +10173,16 @@ def t_platform_scheduler_options_overlap_guard():
     )
 
 def t_symbol_scanner_ema_nan_guard():
-    """symbol_scanner: trend_direction assignment must guard EMA values for NaN."""
+    """symbol_scanner: trend_direction assignment must guard EMA values for NaN/inf."""
     import inspect
     import symbol_scanner as _sc
     src = inspect.getsource(_sc.SymbolScanner._score_symbol)
-    # NaN identity check: x == x is False only for NaN
+    # Accept NaN identity check (x == x), math.isnan, or math.isfinite (preferred)
     assert ("ema9 == sc.ema9" in src or "ema21 == sc.ema21" in src or
-            "isnan" in src or "ema9 and sc.ema9 == sc.ema9" in src), (
+            "isnan" in src or "isfinite" in src or
+            "ema9 and sc.ema9 == sc.ema9" in src), (
         "symbol_scanner._score_symbol trend_direction check must guard EMA values for NaN "
-        "using identity check (x == x) or math.isnan — EMAIndicator can return NaN "
+        "using identity check (x == x), math.isnan, or math.isfinite — EMAIndicator can return NaN "
         "for insufficient data and NaN is truthy"
     )
 
@@ -10520,7 +10525,7 @@ def t_strategy_signals_bollinger_zero_guard():
     import strategy_signals as _ss
     src = inspect.getsource(_ss._signals_iron_condor)
     assert "bb_mavg" in src and (
-        "bb_mavg != 0" in src or ".where(" in src
+        "bb_mavg != 0" in src or ".where(" in src or ".replace(0," in src
         or "<= 0" in src or "pd.isna" in src
     ), (
         "_signals_iron_condor must guard bollinger_mavg() == 0 before division — "
@@ -11168,11 +11173,14 @@ def t_platform_scheduler_profile_in_executor():
     )
 
 def t_platform_scheduler_master_start_in_thread():
+    # BUG FIX (Batch 23): master.start() calls tick_engine.start_loop() which uses
+    # asyncio.get_running_loop() — running it in asyncio.to_thread (a threadpool worker
+    # with no event loop) raises RuntimeError.  Must be called directly from the async context.
     import inspect, platform_scheduler as ps
     src = inspect.getsource(ps.PlatformScheduler._auto_start_bot)
-    assert "asyncio.to_thread" in src and "master.start" in src, (
-        "_auto_start must wrap master.start() in asyncio.to_thread — "
-        "master.start() is synchronous and blocks the event loop during strategy warmup"
+    assert "asyncio.to_thread(master.start" not in src, (
+        "_auto_start must NOT wrap master.start() in asyncio.to_thread — "
+        "master.start() calls tick_engine.start_loop() which requires a running event loop"
     )
 
 def t_twap_engine_cancelled_error_propagated():
@@ -12414,6 +12422,2157 @@ run("institutional_flow: equal buy/sell qty resolves to NEUTRAL not BUY",       
 run("institutional_flow: _parse_block_deals uses strict > not >= for net direction",       t_institutional_flow_net_direction_source)
 
 # ══════════════════════════════════════════════════════════════════════════
+# 22. BATCH 22 — options_flow, institutional_flow, market_data, news_sentinel,
+#     news_gate, portfolio_var, portfolio_optimizer, gamma_scalp,
+#     correlation_guard, event_calendar bug-fixes (audit round 3)
+# ══════════════════════════════════════════════════════════════════════════
+
+def t_options_flow_safe_int_helper():
+    """options_flow._safe_int handles '', '-', None without raising."""
+    import options_flow as of
+    assert of._safe_int("", 0)    == 0
+    assert of._safe_int("-", 0)   == 0
+    assert of._safe_int(None, 0)  == 0
+    assert of._safe_int("500", 0) == 500
+
+def t_options_flow_safe_float_helper():
+    """options_flow._safe_float handles '', '-', 'N/A', None without raising."""
+    import options_flow as of
+    assert of._safe_float("",    0.0) == 0.0
+    assert of._safe_float("-",   0.0) == 0.0
+    assert of._safe_float("N/A", 0.0) == 0.0
+    assert of._safe_float(None,  0.0) == 0.0
+    assert of._safe_float("12.5",0.0) == 12.5
+
+def t_options_flow_iv_spike_not_on_zero_iv():
+    """options_flow: IV spike must not fire when current iv=0 (would compare 0 vs avg)."""
+    import inspect, options_flow as of
+    src = inspect.getsource(of.analyze_flow)
+    # The spike check lines must be nested inside `if iv > 0.001:` block
+    # Ensure `hist.pop(0)` and `IV_SPIKE_THRESHOLD` appear after the iv > 0.001 guard
+    lines = [l.rstrip() for l in src.splitlines()]
+    iv_guard_indent = None
+    for i, line in enumerate(lines):
+        if "if iv > 0.001:" in line:
+            iv_guard_indent = len(line) - len(line.lstrip())
+        if iv_guard_indent is not None and "IV_SPIKE_THRESHOLD" in line:
+            spike_indent = len(line) - len(line.lstrip())
+            assert spike_indent > iv_guard_indent, (
+                "IV spike check must be inside `if iv > 0.001:` block — "
+                "otherwise a zero-iv current value triggers false spike detection"
+            )
+            break
+    else:
+        assert False, "IV_SPIKE_THRESHOLD not found after iv > 0.001 guard"
+
+def t_options_flow_cache_write_under_lock():
+    """options_flow: _cache[symbol] = flow write is inside _flow_lock context."""
+    import inspect, options_flow as of
+    src = inspect.getsource(of.analyze_flow)
+    assert "with _flow_lock:" in src, "_flow_lock must be used in analyze_flow"
+    assert "_cache[symbol] = flow" in src, "_cache write must be in source"
+    # Check that the cache write appears after a with _flow_lock: block
+    lines = src.splitlines()
+    lock_seen = False
+    for line in lines:
+        stripped = line.strip()
+        if "with _flow_lock:" in stripped:
+            lock_seen = True
+        if lock_seen and "_cache[symbol] = flow" in stripped:
+            break
+    else:
+        assert False, "_cache[symbol] = flow must appear after a with _flow_lock: block"
+
+def t_institutional_flow_delivery_pct_clamped():
+    """institutional_flow._parse_delivery clamps delivery_pct to [0, 100]."""
+    import inspect, institutional_flow as inf
+    src = inspect.getsource(inf._parse_delivery)
+    assert "min(100.0, max(0.0" in src or "min(100" in src, (
+        "_parse_delivery must clamp delivery_pct to [0, 100] to handle corrupt NSE data"
+    )
+
+def t_institutional_flow_or_zero_qty_fix():
+    """institutional_flow._parse_block_deals: explicit 0 quantity is preserved (not skipped by 'or')."""
+    import inspect, institutional_flow as inf
+    src = inspect.getsource(inf._parse_block_deals)
+    # The old buggy pattern used `rec.get("quantity") or rec.get("qty") or 0`
+    # which skips explicit 0; the fix uses `is not None` check
+    assert "is not None" in src, (
+        "_parse_block_deals must use `is not None` guard for qty/price, "
+        "not bare `or` which silently skips explicit 0"
+    )
+
+def t_institutional_flow_early_return_empty():
+    """institutional_flow.refresh_daily returns early when all NSE sources empty."""
+    import inspect, institutional_flow as inf
+    src = inspect.getsource(inf.refresh_daily)
+    assert "return" in src, "refresh_daily must have an early return"
+    # Find the warning about empty sources and check return is nearby
+    lines = src.splitlines()
+    warn_idx = None
+    for i, line in enumerate(lines):
+        if "all NSE data sources returned empty" in line:
+            warn_idx = i
+    assert warn_idx is not None, "warning about empty sources must exist"
+    # return should appear within a few lines of the warning
+    nearby = "\n".join(lines[warn_idx:warn_idx + 5])
+    assert "return" in nearby, (
+        "refresh_daily must return immediately after warning about empty sources "
+        "to avoid wasting time building synthetic default entries"
+    )
+
+def t_institutional_flow_deal_dict_safe_access():
+    """institutional_flow._build_cache_entry uses .get() not [] for deal dict keys."""
+    import inspect, institutional_flow as inf
+    src = inspect.getsource(inf._build_cache_entry)
+    assert 'deal.get("direction")' in src or "deal.get('direction')" in src, (
+        "_build_cache_entry must use deal.get('direction') not deal['direction'] "
+        "to avoid KeyError on unexpected deal dict shapes"
+    )
+
+def t_market_data_safe_float_helper():
+    """market_data._sf handles '', '-', 'N/A', None without raising."""
+    import market_data as md
+    assert md._sf("",    0.0) == 0.0
+    assert md._sf("-",   0.0) == 0.0
+    assert md._sf("N/A", 0.0) == 0.0
+    assert md._sf(None,  0.0) == 0.0
+    assert md._sf("1234.5", 0.0) == 1234.5
+
+def t_market_data_csv_cache_has_ttl():
+    """market_data.YFinanceClient CSV cache stores (df, timestamp) tuples with TTL."""
+    import inspect, market_data as md
+    src = inspect.getsource(md.YFinanceClient.historical)
+    assert "_CSV_CACHE_TTL" in src, (
+        "YFinanceClient.historical must enforce a TTL on the CSV cache "
+        "to prevent serving stale OHLCV data from prior sessions"
+    )
+    assert "time.time()" in src, (
+        "YFinanceClient.historical must record insertion timestamp for TTL check"
+    )
+
+def t_market_data_next_tick_thread_safe():
+    """market_data.PaperTickSimulator.next_tick is protected by self._lock."""
+    import inspect, market_data as md
+    src = inspect.getsource(md.PaperTickSimulator.next_tick)
+    assert "self._lock" in src, (
+        "PaperTickSimulator.next_tick must hold self._lock to prevent day-reset "
+        "race when seed() and next_tick() run from concurrent threads"
+    )
+
+def t_market_data_next_tick_base_zero_guard():
+    """market_data.PaperTickSimulator.next_tick guards against base==0 division."""
+    import inspect, market_data as md
+    src = inspect.getsource(md.PaperTickSimulator.next_tick)
+    assert "if base" in src or "base else" in src, (
+        "next_tick must guard pct calculation against base==0 "
+        "to avoid ZeroDivisionError when price seed fails"
+    )
+
+def t_news_sentinel_break_inside_if_headline():
+    """news_sentinel: pool-cap break fires only after a headline is added (not on non-match)."""
+    import inspect, news_sentinel as ns
+    src = inspect.getsource(ns.NewsSentinel._fetch_headlines)
+    lines = src.splitlines()
+    # Find the `if len(results) >= max_headlines * 2:` guard
+    # It must be INSIDE the `if headline and headline not in results:` block
+    in_headline_block = False
+    headline_if_indent = None
+    for line in lines:
+        stripped = line.strip()
+        if "if headline" in stripped and "not in results" in stripped:
+            in_headline_block = True
+            headline_if_indent = len(line) - len(line.lstrip())
+        if in_headline_block and "if len(results)" in stripped:
+            cap_indent = len(line) - len(line.lstrip())
+            assert cap_indent > headline_if_indent, (
+                "The pool-cap `if len(results) >= max_headlines * 2: break` "
+                "must be INSIDE `if headline and headline not in results:` — "
+                "otherwise non-matching items incorrectly advance the cap counter"
+            )
+            break
+
+def t_news_gate_httpx_connect_timeout():
+    """news_gate.refresh uses per-phase httpx.Timeout (not scalar) to cap connect time."""
+    import inspect, news_gate as ng
+    src = inspect.getsource(ng.NewsGate.refresh)
+    assert "httpx.Timeout" in src, (
+        "NewsGate.refresh must use httpx.Timeout(connect=...) not scalar timeout "
+        "to prevent a hung TCP handshake from blocking the event loop for 8 s"
+    )
+
+def t_news_gate_score_threshold():
+    """news_gate blocks only when score < -1.0 (not ≤ -1.0 which blocks on single keyword)."""
+    import inspect, news_gate as ng
+    src = inspect.getsource(ng.NewsGate.refresh)
+    assert "<= -1.0" not in src, (
+        "NewsGate.refresh must use `< -1.0`, not `<= -1.0` — "
+        "a single negative keyword (e.g. 'loss') must not permanently block a symbol"
+    )
+    assert "< -1.0" in src, "NewsGate.refresh must use `< -1.0` threshold"
+
+def t_portfolio_var_silent_except_fixed():
+    """portfolio_var._fetch_returns logs failures instead of silently swallowing them."""
+    import inspect, portfolio_var as pv
+    src = inspect.getsource(pv.PortfolioVaR._fetch_returns)
+    assert "except Exception as exc:" in src or "except Exception as e:" in src, (
+        "_fetch_returns must name the exception in the except clause "
+        "so it can be logged — bare `except Exception: pass` hides all errors"
+    )
+    assert "pass\n" not in src.split("except Exception")[1].split("def ")[0], (
+        "_fetch_returns must not use bare `pass` in the except block — "
+        "silent failure means VaR silently under-counts portfolio coverage"
+    )
+
+def t_portfolio_optimizer_beta_constraint():
+    """portfolio_optimizer beta constraint uses scale-invariant formulation."""
+    import inspect, portfolio_optimizer as po
+    src = inspect.getsource(po.PortfolioOptimizer._mv_optimize)
+    assert "max(float(w.sum()), 1.0)" not in src, (
+        "beta constraint must NOT divide by max(w.sum(), 1.0) — "
+        "near-zero weight vectors make the denominator 1.0, trivially satisfying constraint"
+    )
+    assert "1e-9" in src or ("w.sum()" in src and "bc *" in src), (
+        "beta constraint must use scale-invariant form: bc * w.sum() - dot(w,b) >= 0"
+    )
+
+def t_gamma_scalp_d1_spot_guard():
+    """gamma_scalp._d1 returns 0.0 for S <= 0 (guards math.log(0))."""
+    from gamma_scalp import _d1
+    result = _d1(0.0, 100.0, 7/365, 0.065, 0.2)
+    assert result == 0.0, f"_d1 with S=0 must return 0.0, got {result}"
+    result_neg = _d1(-50.0, 100.0, 7/365, 0.065, 0.2)
+    assert result_neg == 0.0, f"_d1 with S<0 must return 0.0, got {result_neg}"
+
+def t_gamma_scalp_zero_iv_not_replaced():
+    """gamma_scalp: iv=0 from API is not replaced by 25% fallback (only None/missing is)."""
+    import inspect, gamma_scalp as gs
+    src = inspect.getsource(gs.build_gex_profile)
+    assert 'leg.get("iv", 25) or 25' not in src, (
+        "build_gex_profile must not use `leg.get('iv', 25) or 25` — "
+        "this replaces explicit iv=0 with 25%, causing 500x gamma inflation for unquoted strikes"
+    )
+    assert "not in (None" in src or "is not None" in src, (
+        "IV fallback must guard against None/missing only (not truthiness), "
+        "so legitimate iv=0 (unquoted) propagates to max(sigma, 0.05) floor"
+    )
+
+def t_correlation_guard_matrix_read_under_lock():
+    """correlation_guard.get_correlation snapshots _corr_matrix under _matrix_lock."""
+    import inspect, correlation_guard as cg
+    src = inspect.getsource(cg.get_correlation)
+    assert "_matrix_lock" in src, (
+        "get_correlation must acquire _matrix_lock to snapshot _corr_matrix — "
+        "reading a DataFrame being replaced by refresh_matrix on another thread "
+        "can cause torn reads between .empty check and .loc[] access"
+    )
+
+def t_event_calendar_future_event_wins_over_past():
+    """event_calendar.get_event_risk: a future event at +2h wins over a past event at -9h."""
+    from datetime import datetime
+    import event_calendar as ec
+    ec._event_cache.clear()
+    now = datetime(2026, 6, 21, 14, 0, 0)
+    # past event: 9 AM same day → delta = -5h
+    ec._event_cache["TEST"] = [
+        {"event_type": "RESULTS", "dt": datetime(2026, 6, 21, 9, 0), "description": "past", "results_today": False},
+        {"event_type": "AGM",     "dt": datetime(2026, 6, 21, 16, 0), "description": "future", "results_today": False},
+    ]
+    result = ec.get_event_risk("TEST", current_time=now)
+    # Future event (+2h) should match MEDIUM (< 4h threshold) or HIGH
+    assert result["hours_until"] == 2.0, (
+        f"expected 2.0h (future event wins), got {result['hours_until']} — "
+        "past event with negative delta must not shadow future events"
+    )
+    assert result["risk_level"] in ("MEDIUM", "HIGH", "CRITICAL"), (
+        "future event at 2h should have elevated risk, not NONE"
+    )
+    ec._event_cache.clear()
+
+run("options_flow: _safe_int handles empty/dash/None API fields",                          t_options_flow_safe_int_helper)
+run("options_flow: _safe_float handles empty/dash/N/A/None API fields",                   t_options_flow_safe_float_helper)
+run("options_flow: IV spike detection nested inside iv > 0.001 guard",                    t_options_flow_iv_spike_not_on_zero_iv)
+run("options_flow: _cache write inside _flow_lock context manager",                       t_options_flow_cache_write_under_lock)
+run("institutional_flow: delivery_pct clamped to [0, 100] in _parse_delivery",           t_institutional_flow_delivery_pct_clamped)
+run("institutional_flow: _parse_block_deals preserves explicit qty=0 (is not None guard)", t_institutional_flow_or_zero_qty_fix)
+run("institutional_flow: refresh_daily returns early when all NSE sources empty",         t_institutional_flow_early_return_empty)
+run("institutional_flow: _build_cache_entry uses .get() not [] for deal dict keys",      t_institutional_flow_deal_dict_safe_access)
+run("market_data: _sf helper handles '', '-', 'N/A', None without raising",               t_market_data_safe_float_helper)
+run("market_data: YFinanceClient CSV cache enforces TTL via timestamp",                   t_market_data_csv_cache_has_ttl)
+run("market_data: PaperTickSimulator.next_tick holds self._lock (thread-safe)",           t_market_data_next_tick_thread_safe)
+run("market_data: PaperTickSimulator.next_tick guards base==0 division",                  t_market_data_next_tick_base_zero_guard)
+run("news_sentinel: pool-cap break fires only after headline added (not on non-match)",   t_news_sentinel_break_inside_if_headline)
+run("news_gate: refresh uses httpx.Timeout with per-phase connect timeout",               t_news_gate_httpx_connect_timeout)
+run("news_gate: score threshold is < -1.0 (single keyword must not block symbol)",       t_news_gate_score_threshold)
+run("portfolio_var: _fetch_returns logs failures (no silent bare except pass)",           t_portfolio_var_silent_except_fixed)
+run("portfolio_optimizer: beta constraint uses scale-invariant bc*sum(w)-dot(w,b)>=0",   t_portfolio_optimizer_beta_constraint)
+run("gamma_scalp: _d1 returns 0.0 for S<=0 (prevents math.log domain error)",           t_gamma_scalp_d1_spot_guard)
+run("gamma_scalp: iv=0 from API not replaced by 25% fallback (only None/missing is)",    t_gamma_scalp_zero_iv_not_replaced)
+run("correlation_guard: get_correlation snapshots _corr_matrix under _matrix_lock",      t_correlation_guard_matrix_read_under_lock)
+run("event_calendar: future event at +2h wins over same-day past event at -9h",          t_event_calendar_future_event_wins_over_past)
+
+# ══════════════════════════════════════════════════════════════════════════
+# 23. BATCH 23 — twap_executor, platform_scheduler, signal_engine,
+#                ml_signal_filter, ml_signal_scorer, multi_timeframe,
+#                trade_memory, historical_learner, truedata_client
+# ══════════════════════════════════════════════════════════════════════════
+section("23. BATCH 23 — NETWORK/ENGINE/ML BUG-FIX REGRESSION TESTS")
+
+import asyncio as _asyncio
+import inspect as _inspect
+
+# ── twap_executor fixes ────────────────────────────────────────────────────
+
+def t_twap_executor_lock_not_lazy():
+    """BUG FIX: _start_lock must be initialised in __init__ (not lazily) to prevent
+    two concurrent callers getting different Lock instances."""
+    import twap_executor as _te
+    src = _inspect.getsource(_te.TWAPExecutor.__init__)
+    assert "asyncio.Lock()" in src, "__init__ must create asyncio.Lock() directly"
+    assert "None" not in src.split("asyncio.Lock()")[0].split("_start_lock")[-1], \
+        "_start_lock should not be assigned None in __init__"
+
+def t_twap_executor_run_slices_finally():
+    """BUG FIX: _run_slices must use try/finally so _active is cleaned up on CancelledError."""
+    import twap_executor as _te
+    src = _inspect.getsource(_te.TWAPExecutor._run_slices)
+    assert "finally:" in src, "_run_slices must have a finally block to pop _active on cancellation"
+    assert "self._active.pop" in src, "_run_slices must pop from _active in finally block"
+
+def t_twap_executor_place_single_timeout():
+    """BUG FIX: _place_single must wrap run_in_executor with asyncio.wait_for timeout."""
+    import twap_executor as _te
+    src = _inspect.getsource(_te.TWAPExecutor._place_single)
+    assert "wait_for" in src, "_place_single must use asyncio.wait_for to prevent tick-loop hang"
+    assert "timeout=30" in src, "_place_single timeout must be 30s (matching twap_engine.py)"
+
+# ── platform_scheduler fixes ───────────────────────────────────────────────
+
+def t_platform_scheduler_no_to_thread_for_master_start():
+    """BUG FIX: master.start() is synchronous and must not be called via asyncio.to_thread
+    (which would run it in a thread without an event loop, crashing asyncio internals)."""
+    import platform_scheduler as _ps
+    src = _inspect.getsource(_ps.PlatformScheduler._auto_start_bot)
+    assert "asyncio.to_thread(master.start" not in src, \
+        "master.start must NOT be called via asyncio.to_thread (no event loop in thread)"
+
+def t_platform_scheduler_options_error_warning():
+    """BUG FIX: Options cache errors must be logged at WARNING, not DEBUG, so they
+    are visible in production log level."""
+    import platform_scheduler as _ps
+    src = _inspect.getsource(_ps.PlatformScheduler._options_cache_refresh)
+    assert "logger.warning" in src, \
+        "Options cache refresh errors must be logger.warning, not logger.debug"
+
+# ── signal_engine fixes ────────────────────────────────────────────────────
+
+def t_signal_engine_adx_nan_guard():
+    """BUG FIX: ADX NaN must be checked before computing signal to avoid 'N/A' value
+    paired with 'Neutral' signal (contradictory and misleading for Claude)."""
+    import signal_engine as _se
+    src = _inspect.getsource(_se.SignalEngine._compute_indicators)
+    # The guard must check pd.isna(adx) before assigning adx_sig
+    adx_section = src[src.find("ADX"):]
+    assert "pd.isna(adx)" in adx_section, \
+        "ADX NaN must be guarded with pd.isna(adx) before computing adx_sig"
+    # The old broken pattern: adx_sig = 'BUY' if adx > 25 else 'Neutral' (before NaN check)
+    assert "adx_sig = \"BUY\" if adx > 25" not in adx_section.split("pd.isna(adx)")[0], \
+        "adx_sig must NOT be computed before the pd.isna(adx) check"
+
+# ── ml_signal_filter fixes ─────────────────────────────────────────────────
+
+def t_ml_signal_filter_uses_rlock():
+    """BUG FIX: MLSignalFilter must use threading.RLock so filter_signal can hold the
+    lock while _build_features/_encode re-acquire it (prevents encoder race with _retrain)."""
+    import ml_signal_filter as _mf
+    src = _inspect.getsource(_mf.MLSignalFilter.__init__)
+    assert "RLock" in src, "MLSignalFilter._lock must be threading.RLock() (reentrant)"
+
+def t_ml_signal_filter_sqlite_context_manager():
+    """BUG FIX: _load_trade_history must use 'with sqlite3.connect' context manager
+    so the connection is closed even when the query raises an exception."""
+    import ml_signal_filter as _mf
+    src = _inspect.getsource(_mf.MLSignalFilter._load_trade_history)
+    assert "with sqlite3.connect" in src, \
+        "_load_trade_history must use 'with sqlite3.connect(...)' context manager"
+    assert "con.close()" not in src, \
+        "Explicit con.close() should not be present when using context manager"
+
+def t_ml_signal_filter_atomic_model_save():
+    """BUG FIX: Model must be saved atomically via .tmp rename to prevent a crash
+    mid-write from producing a corrupt .pkl that mismatches the in-memory model."""
+    import ml_signal_filter as _mf
+    src = _inspect.getsource(_mf.MLSignalFilter._retrain)
+    assert ".tmp" in src, "_retrain must write to a .tmp file"
+    assert ".replace(" in src, "_retrain must atomically rename .tmp → .pkl"
+    assert "with open(_MODEL_PATH, \"wb\")" not in src, \
+        "_retrain must not write directly to _MODEL_PATH (use tmp → replace)"
+
+def t_ml_signal_filter_no_dead_import():
+    """BUG FIX: record_outcome must not have a dead try/import block that silently
+    swallows state_store errors."""
+    import ml_signal_filter as _mf
+    src = _inspect.getsource(_mf.MLSignalFilter.record_outcome)
+    assert "from state_store" not in src, \
+        "record_outcome must not contain dead import of state_store"
+
+# ── ml_signal_scorer fixes ─────────────────────────────────────────────────
+
+def t_ml_signal_scorer_has_lock():
+    """BUG FIX: MLSignalScorer must have a threading.Lock to protect concurrent
+    access to _loaded set and _models dict from multiple agent threads."""
+    import ml_signal_scorer as _ms
+    assert hasattr(_ms.ml_signal_scorer, "_lock"), \
+        "MLSignalScorer must have a _lock attribute"
+    import threading
+    assert type(_ms.ml_signal_scorer._lock).__name__ == "lock", \
+        "MLSignalScorer._lock must be a threading.Lock instance"
+
+def t_ml_signal_scorer_score_under_lock():
+    """BUG FIX: score() must check/load symbol under lock to prevent double-load
+    races when multiple agent threads score the same new symbol concurrently."""
+    import ml_signal_scorer as _ms
+    src = _inspect.getsource(_ms.MLSignalScorer.score)
+    assert "self._lock" in src, "score() must access _loaded/_models under self._lock"
+
+def t_ml_signal_scorer_feature12_clamped():
+    """BUG FIX: Feature 12 (MACD/ATR) must be clamped with np.clip(-3,3) like
+    feature 4, to prevent silent NaN→0 substitution in zero-volatility conditions."""
+    import ml_signal_scorer as _ms
+    src = _inspect.getsource(_ms.MLSignalScorer._features_from_snap)
+    # Feature 12 line should have np.clip
+    lines = src.splitlines()
+    feat12_lines = [ln for ln in lines if "12." in ln or ("macd" in ln.lower() and "atr" in ln.lower() and "clip" in ln)]
+    assert any("clip" in ln for ln in feat12_lines), \
+        "Feature 12 (MACD/ATR) must use np.clip to clamp like feature 4"
+
+# ── multi_timeframe fixes ──────────────────────────────────────────────────
+
+def t_multi_timeframe_aggregate_right_aligned():
+    """BUG FIX: _aggregate must right-align bars so most-recent candle is always in
+    a complete bar. With 88 candles × 15-min bars, candles 75-87 must not be dropped."""
+    import multi_timeframe as _mtf
+    import pandas as pd
+    import numpy as np
+
+    # Create 88 1-min candles with predictable close values (0..87)
+    df = pd.DataFrame({
+        "open":   np.zeros(88),
+        "high":   np.zeros(88),
+        "low":    np.zeros(88),
+        "close":  np.arange(88, dtype=float),  # close[i] == i
+        "volume": np.ones(88),
+    })
+    result = _mtf._aggregate(df, 15)
+    # Should get 5 complete 15-min bars (88 // 15 = 5, remainder 13 dropped from left)
+    assert len(result) == 5, f"Expected 5 bars from 88 candles × 15-min, got {len(result)}"
+    # The last bar's close must be the last candle's close (87.0), not an earlier candle
+    last_close = float(result["close"].iloc[-1])
+    assert last_close == 87.0, f"Last bar close must be candle #87 (got {last_close})"
+
+def t_multi_timeframe_aggregate_exact_multiple():
+    """_aggregate with exact multiple (90 candles × 15-min) should produce 6 complete bars."""
+    import multi_timeframe as _mtf
+    import pandas as pd
+    import numpy as np
+
+    df = pd.DataFrame({
+        "open":   np.zeros(90),
+        "high":   np.zeros(90),
+        "low":    np.zeros(90),
+        "close":  np.arange(90, dtype=float),
+        "volume": np.ones(90),
+    })
+    result = _mtf._aggregate(df, 15)
+    assert len(result) == 6, f"Expected 6 bars from 90 candles × 15-min, got {len(result)}"
+    assert float(result["close"].iloc[-1]) == 89.0, "Last bar must end at candle #89"
+
+# ── trade_memory fixes ─────────────────────────────────────────────────────
+
+def t_trade_memory_trim_filters_blank_lines():
+    """BUG FIX: _trim_file_to_max_entries must filter blank lines so partial-write
+    entries from concurrent writes don't displace valid entries."""
+    import trade_memory as _tm
+    src = _inspect.getsource(_tm._trim_file_to_max_entries)
+    assert "valid_lines" in src, \
+        "_trim_file_to_max_entries must filter blank lines using a valid_lines filter"
+    assert "ln.strip()" in src, \
+        "_trim_file_to_max_entries must strip blank lines before trimming"
+
+# ── historical_learner fixes ───────────────────────────────────────────────
+
+def t_historical_learner_eta_uses_newly_done():
+    """BUG FIX: ETA must be computed from newly_done (not done which includes pre-skipped
+    items) so --resume runs don't show wildly underestimated ETA."""
+    import historical_learner as _hl
+    src = _inspect.getsource(_hl.learn)
+    assert "newly_done" in src, \
+        "learn() must track newly_done separately from done for accurate ETA"
+
+def t_historical_learner_pct_zero_division_guard():
+    """BUG FIX: pct calculation must guard against ZeroDivisionError when total==0
+    (e.g., empty symbol list passed via --symbols)."""
+    import historical_learner as _hl
+    src = _inspect.getsource(_hl.learn)
+    # Must have a guard: 'if total > 0' or 'if total else'
+    assert ("if total > 0" in src or "if total else" in src or "if total" in src), \
+        "pct = done * 100 // total must guard against total == 0"
+
+# ── truedata_client fixes ──────────────────────────────────────────────────
+
+def t_truedata_reconnect_loop_uses_while_true():
+    """BUG FIX: TrueDataTicker._run must use 'while True' so the reconnect loop
+    does not exit after the first _get_td() failure (old: 'while self._connected or
+    consecutive_failures == 0' exits immediately after the first failure)."""
+    import truedata_client as _tc
+    src = _inspect.getsource(_tc.TrueDataTicker._run)
+    assert "while True:" in src, \
+        "TrueDataTicker._run must use 'while True' for unlimited reconnect retries"
+    assert "while self._connected or consecutive_failures == 0" not in src, \
+        "Old broken condition 'while self._connected or consecutive_failures == 0' must be removed"
+
+run("twap_executor: _start_lock initialised in __init__ (not lazy None)",              t_twap_executor_lock_not_lazy)
+run("twap_executor: _run_slices uses try/finally to clean _active on CancelledError",  t_twap_executor_run_slices_finally)
+run("twap_executor: _place_single wrapped with asyncio.wait_for(timeout=30s)",         t_twap_executor_place_single_timeout)
+run("platform_scheduler: master.start() not wrapped in asyncio.to_thread",             t_platform_scheduler_no_to_thread_for_master_start)
+run("platform_scheduler: options cache error logged at WARNING not DEBUG",             t_platform_scheduler_options_error_warning)
+run("signal_engine: ADX NaN guard checks pd.isna before computing adx_sig",           t_signal_engine_adx_nan_guard)
+run("ml_signal_filter: uses threading.RLock (reentrant) for filter_signal/_encode",   t_ml_signal_filter_uses_rlock)
+run("ml_signal_filter: _load_trade_history uses context manager (no fd leak)",         t_ml_signal_filter_sqlite_context_manager)
+run("ml_signal_filter: _retrain saves model atomically via .tmp→replace rename",       t_ml_signal_filter_atomic_model_save)
+run("ml_signal_filter: record_outcome has no dead state_store import block",           t_ml_signal_filter_no_dead_import)
+run("ml_signal_scorer: has threading.Lock to protect _loaded/_models",                t_ml_signal_scorer_has_lock)
+run("ml_signal_scorer: score() checks _loaded under self._lock",                      t_ml_signal_scorer_score_under_lock)
+run("ml_signal_scorer: feature 12 (MACD/ATR) clamped with np.clip like feature 4",   t_ml_signal_scorer_feature12_clamped)
+run("multi_timeframe: _aggregate right-aligns bars (88 candles × 15min → 5 complete)", t_multi_timeframe_aggregate_right_aligned)
+run("multi_timeframe: _aggregate exact multiple (90 × 15min → 6 bars, last=89.0)",    t_multi_timeframe_aggregate_exact_multiple)
+run("trade_memory: _trim uses valid_lines filter to skip blank/partial-write lines",   t_trade_memory_trim_filters_blank_lines)
+run("historical_learner: ETA uses newly_done (not done) for accurate --resume ETA",   t_historical_learner_eta_uses_newly_done)
+run("historical_learner: pct = done*100//total guarded against ZeroDivisionError",    t_historical_learner_pct_zero_division_guard)
+run("truedata_client: _run uses 'while True' so reconnect loop never exits early",    t_truedata_reconnect_loop_uses_while_true)
+
+# ══════════════════════════════════════════════════════════════════════════
+# 24. BATCH 24 — paper_trade_sim, profit_optimizer, adaptive_engine,
+#                kite_accounts, god_mode, auto_backtest_runner
+# ══════════════════════════════════════════════════════════════════════════
+section("24. BATCH 24 — MISC/UTILS BUG-FIX REGRESSION TESTS")
+
+# ── paper_trade_sim ────────────────────────────────────────────────────────
+
+def t_paper_trade_sim_kill_switch_enum():
+    """BUG FIX: sebi_compliance._state must be set to KillSwitchState.ACTIVE (enum),
+    not the string 'ACTIVE'. String assignment corrupts the type and silently disables
+    all kill-switch comparisons for the rest of the process lifetime."""
+    import paper_trade_sim as _pts
+    src = _inspect.getsource(_pts)
+    assert "KillSwitchState.ACTIVE" in src, \
+        "paper_trade_sim must assign KillSwitchState.ACTIVE (not the string 'ACTIVE')"
+    assert "sebi_compliance._state = \"ACTIVE\"" not in src, \
+        "String literal 'ACTIVE' must not be assigned to sebi_compliance._state"
+
+# ── profit_optimizer ───────────────────────────────────────────────────────
+
+def t_profit_optimizer_settings_patch_under_lock():
+    """BUG FIX: The backtest loop (combo scoring) must run inside the _opt_lock so live
+    trading cannot observe patched settings (patched SL/target values) mid-run."""
+    import profit_optimizer as _po
+    src = _inspect.getsource(_po.phase1_optimise)
+    # try/finally restore must now be inside the lock context
+    assert "finally:" in src, \
+        "phase1_optimise must use try/finally to guarantee settings restore"
+    # The restore call must be inside the lock
+    lines = src.splitlines()
+    finally_idx = next(i for i, ln in enumerate(lines) if "finally:" in ln)
+    restore_idx = next(i for i, ln in enumerate(lines) if "_restore_settings" in ln)
+    assert restore_idx > finally_idx, \
+        "_restore_settings must be in the finally block (after 'finally:')"
+
+# ── adaptive_engine ────────────────────────────────────────────────────────
+
+def t_adaptive_engine_on_regime_change_uses_lock():
+    """BUG FIX: on_regime_change must hold self._lock when mutating AdaptiveParams
+    objects to prevent races with record_trade() which also writes params under _lock."""
+    import adaptive_engine as _ae
+    src = _inspect.getsource(_ae.AdaptiveLearningEngine.on_regime_change)
+    assert "with self._lock:" in src, \
+        "on_regime_change must hold self._lock when iterating and mutating self._params"
+
+def t_adaptive_engine_save_state_inside_regime_lock():
+    """BUG FIX: _save_state() inside on_regime_change must be called while holding
+    self._lock to prevent a torn write where the file reflects partly-updated params."""
+    import adaptive_engine as _ae
+    src = _inspect.getsource(_ae.AdaptiveLearningEngine.on_regime_change)
+    # _save_state must appear after 'with self._lock:' and before the block ends
+    lock_idx = src.find("with self._lock:")
+    save_idx = src.find("self._save_state()")
+    assert lock_idx >= 0 and save_idx > lock_idx, \
+        "_save_state() in on_regime_change must be called inside the self._lock block"
+
+# ── kite_accounts ──────────────────────────────────────────────────────────
+
+def t_kite_accounts_load_failure_leaves_loaded_false():
+    """BUG FIX: When _load() fails to decrypt accounts.json (e.g. corrupt file or
+    wrong key), it must NOT set _loaded=True. Setting _loaded=True on failure causes
+    the next write (_save) to atomically overwrite the file with an empty dict,
+    permanently destroying all stored credentials."""
+    import kite_accounts as _ka
+    src = _inspect.getsource(_ka._load)
+    # The except block must have a return BEFORE _loaded = True
+    lines = src.splitlines()
+    in_except = False
+    has_return_before_loaded = False
+    for i, ln in enumerate(lines):
+        if "except" in ln:
+            in_except = True
+        if in_except and "return" in ln:
+            has_return_before_loaded = True
+            break
+        if "_loaded = True" in ln:
+            in_except = False  # reached assignment outside except
+    assert has_return_before_loaded, \
+        "_load() except block must 'return' before reaching '_loaded = True'"
+
+# ── god_mode ────────────────────────────────────────────────────────────────
+
+def t_god_mode_capital_allocation_sum_lte_100():
+    """BUG FIX: God Mode capital allocations must sum to ≤ 100% to prevent deploying
+    more than total account equity (was 130%: 60+30+15+25), which causes margin calls."""
+    import god_mode as _gm
+    overrides = _gm._GOD_OVERRIDES
+    capital_keys = ["intraday_capital_pct", "options_capital_pct",
+                    "futures_capital_pct",  "swing_capital_pct"]
+    total_pct = sum(overrides.get(k, 0.0) for k in capital_keys)
+    assert total_pct <= 100.0, \
+        f"God Mode capital pcts must sum ≤ 100% (got {total_pct}%): {[overrides.get(k) for k in capital_keys]}"
+
+def t_god_mode_enable_snapshots_agent_states():
+    """BUG FIX: enable() must snapshot per-agent enabled states before overriding them
+    so disable() can restore exactly which agents were active before God Mode."""
+    import god_mode as _gm
+    src = _inspect.getsource(_gm.GodModeManager.enable)
+    assert "_agent_baseline" in src, \
+        "enable() must populate self._agent_baseline before enabling all agents"
+    assert "is_agent_enabled" in src, \
+        "enable() must call bot_state.is_agent_enabled() to snapshot pre-activation states"
+
+def t_god_mode_disable_restores_agent_states():
+    """BUG FIX: disable() must restore per-agent enabled states from _agent_baseline
+    so agents disabled before God Mode are properly disabled after deactivation."""
+    import god_mode as _gm
+    src = _inspect.getsource(_gm.GodModeManager.disable)
+    assert "_agent_baseline" in src, \
+        "disable() must iterate self._agent_baseline to restore per-agent states"
+    assert "set_agent_enabled" in src, \
+        "disable() must call bot_state.set_agent_enabled() to restore each agent's state"
+
+# ── auto_backtest_runner ───────────────────────────────────────────────────
+
+def t_auto_backtest_runner_sharpe_uses_sqrt_252():
+    """BUG FIX: Sharpe must be annualised with sqrt(252) (fixed factor), not sqrt(N)
+    (trade count). Using sqrt(N) makes Sharpe grow with more backtested trades,
+    making strategies tested over longer periods appear stronger with no real edge."""
+    import auto_backtest_runner as _abr
+    src = _inspect.getsource(_abr._compute_metrics)
+    assert "sqrt(252)" in src or "math.sqrt(252)" in src, \
+        "_compute_metrics must use sqrt(252) for Sharpe annualization, not sqrt(len(arr))"
+    assert "sqrt(len(arr))" not in src and "np.sqrt(len(arr))" not in src, \
+        "_compute_metrics must not use sqrt(len(arr)) — it makes Sharpe grow with trade count"
+
+run("paper_trade_sim: kill switch set to KillSwitchState.ACTIVE (not string 'ACTIVE')", t_paper_trade_sim_kill_switch_enum)
+run("profit_optimizer: backtest loop runs inside _opt_lock with try/finally restore",   t_profit_optimizer_settings_patch_under_lock)
+run("adaptive_engine: on_regime_change holds self._lock when mutating params",          t_adaptive_engine_on_regime_change_uses_lock)
+run("adaptive_engine: _save_state() in on_regime_change called inside self._lock",      t_adaptive_engine_save_state_inside_regime_lock)
+run("kite_accounts: _load() returns early on failure (not setting _loaded=True)",       t_kite_accounts_load_failure_leaves_loaded_false)
+run("god_mode: capital allocations sum ≤ 100% (was 130%: 60+30+15+25)",               t_god_mode_capital_allocation_sum_lte_100)
+run("god_mode: enable() snapshots agent enable states to _agent_baseline",             t_god_mode_enable_snapshots_agent_states)
+run("god_mode: disable() restores agent enable states from _agent_baseline",           t_god_mode_disable_restores_agent_states)
+run("auto_backtest_runner: Sharpe uses sqrt(252) annualisation, not sqrt(N trades)",   t_auto_backtest_runner_sharpe_uses_sqrt_252)
+
+# ══════════════════════════════════════════════════════════════════════════
+# 25. BATCH 25 — portfolio_backtest, strategy_signals, phase6_resilience,
+#                position_reconciler, iv_surface BUG-FIX REGRESSION TESTS
+# ══════════════════════════════════════════════════════════════════════════
+section("25. BATCH 25 — portfolio/signals/phase6/reconciler/iv_surface FIXES")
+
+# ── portfolio_backtest ─────────────────────────────────────────────────────
+
+def t_portfolio_backtest_no_lookahead_uses_prev_bar_signal():
+    """BUG FIX: Entry must use the PREVIOUS bar's signal and the CURRENT bar's open
+    price.  Using sig.loc[ts] (same-bar close) to decide AND close[ts] as entry
+    price is look-ahead bias: we act on information not yet available at bar open."""
+    import portfolio_backtest as _pb
+    src = _inspect.getsource(_pb.PortfolioBacktest._simulate_portfolio)
+    assert "bar_pos - 1" in src, \
+        "_simulate_portfolio must look up the previous bar's signal (common_idx[bar_pos-1])"
+    assert 'df.loc[ts, "open"]' in src or "df.loc[ts, 'open']" in src, \
+        "_simulate_portfolio must enter at the current bar's open, not close"
+
+def t_portfolio_backtest_eod_pnl_in_equity_curve():
+    """BUG FIX: EOD force-close P&L must be reflected in equity_curve[-1].
+    Previously the force-close loop appended trades but never updated cumulative_pnl
+    or equity_curve, so the returned equity curve silently diverged from total_net_pnl."""
+    import portfolio_backtest as _pb
+    src = _inspect.getsource(_pb.PortfolioBacktest._simulate_portfolio)
+    assert "eod_pnl" in src, \
+        "_simulate_portfolio must accumulate EOD close P&L in eod_pnl"
+    assert "equity_curve[-1] = cumulative_pnl" in src, \
+        "_simulate_portfolio must update equity_curve[-1] after EOD closes"
+
+def t_portfolio_backtest_drawdown_uses_equity_curve():
+    """BUG FIX: Max drawdown must be computed on the time-ordered equity curve,
+    not on np.cumsum(pnls).  Trade-sequence cumsum ignores concurrent open positions
+    and intraday drawdowns between trade closes, understating peak-to-trough depth."""
+    import portfolio_backtest as _pb
+    src = _inspect.getsource(_pb.PortfolioBacktest._compute_metrics)
+    assert "np.cumsum(pnls)" not in src, \
+        "_compute_metrics must not use np.cumsum(pnls) for drawdown — use equity_curve"
+    assert "equity_curve" in src, \
+        "_compute_metrics must compute drawdown from the time-ordered equity_curve"
+
+# ── strategy_signals ───────────────────────────────────────────────────────
+
+def t_strategy_signals_intraday_loop_starts_at_20():
+    """BUG FIX: _signals_intraday loop must start at bar 20 (not 2).
+    vol_ma = vol.rolling(20).mean() is NaN for bars 0–18; starting at 2 means
+    bars 2–18 compare vol against NaN which always evaluates to False — silently
+    suppressing valid signals on early bars and producing misleading debug output."""
+    import strategy_signals as _ss
+    src = _inspect.getsource(_ss._signals_intraday)
+    assert "range(20," in src, \
+        "_signals_intraday must start loop at index 20 (first valid vol_ma bar)"
+    assert "range(2," not in src, \
+        "_signals_intraday must not start at 2 — vol_ma is NaN for bars 0–18"
+
+def t_strategy_signals_futures_loop_starts_at_20():
+    """BUG FIX: _signals_futures loop must start at bar 20 (not 2).
+    vol_ma = vol.rolling(20).mean() is NaN for bars 0–18; comparing vol against NaN
+    silently suppresses crossover signals on bars 2–18."""
+    import strategy_signals as _ss
+    src = _inspect.getsource(_ss._signals_futures)
+    assert "range(20," in src, \
+        "_signals_futures must start loop at index 20 (first valid vol_ma bar)"
+    assert "range(2," not in src, \
+        "_signals_futures must not start at 2 — vol_ma is NaN for bars 0–18"
+
+def t_strategy_signals_swing_ema200_always_uses_period_200():
+    """BUG FIX: EMAIndicator(close, min(200, len(df)-1)) produces EMA(79) when
+    len(df)==80, mislabelled and stored as ema200. The 'close > ema200' condition
+    then compares against a fast 79-period MA, firing trend signals that a real
+    200-period MA would have filtered out. Use period=200 unconditionally — the
+    ta library handles warm-up gracefully."""
+    import strategy_signals as _ss
+    src = _inspect.getsource(_ss._signals_swing)
+    assert "min(200, len(df)" not in src, \
+        "_signals_swing must not use min(200, len(df)-1) — always use period 200"
+    assert "EMAIndicator(close, 200)" in src, \
+        "_signals_swing must use EMAIndicator(close, 200) for ema200"
+
+def t_strategy_signals_iron_condor_bb_width_nan_safe():
+    """BUG FIX: bb_mavg.where(bb_mavg != 0) preserves NaN rows (since NaN != 0 is
+    True in pandas). replace(0, nan) is explicit and correct: only divide-by-zero
+    rows are replaced; NaN-propagation in bb_w is intentional (signal suppressed)."""
+    import strategy_signals as _ss
+    src = _inspect.getsource(_ss._signals_iron_condor)
+    assert "bb_mavg.where(bb_mavg != 0)" not in src, \
+        "_signals_iron_condor must use .replace(0, float('nan')) not .where(bb_mavg != 0)"
+    assert ".replace(0," in src, \
+        "_signals_iron_condor must use .replace(0, ...) to guard zero bb_mavg denominator"
+
+# ── phase6_resilience ──────────────────────────────────────────────────────
+
+def t_phase6_resilience_curl_guarded_by_api_key():
+    """BUG FIX: phase6_resilience.py ran curl sub-processes unconditionally even when
+    API_KEY was not set (api_key=None). With no server running, curl stdout has no
+    newline, so rsplit('\\n', 1) raises ValueError: not enough values to unpack,
+    crashing the test script before the results summary is printed."""
+    import phase6_resilience as _p6
+    src = _inspect.getsource(_p6)
+    assert "if api_key is not None:" in src, \
+        "phase6_resilience.py must guard curl sub-process calls with 'if api_key is not None:'"
+
+# ── position_reconciler ────────────────────────────────────────────────────
+
+def t_position_reconciler_missing_tradingsymbol_skips():
+    """BUG FIX: When _tsl_sl_orders has no record for an order_id (SL-M order
+    placement failed at broker), entry.get('tradingsymbol') returns None.  The old
+    fallback 'or pos[\"symbol\"]' used the UNDERLYING symbol (e.g. 'INFY') but the
+    broker position uses the CONTRACT ('INFY2606041650CE').  This caused
+    broker['INFY']==0 to fire _handle_full_external_exit, silently deregistering
+    the live F&O position from the entire TSL/risk system."""
+    import position_reconciler as _pr
+    src = _inspect.getsource(_pr.PositionReconciler.reconcile_once)
+    assert 'or pos["symbol"]' not in src and "or pos['symbol']" not in src, \
+        "reconcile_once must not fall back to pos['symbol'] when tradingsymbol is missing"
+    assert "continue" in src, \
+        "reconcile_once must skip positions with no tradingsymbol (continue) to avoid false exit"
+
+# ── iv_surface ─────────────────────────────────────────────────────────────
+
+def t_iv_surface_gex_uses_conditional_normalisation():
+    """BUG FIX: The original GEX computation always divided raw iv by 100.  The smile
+    computation conditionally divides (only when iv_raw > 1).  For decimal-format chains
+    (iv=0.225 for 22.5%), the GEX was computing (0.225/100)^2 ≈ 5e-6 instead of
+    (0.225)^2 ≈ 0.051 — a 10,000x error that made gex_net collapse to near-zero for all
+    chains, rendering the GEX='LONG'/'SHORT' label meaningless."""
+    import iv_surface as _iv
+    src = _inspect.getsource(_iv.build_surface)
+    # Old code: one-liner with unconditional / 100 in a generator comprehension.
+    # New code: explicit loop with conditional normalisation (c_raw / 100 if c_raw > 1.0)
+    assert '/ 100) ** 2)' not in src, \
+        "build_surface GEX must not unconditionally divide iv by 100 in a generator"
+    assert "c_raw > 1.0" in src, \
+        "build_surface GEX must apply conditional normalisation: 'c_raw > 1.0' check"
+    assert "gex_terms" in src, \
+        "build_surface must accumulate GEX terms in gex_terms list with consistent normalisation"
+
+run("portfolio_backtest: entry uses previous bar signal + current bar open (no look-ahead)", t_portfolio_backtest_no_lookahead_uses_prev_bar_signal)
+run("portfolio_backtest: EOD force-close P&L added to equity_curve[-1]",                    t_portfolio_backtest_eod_pnl_in_equity_curve)
+run("portfolio_backtest: max drawdown uses time-ordered equity_curve not trade cumsum",      t_portfolio_backtest_drawdown_uses_equity_curve)
+run("strategy_signals: _signals_intraday loop starts at 20 (not 2) for valid vol_ma",      t_strategy_signals_intraday_loop_starts_at_20)
+run("strategy_signals: _signals_futures loop starts at 20 (not 2) for valid vol_ma",       t_strategy_signals_futures_loop_starts_at_20)
+run("strategy_signals: _signals_swing EMA200 always uses period 200 (not min(200,n-1))",   t_strategy_signals_swing_ema200_always_uses_period_200)
+run("strategy_signals: iron_condor bb_width denominator uses .replace(0, nan)",             t_strategy_signals_iron_condor_bb_width_nan_safe)
+run("phase6_resilience: curl calls guarded by 'if api_key is not None' (no ValueError)",   t_phase6_resilience_curl_guarded_by_api_key)
+run("position_reconciler: missing tradingsymbol → skip (no false FULL_EXTERNAL_EXIT)",      t_position_reconciler_missing_tradingsymbol_skips)
+run("iv_surface: GEX uses conditional /100 normalisation matching smile computation",        t_iv_surface_gex_uses_conditional_normalisation)
+
+# ══════════════════════════════════════════════════════════════════════════
+# 26. BROKER + ACTIVITY LOG + N8N BRIDGE (Batch 26)
+# ══════════════════════════════════════════════════════════════════════════
+
+import inspect as _inspect26
+import threading as _threading26
+
+
+def t_activity_log_push_uses_lock():
+    """push() must hold threading.Lock around appendleft to prevent concurrent write races."""
+    import agents.activity_log as _al
+    src = _inspect26.getsource(_al.push)
+    assert "with _lock:" in src, "activity_log.push must hold _lock around appendleft"
+    assert "_log.appendleft" in src, "activity_log.push must call _log.appendleft"
+
+
+def t_activity_log_get_uses_lock():
+    """get() must hold threading.Lock — concurrent clear() can raise RuntimeError during iteration."""
+    import agents.activity_log as _al
+    src = _inspect26.getsource(_al.get)
+    assert "with _lock:" in src, "activity_log.get must hold _lock around list(_log)"
+
+
+def t_activity_log_clear_uses_lock():
+    """clear() must hold threading.Lock to prevent RuntimeError during concurrent get()."""
+    import agents.activity_log as _al
+    src = _inspect26.getsource(_al.clear)
+    assert "with _lock:" in src, "activity_log.clear must hold _lock around _log.clear()"
+
+
+def t_activity_log_push_get_thread_safe():
+    """Concurrent push + get on the activity log must not raise RuntimeError."""
+    import agents.activity_log as _al
+    _al.clear()
+    errors = []
+
+    def _push_loop():
+        for i in range(50):
+            try:
+                _al.push("intraday", "SIGNAL", "RELIANCE", price=100.0 + i)
+            except Exception as exc:
+                errors.append(exc)
+
+    def _get_loop():
+        for _ in range(50):
+            try:
+                _al.get(10)
+            except Exception as exc:
+                errors.append(exc)
+
+    threads = [_threading26.Thread(target=_push_loop) for _ in range(3)]
+    threads += [_threading26.Thread(target=_get_loop) for _ in range(2)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+    assert not errors, f"activity_log thread safety errors: {errors}"
+
+
+def t_kotak_ticker_subscribe_persists_tokens_before_send():
+    """subscribe() must persist tokens to _t2s before the WS guard so reconnect
+    re-subscribe catches all tokens even when WS is not yet open."""
+    from brokers.kotak_ticker import KotakTicker
+    src = _inspect26.getsource(KotakTicker.subscribe)
+    persist_pos = src.find("self._t2s")
+    ws_guard_pos = src.find("if not self._ws")
+    assert persist_pos < ws_guard_pos, \
+        "KotakTicker.subscribe must persist tokens to _t2s before the WS guard"
+
+
+def t_kotak_ticker_on_message_empty_token_guard():
+    """_on_message with empty 'tk' field must return early — empty string key
+    corrupts _t2s and produces malformed tick dicts."""
+    from brokers.kotak_ticker import KotakTicker
+    src = _inspect26.getsource(KotakTicker._on_message)
+    assert "if not token:" in src, \
+        "KotakTicker._on_message must guard 'if not token: return'"
+
+
+def t_kotak_ticker_on_message_safe_float_conversion():
+    """Kotak sends numeric fields as strings; empty strings cause float('') ValueError
+    crashing tick dispatch. Must use 'or 0' fallback and catch ValueError/TypeError."""
+    from brokers.kotak_ticker import KotakTicker
+    src = _inspect26.getsource(KotakTicker._on_message)
+    assert "or 0)" in src, \
+        "KotakTicker._on_message must use 'or 0' fallback for empty-string fields"
+    assert "ValueError, TypeError" in src, \
+        "KotakTicker._on_message must catch ValueError and TypeError"
+
+
+def t_upstox_ticker_on_ticks_single_arg():
+    """CRITICAL: on_ticks must be called with a single (ticks) arg — not (ws, ticks).
+    Passing ws as first arg caused tick_engine to receive the WS object as the tick
+    list, silently dropping all Upstox market data."""
+    from brokers.upstox_ticker import UpstoxTicker
+    src = _inspect26.getsource(UpstoxTicker._connect_and_listen)
+    assert "self.on_ticks(ws," not in src, \
+        "UpstoxTicker must not call self.on_ticks(ws, ticks)"
+    assert "self.on_ticks(ticks)" in src, \
+        "UpstoxTicker must call self.on_ticks(ticks) with single argument"
+
+
+def t_upstox_ticker_ws_none_after_disconnect():
+    """After run_forever() returns, _ws must be set to None so is_connected()
+    returns False on a dead connection."""
+    from brokers.upstox_ticker import UpstoxTicker
+    src = _inspect26.getsource(UpstoxTicker._connect_and_listen)
+    assert "self._ws = None" in src, \
+        "UpstoxTicker._connect_and_listen must set self._ws = None after run_forever returns"
+
+
+def t_upstox_ticker_reconnect_sleep_on_clean_close():
+    """On clean close (no exception), reconnect loop must sleep 1s to prevent
+    tight reconnect spin on network oscillation."""
+    from brokers.upstox_ticker import UpstoxTicker
+    src = _inspect26.getsource(UpstoxTicker._run)
+    assert "time.sleep(1.0)" in src, \
+        "UpstoxTicker._run must sleep 1s before reconnecting on clean close"
+
+
+def t_n8n_bridge_client_not_none_at_import():
+    """_client must be an AsyncClient instance at module load time — not None.
+    Lazy check-then-set init is not coroutine-safe under asyncio concurrency."""
+    import n8n_bridge as _n8n
+    import httpx
+    assert isinstance(_n8n._client, httpx.AsyncClient), \
+        "n8n_bridge._client must be an AsyncClient at import time (not None)"
+
+
+def t_n8n_bridge_get_client_no_lazy_init():
+    """_get_client() must not perform check-then-set on the global — that pattern
+    is not safe under asyncio concurrency."""
+    import n8n_bridge as _n8n
+    src = _inspect26.getsource(_n8n._get_client)
+    assert "global" not in src, \
+        "n8n_bridge._get_client must not use 'global' (eager module-level init)"
+    assert "is None" not in src, \
+        "n8n_bridge._get_client must not check 'is None'"
+
+
+def t_n8n_bridge_final_failure_logged_at_warning():
+    """Final retry failure must be logged at WARNING — permanent delivery failures
+    were invisible when logged at DEBUG."""
+    import n8n_bridge as _n8n
+    src = _inspect26.getsource(_n8n.notify)
+    assert 'logger.debug("[n8n] delivery failed' not in src, \
+        "n8n_bridge: final retry failure must not be at DEBUG"
+    assert 'logger.warning("[n8n] delivery failed' in src, \
+        "n8n_bridge: final retry failure must be at WARNING"
+
+
+run("activity_log: push() holds threading.Lock around appendleft",                    t_activity_log_push_uses_lock)
+run("activity_log: get() holds threading.Lock around list(_log)",                     t_activity_log_get_uses_lock)
+run("activity_log: clear() holds threading.Lock around _log.clear()",                 t_activity_log_clear_uses_lock)
+run("activity_log: concurrent push+get threads do not raise RuntimeError",            t_activity_log_push_get_thread_safe)
+run("kotak_ticker: subscribe() persists tokens to _t2s before WS guard",              t_kotak_ticker_subscribe_persists_tokens_before_send)
+run("kotak_ticker: _on_message guards against empty token field",                     t_kotak_ticker_on_message_empty_token_guard)
+run("kotak_ticker: _on_message uses 'or 0' + ValueError/TypeError catch",             t_kotak_ticker_on_message_safe_float_conversion)
+run("upstox_ticker: on_ticks called with single arg (not (ws, ticks))",               t_upstox_ticker_on_ticks_single_arg)
+run("upstox_ticker: _ws set to None after run_forever returns",                       t_upstox_ticker_ws_none_after_disconnect)
+run("upstox_ticker: _run sleeps 1s on clean close (no tight reconnect spin)",         t_upstox_ticker_reconnect_sleep_on_clean_close)
+run("n8n_bridge: _client is AsyncClient at module load (not None)",                   t_n8n_bridge_client_not_none_at_import)
+run("n8n_bridge: _get_client() has no lazy check-then-set race",                      t_n8n_bridge_get_client_no_lazy_init)
+run("n8n_bridge: final retry failure logged at WARNING not DEBUG",                    t_n8n_bridge_final_failure_logged_at_warning)
+
+# ══════════════════════════════════════════════════════════════════════════
+# 27. KOTAK + UPSTOX BROKER ADAPTERS (Batch 27)
+# ══════════════════════════════════════════════════════════════════════════
+
+import inspect as _inspect27
+
+
+def t_kotak_broker_squareoff_has_try_except():
+    """BUG FIX: squareoff_all_positions() had no try/except — an exception from
+    one position's place_order aborted the entire emergency squareoff, leaving
+    remaining open positions unprotected."""
+    from brokers.kotak_broker import KotakBroker
+    src = _inspect27.getsource(KotakBroker.squareoff_all_positions)
+    assert "try:" in src, \
+        "KotakBroker.squareoff_all_positions must have try/except to continue on per-position failure"
+    assert "except Exception" in src, \
+        "KotakBroker.squareoff_all_positions must catch Exception per-position"
+
+
+def t_kotak_broker_squareoff_continues_after_failure():
+    """Functional: squareoff_all_positions must return completed order ids even
+    when place_order raises for one position — no mid-loop abort."""
+    import unittest.mock as _mock
+    from config import settings as _s
+    _orig = _s.trading_mode
+    _s.trading_mode = "PAPER"
+    try:
+        from brokers.kotak_broker import KotakBroker
+        broker = KotakBroker()
+        # Inject two fake positions
+        broker._paper_positions = [
+            {"tradingsymbol": "RELIANCE", "exchange": "NSE", "product": "MIS", "quantity": 1, "average_price": 2800.0, "last_price": 2800.0, "pnl": 0.0},
+            {"tradingsymbol": "TCS",      "exchange": "NSE", "product": "MIS", "quantity": 1, "average_price": 3500.0, "last_price": 3500.0, "pnl": 0.0},
+        ]
+        # Make first place_order raise
+        call_count = [0]
+        orig_place = broker.place_order
+        def _bad_first(tradingsymbol, **kw):
+            call_count[0] += 1
+            if call_count[0] == 1:
+                raise RuntimeError("simulated broker error")
+            return orig_place(tradingsymbol=tradingsymbol, **kw)
+        broker.place_order = _bad_first
+        ids = broker.squareoff_all_positions()
+        assert len(ids) == 1, \
+            f"squareoff must return 1 id (second position) after first fails — got {len(ids)}"
+    finally:
+        _s.trading_mode = _orig
+
+
+def t_upstox_broker_squareoff_has_try_except():
+    """BUG FIX: squareoff_all_positions() had no try/except — same mid-loop abort
+    risk as KotakBroker and ZerodhaBroker."""
+    from brokers.upstox_broker import UpstoxBroker
+    src = _inspect27.getsource(UpstoxBroker.squareoff_all_positions)
+    assert "try:" in src, \
+        "UpstoxBroker.squareoff_all_positions must have try/except per-position"
+    assert "except Exception" in src, \
+        "UpstoxBroker.squareoff_all_positions must catch Exception per-position"
+
+
+def t_upstox_broker_squareoff_continues_after_failure():
+    """Functional: squareoff_all_positions continues and returns completed ids
+    even when one position's place_order raises."""
+    from config import settings as _s
+    _orig = _s.trading_mode
+    _s.trading_mode = "PAPER"
+    try:
+        from brokers.upstox_broker import UpstoxBroker
+        broker = UpstoxBroker()
+        broker._paper_positions = [
+            {"tradingsymbol": "RELIANCE", "exchange": "NSE", "product": "MIS", "quantity": 2, "average_price": 2800.0, "last_price": 2800.0, "pnl": 0.0},
+            {"tradingsymbol": "INFY",     "exchange": "NSE", "product": "MIS", "quantity": 1, "average_price": 1500.0, "last_price": 1500.0, "pnl": 0.0},
+        ]
+        call_count = [0]
+        orig_place = broker.place_order
+        def _bad_first(tradingsymbol, **kw):
+            call_count[0] += 1
+            if call_count[0] == 1:
+                raise RuntimeError("simulated broker error")
+            return orig_place(tradingsymbol=tradingsymbol, **kw)
+        broker.place_order = _bad_first
+        ids = broker.squareoff_all_positions()
+        assert len(ids) == 1, \
+            f"squareoff must return 1 id (second position) after first fails — got {len(ids)}"
+    finally:
+        _s.trading_mode = _orig
+
+
+def t_upstox_broker_place_order_no_dead_mode_check():
+    """BUG FIX: place_order() had 'if settings.trading_mode != \"PAPER\":' after
+    an early-return for PAPER mode — the condition was always True at that point
+    (dead code). Removed the dead check; warning is now unconditional in LIVE path."""
+    from brokers.upstox_broker import UpstoxBroker
+    src = _inspect27.getsource(UpstoxBroker.place_order)
+    # After the early PAPER return, there must NOT be another PAPER mode conditional
+    # guarding the instrument_key warning
+    lines = src.splitlines()
+    paper_return_seen = False
+    dead_condition_found = False
+    for line in lines:
+        stripped = line.strip()
+        if "return self._paper_place" in stripped:
+            paper_return_seen = True
+        if paper_return_seen and 'trading_mode != "PAPER"' in stripped:
+            dead_condition_found = True
+            break
+    assert not dead_condition_found, \
+        "UpstoxBroker.place_order must not have dead 'if trading_mode != PAPER' after the PAPER early-return"
+
+
+run("kotak_broker: squareoff_all_positions has try/except per-position",               t_kotak_broker_squareoff_has_try_except)
+run("kotak_broker: squareoff continues and returns completed ids after one failure",   t_kotak_broker_squareoff_continues_after_failure)
+run("upstox_broker: squareoff_all_positions has try/except per-position",              t_upstox_broker_squareoff_has_try_except)
+run("upstox_broker: squareoff continues and returns completed ids after one failure",  t_upstox_broker_squareoff_continues_after_failure)
+run("upstox_broker: place_order has no dead 'trading_mode != PAPER' check after PAPER return", t_upstox_broker_place_order_no_dead_mode_check)
+
+# ══════════════════════════════════════════════════════════════════════════
+# 28. BASE_AGENT TSL CALLBACK + EXIT INSTRUMENT (Batch 28)
+# ══════════════════════════════════════════════════════════════════════════
+
+import inspect as _inspect28
+
+
+def t_base_agent_on_sl_moved_cancel_fail_returns_early():
+    """BUG FIX (CRITICAL): when modify_order fails AND cancel_order also fails,
+    the original code fell through and placed a NEW SL-M without removing the
+    old one — two live SL-M orders for the same position. Both would trigger
+    on price decline, executing 2x the position size and flipping to a naked short.
+
+    Fix: set _cancel_ok=False; only place new SL-M if cancel succeeded."""
+    import agents.base_agent as _ba
+    src = _inspect28.getsource(_ba._setup_tsl_callbacks)
+    # The fix introduces _cancel_ok flag and guards place_order with 'if not _cancel_ok: return'
+    assert "_cancel_ok" in src, \
+        "_on_sl_moved must track cancel success via _cancel_ok flag"
+    assert "if not _cancel_ok:" in src, \
+        "_on_sl_moved must return early when cancel fails (prevents double-stop)"
+    # The place_order call must only appear AFTER the cancel guard
+    cancel_ok_pos  = src.find("if not _cancel_ok:")
+    place_order_pos = src.find("lambda: kite_client.place_order(")
+    assert cancel_ok_pos < place_order_pos, \
+        "_on_sl_moved: 'if not _cancel_ok' guard must appear before the new SL-M place_order call"
+
+
+def t_base_agent_on_sl_moved_no_place_when_cancel_fails():
+    """Source check: the structure must be cancel → check → place, not cancel → place."""
+    import agents.base_agent as _ba
+    src = _inspect28.getsource(_ba._setup_tsl_callbacks)
+    # Must have 'return' after the cancel failure log (guards the place_order)
+    # Check that 'return' appears between the cancel except block and place_order
+    cancel_fail_pos = src.find("cancel_order failed for")
+    return_after_cancel = src.find("return", cancel_fail_pos)
+    place_order_in_moved = src.find("lambda: kite_client.place_order(")
+    assert return_after_cancel < place_order_in_moved, \
+        "_on_sl_moved: 'return' must appear after cancel failure, before new SL-M placement"
+
+
+def t_base_agent_check_exits_uses_position_tradingsymbol():
+    """BUG FIX: _check_exits_on_tick was placing the exit order with tradingsymbol=sym
+    (snap.symbol = underlying). For F&O positions, pos.tradingsymbol is the CONTRACT
+    (e.g. 'NIFTY2607051850CE') — using sym would try to exit the index, not the contract.
+    Fix: exit uses pos.get('tradingsymbol', sym)."""
+    import agents.base_agent as _ba
+    src = _inspect28.getsource(_ba.BaseAgent._check_exits_on_tick)
+    # Old code: tradingsymbol=sym
+    # New code: _exit_sym = pos.get("tradingsymbol", sym) then tradingsymbol=_exit_sym
+    assert "pos.get(\"tradingsymbol\", sym)" in src or "pos.get('tradingsymbol', sym)" in src, \
+        "_check_exits_on_tick exit must use pos.get('tradingsymbol', sym) not bare sym"
+    # Ensure 'tradingsymbol=sym,' (old bare form) is NOT present in this method
+    assert "tradingsymbol=sym," not in src, \
+        "_check_exits_on_tick must not use 'tradingsymbol=sym' directly for exit order"
+
+
+run("base_agent: _on_sl_moved tracks _cancel_ok before placing new SL-M",            t_base_agent_on_sl_moved_cancel_fail_returns_early)
+run("base_agent: _on_sl_moved returns early when cancel fails (no double-stop)",      t_base_agent_on_sl_moved_no_place_when_cancel_fails)
+run("base_agent: _check_exits_on_tick uses pos tradingsymbol for F&O exit order",     t_base_agent_check_exits_uses_position_tradingsymbol)
+
+# ══════════════════════════════════════════════════════════════════════════
+# 29. STRATEGY_AGENTS SILENT DEAD-CODE BUGS (Batch 29)
+# ══════════════════════════════════════════════════════════════════════════
+
+import inspect as _inspect29
+
+
+def t_options_ctx_bonus_theta_uses_snap_symbol():
+    """BUG FIX: OptionsAgent._ctx_bonus used bare `sym` (NameError — not in scope)
+    to call get_cached(sym) for theta efficiency. Any NameError inside the
+    try/except swallowed it, meaning the theta bonus (+1) NEVER fired.
+    Fix: use snap.symbol."""
+    import agents.strategy_agents as _sa
+    src = _inspect29.getsource(_sa.OptionsAgent._ctx_bonus)
+    # Must use snap.symbol (not bare sym) in the theta block
+    assert "snap.symbol" in src, \
+        "OptionsAgent._ctx_bonus must call get_cached(snap.symbol), not bare sym"
+    # The old bare `sym` must NOT appear in any get_cached call
+    lines = src.splitlines()
+    for line in lines:
+        if "_get_oc" in line and "sym)" in line:
+            assert "snap.symbol" in line, \
+                f"OptionsAgent._ctx_bonus theta call must use snap.symbol: {line.strip()}"
+
+
+def t_swing_fii_pattern_uses_float_directly():
+    """BUG FIX: SwingAgent._pat_fii_swing called .get('fii_net_score') on the float
+    returned by get_fii_sentiment() → AttributeError silently caught → FII_SWING
+    pattern NEVER fires. Fix: use the returned float directly."""
+    import agents.strategy_agents as _sa
+    src = _inspect29.getsource(_sa.SwingAgent._pat_fii_swing)
+    # The dict-access form must not be present
+    assert "fii_net_score" not in src, \
+        "SwingAgent._pat_fii_swing must not call .get('fii_net_score') on a float"
+    # Bearish threshold must be negative (get_fii_sentiment returns [-1.0, 1.0])
+    assert "fii < -" in src, \
+        "SwingAgent._pat_fii_swing bearish check must use 'fii < -<threshold>' (float API)"
+
+
+def t_momentum_fii_pattern_uses_float_directly():
+    """BUG FIX: MomentumAgent._pat_fii_momentum called .get('fii_net_score') on the
+    float returned by get_fii_sentiment() → AttributeError silently caught → FII_MOMENTUM
+    pattern NEVER fires. Fix: use the returned float directly."""
+    import agents.strategy_agents as _sa
+    src = _inspect29.getsource(_sa.MomentumAgent._pat_fii_momentum)
+    # The dict-access form must not be present
+    assert "fii_net_score" not in src, \
+        "MomentumAgent._pat_fii_momentum must not call .get('fii_net_score') on a float"
+    # Bearish threshold must be negative
+    assert "fii < -" in src, \
+        "MomentumAgent._pat_fii_momentum bearish check must use 'fii < -<threshold>' (float API)"
+
+
+def t_fii_sentiment_return_type_is_float():
+    """Confirm get_fii_sentiment() returns float so callers using .get() were always broken."""
+    import inspect
+    from alt_data import alt_data_engine
+    import typing
+    hints = typing.get_type_hints(alt_data_engine.get_fii_sentiment)
+    ret = hints.get("return", None)
+    # Either annotation is float, or the method actually returns a float at runtime
+    result = alt_data_engine.get_fii_sentiment()
+    assert isinstance(result, float), \
+        f"get_fii_sentiment() must return float, got {type(result).__name__}"
+
+
+run("strategy_agents: OptionsAgent._ctx_bonus uses snap.symbol for theta efficiency",  t_options_ctx_bonus_theta_uses_snap_symbol)
+run("strategy_agents: SwingAgent._pat_fii_swing uses float API (no .get dict call)",   t_swing_fii_pattern_uses_float_directly)
+run("strategy_agents: MomentumAgent._pat_fii_momentum uses float API (no .get call)",  t_momentum_fii_pattern_uses_float_directly)
+run("strategy_agents: get_fii_sentiment() returns float confirming dict callers broke", t_fii_sentiment_return_type_is_float)
+
+# ══════════════════════════════════════════════════════════════════════════
+# 30. OVER-TRADING GUARD FIXES (Batch 30)
+# ══════════════════════════════════════════════════════════════════════════
+import inspect as _inspect30
+import agents.strategy_agents as _sa30
+
+def t_scalping_min_score_uses_class_constant():
+    """ScalpingAgent.evaluate_tick must filter at self.MIN_SCORE (5), not settings.min_score_scalping (3)."""
+    src = _inspect30.getsource(_sa30.ScalpingAgent.evaluate_tick)
+    assert "self.MIN_SCORE" in src, "ScalpingAgent must filter at self.MIN_SCORE"
+    assert "settings.min_score_scalping" not in src, \
+        "ScalpingAgent must not use settings.min_score_scalping (would apply threshold 3 instead of 5)"
+
+def t_scalping_min_score_value_is_5():
+    """ScalpingAgent.MIN_SCORE must be 5 (quality-over-quantity gate)."""
+    assert _sa30.ScalpingAgent.MIN_SCORE == 5, \
+        f"ScalpingAgent.MIN_SCORE should be 5, got {_sa30.ScalpingAgent.MIN_SCORE}"
+
+def t_simulation_agent_tracker_has_exit_cooldown():
+    """AgentTracker must record _last_exit_ts on close and block re-entry during cooldown."""
+    import sys, os
+    sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+    from nse_day_simulation import AgentTracker, _POST_EXIT_COOLDOWN_SECS
+    from datetime import datetime
+    t0 = datetime(2026, 6, 22, 10, 0, 0)
+    tracker = AgentTracker("Scalping", "1m")
+    tracker.on_signal("SYM", "BUY", {"stop_loss_pct": 0.5, "target_pct": 1.0}, t0, 1000.0)
+    assert "SYM" in tracker._open
+    # Close immediately via on_price hitting target
+    tracker.on_price("SYM", 1100.0, t0)  # target hit (1% = 1010 → close)
+    assert "SYM" not in tracker._open
+    assert "SYM" in tracker._last_exit_ts
+    # Attempt re-entry immediately (0 seconds elapsed) → must be blocked by cooldown
+    tracker.on_signal("SYM", "BUY", {"stop_loss_pct": 0.5, "target_pct": 1.0}, t0, 1100.0)
+    assert "SYM" not in tracker._open, "Re-entry within cooldown window should be blocked"
+    # After cooldown expires, re-entry is allowed
+    from datetime import timedelta
+    t_after = t0 + timedelta(seconds=_POST_EXIT_COOLDOWN_SECS["Scalping"] + 1)
+    tracker.on_signal("SYM", "BUY", {"stop_loss_pct": 0.5, "target_pct": 1.0}, t_after, 1100.0)
+    assert "SYM" in tracker._open, "Re-entry after cooldown should be allowed"
+
+def t_post_exit_cooldown_table_covers_all_agents():
+    """_POST_EXIT_COOLDOWN_SECS must define cooldowns for all 5 simulation agents."""
+    from nse_day_simulation import _POST_EXIT_COOLDOWN_SECS, AGENT_CLASSES
+    for name, _ in AGENT_CLASSES:
+        assert name in _POST_EXIT_COOLDOWN_SECS, f"No post-exit cooldown defined for {name}"
+        assert _POST_EXIT_COOLDOWN_SECS[name] > 0, f"Cooldown for {name} must be positive"
+
+run("scalping_min_score: evaluate_tick uses self.MIN_SCORE not settings.min_score_scalping", t_scalping_min_score_uses_class_constant)
+run("scalping_min_score: ScalpingAgent.MIN_SCORE == 5", t_scalping_min_score_value_is_5)
+run("simulation: AgentTracker blocks re-entry within post-exit cooldown window", t_simulation_agent_tracker_has_exit_cooldown)
+run("simulation: _POST_EXIT_COOLDOWN_SECS covers all 5 agents", t_post_exit_cooldown_table_covers_all_agents)
+
+# ══════════════════════════════════════════════════════════════════════════
+# 31. INTRADAY FII PATTERN SILENT DEAD-CODE BUG (Batch 31)
+# ══════════════════════════════════════════════════════════════════════════
+import inspect as _inspect31
+import agents.strategy_agents as _sa31
+
+def t_intraday_fii_pattern_uses_float_directly():
+    """IntradayAgent._pat_fii_institutional must NOT call .get() on the float return of get_fii_sentiment()."""
+    src = _inspect31.getsource(_sa31.IntradayAgent._pat_fii_institutional)
+    assert "fii_net_score" not in src, \
+        "_pat_fii_institutional must not access .get('fii_net_score') — get_fii_sentiment() returns a float"
+    assert ".get(" not in src, \
+        "_pat_fii_institutional must not call .get() on the float return value"
+
+def t_intraday_fii_sell_threshold_is_negative():
+    """IntradayAgent SELL condition must check fii < -0.35 (negative FII), not fii < 0.35."""
+    src = _inspect31.getsource(_sa31.IntradayAgent._pat_fii_institutional)
+    assert "fii < -" in src, \
+        "SELL threshold must be fii < -0.35 (negative institutional flow), not fii < 0.35"
+    assert "fii < 0.35" not in src, \
+        "fii < 0.35 would fire SELL on neutral FII — must be fii < -0.35"
+
+def t_intraday_fii_no_falsy_check():
+    """IntradayAgent must not check 'if not sent' on float — float 0.0 is valid neutral sentiment."""
+    src = _inspect31.getsource(_sa31.IntradayAgent._pat_fii_institutional)
+    assert "if not sent" not in src, \
+        "'if not sent' would short-circuit on 0.0 (neutral FII) — check removed"
+
+run("intraday_fii: _pat_fii_institutional uses float directly (no .get())", t_intraday_fii_pattern_uses_float_directly)
+run("intraday_fii: SELL threshold is fii < -0.35 not fii < 0.35", t_intraday_fii_sell_threshold_is_negative)
+run("intraday_fii: no falsy 'if not sent' check on float return", t_intraday_fii_no_falsy_check)
+
+# ══════════════════════════════════════════════════════════════════════════
+# 32. INFRASTRUCTURE BUGS (Batch 32)
+# ══════════════════════════════════════════════════════════════════════════
+import inspect as _inspect32
+
+def t_event_calendar_uses_ist_now():
+    """event_calendar.get_event_risk must use now_ist() not datetime.now() — UTC servers are 5.5h behind IST."""
+    import event_calendar as _ec
+    src = _inspect32.getsource(_ec.get_event_risk)
+    assert "datetime.now()" not in src, \
+        "get_event_risk must not call datetime.now() — use now_ist() for IST-correct comparisons"
+
+def t_event_calendar_has_ist_import():
+    """event_calendar must import now_ist from ist_clock."""
+    import event_calendar as _ec
+    import ist_clock
+    assert hasattr(_ec, "now_ist"), "event_calendar must import now_ist from ist_clock"
+
+def t_event_calendar_date_today_replaced():
+    """event_calendar helpers must not call date.today() — use now_ist().date() for IST correctness."""
+    import event_calendar as _ec
+    for fn_name in ("_fetch_corporate_actions", "_parse_corporate_actions",
+                    "_parse_event_calendar", "_inject_rbi_dates", "has_results_today"):
+        fn = getattr(_ec, fn_name, None)
+        if fn is None:
+            continue
+        src = _inspect32.getsource(fn)
+        assert "date.today()" not in src, \
+            f"{fn_name} must not call date.today() — use now_ist().date() for IST correctness"
+
+def t_backtest_engine_cache_has_lock():
+    """BacktestEngine must have a _cache_lock to prevent concurrent run() races."""
+    from backtest_engine import BacktestEngine
+    engine = BacktestEngine()
+    assert hasattr(engine, "_cache_lock"), "BacktestEngine must have _cache_lock attribute"
+    import threading
+    assert isinstance(engine._cache_lock, type(threading.Lock())), \
+        "_cache_lock must be a threading.Lock"
+
+def t_backtest_engine_run_uses_cache_lock():
+    """BacktestEngine.run must acquire _cache_lock around cache reads and writes."""
+    from backtest_engine import BacktestEngine
+    src = _inspect32.getsource(BacktestEngine.run)
+    assert "_cache_lock" in src, "BacktestEngine.run must use _cache_lock"
+
+def t_ml_filter_inference_error_is_warning():
+    """ml_signal_filter must log inference errors at WARNING level (not DEBUG) so they surface in prod."""
+    import ml_signal_filter as _mlf
+    src = _inspect32.getsource(_mlf.MLSignalFilter.filter_signal)
+    assert 'logger.warning' in src, \
+        "inference error must be logged at WARNING level so it's visible in production logs"
+    assert 'logger.debug("[MLFilter] inference error' not in src, \
+        "inference error must not stay at DEBUG — production logs often filter DEBUG out"
+
+run("event_calendar: get_event_risk uses now_ist() not datetime.now()", t_event_calendar_uses_ist_now)
+run("event_calendar: imports now_ist from ist_clock", t_event_calendar_has_ist_import)
+run("event_calendar: all helpers use now_ist().date() not date.today()", t_event_calendar_date_today_replaced)
+run("backtest_engine: BacktestEngine has _cache_lock for concurrent run() safety", t_backtest_engine_cache_has_lock)
+run("backtest_engine: BacktestEngine.run acquires _cache_lock", t_backtest_engine_run_uses_cache_lock)
+run("ml_signal_filter: inference error logged at WARNING not DEBUG", t_ml_filter_inference_error_is_warning)
+
+# ══════════════════════════════════════════════════════════════════════════
+# 33. RUTHLESS AUDIT BATCH 33 (tick_engine, sebi, alt_data, risk, TSL, kite, macro)
+# ══════════════════════════════════════════════════════════════════════════
+import inspect as _inspect33
+
+def t_tick_engine_rest_vol_lock():
+    """tick_engine must protect _rest_last_cum_vol with _rest_vol_lock to prevent thread races."""
+    import tick_engine as _te
+    assert hasattr(_te, "_rest_vol_lock"), "_rest_vol_lock must exist at module level in tick_engine"
+    src = _inspect33.getsource(_te._kite_quote_to_quote)
+    assert "_rest_vol_lock" in src, "_kite_quote_to_quote must acquire _rest_vol_lock"
+
+def t_tick_engine_indicator_error_is_warning():
+    """tick_engine indicator compute errors must be logged at WARNING not DEBUG."""
+    import tick_engine as _te
+    src = _inspect33.getsource(_te.IndicatorCalc.compute)
+    assert "logger.warning" in src, "IndicatorCalc.compute must log at WARNING on exception"
+    assert 'logger.debug("Indicator compute' not in src, \
+        "indicator compute error must not stay at DEBUG"
+
+def t_tick_engine_all_latest_uses_get():
+    """tick_engine.all_latest() must use dict.get() to prevent KeyError on concurrent symbol removal."""
+    import tick_engine as _te
+    src = _inspect33.getsource(_te.TickEngine.all_latest)
+    assert "self._latest_tick.get(sym)" in src, \
+        "all_latest must use .get(sym) to guard against concurrent symbol removal"
+    assert "self._latest_ind.get(sym)" in src, \
+        "all_latest must use .get(sym) for _latest_ind"
+
+def t_sebi_compliance_uses_now_ist():
+    """sebi_compliance._record_audit must use now_ist() for IST-correct audit timestamps."""
+    import sebi_compliance as _sc
+    src = _inspect33.getsource(_sc.SEBICompliance._record_audit)
+    assert "now_ist()" in src, "_record_audit must use now_ist() not datetime.now()"
+    assert "datetime.now()" not in src, "_record_audit must not use datetime.now() — UTC is 5.5h behind IST"
+
+def t_sebi_compliance_otr_blocks_order():
+    """SEBI OTR > 10:1 must reject orders (return False), not merely log a warning."""
+    import sebi_compliance as _sc
+    src = _inspect33.getsource(_sc.SEBICompliance.pre_order_check)
+    assert "return False, algo_id, reason" in src, \
+        "OTR violation must return False to block the order"
+    assert "SEBI OTR block" in src or "OTR" in src, \
+        "OTR block reason must be logged"
+
+def t_sebi_kill_switch_logged_to_audit():
+    """trigger_kill_switch must record an audit log entry — kill-switch events must be in audit trail."""
+    import sebi_compliance as _sc
+    src = _inspect33.getsource(_sc.SEBICompliance.trigger_kill_switch)
+    assert "_record_audit" in src, \
+        "trigger_kill_switch must call _record_audit to preserve event in compliance trail"
+
+def t_sebi_pause_resume_logged_to_audit():
+    """pause_trading and resume_trading must record audit log entries."""
+    import sebi_compliance as _sc
+    for fn_name in ("pause_trading", "resume_trading"):
+        fn = getattr(_sc.SEBICompliance, fn_name)
+        src = _inspect33.getsource(fn)
+        assert "_record_audit" in src, \
+            f"{fn_name} must call _record_audit for regulatory audit trail"
+
+def t_alt_data_uses_now_ist():
+    """alt_data event-day methods must use now_ist() not datetime.now()/date.today()."""
+    import alt_data as _ad
+    for fn_name in ("is_event_day", "days_to_next_event", "next_fno_expiry", "is_earnings_period"):
+        fn = getattr(_ad.AltDataEngine, fn_name, None)
+        if fn is None:
+            continue
+        src = _inspect33.getsource(fn)
+        assert "date.today()" not in src, \
+            f"{fn_name} must not call date.today() — use now_ist() for IST correctness"
+        assert "datetime.now()" not in src, \
+            f"{fn_name} must not call datetime.now() — use now_ist() for IST correctness"
+
+def t_risk_manager_loss_notification_logs_critical():
+    """risk_manager._send_loss_limit_notification must log CRITICAL on exception — silent pass loses kill alerts."""
+    import risk_manager as _rm
+    src = _inspect33.getsource(_rm.RiskManager._send_loss_limit_notification)
+    assert "logger.critical" in src, \
+        "_send_loss_limit_notification must log CRITICAL on exception, not pass silently"
+    assert "except Exception:\n            pass" not in src, \
+        "_send_loss_limit_notification must not swallow exception with bare pass"
+
+def t_risk_manager_kelly_failure_is_warning():
+    """risk_manager Kelly fraction calculation failure must be logged at WARNING not DEBUG."""
+    import risk_manager as _rm
+    src = _inspect33.getsource(_rm.get_kelly_fraction)
+    assert "logger.warning" in src, "Kelly fraction failure must be logged at WARNING"
+    assert 'logger.debug("[RiskManager] Kelly' not in src, \
+        "Kelly failure must not stay at DEBUG — it indicates a broken adaptive engine"
+
+def t_trailing_sl_no_double_fire_on_callback_failure():
+    """TSL: SL callback failure must deregister position (not revert to ACTIVE) to prevent double-exit."""
+    import trailing_sl_engine as _tsl
+    src = _inspect33.getsource(_tsl.TrailingSLEngine._evaluate_locked)
+    assert "pos.status = SLStatus.ACTIVE" not in src, \
+        "SL callback failure must NOT revert status to ACTIVE — that causes double-fire on next tick"
+    assert "self._positions.pop(pos.order_id, None)" in src, \
+        "Position must be deregistered even if SL callback raises"
+
+def t_kite_client_token_persist_logs_warning():
+    """kite_client.set_access_token must log WARNING if token persistence fails, not silently pass."""
+    import kite_client as _kc
+    src = _inspect33.getsource(_kc.KiteClient.set_access_token)
+    assert "logger.warning" in src, \
+        "set_access_token must log a warning when state_store persistence fails"
+    assert "except Exception:\n            pass" not in src, \
+        "set_access_token must not swallow token persistence exception silently"
+
+def t_kite_paper_placed_at_uses_ist():
+    """kite_client paper order placed_at must use IST timezone not naive datetime.now()."""
+    import kite_client as _kc
+    src = _inspect33.getsource(_kc.KiteClient._paper_place)
+    assert "datetime.now()" not in src, \
+        "_paper_place must not use datetime.now() — paper order timestamps must be IST"
+    assert "_IST" in src, "_paper_place must use _IST timezone for placed_at timestamp"
+
+def t_macro_signals_vix_preserves_zero():
+    """macro_signals VIX fetch must not discard zero VIX — the pattern 'or 0) or None' returns None for 0.0."""
+    import macro_signals as _ms
+    src = _inspect33.getsource(_ms._fetch_india_vix_nse)
+    assert ") or None" not in src, \
+        "_fetch_india_vix_nse must not use 'float(...) or None' — this discards 0.0 VIX readings"
+    assert "last_val is not None" in src, \
+        "VIX None check must test for None explicitly, not use truthiness"
+
+def t_order_guard_persist_failure_is_warning():
+    """order_guard trade count persistence failure must log at WARNING not DEBUG."""
+    import order_guard as _og
+    src = _inspect33.getsource(_og.OrderGuard._persist_trade_count)
+    assert "logger.warning" in src, "_persist_trade_count must log at WARNING not DEBUG"
+    assert "logger.debug" not in src, "_persist_trade_count must not stay at DEBUG"
+
+run("tick_engine: _rest_last_cum_vol protected by _rest_vol_lock", t_tick_engine_rest_vol_lock)
+run("tick_engine: indicator compute errors logged at WARNING not DEBUG", t_tick_engine_indicator_error_is_warning)
+run("tick_engine: all_latest() uses .get() to prevent KeyError race", t_tick_engine_all_latest_uses_get)
+run("sebi_compliance: _record_audit uses now_ist() not datetime.now()", t_sebi_compliance_uses_now_ist)
+run("sebi_compliance: OTR > 10:1 blocks order (returns False)", t_sebi_compliance_otr_blocks_order)
+run("sebi_compliance: kill-switch triggers audit log entry", t_sebi_kill_switch_logged_to_audit)
+run("sebi_compliance: pause/resume logged to audit trail", t_sebi_pause_resume_logged_to_audit)
+run("alt_data: all event-day methods use now_ist() not datetime.now()", t_alt_data_uses_now_ist)
+run("risk_manager: loss notification failure logged CRITICAL not pass", t_risk_manager_loss_notification_logs_critical)
+run("risk_manager: Kelly fraction failure logged WARNING not DEBUG", t_risk_manager_kelly_failure_is_warning)
+run("trailing_sl_engine: SL callback failure deregisters position (no double-fire)", t_trailing_sl_no_double_fire_on_callback_failure)
+run("kite_client: token persistence failure logged WARNING not pass", t_kite_client_token_persist_logs_warning)
+run("kite_client: paper order placed_at uses IST timezone", t_kite_paper_placed_at_uses_ist)
+run("macro_signals: VIX zero value preserved (not discarded by 'or None')", t_macro_signals_vix_preserves_zero)
+run("order_guard: trade count persist failure logged WARNING not DEBUG", t_order_guard_persist_failure_is_warning)
+
+# ══════════════════════════════════════════════════════════════════════════
+# 34. RUTHLESS AUDIT BATCH 34 (credential leak, scheduler races, memory leaks, UTC/IST)
+# ══════════════════════════════════════════════════════════════════════════
+import inspect as _inspect34
+
+def t_kite_auto_login_no_token_in_error():
+    """kite_auto_login must NOT include page.url in the request_token missing error (credential leak)."""
+    import kite_auto_login as _kal
+    src = _inspect34.getsource(_kal.run_kite_auto_login)
+    # The error raised when request_token is missing must not embed page.url
+    for line in src.splitlines():
+        if "request_token" in line.lower() and "raise" in line and "page.url" in line:
+            raise AssertionError(
+                f"kite_auto_login leaks request_token via page.url in error message: {line.strip()}"
+            )
+
+def t_master_agent_duplicate_start_guard():
+    """master_agent_v5.start() must have an early-return guard when already running."""
+    import master_agent_v5 as _ma
+    src = _inspect34.getsource(_ma.MasterAgent.start)
+    assert "already running" in src or ("self.running" in src and "return" in src), \
+        "MasterAgent.start() must guard against duplicate invocations when bot is already running"
+
+def t_master_agent_misfire_grace_time():
+    """master_agent_v5 APScheduler jobs must set misfire_grace_time to prevent silent skips."""
+    import master_agent_v5 as _ma
+    src = _inspect34.getsource(_ma.MasterAgent.start)
+    assert "misfire_grace_time" in src, \
+        "MasterAgent.start() must set misfire_grace_time on APScheduler jobs"
+
+def t_master_agent_shutdown_not_silent():
+    """master_agent_v5 scheduler shutdown exception must not be silently swallowed."""
+    import master_agent_v5 as _ma
+    src = _inspect34.getsource(_ma.MasterAgent.stop)
+    assert "except Exception:\n            pass" not in src, \
+        "MasterAgent.stop() must not silently swallow scheduler shutdown exceptions"
+    assert "logger.warning" in src or "logger.error" in src, \
+        "MasterAgent.stop() must log scheduler shutdown exceptions"
+
+def t_master_agent_rolling_sharpe_prunes_stale():
+    """master_agent_v5 must prune stale keys from _rolling_sharpe_below_count."""
+    import master_agent_v5 as _ma
+    src = _inspect34.getsource(_ma.MasterAgent._check_rolling_sharpe)
+    assert "_rolling_sharpe_below_count" in src, \
+        "_check_rolling_sharpe must reference _rolling_sharpe_below_count"
+    assert "del self._rolling_sharpe_below_count" in src or \
+           "stale" in src or \
+           "seen_keys" in src, \
+        "_check_rolling_sharpe must prune stale keys from _rolling_sharpe_below_count to prevent memory leak"
+
+def t_main_rate_store_lock_exists():
+    """main.py must have a threading.Lock protecting _rate_store to prevent race conditions."""
+    import main as _main
+    assert hasattr(_main, "_rate_store_lock"), \
+        "main.py must define _rate_store_lock (threading.Lock) to guard _rate_store"
+    import threading
+    assert isinstance(_main._rate_store_lock, type(threading.Lock())), \
+        "_rate_store_lock must be a threading.Lock instance"
+
+def t_main_regime_broadcast_uses_now_ist():
+    """main.py regime broadcast must use now_ist() not datetime.utcnow()."""
+    import main as _main
+    src = _inspect34.getsource(_main.regime_refresh)
+    assert "utcnow" not in src, \
+        "regime_refresh must not use datetime.utcnow() — use now_ist() for IST timestamps"
+
+def t_platform_scheduler_options_cache_no_overlap():
+    """platform_scheduler options_cache job must have max_instances=1 and coalesce=True."""
+    import platform_scheduler as _ps
+    src = _inspect34.getsource(_ps.PlatformScheduler.start)
+    # Find the options_cache job definition
+    assert "options_cache" in src, "options_cache job must exist in start()"
+    cache_block = src[src.find("options_cache"):]
+    assert "max_instances=1" in cache_block[:500], \
+        "options_cache job must set max_instances=1 to prevent concurrent execution"
+    assert "coalesce=True" in cache_block[:500], \
+        "options_cache job must set coalesce=True to prevent queued missed-fire pile-up"
+
+def t_notifier_both_channels_fail_is_critical():
+    """notifier.send() must log CRITICAL when all configured channels fail."""
+    import notifier as _notifier
+    src = _inspect34.getsource(_notifier.Notifier.send)
+    assert "logger.critical" in src, \
+        "Notifier.send() must log CRITICAL when all notification channels fail — alert may be lost"
+
+def t_signal_aggregator_register_uses_get():
+    """signal_aggregator.register() must use .get() not direct dict access to avoid premature defaultdict entries."""
+    import signal_aggregator as _sa
+    src = _inspect34.getsource(_sa.SignalAggregator.register)
+    assert "self._signals[key]" not in src or ".get(" in src, \
+        "register() must use self._signals.get(key, []) not self._signals[key] to avoid memory leak"
+    assert ".get(key" in src or ".get(symbol" in src, \
+        "register() must use .get() for _signals lookup"
+
+def t_state_store_report_generated_at_is_utc():
+    """state_store get_performance_report must include timezone in report_generated_at."""
+    import state_store as _ss
+    src = _inspect34.getsource(_ss.get_performance_report)
+    # datetime.now() without tz is naive — must have timezone.utc or now_ist
+    naive_uses = [ln for ln in src.splitlines()
+                  if "datetime.now()" in ln and "report_generated_at" in ln]
+    assert not naive_uses, \
+        f"get_performance_report uses naive datetime.now() for report_generated_at: {naive_uses}"
+    assert "timezone.utc" in src or "now_ist" in src, \
+        "get_performance_report must use timezone-aware datetime for report_generated_at"
+
+def t_claude_trade_gate_log_uses_ist():
+    """claude_trade_gate gate log timestamp must use _now_ist() not datetime.now()."""
+    import claude_trade_gate as _ctg
+    src = _inspect34.getsource(_ctg.assess)
+    assert 'datetime.now().strftime' not in src, \
+        "claude_trade_gate.assess() gate log must use _now_ist() not datetime.now() for IST timestamp"
+
+def t_symbol_scanner_ema_uses_isfinite():
+    """symbol_scanner EMA validity check must use math.isfinite not truthiness (fails for ema=0.0)."""
+    import symbol_scanner as _sym
+    src = _inspect34.getsource(_sym.SymbolScanner._score_symbol)
+    assert "math.isfinite" in src, \
+        "_score_symbol must use math.isfinite() for EMA validity — truthiness fails for 0.0"
+    assert "sc.ema9 and sc.ema9 == sc.ema9" not in src, \
+        "_score_symbol must not use truthiness (sc.ema9) for EMA validity check — fails for 0.0"
+
+def t_greeks_atm_strike_never_zero():
+    """greeks_engine.atm_strike must never return 0 even for very small spot prices."""
+    from greeks_engine import atm_strike
+    assert atm_strike(spot=20, step=50) >= 50, \
+        "atm_strike(spot=20) must return at least one step (50), not 0"
+    assert atm_strike(spot=1, step=50) >= 50, \
+        "atm_strike(spot=1) must return at least one step (50), not 0"
+    assert atm_strike(spot=24.9, step=50) >= 50, \
+        "atm_strike(spot=24.9) must return at least one step (50), not 0"
+
+def t_atomic_bracket_sl_verification_logs_warning():
+    """atomic_bracket SL verification failure must log a warning not silently pass."""
+    import atomic_bracket as _ab
+    src = _inspect34.getsource(_ab.AtomicBracketEngine._on_tsl_sl_hit)
+    assert "logger.warning" in src, \
+        "_on_tsl_sl_hit must log a WARNING when SL verification fails, not silently pass"
+    # Verify the specific SL verification exception handler is not a bare pass
+    lines = src.splitlines()
+    for i, line in enumerate(lines):
+        if "SL verification" in line or ("_sl_exc" in line and "except" in line):
+            context = "\n".join(lines[i:i+5])
+            assert "pass" not in context or "logger" in context, \
+                f"SL verification exception handler must not silently pass: {context}"
+            break
+
+run("kite_auto_login: request_token not leaked in redirect error message", t_kite_auto_login_no_token_in_error)
+run("master_agent_v5: duplicate start() guard prevents double-scheduling", t_master_agent_duplicate_start_guard)
+run("master_agent_v5: APScheduler jobs set misfire_grace_time", t_master_agent_misfire_grace_time)
+run("master_agent_v5: scheduler shutdown exception logged not swallowed", t_master_agent_shutdown_not_silent)
+run("master_agent_v5: _rolling_sharpe_below_count prunes stale strategy keys", t_master_agent_rolling_sharpe_prunes_stale)
+run("main.py: _rate_store_lock (threading.Lock) guards rate limiter dict", t_main_rate_store_lock_exists)
+run("main.py: regime broadcast uses now_ist() not datetime.utcnow()", t_main_regime_broadcast_uses_now_ist)
+run("platform_scheduler: options_cache job has max_instances=1 + coalesce=True", t_platform_scheduler_options_cache_no_overlap)
+run("notifier: all channels failing escalates to CRITICAL not WARNING", t_notifier_both_channels_fail_is_critical)
+run("signal_aggregator: register() uses .get() not direct key access", t_signal_aggregator_register_uses_get)
+run("state_store: report_generated_at uses timezone-aware datetime", t_state_store_report_generated_at_is_utc)
+run("claude_trade_gate: gate log timestamp uses _now_ist() not datetime.now()", t_claude_trade_gate_log_uses_ist)
+run("symbol_scanner: EMA validity check uses math.isfinite not truthiness", t_symbol_scanner_ema_uses_isfinite)
+run("greeks_engine: atm_strike(spot<25) returns >= one step (not 0)", t_greeks_atm_strike_never_zero)
+run("atomic_bracket: SL verification failure logs WARNING not silent pass", t_atomic_bracket_sl_verification_logs_warning)
+
+# ══════════════════════════════════════════════════════════════════════════
+# 35. RUTHLESS AUDIT BATCH 35 (brokers, event_calendar, market-data, gamma)
+# ══════════════════════════════════════════════════════════════════════════
+import inspect as _inspect35
+
+def t_upstox_ticker_ist_timestamps():
+    """upstox_ticker _parse_ticks must use IST-aware datetime, not naive datetime.now()."""
+    import brokers.upstox_ticker as _ut
+    src = _inspect35.getsource(_ut.UpstoxTicker._parse_ticks)
+    assert "datetime.now()" not in src, \
+        "_parse_ticks must not use naive datetime.now() for tick timestamps — use IST-aware datetime"
+    assert "_IST" in src or "ZoneInfo" in src or "now_ist" in src, \
+        "_parse_ticks must emit IST-aware timestamps"
+
+def t_upstox_ticker_sym_lock_exists():
+    """upstox_ticker must have _sym_lock to protect _token_to_sym across threads."""
+    import brokers.upstox_ticker as _ut
+    ticker = _ut.UpstoxTicker.__new__(_ut.UpstoxTicker)
+    src = _inspect35.getsource(_ut.UpstoxTicker.__init__)
+    assert "_sym_lock" in src, "_sym_lock must be created in UpstoxTicker.__init__"
+    src_sub = _inspect35.getsource(_ut.UpstoxTicker.subscribe)
+    assert "_sym_lock" in src_sub, "subscribe() must acquire _sym_lock before mutating _token_to_sym"
+
+def t_upstox_ticker_parse_error_is_warning():
+    """upstox_ticker on_message parse errors must log at WARNING not DEBUG."""
+    import brokers.upstox_ticker as _ut
+    src = _inspect35.getsource(_ut.UpstoxTicker._connect_and_listen)
+    assert "logger.debug" not in src or "logger.warning" in src, \
+        "on_message parse errors must log at WARNING so schema regressions are visible"
+
+def t_upstox_broker_paper_place_ist():
+    """upstox_broker _paper_place placed_at must use IST datetime."""
+    import brokers.upstox_broker as _ub
+    src = _inspect35.getsource(_ub.UpstoxBroker._paper_place)
+    assert "datetime.now().isoformat()" not in src, \
+        "_paper_place must not use naive datetime.now() for placed_at"
+    assert "_IST" in src or "ZoneInfo" in src, \
+        "_paper_place placed_at must use IST timezone"
+
+def t_upstox_broker_paper_lock_is_rlock():
+    """upstox_broker _paper_lock must be RLock to allow re-entrant acquisition."""
+    import brokers.upstox_broker as _ub
+    src = _inspect35.getsource(_ub.UpstoxBroker.__init__)
+    assert "RLock" in src, "_paper_lock must be threading.RLock() not Lock()"
+
+def t_kotak_broker_paper_place_ist():
+    """kotak_broker _paper_place placed_at must use IST datetime."""
+    import brokers.kotak_broker as _kb
+    src = _inspect35.getsource(_kb.KotakBroker._paper_place)
+    assert "datetime.now().isoformat()" not in src, \
+        "_paper_place must not use naive datetime.now() for placed_at"
+    assert "_IST" in src or "ZoneInfo" in src, \
+        "_paper_place placed_at must use IST timezone"
+
+def t_kotak_ticker_t2s_lock_exists():
+    """kotak_ticker must have _t2s_lock to protect _t2s across subscribe/WS threads."""
+    import brokers.kotak_ticker as _kt
+    src = _inspect35.getsource(_kt.KotakTicker.__init__)
+    assert "_t2s_lock" in src, "_t2s_lock must be created in KotakTicker.__init__"
+    src_sub = _inspect35.getsource(_kt.KotakTicker.subscribe)
+    assert "_t2s_lock" in src_sub, "subscribe() must acquire _t2s_lock before mutating _t2s"
+
+def t_kotak_ticker_exponential_backoff():
+    """kotak_ticker reconnect loop must use exponential backoff not fixed 5s sleep."""
+    import brokers.kotak_ticker as _kt
+    src = _inspect35.getsource(_kt.KotakTicker._run)
+    assert "retry_delay" in src or "backoff" in src, \
+        "_run reconnect loop must implement exponential backoff (not fixed 5s sleep)"
+    assert "time.sleep(5)" not in src, \
+        "_run must not use a fixed 5s sleep — use exponential backoff"
+
+def t_startup_no_key_prefix_in_output():
+    """startup.py must not print the first chars of API key values to stdout."""
+    import startup as _su
+    import inspect
+    src = inspect.getsource(_su)
+    # The old pattern was val[:4] inside a print() line
+    assert "val[:4]" not in src, \
+        "startup.py must not print val[:4] — API key prefixes leaked to deployment logs"
+
+def t_event_calendar_get_event_risk_warning():
+    """event_calendar get_event_risk must log WARNING not DEBUG on exception."""
+    import event_calendar as _ec
+    src = _inspect35.getsource(_ec.get_event_risk)
+    assert "logger.debug" not in src, \
+        "get_event_risk exception must log at WARNING not DEBUG — silent open failure is dangerous"
+    assert "logger.warning" in src, \
+        "get_event_risk must use logger.warning on exception"
+
+def t_institutional_flow_today_str_uses_ist():
+    """institutional_flow _today_str must use now_ist() not datetime.now() for NSE date."""
+    import institutional_flow as _if
+    src = _inspect35.getsource(_if._today_str)
+    assert "datetime.now()" not in src, \
+        "_today_str must not use naive datetime.now() — returns UTC date on prod server"
+    assert "now_ist" in src or "_now_ist" in src, \
+        "_today_str must use now_ist() for correct IST date"
+
+def t_news_gate_refresh_uses_ist():
+    """news_gate refresh must use now_ist() not datetime.now() for date range."""
+    import news_gate as _ng
+    src = _inspect35.getsource(_ng.NewsGate.refresh)
+    assert "datetime.now()" not in src, \
+        "news_gate refresh must not use naive datetime.now() — returns UTC date on prod server"
+
+def t_portfolio_var_near_zero_guard():
+    """portfolio_var compute must guard against near-zero total_notional."""
+    import portfolio_var as _pv
+    src = _inspect35.getsource(_pv.PortfolioVaR.compute)
+    assert "== 0.0" not in src or "< 1e-6" in src, \
+        "compute must use < 1e-6 not == 0.0 for total_notional guard (float equality is fragile)"
+
+def t_portfolio_var_sigma_zero_guard():
+    """portfolio_var compute must guard against sigma==0 (flat returns) before z-score VaR."""
+    import portfolio_var as _pv
+    src = _inspect35.getsource(_pv.PortfolioVaR.compute)
+    assert "sigma == 0.0" in src or "sigma == 0" in src, \
+        "compute must check sigma == 0 before computing z-score VaR — flat returns give 0 VaR"
+
+def t_position_reconciler_position_closed_logs_warning():
+    """position_reconciler _handle_full_external_exit must log WARNING if position_closed fails."""
+    import position_reconciler as _pr
+    src = _inspect35.getsource(_pr.PositionReconciler._handle_full_external_exit)
+    assert "except Exception:\n            pass" not in src, \
+        "_handle_full_external_exit must not silently swallow risk_manager.position_closed() failure"
+    assert "logger.warning" in src, \
+        "_handle_full_external_exit must log WARNING when position_closed() raises"
+
+def t_gamma_scalp_cache_lock_exists():
+    """gamma_scalp must have _cache_lock protecting the _cache dict from concurrent writes."""
+    import gamma_scalp as _gs
+    assert hasattr(_gs, "_cache_lock"), "_cache_lock must exist in gamma_scalp module"
+    src_get = _inspect35.getsource(_gs.get_cached_gex)
+    assert "_cache_lock" in src_get, "get_cached_gex must acquire _cache_lock before reading _cache"
+
+def t_truedata_client_uses_ist_for_end_date():
+    """truedata_client historical() must use now_ist() not datetime.now() for end_date."""
+    import truedata_client as _td
+    src = _inspect35.getsource(_td.TrueDataHistoricalClient.historical)
+    assert "datetime.now()" not in src, \
+        "historical() must not use naive datetime.now() for end_date — use now_ist()"
+
+def t_truedata_client_tick_parse_is_warning():
+    """truedata_client tick parse errors must log at WARNING not DEBUG."""
+    import truedata_client as _td
+    src = _inspect35.getsource(_td.TrueDataTicker._on_tick)
+    for line in src.splitlines():
+        if "tick parse error" in line.lower() or "parse error" in line.lower():
+            assert "logger.debug" not in line, \
+                f"tick parse error must log at WARNING not DEBUG: {line.strip()}"
+
+def t_activity_log_uses_ist():
+    """agents/activity_log push() must use IST-aware now_ist() not naive datetime.now()."""
+    import agents.activity_log as _al
+    src = _inspect35.getsource(_al.push)
+    assert "datetime.now()" not in src, \
+        "activity_log.push() must not use naive datetime.now() for timestamps"
+
+def t_profit_optimizer_apply_acquires_lock():
+    """profit_optimizer apply_optimised_config must acquire _opt_lock before mutating settings."""
+    import profit_optimizer as _po
+    src = _inspect35.getsource(_po.apply_optimised_config)
+    assert "_opt_lock" in src, \
+        "apply_optimised_config must acquire _opt_lock to prevent races with phase1_optimise"
+
+run("upstox_ticker: _parse_ticks uses IST-aware datetime not naive datetime.now()", t_upstox_ticker_ist_timestamps)
+run("upstox_ticker: _sym_lock guards _token_to_sym across subscribe/WS threads", t_upstox_ticker_sym_lock_exists)
+run("upstox_ticker: on_message parse error logged at WARNING not DEBUG", t_upstox_ticker_parse_error_is_warning)
+run("upstox_broker: _paper_place placed_at uses IST datetime", t_upstox_broker_paper_place_ist)
+run("upstox_broker: _paper_lock is RLock for re-entrant safety", t_upstox_broker_paper_lock_is_rlock)
+run("kotak_broker: _paper_place placed_at uses IST datetime", t_kotak_broker_paper_place_ist)
+run("kotak_ticker: _t2s_lock guards _t2s across subscribe/WS threads", t_kotak_ticker_t2s_lock_exists)
+run("kotak_ticker: reconnect uses exponential backoff not fixed 5s sleep", t_kotak_ticker_exponential_backoff)
+run("startup: API key prefix not printed to stdout (no val[:4])", t_startup_no_key_prefix_in_output)
+run("event_calendar: get_event_risk logs WARNING not DEBUG on exception", t_event_calendar_get_event_risk_warning)
+run("institutional_flow: _today_str uses now_ist() for correct NSE IST date", t_institutional_flow_today_str_uses_ist)
+run("news_gate: refresh uses now_ist() not naive datetime.now()", t_news_gate_refresh_uses_ist)
+run("portfolio_var: near-zero total_notional guarded with < 1e-6 not == 0.0", t_portfolio_var_near_zero_guard)
+run("portfolio_var: sigma==0 guard before z-score VaR (flat returns)", t_portfolio_var_sigma_zero_guard)
+run("position_reconciler: position_closed() failure logs WARNING not silent pass", t_position_reconciler_position_closed_logs_warning)
+run("gamma_scalp: _cache_lock protects _cache dict from concurrent writes", t_gamma_scalp_cache_lock_exists)
+run("truedata_client: historical() uses now_ist() not datetime.now() for end_date", t_truedata_client_uses_ist_for_end_date)
+run("truedata_client: tick parse errors logged at WARNING not DEBUG", t_truedata_client_tick_parse_is_warning)
+run("agents/activity_log: log() uses IST-aware timestamp not datetime.now()", t_activity_log_uses_ist)
+run("profit_optimizer: apply_optimised_config acquires _opt_lock before settings mutation", t_profit_optimizer_apply_acquires_lock)
+
+# ══════════════════════════════════════════════════════════════════════════
+# 36. RUTHLESS AUDIT BATCH 36 (levels_engine, news_sentinel, signal_bus, iv_surface)
+# ══════════════════════════════════════════════════════════════════════════
+import inspect as _inspect36
+
+def t_levels_engine_download_error_is_warning():
+    """levels_engine yfinance download errors must log at WARNING not DEBUG."""
+    import levels_engine as _le
+    src = _inspect36.getsource(_le._refresh_symbol)
+    for line in src.splitlines():
+        if "download error" in line.lower():
+            assert "logger.debug" not in line, \
+                f"yfinance download error must log at WARNING not DEBUG: {line.strip()}"
+
+def t_levels_engine_empty_data_is_warning():
+    """levels_engine empty yfinance data must log at WARNING not DEBUG."""
+    import levels_engine as _le
+    src = _inspect36.getsource(_le._refresh_symbol)
+    for line in src.splitlines():
+        if "empty data" in line.lower():
+            assert "logger.debug" not in line, \
+                f"empty data must log at WARNING not DEBUG: {line.strip()}"
+
+def t_levels_engine_get_levels_explicit_none_check():
+    """get_levels must use explicit `is None` check, not falsy dict check."""
+    import levels_engine as _le
+    src = _inspect36.getsource(_le.get_levels)
+    assert "base is None" in src or "is not None" in src, \
+        "get_levels must check `base is None` explicitly — falsy check fails for empty dict"
+
+def t_news_sentinel_fetch_error_is_warning():
+    """NewsSentinel fetch errors must log at WARNING not DEBUG."""
+    import news_sentinel as _ns
+    src = _inspect36.getsource(_ns.NewsSentinel.get_headlines)
+    for line in src.splitlines():
+        if "fetch error" in line.lower():
+            assert "logger.debug" not in line, \
+                f"fetch error must log at WARNING not DEBUG: {line.strip()}"
+
+def t_news_sentinel_failed_fetch_removes_placeholder():
+    """NewsSentinel must remove the cache placeholder on fetch error so next call retries."""
+    import news_sentinel as _ns
+    src = _inspect36.getsource(_ns.NewsSentinel.get_headlines)
+    assert "pop" in src or "del self._cache" in src, \
+        "On fetch error, NewsSentinel must remove the cache placeholder to allow immediate retry"
+
+def t_signal_bus_prunes_empty_deques():
+    """SignalBus.publish must prune symbols with empty deques to prevent unbounded dict growth."""
+    import signal_bus as _sb
+    src = _inspect36.getsource(_sb.SignalBus.publish)
+    assert "empty_syms" in src or "del self._events" in src or "not d" in src, \
+        "publish() must prune empty symbol deques from _events to prevent memory leak"
+
+def t_iv_surface_evicts_stale_cache_entries():
+    """iv_surface.build_surface must evict stale cache entries to prevent unbounded growth."""
+    import iv_surface as _iv
+    src = _inspect36.getsource(_iv.build_surface)
+    assert "stale" in src or "_TTL * 2" in src or "del _cache" in src, \
+        "build_surface must evict stale _cache entries — cache currently has no eviction"
+
+run("levels_engine: yfinance download error logs WARNING not DEBUG", t_levels_engine_download_error_is_warning)
+run("levels_engine: empty yfinance data logs WARNING not DEBUG", t_levels_engine_empty_data_is_warning)
+run("levels_engine: get_levels uses explicit `is None` check not falsy dict check", t_levels_engine_get_levels_explicit_none_check)
+run("news_sentinel: fetch error logs WARNING not DEBUG", t_news_sentinel_fetch_error_is_warning)
+run("news_sentinel: failed fetch removes cache placeholder so next caller retries", t_news_sentinel_failed_fetch_removes_placeholder)
+run("signal_bus: publish() prunes empty symbol deques to prevent dict growth", t_signal_bus_prunes_empty_deques)
+run("iv_surface: build_surface evicts stale _cache entries to prevent unbounded growth", t_iv_surface_evicts_stale_cache_entries)
+
+def t_tick_recorder_uses_ist_for_fallback_ts():
+    """tick_recorder.record() must use now_ist() not datetime.now() for fallback tick timestamp."""
+    import tick_recorder as _tr
+    src = _inspect36.getsource(_tr.TickRecorder.record)
+    assert "datetime.now()" not in src, \
+        "tick_recorder.record() must not use naive datetime.now() for fallback timestamp — use now_ist()"
+
+def t_tick_recorder_stop_logs_commit_failure():
+    """tick_recorder.stop() must log WARNING not silently pass on final commit failure."""
+    import tick_recorder as _tr
+    src = _inspect36.getsource(_tr.TickRecorder.stop)
+    assert "except Exception" in src, "stop() must catch commit exceptions"
+    assert "logger.warning" in src or "logger.error" in src, \
+        "stop() must log WARNING/ERROR (not pass silently) when final commit fails"
+
+def t_twap_engine_lambda_captures_chunk_by_value():
+    """twap_engine.execute() lambda must capture chunk by value (lambda chunk=chunk:) not by reference."""
+    import twap_engine as _te
+    src = _inspect36.getsource(_te.TWAPEngine.execute)
+    assert "lambda chunk=chunk:" in src, \
+        "TWAP lambda must use default-argument capture (lambda chunk=chunk:) to avoid stale quantity on timeout"
+
+def t_broker_router_secondaries_under_lock():
+    """BrokerRouter.add_secondary must hold _lock while mutating _secondaries."""
+    import broker_router as _br
+    src = _inspect36.getsource(_br.BrokerRouter.add_secondary)
+    assert "self._lock" in src or "with self._lock" in src, \
+        "add_secondary must hold _lock when mutating _secondaries to prevent concurrent read races"
+
+def t_broker_router_slm_cancel_is_warning():
+    """BrokerRouter.mirror_exit SL-M cancel failure must log WARNING not DEBUG."""
+    import broker_router as _br
+    src = _inspect36.getsource(_br.BrokerRouter.mirror_exit)
+    for line in src.splitlines():
+        if "cancel SL-M" in line or "cancel sl-m" in line.lower():
+            assert "logger.debug" not in line, \
+                f"SL-M cancel failure must log at WARNING not DEBUG: {line.strip()}"
+
+def t_n8n_bridge_unexpected_error_is_warning():
+    """n8n_bridge unexpected webhook error must log WARNING not DEBUG."""
+    import n8n_bridge as _nb
+    src = _inspect36.getsource(_nb.notify)
+    for line in src.splitlines():
+        if "unexpected error" in line.lower():
+            assert "logger.debug" not in line, \
+                f"unexpected webhook error must log at WARNING not DEBUG: {line.strip()}"
+
+def t_historical_learner_params_access_under_lock():
+    """historical_learner must access adaptive_engine._params under _lock."""
+    import historical_learner as _hl
+    src = _inspect36.getsource(_hl._run_one)
+    assert "_lock" in src, \
+        "historical_learner must hold adaptive_engine._lock when reading/writing _params"
+
+def t_historical_learner_win_rate_float_guard():
+    """historical_learner must use < 1e-9 not == 0 for win_rate_20 float comparison."""
+    import historical_learner as _hl
+    src = _inspect36.getsource(_hl._run_one)
+    assert "win_rate_20 == 0" not in src, \
+        "win_rate_20 == 0 is unreliable for floats — use < 1e-9 instead"
+
+def t_adaptive_engine_get_params_holds_lock():
+    """adaptive_engine.get_params must acquire _lock before reading/writing _params."""
+    import adaptive_engine as _ae
+    src = _inspect36.getsource(_ae.AdaptiveLearningEngine.get_params)
+    assert "self._lock" in src, \
+        "get_params must hold _lock to prevent concurrent dict mutation from record_trade"
+
+def t_adaptive_engine_should_rebacktest_holds_lock():
+    """adaptive_engine.should_rebacktest must hold _lock while iterating _rebacktest_queue and _params."""
+    import adaptive_engine as _ae
+    src = _inspect36.getsource(_ae.AdaptiveLearningEngine.should_rebacktest)
+    assert "self._lock" in src, \
+        "should_rebacktest must hold _lock to prevent concurrent dict-changed-during-iteration"
+
+def t_adaptive_engine_summary_snapshots_under_lock():
+    """adaptive_engine.summary must take a snapshot of _params under _lock before iterating."""
+    import adaptive_engine as _ae
+    src = _inspect36.getsource(_ae.AdaptiveLearningEngine.summary)
+    assert "params_snap" in src or ("self._lock" in src and "list(self._params" in src), \
+        "summary must snapshot _params under _lock to avoid RuntimeError during concurrent mutation"
+
+def t_multi_timeframe_min_spread_guards_zero_lag():
+    """multi_timeframe._trend_direction must use _MIN_SPREAD to prevent zero-lag collapse."""
+    import multi_timeframe as _mt
+    src = _inspect36.getsource(_mt._trend_direction)
+    assert "_MIN_SPREAD" in src or "1e-9" in src, \
+        "_trend_direction must guard against diff_lag==0 zero-collapse with a minimum absolute spread"
+
+def t_backtest_engine_ema50_zero_guard():
+    """backtest_engine._generate_signals must guard ema50 division by near-zero."""
+    import backtest_engine as _be
+    src = _inspect36.getsource(_be.BacktestEngine._generate_signals)
+    assert "1e-9" in src or "_e50" in src, \
+        "_generate_signals must guard ema50 division — zero ema50 causes ZeroDivisionError"
+
+def t_backtest_engine_cache_reads_hold_lock():
+    """backtest_engine.get_approved_symbols and is_approved must hold _cache_lock."""
+    import backtest_engine as _be
+    src_gas = _inspect36.getsource(_be.BacktestEngine.get_approved_symbols)
+    src_ia  = _inspect36.getsource(_be.BacktestEngine.is_approved)
+    src_cc  = _inspect36.getsource(_be.BacktestEngine.clear_cache)
+    assert "_cache_lock" in src_gas, "get_approved_symbols must hold _cache_lock to prevent RuntimeError on concurrent writes"
+    assert "_cache_lock" in src_ia,  "is_approved must hold _cache_lock"
+    assert "_cache_lock" in src_cc,  "clear_cache must hold _cache_lock"
+
+def t_auto_backtest_runner_or_low_zero_guard():
+    """auto_backtest_runner._signals_orb must guard or_low division by zero."""
+    import auto_backtest_runner as _ab
+    src = _inspect36.getsource(_ab._signals_orb)
+    assert "1e-9" in src or "or_low < " in src, \
+        "_signals_orb must guard or_low division — zero or_low causes ZeroDivisionError"
+
+def t_market_regime_vix_history_inside_lock():
+    """market_regime.update must update _vix_history inside _state_lock."""
+    import market_regime as _mr
+    src = _inspect36.getsource(_mr.MarketRegimeDetector.update)
+    assert "_state_lock" in src, \
+        "update() must protect _vix_history mutations inside _state_lock — _vix_zscore can read it concurrently"
+
+def t_ml_signal_scorer_train_holds_lock():
+    """ml_signal_scorer.train must hold _lock when assigning _models and _loaded."""
+    import ml_signal_scorer as _ms
+    src = _inspect36.getsource(_ms.MLSignalScorer.train)
+    assert "self._lock" in src, \
+        "train() must hold _lock when assigning _models[symbol] and _loaded.add(symbol) to prevent race with score()"
+
+def t_trade_memory_trim_error_is_warning():
+    """trade_memory._trim_file_to_max_entries must log WARNING not DEBUG on error."""
+    import trade_memory as _tm
+    src = _inspect36.getsource(_tm._trim_file_to_max_entries)
+    for line in src.splitlines():
+        if "trim error" in line.lower():
+            assert "logger.debug" not in line, \
+                f"trim error must log at WARNING not DEBUG: {line.strip()}"
+
+def t_portfolio_backtest_calmar_uses_epsilon():
+    """portfolio_backtest Calmar guard must use abs > 1e-9 not != 0 for float safety."""
+    import portfolio_backtest as _pb
+    src = _inspect36.getsource(_pb.PortfolioBacktest._compute_metrics)
+    assert "1e-9" in src or "abs(max_dd_pct)" in src, \
+        "Calmar guard must use abs(max_dd_pct) > 1e-9 not != 0 to handle near-zero float accumulation"
+
+def t_portfolio_backtest_tx_costs_silent_failure_logged():
+    """portfolio_backtest compute_tx_costs failure must log WARNING not silently pass."""
+    import portfolio_backtest as _pb
+    src = _inspect36.getsource(_pb.PortfolioBacktest.run)
+    assert "logger.warning" in src or "logger.error" in src, \
+        "compute_tx_costs failure must log at WARNING not silently pass — costs will be understated"
+
+def t_strategy_signals_vwap_epsilon_guard():
+    """strategy_signals VWAP zero-check must use abs(v) < 1e-9 not v == 0."""
+    import strategy_signals as _ss
+    src = _inspect36.getsource(_ss._signals_vwap_reversion)
+    assert "1e-9" in src, \
+        "_signals_vwap_reversion must use abs(v) < 1e-9 not v == 0 for float-safe VWAP zero guard"
+
+def t_strategy_signals_atr_ma_epsilon_guard():
+    """strategy_signals ATR mean zero-check must use > 1e-9 not > 0."""
+    import strategy_signals as _ss
+    src = _inspect36.getsource(_ss._signals_short_straddle)
+    assert "1e-9" in src, \
+        "_signals_short_straddle must use atr_ma.iloc[i] > 1e-9 not > 0 for float-safe division"
+
+def t_bhavcopy_loader_uses_ist_for_latest_date():
+    """bhavcopy_loader.latest_available_date must use IST date not UTC date.today()."""
+    import bhavcopy_loader as _bl
+    src = _inspect36.getsource(_bl.latest_available_date)
+    assert "date.today()" not in src, \
+        "latest_available_date must not use date.today() on UTC server — use now_ist().date()"
+
+def t_adaptive_engine_queue_rebacktest_uses_ist():
+    """adaptive_engine._queue_rebacktest must use _now_ist() not datetime.now() for queued_at."""
+    import adaptive_engine as _ae
+    src = _inspect36.getsource(_ae.AdaptiveLearningEngine._queue_rebacktest)
+    assert "datetime.now()" not in src, \
+        "_queue_rebacktest must use _now_ist() for queued_at timestamp"
+
+def t_trade_memory_time_of_day_uses_ist():
+    """trade_memory._time_of_day must use now_ist() not datetime.now() for session bucketing."""
+    import trade_memory as _tm
+    src = _inspect36.getsource(_tm._time_of_day)
+    assert "datetime.now()" not in src, \
+        "_time_of_day must use _now_ist() — naive datetime.now() gives wrong session on UTC server"
+
+run("tick_recorder: record() fallback timestamp uses now_ist() not datetime.now()", t_tick_recorder_uses_ist_for_fallback_ts)
+run("tick_recorder: stop() logs WARNING on final commit failure (not silent pass)", t_tick_recorder_stop_logs_commit_failure)
+run("twap_engine: execute() lambda captures chunk by value to prevent stale qty on timeout", t_twap_engine_lambda_captures_chunk_by_value)
+run("broker_router: add_secondary holds _lock when mutating _secondaries", t_broker_router_secondaries_under_lock)
+run("broker_router: mirror_exit SL-M cancel failure logs WARNING not DEBUG", t_broker_router_slm_cancel_is_warning)
+run("n8n_bridge: unexpected webhook error logs WARNING not DEBUG", t_n8n_bridge_unexpected_error_is_warning)
+run("historical_learner: _params read/write under adaptive_engine._lock", t_historical_learner_params_access_under_lock)
+run("historical_learner: win_rate_20 guard uses < 1e-9 not == 0 (float safety)", t_historical_learner_win_rate_float_guard)
+run("adaptive_engine: get_params acquires _lock before reading/writing _params", t_adaptive_engine_get_params_holds_lock)
+run("adaptive_engine: should_rebacktest holds _lock while iterating _rebacktest_queue", t_adaptive_engine_should_rebacktest_holds_lock)
+run("adaptive_engine: summary snapshots _params under _lock to prevent RuntimeError", t_adaptive_engine_summary_snapshots_under_lock)
+run("multi_timeframe: _trend_direction uses _MIN_SPREAD to prevent zero-lag spurious signal", t_multi_timeframe_min_spread_guards_zero_lag)
+run("backtest_engine: _generate_signals guards ema50 near-zero before division", t_backtest_engine_ema50_zero_guard)
+run("backtest_engine: get_approved_symbols/is_approved/clear_cache hold _cache_lock", t_backtest_engine_cache_reads_hold_lock)
+run("auto_backtest_runner: _signals_orb guards or_low near-zero before division", t_auto_backtest_runner_or_low_zero_guard)
+run("market_regime: update() mutates _vix_history inside _state_lock", t_market_regime_vix_history_inside_lock)
+run("ml_signal_scorer: train() holds _lock when assigning _models and _loaded", t_ml_signal_scorer_train_holds_lock)
+run("trade_memory: _trim_file_to_max_entries logs WARNING not DEBUG on trim error", t_trade_memory_trim_error_is_warning)
+run("portfolio_backtest: Calmar guard uses abs(max_dd_pct) > 1e-9 not != 0", t_portfolio_backtest_calmar_uses_epsilon)
+run("portfolio_backtest: compute_tx_costs failure logs WARNING not silent pass", t_portfolio_backtest_tx_costs_silent_failure_logged)
+run("strategy_signals: VWAP zero guard uses abs(v) < 1e-9 not v == 0", t_strategy_signals_vwap_epsilon_guard)
+run("strategy_signals: ATR mean zero guard uses > 1e-9 not > 0", t_strategy_signals_atr_ma_epsilon_guard)
+run("bhavcopy_loader: latest_available_date uses now_ist().date() not date.today()", t_bhavcopy_loader_uses_ist_for_latest_date)
+run("adaptive_engine: _queue_rebacktest uses _now_ist() not datetime.now()", t_adaptive_engine_queue_rebacktest_uses_ist)
+run("trade_memory: _time_of_day uses _now_ist() not datetime.now() for session bucketing", t_trade_memory_time_of_day_uses_ist)
+
 # 122. SCALPING LATENCY — gate skip, warm_connections, scalping_skip_gate config
 # ══════════════════════════════════════════════════════════════════════════
 

@@ -94,6 +94,10 @@ class SignalBus:
             while dq and dq[0].ts < cutoff:
                 dq.popleft()
             dq.append(evt)
+            # Prune symbols with fully-expired deques to prevent unbounded dict growth
+            empty_syms = [s for s, d in self._events.items() if not d and s != symbol]
+            for s in empty_syms:
+                del self._events[s]
             subs = list(self._subscribers)
 
         # Notify subscribers outside the lock (callbacks may be slow)

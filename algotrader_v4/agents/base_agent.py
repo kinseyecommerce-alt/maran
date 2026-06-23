@@ -77,10 +77,21 @@ def _setup_tsl_callbacks() -> None:
             )
         except Exception as exc:
             logger.error("[{}] _on_sl_moved: modify_order failed for {}: {}", pos.strategy, pos.symbol, exc)
+            _cancel_ok = False
             try:
                 await _loop.run_in_executor(None, lambda: kite_client.cancel_order(sl_oid))
+                _cancel_ok = True
             except Exception as exc:
                 logger.error("[{}] _on_sl_moved: cancel_order failed for {}: {}", pos.strategy, pos.symbol, exc)
+            if not _cancel_ok:
+                # Old SL-M is still live and cannot be cancelled — placing a new one
+                # would create TWO active stops (double-exit and a naked short when
+                # both fire). Leave the original stop at its old level rather than risk.
+                logger.critical(
+                    "[{}] _on_sl_moved: SL-M {} for {} could not be modified or cancelled — "
+                    "leaving original stop to prevent double-exit",
+                    pos.strategy, sl_oid, pos.symbol)
+                return
             try:
                 # Use the stored tradingsymbol (actual instrument, e.g. F&O contract)
                 # — pos.symbol is the UNDERLYING and would place the stop on the wrong instrument.
@@ -1519,9 +1530,10 @@ class BaseAgent(ABC):
             _exit_exch   = pos.get("exchange", "NSE")
             _exit_prod   = pos.get("product", self.product)
             _exit_tag    = _otag(f"Agent-{self.name}", "EXIT")
+            _exit_sym = pos.get("tradingsymbol", sym)  # use contract symbol for F&O, not underlying
             oid  = await asyncio.get_running_loop().run_in_executor(
                 None, lambda: kite_client.place_order(
-                    tradingsymbol=sym, exchange=_exit_exch,
+                    tradingsymbol=_exit_sym, exchange=_exit_exch,
                     transaction_type=exit_side, quantity=qty, order_type="MARKET",
                     product=_exit_prod, tag=_exit_tag,
                 )

@@ -41,11 +41,9 @@ class TWAPExecutor:
 
     def __init__(self) -> None:
         self._active: dict[str, TWAPOrder] = {}
-        self._start_lock: asyncio.Lock | None = None   # lazy init — event loop may not exist yet
+        self._start_lock: asyncio.Lock = asyncio.Lock()
 
     def _get_lock(self) -> asyncio.Lock:
-        if self._start_lock is None:
-            self._start_lock = asyncio.Lock()
         return self._start_lock
 
     async def _place_single(
@@ -53,13 +51,16 @@ class TWAPExecutor:
         exchange: str, product: str, tag: str,
         loop: asyncio.AbstractEventLoop,
     ) -> str:
-        return await loop.run_in_executor(
-            None,
-            lambda: kite_client.place_order(
-                tradingsymbol=symbol, exchange=exchange,
-                transaction_type=direction, quantity=qty,
-                order_type="MARKET", product=product, tag=tag,
+        return await asyncio.wait_for(
+            loop.run_in_executor(
+                None,
+                lambda: kite_client.place_order(
+                    tradingsymbol=symbol, exchange=exchange,
+                    transaction_type=direction, quantity=qty,
+                    order_type="MARKET", product=product, tag=tag,
+                ),
             ),
+            timeout=30.0,
         )
 
     async def _run_slices(
@@ -69,24 +70,26 @@ class TWAPExecutor:
     ) -> list[str]:
         paper = _paper()
         ids: list[str] = []
-        for i, qty in enumerate(qty_list):
-            if qty <= 0:
-                continue
-            try:
-                oid = await self._place_single(
-                    order.symbol, qty, order.direction, exchange, product, order.tag, loop)
-                ids.append(oid)
-                order.placed += qty
-                order.order_ids.append(oid)
-                logger.info("TWAP slice {}/{} | {} {} qty={} id={}",
-                            i + 1, len(qty_list), order.direction, order.symbol, qty, oid)
-            except Exception as exc:
-                logger.warning("TWAP slice {}/{} | {} {} qty={} FAILED: {}",
-                               i + 1, len(qty_list), order.direction, order.symbol, qty, exc)
-            if not paper and i < len(qty_list) - 1 and order.interval_sec > 0:
-                await asyncio.sleep(order.interval_sec)
-        order.done = True
-        self._active.pop(order.symbol, None)
+        try:
+            for i, qty in enumerate(qty_list):
+                if qty <= 0:
+                    continue
+                try:
+                    oid = await self._place_single(
+                        order.symbol, qty, order.direction, exchange, product, order.tag, loop)
+                    ids.append(oid)
+                    order.placed += qty
+                    order.order_ids.append(oid)
+                    logger.info("TWAP slice {}/{} | {} {} qty={} id={}",
+                                i + 1, len(qty_list), order.direction, order.symbol, qty, oid)
+                except Exception as exc:
+                    logger.warning("TWAP slice {}/{} | {} {} qty={} FAILED: {}",
+                                   i + 1, len(qty_list), order.direction, order.symbol, qty, exc)
+                if not paper and i < len(qty_list) - 1 and order.interval_sec > 0:
+                    await asyncio.sleep(order.interval_sec)
+        finally:
+            order.done = True
+            self._active.pop(order.symbol, None)
         return ids
 
     async def place_twap(

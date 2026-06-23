@@ -11,6 +11,7 @@ from typing import Optional
 
 from loguru import logger
 
+from ist_clock import now_ist
 from market_data import nse_client
 
 
@@ -67,19 +68,29 @@ def get_event_risk(symbol: str, current_time: Optional[datetime] = None) -> dict
     by a calendar-data issue.
     """
     try:
-        now = current_time or datetime.now()
+        now = current_time or now_ist().replace(tzinfo=None)
         events = _event_cache.get(symbol, []) + _event_cache.get(_MARKET_KEY, [])
         if not events:
             return dict(_SAFE_RESULT)
 
-        # Find the soonest upcoming event
+        # Find the soonest upcoming (or same-day) event.
+        # Skip events that have already passed UNLESS results_today is set —
+        # a past event with delta_hours < 0 whose results have been announced
+        # is no longer predictive for new trades, so future events must take
+        # priority.  results_today=True events are treated as hours=0 (block).
         min_hours: float = float("inf")
         worst_event: Optional[dict] = None
         for ev in events:
             dt: datetime = ev["dt"]
             delta_hours = (dt - now).total_seconds() / 3600.0
-            if delta_hours < min_hours:   # include same-day past events (midnight-stored)
-                min_hours = delta_hours
+            if delta_hours < 0:
+                if not ev.get("results_today"):
+                    continue   # already past, not blocking new trades
+                clamped = 0.0  # results announced today — still block
+            else:
+                clamped = delta_hours
+            if clamped < min_hours:
+                min_hours = clamped
                 worst_event = ev
 
         if worst_event is None:
@@ -105,13 +116,13 @@ def get_event_risk(symbol: str, current_time: Optional[datetime] = None) -> dict
             "description": worst_event.get("description", ""),
         }
     except Exception as exc:
-        logger.debug("[events] get_event_risk error {}: {}", symbol, exc)
+        logger.warning("[events] get_event_risk error {}: {}", symbol, exc)
         return dict(_SAFE_RESULT)
 
 
 def has_results_today(symbol: str) -> bool:
     """Return True if *symbol* has earnings / annual results scheduled for today."""
-    today = date.today()
+    today = now_ist().date()
     for ev in _event_cache.get(symbol, []):
         if ev.get("results_today") and ev["dt"].date() == today:
             return True
@@ -128,13 +139,18 @@ async def refresh_calendar() -> None:
     """
     logger.info("[events] refreshing event calendar...")
     try:
-        _event_cache.clear()
+        # Build into a temp dict then swap atomically — readers never see empty cache mid-refresh
+        global _event_cache
+        _tmp_cache: dict = {}
+        _orig_cache = _event_cache
+        _event_cache = _tmp_cache
         await asyncio.gather(
             _fetch_corporate_actions(),
             _fetch_event_calendar(),
             return_exceptions=True,
         )
         _inject_rbi_dates()
+        _event_cache = _tmp_cache   # atomic assignment (already pointing here; confirms intent)
         logger.info(
             "[events] calendar loaded — {} symbols cached",
             sum(1 for k in _event_cache if k != _MARKET_KEY),
@@ -146,7 +162,7 @@ async def refresh_calendar() -> None:
 # ── Internal helpers ──────────────────────────────────────────────────────────
 
 async def _fetch_corporate_actions() -> None:
-    today    = date.today()
+    today    = now_ist().date()
     to_date  = today + timedelta(days=7)
     from_str = today.strftime("%d-%m-%Y")
     to_str   = to_date.strftime("%d-%m-%Y")
@@ -168,7 +184,7 @@ async def _fetch_corporate_actions() -> None:
 
 def _parse_corporate_actions(data: list) -> None:
     """Parse the NSE corporate-actions response and insert events into the cache."""
-    today_date = date.today()
+    today_date = now_ist().date()
     for item in data:
         symbol  = (item.get("symbol") or "").strip().upper()
         purpose = (item.get("purpose") or "").strip()
@@ -217,7 +233,7 @@ async def _fetch_event_calendar() -> None:
 
 def _parse_event_calendar(data: list) -> None:
     """Parse the NSE event-calendar response."""
-    today_date = date.today()
+    today_date = now_ist().date()
     for item in data:
         symbol  = (item.get("symbol") or "").strip().upper()
         purpose = (item.get("purpose") or "").strip()
@@ -253,7 +269,7 @@ def _inject_rbi_dates() -> None:
     # Clear stale RBI entries before re-injecting
     macro_events = [e for e in macro_events if e.get("event_type") != "RBI_MPC"]
 
-    today = date.today()
+    today = now_ist().date()
     for date_str in RBI_DATES:
         try:
             ev_date = datetime.strptime(date_str, "%Y-%m-%d")

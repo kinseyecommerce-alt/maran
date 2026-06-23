@@ -159,7 +159,7 @@ class TrueDataTicker:
         max_backoff = 60.0
         consecutive_failures = 0
 
-        while self._connected or consecutive_failures == 0:
+        while True:   # retry indefinitely; graceful stop() exits via `return` inside the loop
             td = _get_td()
             if td is None:
                 consecutive_failures += 1
@@ -250,7 +250,7 @@ class TrueDataTicker:
                 if not f.cancelled() and f.exception() else None
             )
         except Exception as exc:
-            logger.debug("[TrueDataTicker] tick parse error: {}", exc)
+            logger.warning("[TrueDataTicker] tick parse error: {}", exc)
 
     def stop(self) -> None:
         self._connected = False
@@ -286,7 +286,7 @@ class TrueDataHistoricalClient:
             return pd.DataFrame()
 
         bar_size   = self._INTERVAL_MAP.get(interval, "1 min")
-        end_date   = datetime.now()
+        end_date   = now_ist()
         start_date = end_date - timedelta(days=lookback_days)
         instrument = _td_symbol(symbol, exchange)
 

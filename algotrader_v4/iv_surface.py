@@ -112,18 +112,24 @@ def build_surface(symbol: str, chain: list[dict], spot: float) -> SkewData:
         direction = "NEUTRAL"
 
     # Net GEX proxy: Σ call_oi×iv² – Σ put_oi×iv²  (dimensionless relative measure)
-    # Use same heuristic as main loop: iv>1 means %-encoded, else already decimal.
+    # Use same heuristic as main loop: iv > 1.0 means %-encoded, else already decimal.
+    # Always dividing by 100 produces a ~10,000× error for decimal-format chains
+    # (0.225 → 0.00225 instead of 0.225).
     def _gex_iv(raw) -> float:
-        v = float(raw or 0)
-        return v / 100.0 if v > 1.0 else v
+        """Normalise raw IV using >1.0 heuristic (c_raw > 1.0 → %-form, divide by 100)."""
+        c_raw = float(raw or 0)
+        return c_raw / 100.0 if c_raw > 1.0 else c_raw
 
-    gex_net = sum(
-        int(float((row.get("CE") or {}).get("oi", 0) or 0))
-        * (_gex_iv((row.get("CE") or {}).get("iv", 0)) ** 2)
-        - int(float((row.get("PE") or {}).get("oi", 0) or 0))
-        * (_gex_iv((row.get("PE") or {}).get("iv", 0)) ** 2)
-        for row in chain if int(float(row.get("strike", 0))) > 0
-    )
+    gex_terms = []
+    for row in chain:
+        if int(float(row.get("strike", 0))) <= 0:
+            continue
+        c_oi  = int(float((row.get("CE") or {}).get("oi", 0) or 0))
+        p_oi  = int(float((row.get("PE") or {}).get("oi", 0) or 0))
+        c_iv  = _gex_iv((row.get("CE") or {}).get("iv", 0))
+        p_iv  = _gex_iv((row.get("PE") or {}).get("iv", 0))
+        gex_terms.append(c_oi * c_iv ** 2 - p_oi * p_iv ** 2)
+    gex_net = sum(gex_terms)
 
     sd = SkewData(
         symbol=symbol, spot=spot, atm_iv=round(atm_iv, 4),
@@ -133,6 +139,11 @@ def build_surface(symbol: str, chain: list[dict], spot: float) -> SkewData:
         gex_net=round(gex_net, 2), smile=smile,
     )
     with _cache_lock:
+        # Evict entries older than 2× TTL to prevent unbounded cache growth
+        now = time.time()
+        stale = [k for k, v in _cache.items() if now - v.updated_at > _TTL * 2]
+        for k in stale:
+            del _cache[k]
         _cache[symbol.upper()] = sd
     return sd
 

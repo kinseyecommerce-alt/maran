@@ -149,7 +149,7 @@ def get_kelly_fraction(agent_name: str) -> float:
         avg_loss = abs(sum(p.avg_loss_pct for p in params_list) / n)
         return _compute_kelly(win_rate, avg_win, avg_loss)
     except Exception as exc:
-        logger.debug("[RiskManager] Kelly fraction calculation failed for {}: {}", agent_name, exc)
+        logger.warning("[RiskManager] Kelly fraction calculation failed for {}: {}", agent_name, exc)
         return 0.0
 
 
@@ -285,8 +285,8 @@ class RiskManager:
                 body=f"Trading halted. Current P&L: ₹{pnl:.0f}",
                 level="CRITICAL",
             )
-        except Exception:
-            pass
+        except Exception as exc:
+            logger.critical("[RiskManager] FAILED to send loss-limit notification: {}", exc)
 
     def _check_market_hours(self) -> tuple[bool, str]:
         from config import settings
@@ -394,8 +394,8 @@ class RiskManager:
                 logger.debug("FII strong sell: qty scaled -30% → {}", qty)
             elif fii_score <= -0.2:
                 qty = max(1, int(qty * 0.85))
-        except Exception:
-            pass
+        except Exception as exc:
+            logger.warning("[RiskManager] Event-day/FII sizing failed, using base qty: {}", exc)
         # Re-validate after scaling: clamp to max_position_size (not the per-agent cap)
         # so that FII bullish scaling (+10%/+20%) can actually push qty above the
         # per-agent allocation up to the hard absolute limit.  Bearish scaling already
@@ -597,8 +597,8 @@ class RiskManager:
                         daemon=True,
                         name="risk-50pct-notify",
                     ).start()
-                except Exception:
-                    pass
+                except Exception as exc:
+                    logger.error("[RiskManager] 50%% loss warning notification failed: {}", exc)
 
     def position_opened(self) -> None:
         with self._lock:

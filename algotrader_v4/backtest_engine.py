@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import io
 import math
+import threading
 from dataclasses import dataclass, field
 from datetime import datetime
 
@@ -204,6 +205,7 @@ class BacktestEngine:
 
     def __init__(self) -> None:
         self._cache: dict[tuple[str, str], BacktestResult] = {}
+        self._cache_lock = threading.Lock()
 
     # ── Public API ─────────────────────────────────────────────────────────────
 
@@ -219,8 +221,9 @@ class BacktestEngine:
         out_of_sample_pct: float | None = None,
     ) -> BacktestResult:
         key = (symbol, strategy)
-        if not force and key in self._cache:
-            return self._cache[key]
+        with self._cache_lock:
+            if not force and key in self._cache:
+                return self._cache[key]
 
         days   = lookback_days or settings.bt_lookback_days
         params = STRATEGY_PARAMS.get(strategy, STRATEGY_PARAMS["intraday"])
@@ -231,7 +234,8 @@ class BacktestEngine:
                 symbol=symbol, strategy=strategy, passed=False,
                 fail_reasons=[f"Insufficient data ({len(df) if df is not None else 0} bars)"]
             )
-            self._cache[key] = result
+            with self._cache_lock:
+                self._cache[key] = result
             return result
 
         oos_pct = out_of_sample_pct if out_of_sample_pct is not None else 0.30
@@ -247,7 +251,8 @@ class BacktestEngine:
             result  = self._compute_metrics(symbol, strategy, trades)
 
         result = self._apply_gate(result)
-        self._cache[key] = result
+        with self._cache_lock:
+            self._cache[key] = result
         logger.info(
             "Backtest {} {} → {} | trades={} win_rate={:.0f}% sharpe={:.2f} dd={:.1f}%{}",
             symbol, strategy, "PASS" if result.passed else "FAIL",
@@ -342,17 +347,20 @@ class BacktestEngine:
         return summary
 
     def get_approved_symbols(self, strategy: str) -> list[str]:
-        return [
-            sym for (sym, strat), res in self._cache.items()
-            if strat == strategy and res.passed
-        ]
+        with self._cache_lock:
+            return [
+                sym for (sym, strat), res in self._cache.items()
+                if strat == strategy and res.passed
+            ]
 
     def is_approved(self, symbol: str, strategy: str) -> bool:
         key = (symbol, strategy)
-        return key in self._cache and self._cache[key].passed
+        with self._cache_lock:
+            return key in self._cache and self._cache[key].passed
 
     def clear_cache(self) -> None:
-        self._cache.clear()
+        with self._cache_lock:
+            self._cache.clear()
         logger.info("Backtest cache cleared")
 
     # ── Walk-forward ───────────────────────────────────────────────────────────
@@ -500,7 +508,10 @@ class BacktestEngine:
             ema20 = ta.trend.EMAIndicator(close, 20).ema_indicator()
             rsi   = ta.momentum.RSIIndicator(close, 14).rsi()
             for i in range(50, n - 1):
-                near   = abs(close.iloc[i] - ema50.iloc[i]) / ema50.iloc[i] < 0.015
+                _e50 = float(ema50.iloc[i])
+                if _e50 < 1e-9:
+                    continue
+                near   = abs(float(close.iloc[i]) - _e50) / _e50 < 0.015
                 ema_up = ema20.iloc[i] > ema50.iloc[i]
                 rsi_ok = 40 < rsi.iloc[i] < 60
                 if near and ema_up and rsi_ok:

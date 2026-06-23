@@ -7,12 +7,13 @@ from __future__ import annotations
 
 import threading
 import time
-from datetime import datetime, timedelta
+from datetime import timedelta
 
 import httpx
 from loguru import logger
 
 from config import settings
+from ist_clock import now_ist as _now_ist
 
 _NEG_KEYWORDS = [
     "fraud", "investigation", "penalty", "sebi", "suspension",
@@ -79,15 +80,16 @@ class NewsGate:
                 if now - self._last_poll < settings.news_poll_interval_sec:
                     return
                 self._last_poll = now  # claim the slot under lock to prevent duplicate fetches
-            from_date = (datetime.now() - timedelta(days=1)).strftime("%d-%m-%Y")
-            to_date = datetime.now().strftime("%d-%m-%Y")
+            from_date = (_now_ist() - timedelta(days=1)).strftime("%d-%m-%Y")
+            to_date = _now_ist().strftime("%d-%m-%Y")
             url = (
                 "https://www.nseindia.com/api/corporate-announcements"
                 f"?index=equities&from_date={from_date}&to_date={to_date}"
             )
             headers = {"User-Agent": "Mozilla/5.0", "Accept": "application/json"}
             try:
-                async with httpx.AsyncClient(timeout=8.0) as client:
+                _timeout = httpx.Timeout(connect=4.0, read=8.0, write=4.0, pool=2.0)
+                async with httpx.AsyncClient(timeout=_timeout) as client:
                     resp = await client.get(url, headers=headers)
                     resp.raise_for_status()
                     announcements = resp.json()
@@ -102,7 +104,7 @@ class NewsGate:
                     if not sym:
                         continue
                     subject = str(ann.get("subject") or ann.get("desc") or "")
-                    if self._score_text(subject) <= -1.0:
+                    if self._score_text(subject) < -1.0:
                         self.block(sym, f"NSE: {subject[:80]}")
                 except Exception as exc:
                     logger.debug("NewsGate: announcement parse error: {}", exc)

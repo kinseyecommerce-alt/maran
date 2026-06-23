@@ -153,7 +153,7 @@ class OrderGuard:
             from state_store import set_kv
             set_kv("order_guard_trade_count", json.dumps(snapshot))
         except Exception as exc:
-            logger.debug("OrderGuard: trade count persist failed (counts survive in-memory until restart): {}", exc)
+            logger.warning("OrderGuard: trade count persist failed (counts survive in-memory until restart): {}", exc)
 
     def restore_counts(self) -> None:
         """Reload persisted per-strategy trade counts (e.g. after a restart).
@@ -177,7 +177,7 @@ class OrderGuard:
                     except (TypeError, ValueError):
                         continue
         except Exception as exc:
-            logger.debug("OrderGuard: trade count restore failed (counts reset to 0): {}", exc)
+            logger.warning("OrderGuard: trade count restore failed (counts reset to 0): {}", exc)
 
     def owner_of(self, symbol: str) -> str | None:
         """Return the '{strategy}:{side}' owner of the symbol lock, or None."""

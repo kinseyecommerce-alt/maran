@@ -5,11 +5,14 @@ All agents write here; the /agents/activity endpoint reads it.
 """
 from __future__ import annotations
 
+import threading
 from collections import deque
-from datetime import datetime
 from typing import Optional
 
-_log: deque[dict] = deque(maxlen=200)
+from ist_clock import now_ist as _now_ist
+
+_log:  deque[dict]   = deque(maxlen=200)
+_lock: threading.Lock = threading.Lock()
 
 AGENT_COLORS = {
     "intraday": "#3b82f6",   # blue
@@ -50,31 +53,34 @@ def push(
     order_id:  str = "",
     detail:    str = "",
 ) -> None:
-    _log.appendleft({
-        "time":        datetime.now().strftime("%H:%M:%S"),
-        "agent":       agent,
-        "color":       AGENT_COLORS.get(agent, "#6b7280"),
-        "event":       event,
-        "icon":        EVENT_ICONS.get(event, "circle"),
-        "symbol":      symbol,
-        "side":        side,
-        "price":       round(price, 2),
-        "qty":         qty,
-        "pnl":         round(pnl, 2) if pnl is not None else None,
-        "pattern":     pattern,
-        "score":       score,
-        "gate_conf":   gate_conf,
-        "gate_reason": gate_reason,
-        "sl":          round(sl, 2) if sl else 0.0,
-        "target":      round(target, 2) if target else 0.0,
-        "order_id":    order_id,
-        "detail":      detail,
-    })
+    with _lock:
+        _log.appendleft({
+            "time":        _now_ist().strftime("%H:%M:%S"),
+            "agent":       agent,
+            "color":       AGENT_COLORS.get(agent, "#6b7280"),
+            "event":       event,
+            "icon":        EVENT_ICONS.get(event, "circle"),
+            "symbol":      symbol,
+            "side":        side,
+            "price":       round(price, 2),
+            "qty":         qty,
+            "pnl":         round(pnl, 2) if pnl is not None else None,
+            "pattern":     pattern,
+            "score":       score,
+            "gate_conf":   gate_conf,
+            "gate_reason": gate_reason,
+            "sl":          round(sl, 2) if sl else 0.0,
+            "target":      round(target, 2) if target else 0.0,
+            "order_id":    order_id,
+            "detail":      detail,
+        })
 
 
 def get(n: int = 100) -> list[dict]:
-    return list(_log)[:n]
+    with _lock:
+        return list(_log)[:n]
 
 
 def clear() -> None:
-    _log.clear()
+    with _lock:
+        _log.clear()

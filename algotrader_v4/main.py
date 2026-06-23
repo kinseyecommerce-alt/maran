@@ -191,6 +191,7 @@ async def _ip_whitelist_gate(request: Request, call_next):
 
 # ── MED-2: In-memory rate limiter for orders and AI signals ──────────────────
 _rate_store: dict[str, list[float]] = defaultdict(list)
+_rate_store_lock = threading.Lock()
 _RATE_WINDOW = 60.0
 _RATE_LIMITS = {
     "/orders/place": 30,
@@ -215,14 +216,15 @@ async def _rate_limiter(request: Request, call_next):
             client_ip = request.client.host if request.client else "unknown"
             key = f"{client_ip}:{path}"
             now = time.monotonic()
-            calls = _rate_store[key]
-            calls[:] = [t for t in calls if now - t < _RATE_WINDOW]
-            if not calls:
-                del _rate_store[key]
+            with _rate_store_lock:
                 calls = _rate_store[key]
-            if len(calls) >= limit:
-                return JSONResponse({"detail": "Rate limit exceeded"}, status_code=429)
-            calls.append(now)
+                calls[:] = [t for t in calls if now - t < _RATE_WINDOW]
+                if not calls:
+                    del _rate_store[key]
+                    calls = _rate_store[key]
+                if len(calls) >= limit:
+                    return JSONResponse({"detail": "Rate limit exceeded"}, status_code=429)
+                calls.append(now)
     return await call_next(request)
 
 
@@ -1859,7 +1861,7 @@ async def regime_refresh():
     await broadcast({
         "event": "regime_change",
         "regime": regime.value,
-        "ts": datetime.utcnow().isoformat() + "Z",
+        "ts": now_ist().isoformat(),
     })
     return {"regime": regime.value, "label": regime_detector._regime_label(),
             "active": plan.active, "paused": plan.paused,

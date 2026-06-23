@@ -66,7 +66,7 @@ def _fetch_yf_change(ticker: str) -> Optional[dict]:
             return None
         last_close = float(closes.iloc[-1])
         prev_close = float(closes.iloc[-2])
-        change_pct = round((last_close - prev_close) / prev_close * 100, 2) if prev_close else 0.0
+        change_pct = round((last_close - prev_close) / prev_close * 100, 2) if prev_close and prev_close > 0 else 0.0
         return {
             "ticker":     ticker,
             "last":       round(last_close, 4),
@@ -162,7 +162,7 @@ def _fetch_sector_change(ticker: str) -> Optional[dict]:
             return None
         yesterday  = float(closes.iloc[-1])
         day_before = float(closes.iloc[-2])
-        change_pct = round((yesterday - day_before) / day_before * 100, 2) if day_before else 0.0
+        change_pct = round((yesterday - day_before) / day_before * 100, 2) if day_before and day_before > 0 else 0.0
         return {"ticker": ticker, "change_pct": change_pct}
     except Exception as exc:
         logger.debug("[pre_market] sector {} fetch failed: {}", ticker, exc)

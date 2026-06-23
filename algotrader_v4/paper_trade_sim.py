@@ -119,7 +119,8 @@ SCENARIOS = ["bullish", "bearish", "pullback", "ranging"]
 order_guard._active.clear()
 order_guard._trade_count.clear()
 risk_manager.reset_daily()
-sebi_compliance._state = "ACTIVE"  # ensure not killed
+from sebi_compliance import KillSwitchState
+sebi_compliance._state = KillSwitchState.ACTIVE  # ensure not killed
 
 agents = {
     "intraday": IntradayAgent(),

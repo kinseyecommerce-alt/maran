@@ -59,21 +59,34 @@ def _trend_direction(df: pd.DataFrame, fast: int = 9, slow: int = 21) -> Directi
     ema_s = closes.ewm(span=slow, adjust=False).mean()
     diff     = float(ema_f.iloc[-1]) - float(ema_s.iloc[-1])
     diff_lag = float(ema_f.iloc[-2]) - float(ema_s.iloc[-2])
-    if diff > 0 and diff > abs(diff_lag) * 0.1:
+    _lag_abs = abs(diff_lag)
+    # When diff_lag == 0 (EMAs were flat one bar ago, e.g. market open), the
+    # original check collapses to `diff > 0` — any tiny spread passes as bullish.
+    # Guard with a minimum absolute spread so a near-zero EMA separation at open
+    # doesn't produce a spurious MTF alignment signal.
+    _MIN_SPREAD = 0.05
+    if diff > _MIN_SPREAD and (_lag_abs < 1e-9 or diff > _lag_abs * 0.1):
         return "bullish"
-    if diff < 0 and abs(diff) > abs(diff_lag) * 0.1:
+    if diff < -_MIN_SPREAD and (_lag_abs < 1e-9 or abs(diff) > _lag_abs * 0.1):
         return "bearish"
     return "neutral"
 
 
 def _aggregate(df_1m: pd.DataFrame, minutes: int) -> pd.DataFrame:
-    """Aggregate 1-min OHLCV into N-minute bars."""
+    """Aggregate 1-min OHLCV into N-minute bars, right-aligned to the most recent candle.
+
+    Right-alignment ensures the most recent bar is always a complete N-minute bar.
+    The oldest incomplete period (n % minutes candles) is dropped from the left.
+    """
     n = len(df_1m)
     if n < minutes:
         return pd.DataFrame(columns=df_1m.columns)
     bars = []
-    for i in range(0, n - minutes + 1, minutes):
+    start = n % minutes  # drop leftover oldest candles so last bar is always complete
+    for i in range(start, n, minutes):
         chunk = df_1m.iloc[i:i + minutes]
+        if len(chunk) < minutes:
+            break
         bars.append({
             "open":   float(chunk["open"].iloc[0]),
             "high":   float(chunk["high"].max()),

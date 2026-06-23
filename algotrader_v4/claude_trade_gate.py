@@ -507,7 +507,7 @@ def _log(symbol: str, strategy: str, action: str, d: GateDecision, rsi: float) -
         d.confidence, d.size_factor, d.reason, warn, d.latency_ms,
     )
     _gate_log.appendleft({
-        "time":        datetime.now().strftime("%H:%M:%S"),
+        "time":        _now_ist().strftime("%H:%M:%S"),
         "symbol":      symbol,
         "strategy":    strategy,
         "signal":      action,

@@ -182,8 +182,11 @@ class SignalEngine:
 
         # ADX (trend strength)
         adx = ta.trend.ADXIndicator(high, low, close, window=14).adx().iloc[-1]
-        adx_sig = "BUY" if adx > 25 else "Neutral"
-        results.append({"name": "ADX (14)", "value": f"{adx:.1f}" if not pd.isna(adx) else "N/A", "signal": adx_sig})
+        if pd.isna(adx):
+            results.append({"name": "ADX (14)", "value": "N/A", "signal": "Neutral"})
+        else:
+            adx_sig = "BUY" if adx > 25 else "Neutral"
+            results.append({"name": "ADX (14)", "value": f"{adx:.1f}", "signal": adx_sig})
 
         return results
 

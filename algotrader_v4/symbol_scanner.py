@@ -24,6 +24,7 @@ import copy
 import math
 from dataclasses import dataclass, field
 from datetime import datetime, time
+from ist_clock import now_ist as _now_ist
 from pathlib import Path
 from typing import Optional
 
@@ -339,7 +340,7 @@ class SymbolScanner:
                     [s["symbol"] for s in selected]
                 )
 
-            self._last_scan = datetime.now()
+            self._last_scan = _now_ist()
             return self._selected
         finally:
             # Always release the flag — an exception here must not block all
@@ -467,7 +468,7 @@ class SymbolScanner:
             if n >= 50:
                 sc.ema50 = float(ta.trend.EMAIndicator(close, 50).ema_indicator().iloc[-1])
 
-            if (sc.ema9 and sc.ema9 == sc.ema9 and sc.ema21 and sc.ema21 == sc.ema21):
+            if (math.isfinite(sc.ema9) and math.isfinite(sc.ema21)):
                 if sc.ltp > sc.ema9 > sc.ema21:   sc.trend_direction = "UP"
                 elif sc.ltp < sc.ema9 < sc.ema21: sc.trend_direction = "DOWN"
 

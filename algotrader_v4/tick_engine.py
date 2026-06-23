@@ -494,7 +494,7 @@ class IndicatorCalc:
                  ind.ichimoku_cloud_dir) = _ichimoku(high, low)
 
         except Exception as exc:
-            logger.warning("Indicator compute partial for {} — agents may see stale indicators: {}", sym, exc)
+            logger.warning("[TickEngine] Indicator compute error {}: {}", sym, exc)
 
         # Sanitize NaN before derived-label checks: NaN is truthy so ``if ind.ema9``
         # would silently pass, and downstream math (int(NaN)) would OverflowError.
@@ -526,7 +526,7 @@ class IndicatorCalc:
 # last cumulative value per symbol; reset daily via the _session_date mechanism
 # in _process_tick().
 _rest_last_cum_vol: dict[str, int] = {}
-_rest_vol_lock = Lock()   # guards read-modify-write across thread-pool workers and asyncio loop
+_rest_vol_lock = Lock()  # guards _rest_last_cum_vol across run_in_executor threads and asyncio loop
 
 
 def _kite_quote_to_quote(symbol: str, data: dict) -> Quote:
@@ -838,15 +838,15 @@ class TickEngine:
                     if symbol in ("NIFTY 50", "NIFTY50"):
                         self._black_swan_phase = self._compute_bs_phase(snap.candles_1min)
                     snap.black_swan_phase = self._black_swan_phase
-            except Exception:
-                pass
+            except Exception as exc:
+                logger.warning("[TickEngine] Regime detection error for {}: {}", symbol, exc)
 
         # Record tick for later replay (no-op when recorder is disabled)
         if _tick_recorder is not None:
             try:
                 _tick_recorder.record(symbol, tick)
-            except Exception:
-                pass
+            except Exception as exc:
+                logger.warning("[TickEngine] Tick recording error for {}: {}", symbol, exc)
 
         for name, q in list(self._subscribers.items()):
             try:
@@ -895,8 +895,8 @@ class TickEngine:
                     "source":          source,
                     "ts":         tick.timestamp.isoformat(),
                 })
-            except Exception:
-                pass
+            except Exception as exc:
+                logger.warning("[TickEngine] ws_broadcast error: {}", exc)
 
     # ── KiteConnect WebSocket ingest ──────────────────────────────────
 
@@ -1004,8 +1004,8 @@ class TickEngine:
     def all_latest(self) -> dict[str, dict]:
         result = {}
         for sym in list(self._latest_tick):  # snapshot keys — new-symbol writes from event loop can change size during sync-endpoint iteration
-            tick = self._latest_tick[sym]
-            ind  = self._latest_ind[sym]
+            tick = self._latest_tick.get(sym)
+            ind  = self._latest_ind.get(sym)
             if tick and ind:
                 # ATR as % of price + a cheap bounded momentum composite for the
                 # portfolio optimizer:

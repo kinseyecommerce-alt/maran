@@ -47,7 +47,7 @@ class PlatformScheduler:
         )
         self._sched.add_job(
             self._options_cache_refresh, "interval",
-            minutes=5, id="options_cache",
+            minutes=5, id="options_cache", max_instances=1, coalesce=True,
         )
         self._sched.start()
         logger.info("[platform] scheduler started (Kite@08:50, Report@09:00, Data@09:10, Start@09:16 IST)")
@@ -121,7 +121,7 @@ class PlatformScheduler:
             if symbols:
                 await update_cache(symbols[:20])  # limit to top 20 to avoid rate limits
         except Exception as exc:
-            logger.debug("[platform] Options cache refresh: {}", exc)
+            logger.warning("[platform] Options cache refresh failed: {}", exc)
         finally:
             self._options_refresh_running = False
 
@@ -202,7 +202,7 @@ class PlatformScheduler:
             return
 
         try:
-            report = await asyncio.to_thread(master.start, strategies, watchlist)
+            report = master.start(strategies, watchlist)
             lines = [f"🚀 <b>Bot auto-started</b> | Mode: {settings.trading_mode}"]
             for strat, data in report.items():
                 lines.append(f"  {strat}: {data['approved']}/{data['total']} symbols approved")

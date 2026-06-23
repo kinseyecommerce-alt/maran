@@ -50,7 +50,7 @@ def _signals_intraday(df: pd.DataFrame) -> pd.Series:
     vwap   = ta.volume.VolumeWeightedAveragePrice(high, low, close, vol).volume_weighted_average_price()
     vol_ma = vol.rolling(20).mean()
     macd_h = ta.trend.MACD(close).macd_diff()
-    for i in range(2, len(df)):
+    for i in range(20, len(df)):
         if (close.iloc[i-1] < vwap.iloc[i-1] and close.iloc[i] > vwap.iloc[i]
                 and ema9.iloc[i] > ema21.iloc[i] and 45 < rsi.iloc[i] < 67
                 and macd_h.iloc[i] > 0 and vol.iloc[i] > vol_ma.iloc[i] * 1.25):
@@ -65,13 +65,13 @@ def _signals_swing(df: pd.DataFrame) -> pd.Series:
         return s
     ema50  = ta.trend.EMAIndicator(close, 50).ema_indicator()
     ema20  = ta.trend.EMAIndicator(close, 20).ema_indicator()
-    ema200 = ta.trend.EMAIndicator(close, min(200, len(df) - 1)).ema_indicator()
+    ema200 = ta.trend.EMAIndicator(close, 200).ema_indicator()
     rsi    = ta.momentum.RSIIndicator(close, 14).rsi()
     adx    = ta.trend.ADXIndicator(high, low, close, 14).adx()
     for i in range(55, len(df)):
         if pd.isna(ema200.iloc[i]) or pd.isna(ema50.iloc[i]) or pd.isna(ema20.iloc[i]):
             continue
-        if ema50.iloc[i] == 0:
+        if float(ema50.iloc[i]) <= 1e-9:
             continue
         if (abs(close.iloc[i] - ema50.iloc[i]) / ema50.iloc[i] < 0.018
                 and ema20.iloc[i] > ema50.iloc[i] and close.iloc[i] > ema200.iloc[i]
@@ -89,7 +89,7 @@ def _signals_futures(df: pd.DataFrame) -> pd.Series:
     ema21  = ta.trend.EMAIndicator(close, 21).ema_indicator()
     adx    = ta.trend.ADXIndicator(high, low, close, 14).adx()
     vol_ma = vol.rolling(20).mean()
-    for i in range(2, len(df)):
+    for i in range(20, len(df)):
         bull = ema9.iloc[i-1] < ema21.iloc[i-1] and ema9.iloc[i] > ema21.iloc[i]
         if bull and adx.iloc[i] > 23 and vol.iloc[i] > vol_ma.iloc[i] * 1.3:
             s.iloc[i] = 1
@@ -135,7 +135,7 @@ def _signals_vwap_reversion(df: pd.DataFrame) -> pd.Series:
     adx  = ta.trend.ADXIndicator(high, low, close, 14).adx()
     for i in range(15, len(df)):
         v = float(vwap.iloc[i])
-        if not math.isfinite(v) or v == 0:
+        if not math.isfinite(v) or abs(v) < 1e-9:
             continue
         dev = abs(close.iloc[i] - v) / v * 100
         if 0.5 < dev < 2.5 and adx.iloc[i] < 22:
@@ -156,10 +156,13 @@ def _signals_iron_condor(df: pd.DataFrame) -> pd.Series:
     bb_mavg  = bb.bollinger_mavg()
     bb_upper = bb.bollinger_hband()
     bb_lower = bb.bollinger_lband()
+    # Guard zero denominator: replace(0, nan) ensures division produces NaN
+    # (signal suppressed) rather than ZeroDivisionError on halted/zero-price symbols
+    bb_mavg_safe = bb_mavg.replace(0, float("nan"))
     rsi  = ta.momentum.RSIIndicator(close, 14).rsi()
     for i in range(20, len(df)):
-        mavg = bb_mavg.iloc[i]
-        if mavg <= 0 or pd.isna(mavg):
+        mavg = bb_mavg_safe.iloc[i]
+        if pd.isna(mavg) or mavg <= 0:
             continue
         bb_w_i = (bb_upper.iloc[i] - bb_lower.iloc[i]) / mavg * 100
         if adx.iloc[i] < 20 and bb_w_i < 2.5 and 38 < rsi.iloc[i] < 62:
@@ -176,7 +179,7 @@ def _signals_short_straddle(df: pd.DataFrame) -> pd.Series:
     atr    = ta.volatility.AverageTrueRange(high, low, close, 14).average_true_range()
     atr_ma = atr.rolling(20).mean()
     for i in range(20, len(df)):
-        iv_low = atr.iloc[i] / atr_ma.iloc[i] < 0.85 if atr_ma.iloc[i] > 0 else False
+        iv_low = atr.iloc[i] / atr_ma.iloc[i] < 0.85 if atr_ma.iloc[i] > 1e-9 else False
         if adx.iloc[i] < 18 and iv_low:
             s.iloc[i] = 1
     return s

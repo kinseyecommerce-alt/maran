@@ -23,6 +23,8 @@ import json
 import sys
 import time
 from datetime import datetime
+
+from ist_clock import now_ist as _now_ist
 from pathlib import Path
 
 from loguru import logger
@@ -86,8 +88,9 @@ async def _run_one(symbol: str, strategy: str, sem: asyncio.Semaphore,
 
             # Pre-populate adaptive engine with learned params
             params_key = f"{strategy}::{symbol}"
-            existing = adaptive_engine._params.get(params_key)
-            if existing is None or existing.win_rate_20 == 0:
+            with adaptive_engine._lock:
+                existing = adaptive_engine._params.get(params_key)
+            if existing is None or existing.win_rate_20 < 1e-9:
                 # Seed with backtest results
                 from adaptive_engine import STRATEGY_CONFIG, GATE_THRESHOLDS
                 cfg  = STRATEGY_CONFIG.get(strategy, {})
@@ -106,7 +109,8 @@ async def _run_one(symbol: str, strategy: str, sem: asyncio.Semaphore,
                     min_adx=20.0,
                     status="ACTIVE" if result.passed else "CAUTIOUS",
                 )
-                adaptive_engine._params[params_key] = new_params
+                with adaptive_engine._lock:
+                    adaptive_engine._params[params_key] = new_params
 
             if result.passed:
                 if symbol not in approved[strategy]:
@@ -120,14 +124,14 @@ async def _run_one(symbol: str, strategy: str, sem: asyncio.Semaphore,
                 "win_rate": round(result.win_rate, 1),
                 "sharpe": round(result.sharpe_ratio, 2),
                 "trades": result.total_trades,
-                "ts": datetime.now().isoformat(),
+                "ts": _now_ist().isoformat(),
             }
             return symbol, strategy, result.passed, status
 
         except Exception as exc:
             logger.warning("  {} {} error: {}", symbol, strategy, exc)
             progress[key] = {"done": False, "passed": False, "error": str(exc),
-                             "ts": datetime.now().isoformat()}
+                             "ts": _now_ist().isoformat()}
             return symbol, strategy, False, f"❌ ERROR"
 
 
@@ -177,11 +181,13 @@ async def learn(symbols: list[str], strategies: list[str],
         print(f"  Skipping {skipped} already-completed backtests (--resume)\n")
 
     milestone_pct = 0
+    newly_done = 0   # count only freshly completed (not pre-skipped) for accurate ETA
     for coro in asyncio.as_completed(tasks):
         sym, strat, passed, status = await coro
         done += 1
+        newly_done += 1
         elapsed = time.time() - t_start
-        rate    = done / elapsed if elapsed > 0 else 1
+        rate    = newly_done / elapsed if elapsed > 0 else 1
         eta_s   = int((total - done) / rate) if rate > 0 else 0
         eta     = f"{eta_s//60}m{eta_s%60:02d}s"
 
@@ -194,7 +200,7 @@ async def learn(symbols: list[str], strategies: list[str],
             adaptive_engine._save_state()
 
         # Telegram milestone every 25%
-        pct = done * 100 // total
+        pct = (done * 100 // total) if total > 0 else 100
         if pct >= milestone_pct + 25:
             milestone_pct = (pct // 25) * 25
             pass_counts = {s: len(v) for s, v in approved.items()}

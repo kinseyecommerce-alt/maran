@@ -17,6 +17,9 @@ import threading
 import uuid
 from datetime import datetime
 from typing import Any, Optional
+from zoneinfo import ZoneInfo
+
+_IST = ZoneInfo("Asia/Kolkata")
 
 import httpx
 from loguru import logger
@@ -98,7 +101,7 @@ class UpstoxBroker(BaseBroker):
         self._access_token: str = settings.upstox_access_token or ""
         self._paper_orders:    list[dict] = []
         self._paper_positions: list[dict] = []
-        self._paper_lock  = threading.Lock()
+        self._paper_lock  = threading.RLock()  # RLock: _paper_place and check_paper_triggers both call _update_paper_position under this lock
         self._token_lock  = threading.Lock()
 
     # ── Auth ─────────────────────────────────────────────────────────────────
@@ -273,12 +276,12 @@ class UpstoxBroker(BaseBroker):
         upstox_otype     = _KITE_OTYPE_TO_UPSTOX.get(order_type, "MKT")
 
         # Upstox instrument_key format: "NSE_EQ|{isin}" — symbol-based keys are invalid in LIVE mode
+        # Upstox LIVE requires ISIN-based instrument keys; symbol-based keys work only in dev/test.
         instrument_key = f"{exchange}_{self._segment(exchange)}|{tradingsymbol}"
-        if settings.trading_mode != "PAPER":
-            logger.warning(
-                "[Upstox] instrument_key '{}' uses symbol name — Upstox requires ISIN-based keys in LIVE mode",
-                instrument_key
-            )
+        logger.warning(
+            "[Upstox] instrument_key '{}' uses symbol name — Upstox requires ISIN-based keys in LIVE mode",
+            instrument_key
+        )
 
         payload: dict = {
             "quantity":        quantity,
@@ -357,17 +360,20 @@ class UpstoxBroker(BaseBroker):
                 continue
             side = "SELL" if pos["quantity"] > 0 else "BUY"
             qty  = abs(pos["quantity"])
-            oid  = self.place_order(
-                tradingsymbol=pos["tradingsymbol"],
-                exchange=pos.get("exchange", "NSE"),
-                transaction_type=side,
-                quantity=qty,
-                order_type="MARKET",
-                product=pos.get("product", "MIS"),
-                tag="SquareOff",
-            )
-            order_ids.append(oid)
-            logger.info("[Upstox] Square-off {} {} qty={}", side, pos["tradingsymbol"], qty)
+            try:
+                oid = self.place_order(
+                    tradingsymbol=pos["tradingsymbol"],
+                    exchange=pos.get("exchange", "NSE"),
+                    transaction_type=side,
+                    quantity=qty,
+                    order_type="MARKET",
+                    product=pos.get("product", "MIS"),
+                    tag="SquareOff",
+                )
+                order_ids.append(oid)
+                logger.info("[Upstox] Square-off {} {} qty={}", side, pos["tradingsymbol"], qty)
+            except Exception as exc:
+                logger.error("[UpstoxBroker] squareoff failed for {}: {}", pos.get("tradingsymbol", "?"), exc)
         return order_ids
 
     # ── Portfolio ─────────────────────────────────────────────────────────────
@@ -507,7 +513,7 @@ class UpstoxBroker(BaseBroker):
             "trigger_price":    trigger_price,
             "status":           status,
             "tag":              tag,
-            "placed_at":        datetime.now().isoformat(),
+            "placed_at":        datetime.now(_IST).isoformat(),
         }
         with self._paper_lock:
             self._paper_orders.append(record)

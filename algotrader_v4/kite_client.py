@@ -173,8 +173,8 @@ class KiteClient:
         try:
             from state_store import set_kv
             set_kv("kite_access_token", token)
-        except Exception:
-            pass
+        except Exception as exc:
+            logger.warning("[kite] Failed to persist access token to state_store: {}", exc)
         logger.info("Kite auth OK (orders-only, rate-limited mode)")
         return token
 
@@ -759,7 +759,7 @@ class KiteClient:
             "disclosed_quantity": disclosed_quantity,
             "status":           status,
             "tag":              tag,
-            "placed_at":        datetime.now().isoformat(),
+            "placed_at":        datetime.now(tz=_IST).isoformat(),
             "placed_ts":        time.time(),   # epoch — used for terminal-order pruning
         }
         with self._paper_orders_lock:

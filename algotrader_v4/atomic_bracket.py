@@ -35,7 +35,9 @@ import math
 import time
 import uuid
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timezone
+from zoneinfo import ZoneInfo
+_IST = ZoneInfo("Asia/Kolkata")
 from enum import Enum
 from typing import Optional, Callable
 
@@ -150,9 +152,9 @@ class BracketOrder:
             "net_pnl":       round(self.net_pnl, 2),
             "sub_strategy":  self.sub_strategy,
             "trigger":       self.trigger_reason,
-            "created_at":    datetime.fromtimestamp(self.created_at).isoformat(),
-            "filled_at":     datetime.fromtimestamp(self.filled_at).isoformat() if self.filled_at else "",
-            "closed_at":     datetime.fromtimestamp(self.closed_at).isoformat() if self.closed_at else "",
+            "created_at":    datetime.fromtimestamp(self.created_at, tz=_IST).isoformat(),
+            "filled_at":     datetime.fromtimestamp(self.filled_at, tz=_IST).isoformat() if self.filled_at else "",
+            "closed_at":     datetime.fromtimestamp(self.closed_at, tz=_IST).isoformat() if self.closed_at else "",
         }
 
 
@@ -398,8 +400,9 @@ class AtomicBracketEngine:
                         if h.get("status") == "COMPLETE":
                             sl_already_filled = True
                             break
-            except Exception:
-                pass
+            except Exception as _sl_exc:
+                logger.warning("[bracket] SL verification failed for {} — assuming not filled: {}",
+                               bracket.sl_order_id, _sl_exc)
             if not sl_already_filled:
                 try:
                     await _loop.run_in_executor(

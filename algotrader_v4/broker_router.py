@@ -40,25 +40,27 @@ class BrokerRouter:
 
     def add_secondary(self, name: str, client: Any) -> None:
         """Register a secondary broker (e.g. UpstoxBroker instance)."""
-        self._secondaries = [(n, c) for n, c in self._secondaries if n != name]
-        self._secondaries.append((name, client))
+        with self._lock:
+            self._secondaries = [(n, c) for n, c in self._secondaries if n != name]
+            self._secondaries.append((name, client))
         logger.info("[BrokerRouter] secondary broker registered: {}", name)
 
     def remove_secondary(self, name: str) -> None:
-        self._secondaries = [(n, c) for n, c in self._secondaries if n != name]
+        with self._lock:
+            self._secondaries = [(n, c) for n, c in self._secondaries if n != name]
 
     def clear_secondaries(self) -> None:
-        # Assign a new list rather than mutating in-place: concurrent iterations
-        # (mirror_exit, squareoff_all_secondaries) hold a reference to the old
-        # list and continue safely; .clear() would corrupt their iteration.
-        self._secondaries = []
+        with self._lock:
+            self._secondaries = []
 
     @property
     def has_secondaries(self) -> bool:
-        return bool(self._secondaries)
+        with self._lock:
+            return bool(self._secondaries)
 
     def secondary_names(self) -> list[str]:
-        return [n for n, _ in self._secondaries]
+        with self._lock:
+            return [n for n, _ in self._secondaries]
 
     # ── Mirror entry + SL-M on secondaries ───────────────────────────────
 
@@ -79,13 +81,15 @@ class BrokerRouter:
         Called AFTER the primary entry has already succeeded.
         Errors on secondaries are logged but never re-raised.
         """
-        if not self._secondaries:
+        with self._lock:
+            secondaries_snapshot = list(self._secondaries)
+        if not secondaries_snapshot:
             return
 
         sl_side = "SELL" if transaction_type == "BUY" else "BUY"
         broker_details: dict[str, dict] = {}
 
-        for name, client in self._secondaries:
+        for name, client in secondaries_snapshot:
             try:
                 entry_id = client.place_order(
                     tradingsymbol=tradingsymbol,
@@ -167,7 +171,7 @@ class BrokerRouter:
             try:
                 client.cancel_order(info["sl_id"])
             except Exception as exc:
-                logger.debug("[BrokerRouter] {} cancel SL-M {} skipped: {}", broker_name, info["sl_id"], exc)
+                logger.warning("[BrokerRouter] {} cancel SL-M {} FAILED — orphan SL-M may trigger a reverse position: {}", broker_name, info["sl_id"], exc)
             try:
                 client.place_order(
                     tradingsymbol=info["symbol"],
@@ -226,8 +230,10 @@ class BrokerRouter:
 
     def get_secondary_positions(self) -> dict[str, list]:
         """Return combined positions from all secondaries. Keys = broker names."""
+        with self._lock:
+            secondaries_snapshot = list(self._secondaries)
         result: dict[str, list] = {}
-        for name, client in self._secondaries:
+        for name, client in secondaries_snapshot:
             try:
                 pos = client.positions()
                 result[name] = pos.get("net", [])

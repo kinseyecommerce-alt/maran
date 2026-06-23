@@ -137,7 +137,7 @@ async def refresh_matrix(symbols: list[str]) -> None:
 
     try:
         returns = closes.pct_change().dropna(how="all")
-        matrix  = returns.corr()
+        matrix  = returns.corr(min_periods=10)
         with _matrix_lock:
             _corr_matrix = matrix
             _matrix_ready = True
@@ -162,13 +162,18 @@ def get_correlation(sym_a: str, sym_b: str) -> float:
     a = _strip_ns(sym_a)
     b = _strip_ns(sym_b)
 
-    if _corr_matrix.empty:
+    # Snapshot the reference under the lock to avoid torn reads: refresh_matrix
+    # runs on a thread-pool thread and may replace _corr_matrix while we access it.
+    with _matrix_lock:
+        matrix = _corr_matrix
+
+    if matrix.empty:
         return 0.0
-    if a not in _corr_matrix.columns or b not in _corr_matrix.columns:
+    if a not in matrix.columns or b not in matrix.columns:
         return 0.0
 
     try:
-        val = _corr_matrix.loc[a, b]
+        val = matrix.loc[a, b]
         # numpy scalar → plain float; guard against NaN
         result = float(val)
         return 0.0 if np.isnan(result) else result
@@ -201,7 +206,10 @@ def check(new_symbol: str, open_positions: list[str]) -> dict:
         }
 
     new_sym = _strip_ns(new_symbol)
-    matrix_empty = _corr_matrix.empty
+    # Snapshot under lock once for the entire check() call.
+    with _matrix_lock:
+        matrix = _corr_matrix
+    matrix_empty = matrix.empty
 
     max_r:          float           = -2.0   # below any real correlation
     most_correlated: Optional[str]  = None
@@ -212,7 +220,7 @@ def check(new_symbol: str, open_positions: list[str]) -> dict:
         if pos_sym == new_sym:
             continue
 
-        if matrix_empty or new_sym not in _corr_matrix.columns or pos_sym not in _corr_matrix.columns:
+        if matrix_empty or new_sym not in matrix.columns or pos_sym not in matrix.columns:
             any_unknown = True
             continue
 
@@ -280,10 +288,13 @@ def portfolio_heat(open_positions: list[str]) -> float:
     total_r = 0.0
     counted = 0
 
+    with _matrix_lock:
+        matrix = _corr_matrix
+
     for a, b in pairs:
-        if _corr_matrix.empty:
+        if matrix.empty:
             continue
-        if a not in _corr_matrix.columns or b not in _corr_matrix.columns:
+        if a not in matrix.columns or b not in matrix.columns:
             continue
         r = get_correlation(a, b)
         if np.isnan(r):

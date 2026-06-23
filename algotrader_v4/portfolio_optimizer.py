@@ -229,11 +229,14 @@ class PortfolioOptimizer:
                 "type": "ineq",
                 "fun": lambda w: capital - w.sum(),
             },
-            # Portfolio weighted-average beta ≤ beta_cap
+            # Portfolio weighted-average beta ≤ beta_cap.
+            # Reformulated as bc*sum(w) - dot(w,b) >= 0 to avoid dividing by
+            # near-zero w.sum() during SLSQP's line-search, which made the
+            # constraint trivially satisfied at early near-zero weight vectors.
             {
                 "type": "ineq",
                 "fun": lambda w, b=betas, bc=beta_cap: (
-                    bc - float(np.dot(w, b)) / max(float(w.sum()), 1.0)
+                    bc * max(float(w.sum()), 1e-9) - float(np.dot(w, b))
                 ),
             },
         ]

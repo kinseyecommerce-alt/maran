@@ -20,6 +20,8 @@ import os
 import threading
 import zipfile
 from datetime import date, timedelta
+
+from ist_clock import now_ist as _now_ist
 from pathlib import Path
 from typing import Optional
 
@@ -138,7 +140,7 @@ def load_symbol(
 
 def latest_available_date() -> date:
     """Return the latest date for which Bhavcopy is likely published (T-1)."""
-    today = date.today()
+    today = _now_ist().date()
     # Published after market close; use yesterday if today is a trading day,
     # else walk back to last Friday.
     candidate = today - timedelta(days=1)

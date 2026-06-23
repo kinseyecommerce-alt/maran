@@ -419,14 +419,13 @@ class TrailingSLEngine:
             if cb_sl_hit:
                 try:
                     await cb_sl_hit(pos, ltp, pnl)
-                    with self._lock:
-                        self._positions.pop(pos.order_id, None)
                 except Exception as exc:
                     logger.error(
-                        "[TSL] SL callback failed for {} — leaving in position list for retry: {}",
+                        "[TSL] SL callback failed for {} — position deregistered to prevent double-exit: {}",
                         pos.symbol, exc
                     )
-                    pos.status = SLStatus.ACTIVE  # allow re-evaluation on next tick
+                with self._lock:
+                    self._positions.pop(pos.order_id, None)
             else:
                 pos.status = SLStatus.HIT
                 with self._lock:

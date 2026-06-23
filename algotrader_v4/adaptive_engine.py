@@ -46,6 +46,8 @@ import time
 from collections import deque
 from dataclasses import dataclass, field, asdict, fields as dc_fields
 from datetime import datetime, date, timedelta
+
+from ist_clock import now_ist as _now_ist
 from pathlib import Path
 from typing import Optional
 
@@ -110,7 +112,7 @@ class AdaptiveParams:
 
     # State
     status:       str   = "ACTIVE"  # ACTIVE / CAUTIOUS / RETIRED
-    last_updated: str   = field(default_factory=lambda: datetime.now().isoformat())
+    last_updated: str   = field(default_factory=lambda: _now_ist().isoformat())
     adaptation_count: int = 0
 
     # Learning history
@@ -170,7 +172,7 @@ class AdaptiveLearningEngine:
             if len(trades_list) >= self.MIN_TRADES_ADAPT:
                 self._adapt_parameters(params, trades_list, trade.strategy)
             self._check_health(params, trade.strategy)
-            params.last_updated = datetime.now().isoformat()
+            params.last_updated = _now_ist().isoformat()
             params.adaptation_count += 1
         logger.info("Adapt [{}::{}] WR={:.0f}% size={:.2f} sl={:.1f}% → {}",
             trade.strategy, trade.symbol, params.win_rate_20 * 100,
@@ -271,52 +273,58 @@ class AdaptiveLearningEngine:
     def on_regime_change(self, old_regime: str, new_regime: str, vix: float) -> None:
         volatile_regime = new_regime in ("BEAR_VOLATILE", "HIGH_VOLATILE")
         bear_regime     = new_regime in ("BEAR_TREND", "BEAR_VOLATILE")
-        for key, params in list(self._params.items()):  # list() snapshot safe for concurrent callers
-            strategy, symbol = key.split("::", maxsplit=1)
-            if volatile_regime:
-                params.size_factor = min(params.size_factor, 0.5)
-                params.sl_pct = round(params.sl_pct * 1.2, 2)
-            if bear_regime and "swing" in strategy:
-                params.status = "CAUTIOUS"
-                params.size_factor = 0.25  # floor matches _adapt_parameters minimum; 0.0 causes zero-qty orders
-            if new_regime == "BULL_TREND" and old_regime != "BULL_TREND":
-                params.size_factor = max(0.75, params.size_factor)
-            if strategy in ("iron_condor", "short_straddle") and volatile_regime:
-                self._queue_rebacktest(strategy, symbol, f"regime→{new_regime}")
-        self._save_state()
+        with self._lock:
+            for key, params in list(self._params.items()):
+                strategy, symbol = key.split("::", maxsplit=1)
+                if volatile_regime:
+                    params.size_factor = min(params.size_factor, 0.5)
+                    params.sl_pct = round(params.sl_pct * 1.2, 2)
+                if bear_regime and "swing" in strategy:
+                    params.status = "CAUTIOUS"
+                    params.size_factor = 0.25  # floor matches _adapt_parameters minimum; 0.0 causes zero-qty orders
+                if new_regime == "BULL_TREND" and old_regime != "BULL_TREND":
+                    params.size_factor = max(0.75, params.size_factor)
+                if strategy in ("iron_condor", "short_straddle") and volatile_regime:
+                    self._queue_rebacktest(strategy, symbol, f"regime→{new_regime}")
+            self._save_state()
 
     def get_params(self, strategy: str, symbol: str) -> AdaptiveParams:
         key = f"{strategy}::{symbol}"
-        if key not in self._params:
-            self._params[key] = self._init_params(strategy, symbol)
-        return self._params[key]
+        with self._lock:
+            if key not in self._params:
+                self._params[key] = self._init_params(strategy, symbol)
+            return self._params[key]
 
     def should_rebacktest(self, strategy: str, symbol: str) -> tuple[bool, str]:
         key = f"{strategy}::{symbol}"
-        for item in self._rebacktest_queue:
-            if item["strategy"] == strategy and item["symbol"] == symbol:
-                return True, item["reason"]
-        params = self._params.get(key)
-        if not params:
-            return True, "No history — first run"
-        gate_wr = GATE_THRESHOLDS.get(strategy, {}).get("win_rate", 55) / 100
-        if params.win_rate_20 < gate_wr * self.DECAY_THRESHOLD:
-            return True, f"Performance decay (WR {params.win_rate_20*100:.0f}%)"
+        with self._lock:
+            for item in self._rebacktest_queue:
+                if item["strategy"] == strategy and item["symbol"] == symbol:
+                    return True, item["reason"]
+            params = self._params.get(key)
+            if not params:
+                return True, "No history — first run"
+            gate_wr = GATE_THRESHOLDS.get(strategy, {}).get("win_rate", 55) / 100
+            if params.win_rate_20 < gate_wr * self.DECAY_THRESHOLD:
+                return True, f"Performance decay (WR {params.win_rate_20*100:.0f}%)"
         return False, "OK — using adaptive params"
 
     def summary(self) -> dict:
-        active   = sum(1 for p in self._params.values() if p.status == "ACTIVE")
-        cautious = sum(1 for p in self._params.values() if p.status == "CAUTIOUS")
-        retired  = sum(1 for p in self._params.values() if p.status == "RETIRED")
+        with self._lock:
+            params_snap = list(self._params.items())
+            rebacktest_len = len(self._rebacktest_queue)
+        active   = sum(1 for _, p in params_snap if p.status == "ACTIVE")
+        cautious = sum(1 for _, p in params_snap if p.status == "CAUTIOUS")
+        retired  = sum(1 for _, p in params_snap if p.status == "RETIRED")
         return {
-            "total_pairs": len(self._params), "active": active,
+            "total_pairs": len(params_snap), "active": active,
             "cautious": cautious, "retired": retired,
             "backtests_skipped": self.backtests_skipped,
             "backtests_run": self.backtests_run,
-            "rebacktest_queue": len(self._rebacktest_queue),
+            "rebacktest_queue": rebacktest_len,
             "efficiency_pct": round(self.backtests_skipped /
                 max(self.backtests_skipped + self.backtests_run, 1) * 100, 1),
-            "all_params": {k: v.to_dict() for k, v in list(self._params.items())[:20]},
+            "all_params": {k: v.to_dict() for k, v in params_snap[:20]},
         }
 
     def _init_params(self, strategy: str, symbol: str) -> AdaptiveParams:
@@ -345,7 +353,7 @@ class AdaptiveLearningEngine:
 
     def _queue_rebacktest(self, strategy: str, symbol: str, reason: str) -> None:
         entry = {"strategy": strategy, "symbol": symbol, "reason": reason,
-                 "queued_at": datetime.now().isoformat()}
+                 "queued_at": _now_ist().isoformat()}
         for item in self._rebacktest_queue:
             if item["strategy"] == strategy and item["symbol"] == symbol:
                 return
