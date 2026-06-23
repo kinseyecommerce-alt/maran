@@ -49,6 +49,23 @@ export function connectWS() {
         })
       } else if (data.event === 'signal') {
         addToast(`Signal: ${data.signal?.action || data.signal} on ${data.symbol}`, 'info')
+        const action = data.signal?.action || data.signal || 'SIGNAL'
+        const entryType = action === 'BUY' ? 'buy' : action === 'SELL' ? 'sell' : 'analyze'
+        useStore.getState().prependActivityEntry({
+          time: new Date().toLocaleTimeString('en-IN', { hour12: false, timeZone: 'Asia/Kolkata' }),
+          agent: (data.strategy || 'SYSTEM').toUpperCase(),
+          action: `${action} ${data.symbol}${data.price ? ` @ ${data.price}` : ''}`,
+          type: entryType,
+          cat: 'SIG',
+        })
+      } else if (data.event === 'regime_change') {
+        useStore.getState().prependActivityEntry({
+          time: new Date().toLocaleTimeString('en-IN', { hour12: false, timeZone: 'Asia/Kolkata' }),
+          agent: 'SYSTEM',
+          action: `MARKET REGIME CHANGED: ${data.from || ''} → ${data.to || data.regime || 'UNKNOWN'}`,
+          type: 'alert',
+          cat: 'WARN',
+        })
       }
     } catch { /* ignore parse errors */ }
   }

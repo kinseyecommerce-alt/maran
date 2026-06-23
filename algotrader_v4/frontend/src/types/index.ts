@@ -99,3 +99,13 @@ export interface HealthData {
 }
 
 export type TabId = 'positions' | 'orders' | 'brackets' | 'risk' | 'agents' | 'sebi'
+
+export interface AgentActivityEntry {
+  time?: string
+  agent?: string
+  action?: string
+  type?: 'buy' | 'sell' | 'alert' | 'loss' | 'system' | 'analyze'
+  cat?: 'EXEC' | 'RISK' | 'WARN' | 'SIG' | 'SYS'
+  confidence?: string
+  group?: string
+}

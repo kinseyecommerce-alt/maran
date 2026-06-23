@@ -10,6 +10,7 @@ import BracketsTab from './components/tabs/BracketsTab'
 import RiskTab from './components/tabs/RiskTab'
 import AgentsTab from './components/tabs/AgentsTab'
 import SebiTab from './components/tabs/SebiTab'
+import AgentCommandCenter from './components/AgentCommandCenter'
 import { connectWS } from './ws/websocket'
 import { useStore } from './store'
 import type { TabId } from './types'
@@ -57,6 +58,7 @@ function Toasts() {
 
 export default function App() {
   const [activeTab, setActiveTab] = useState<TabId>('positions')
+  const [agentView, setAgentView] = useState(false)
   const { riskStatus, positions } = useStore()
   const TabComponent = TAB_COMPONENTS[activeTab]
 
@@ -73,7 +75,9 @@ export default function App() {
 
   return (
     <div className="flex flex-col h-screen bg-slate-50 overflow-hidden">
-      <Header />
+      <Header onAgentView={() => setAgentView(true)} agentViewActive={agentView} />
+
+      {agentView && <AgentCommandCenter onClose={() => setAgentView(false)} />}
 
       {isHalted && (
         <div className="bg-red-600 text-white text-xs text-center py-1.5 font-medium shrink-0">

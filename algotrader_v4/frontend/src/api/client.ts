@@ -47,6 +47,7 @@ export const api = {
 
   // Agents
   agents: () => ax().get('/agents'),
+  agentActivity: () => ax().get('/agents/activity'),
   pauseAgent: (name: string) => ax().post(`/agents/${name}/pause`),
   resumeAgent: (name: string) => ax().post(`/agents/${name}/resume`),
 

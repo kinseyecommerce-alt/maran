@@ -1,5 +1,5 @@
 import React, { useEffect, useState, useCallback } from 'react'
-import { Activity, Wifi, WifiOff, Settings, Zap, ZapOff, Eye, EyeOff } from 'lucide-react'
+import { Activity, Wifi, WifiOff, Settings, Zap, ZapOff, Eye, EyeOff, Cpu } from 'lucide-react'
 import { clsx } from 'clsx'
 import { useStore } from '../../store'
 import { api } from '../../api/client'
@@ -7,7 +7,12 @@ import { Badge, Btn, Modal, Input } from '../ui'
 
 type SettingsTab = 'connection' | 'apikeys' | 'applogin'
 
-export default function Header() {
+interface HeaderProps {
+  onAgentView?: () => void
+  agentViewActive?: boolean
+}
+
+export default function Header({ onAgentView, agentViewActive }: HeaderProps) {
   const { health, botStatus, wsConnected, apiKey, apiBase, setApiKey, setApiBase, setHealth, setBotStatus, addToast } = useStore()
   const [time, setTime] = useState(new Date())
   const [configOpen, setConfigOpen] = useState(false)
@@ -230,6 +235,23 @@ export default function Header() {
           <><Zap className="w-3.5 h-3.5 mr-1 inline-block" />Start Bot</>
         )}
       </Btn>
+
+      {/* Agent Command Center toggle */}
+      {onAgentView && (
+        <button
+          onClick={onAgentView}
+          title="Agent Command Center"
+          className={clsx(
+            'flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg text-xs font-medium transition-colors',
+            agentViewActive
+              ? 'bg-emerald-600 text-white'
+              : 'bg-slate-900 text-emerald-400 hover:bg-slate-800 border border-slate-700',
+          )}
+        >
+          <Cpu className="w-3.5 h-3.5" />
+          <span className="hidden sm:inline">Agents</span>
+        </button>
+      )}
 
       {/* Settings button */}
       <button

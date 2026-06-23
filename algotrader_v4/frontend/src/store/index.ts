@@ -1,5 +1,5 @@
 import { create } from 'zustand'
-import type { TickData, Position, Order, Bracket, RiskStatus, Agent, BotStatus, HealthData } from '../types'
+import type { TickData, Position, Order, Bracket, RiskStatus, Agent, BotStatus, HealthData, AgentActivityEntry } from '../types'
 
 interface AppStore {
   // Connection
@@ -44,6 +44,11 @@ interface AppStore {
   // Agents
   agents: Record<string, Agent>
   setAgents: (a: Record<string, Agent>) => void
+
+  // Agent activity log
+  agentActivity: AgentActivityEntry[]
+  setAgentActivity: (a: AgentActivityEntry[]) => void
+  prependActivityEntry: (e: AgentActivityEntry) => void
 
   // Toasts
   toasts: { id: string; msg: string; type: 'buy' | 'sell' | 'info' | 'error' }[]
@@ -93,6 +98,10 @@ export const useStore = create<AppStore>((set, get) => ({
 
   agents: {},
   setAgents: (a) => set({ agents: a }),
+
+  agentActivity: [],
+  setAgentActivity: (a) => set({ agentActivity: a }),
+  prependActivityEntry: (e) => set((s) => ({ agentActivity: [e, ...s.agentActivity].slice(0, 100) })),
 
   toasts: [],
   addToast: (msg, type = 'info') => {
