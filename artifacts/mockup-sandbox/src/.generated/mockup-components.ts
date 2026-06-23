@@ -5,5 +5,8 @@ export const modules: ModuleMap = {
   "./components/mockups/algotrader-dashboard/AgentCommandCenterV2.tsx": () => import("../components/mockups/algotrader-dashboard/AgentCommandCenterV2.tsx"),
   "./components/mockups/algotrader-dashboard/AgentCommandCenterV3.tsx": () => import("../components/mockups/algotrader-dashboard/AgentCommandCenterV3.tsx"),
   "./components/mockups/algotrader-dashboard/PrecisionInstrument.tsx": () => import("../components/mockups/algotrader-dashboard/PrecisionInstrument.tsx"),
-  "./components/mockups/algotrader-dashboard/RiskFirstDashboard.tsx": () => import("../components/mockups/algotrader-dashboard/RiskFirstDashboard.tsx")
+  "./components/mockups/algotrader-dashboard/RiskFirstDashboard.tsx": () => import("../components/mockups/algotrader-dashboard/RiskFirstDashboard.tsx"),
+  "./components/mockups/algotrader-dashboard/SettingsDrawer.tsx": () => import("../components/mockups/algotrader-dashboard/SettingsDrawer.tsx"),
+  "./components/mockups/algotrader-dashboard/SettingsModalRefined.tsx": () => import("../components/mockups/algotrader-dashboard/SettingsModalRefined.tsx"),
+  "./components/mockups/algotrader-dashboard/SettingsSidebarNav.tsx": () => import("../components/mockups/algotrader-dashboard/SettingsSidebarNav.tsx")
 };
