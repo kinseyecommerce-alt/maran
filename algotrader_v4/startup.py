@@ -38,7 +38,7 @@ for key in REQUIRED:
         print(f"  ✗  {key} — NOT SET")
         ok = False
     else:
-        print(f"  ✓  {key} — ok ({val[:4]}…)")
+        print(f"  ✓  {key} — ok (set, {len(val)} chars)")
 
 for key in OPTIONAL:
     val = os.getenv(key, "")

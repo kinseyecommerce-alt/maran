@@ -47,7 +47,8 @@ class PortfolioVaR:
 
         notionals = np.array([abs(p["quantity"]) * p.get("last_price", 0.0) for p, _ in valid])
         total_notional = float(notionals.sum())
-        if total_notional == 0.0:
+        if total_notional < 1e-6:
+            logger.warning("[PortfolioVaR] total_notional near-zero ({}) — returning zero VaR", total_notional)
             return {**_zero, "n_positions": len(active)}
 
         weights = notionals / total_notional
@@ -65,6 +66,9 @@ class PortfolioVaR:
             return {**_zero, "total_notional": round(total_notional, 2), "n_positions": len(active)}
         mu = float(portfolio_rets.mean())
         sigma = float(portfolio_rets.std(ddof=1))
+        if sigma == 0.0:
+            logger.warning("[PortfolioVaR] zero sigma (flat returns) — returning zero VaR")
+            return {**_zero, "total_notional": round(total_notional, 2), "n_positions": len(active)}
 
         z95 = float(_stats.norm.ppf(0.05))
         z99 = float(_stats.norm.ppf(0.01))

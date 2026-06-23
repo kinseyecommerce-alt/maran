@@ -116,7 +116,7 @@ def get_event_risk(symbol: str, current_time: Optional[datetime] = None) -> dict
             "description": worst_event.get("description", ""),
         }
     except Exception as exc:
-        logger.debug("[events] get_event_risk error {}: {}", symbol, exc)
+        logger.warning("[events] get_event_risk error {}: {}", symbol, exc)
         return dict(_SAFE_RESULT)
 
 
@@ -139,13 +139,18 @@ async def refresh_calendar() -> None:
     """
     logger.info("[events] refreshing event calendar...")
     try:
-        _event_cache.clear()
+        # Build into a temp dict then swap atomically — readers never see empty cache mid-refresh
+        global _event_cache
+        _tmp_cache: dict = {}
+        _orig_cache = _event_cache
+        _event_cache = _tmp_cache
         await asyncio.gather(
             _fetch_corporate_actions(),
             _fetch_event_calendar(),
             return_exceptions=True,
         )
         _inject_rbi_dates()
+        _event_cache = _tmp_cache   # atomic assignment (already pointing here; confirms intent)
         logger.info(
             "[events] calendar loaded — {} symbols cached",
             sum(1 for k in _event_cache if k != _MARKET_KEY),

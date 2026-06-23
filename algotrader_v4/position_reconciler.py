@@ -226,8 +226,9 @@ class PositionReconciler:
                            pos["symbol"], exc)
         try:
             risk_manager.position_closed()
-        except Exception:
-            pass
+        except Exception as _exc:
+            logger.warning("[Reconciler] risk_manager.position_closed() failed for {}: {}",
+                           trade_sym, _exc)
 
         self.stats.full_exits += 1
         return {"type": "FULL_EXTERNAL_EXIT", "symbol": trade_sym,

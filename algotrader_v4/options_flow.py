@@ -68,7 +68,8 @@ _flow_lock = threading.Lock()   # guards _iv_history, _iv_history_date, and _cac
 
 
 def get_cached_flow(symbol: str) -> Optional[OptionsFlow]:
-    f = _cache.get(symbol.upper())
+    with _flow_lock:
+        f = _cache.get(symbol.upper())
     return f if (f and time.time() - f.updated_at < _TTL) else None
 
 
@@ -128,11 +129,12 @@ def analyze_flow(symbol: str, chain: list[dict], spot: float) -> OptionsFlow:
 
             # IV spike — only track and check when IV is valid (skip missing/zero-IV strikes)
             hkey = f"{strike}_{side}"
-            hist = sym_hist.setdefault(hkey, [])
-            if iv > 0.001:
-                hist.append(iv)
-                if len(hist) > 20:
-                    hist.pop(0)
+            with _flow_lock:
+                hist = sym_hist.setdefault(hkey, [])
+                if iv > 0.001:
+                    hist.append(iv)
+                    if len(hist) > 20:
+                        hist.pop(0)
                 if len(hist) >= 4:
                     avg = sum(hist[:-1]) / (len(hist) - 1)
                     if avg > 0 and abs(iv - avg) / avg > IV_SPIKE_THRESHOLD:

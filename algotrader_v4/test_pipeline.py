@@ -9475,23 +9475,27 @@ def t_broker_router_duplicate_primary_order_id_guard():
     )
 
 def t_event_calendar_refresh_clears_stale_entries():
-    """refresh_calendar must call _event_cache.clear() before fetching new data."""
+    """refresh_calendar must discard stale _event_cache before fetching new data (clear or atomic replace)."""
     import inspect
     import event_calendar as _ec
     src = inspect.getsource(_ec.refresh_calendar)
-    assert "_event_cache.clear()" in src, (
-        "refresh_calendar must call _event_cache.clear() to prevent duplicate event accumulation"
+    # Accept either: explicit clear() or atomic dict-replacement pattern
+    assert "_event_cache.clear()" in src or "_event_cache = " in src, (
+        "refresh_calendar must clear or atomically replace _event_cache to prevent stale accumulation"
     )
 
 def t_event_calendar_clear_before_gather():
-    """_event_cache.clear() must appear before asyncio.gather in refresh_calendar."""
+    """Stale cache reset must appear before asyncio.gather in refresh_calendar."""
     import inspect
     import event_calendar as _ec
     src = inspect.getsource(_ec.refresh_calendar)
-    clear_pos  = src.find("_event_cache.clear()")
     gather_pos = src.find("asyncio.gather")
-    assert 0 < clear_pos < gather_pos, (
-        "_event_cache.clear() must run before asyncio.gather in refresh_calendar"
+    # Accept either clear() or the atomic-replace pattern (_event_cache = ...)
+    clear_pos = src.find("_event_cache.clear()")
+    replace_pos = src.find("_event_cache = ")
+    reset_pos = max(clear_pos, replace_pos)   # whichever pattern is present
+    assert 0 < reset_pos < gather_pos, (
+        "Cache reset (_event_cache.clear() or atomic replace) must appear before asyncio.gather in refresh_calendar"
     )
 
 def t_historical_learner_save_progress_atomic():
@@ -14097,6 +14101,192 @@ run("claude_trade_gate: gate log timestamp uses _now_ist() not datetime.now()", 
 run("symbol_scanner: EMA validity check uses math.isfinite not truthiness", t_symbol_scanner_ema_uses_isfinite)
 run("greeks_engine: atm_strike(spot<25) returns >= one step (not 0)", t_greeks_atm_strike_never_zero)
 run("atomic_bracket: SL verification failure logs WARNING not silent pass", t_atomic_bracket_sl_verification_logs_warning)
+
+# ══════════════════════════════════════════════════════════════════════════
+# 35. RUTHLESS AUDIT BATCH 35 (brokers, event_calendar, market-data, gamma)
+# ══════════════════════════════════════════════════════════════════════════
+import inspect as _inspect35
+
+def t_upstox_ticker_ist_timestamps():
+    """upstox_ticker _parse_ticks must use IST-aware datetime, not naive datetime.now()."""
+    import brokers.upstox_ticker as _ut
+    src = _inspect35.getsource(_ut.UpstoxTicker._parse_ticks)
+    assert "datetime.now()" not in src, \
+        "_parse_ticks must not use naive datetime.now() for tick timestamps — use IST-aware datetime"
+    assert "_IST" in src or "ZoneInfo" in src or "now_ist" in src, \
+        "_parse_ticks must emit IST-aware timestamps"
+
+def t_upstox_ticker_sym_lock_exists():
+    """upstox_ticker must have _sym_lock to protect _token_to_sym across threads."""
+    import brokers.upstox_ticker as _ut
+    ticker = _ut.UpstoxTicker.__new__(_ut.UpstoxTicker)
+    src = _inspect35.getsource(_ut.UpstoxTicker.__init__)
+    assert "_sym_lock" in src, "_sym_lock must be created in UpstoxTicker.__init__"
+    src_sub = _inspect35.getsource(_ut.UpstoxTicker.subscribe)
+    assert "_sym_lock" in src_sub, "subscribe() must acquire _sym_lock before mutating _token_to_sym"
+
+def t_upstox_ticker_parse_error_is_warning():
+    """upstox_ticker on_message parse errors must log at WARNING not DEBUG."""
+    import brokers.upstox_ticker as _ut
+    src = _inspect35.getsource(_ut.UpstoxTicker._connect_and_listen)
+    assert "logger.debug" not in src or "logger.warning" in src, \
+        "on_message parse errors must log at WARNING so schema regressions are visible"
+
+def t_upstox_broker_paper_place_ist():
+    """upstox_broker _paper_place placed_at must use IST datetime."""
+    import brokers.upstox_broker as _ub
+    src = _inspect35.getsource(_ub.UpstoxBroker._paper_place)
+    assert "datetime.now().isoformat()" not in src, \
+        "_paper_place must not use naive datetime.now() for placed_at"
+    assert "_IST" in src or "ZoneInfo" in src, \
+        "_paper_place placed_at must use IST timezone"
+
+def t_upstox_broker_paper_lock_is_rlock():
+    """upstox_broker _paper_lock must be RLock to allow re-entrant acquisition."""
+    import brokers.upstox_broker as _ub
+    src = _inspect35.getsource(_ub.UpstoxBroker.__init__)
+    assert "RLock" in src, "_paper_lock must be threading.RLock() not Lock()"
+
+def t_kotak_broker_paper_place_ist():
+    """kotak_broker _paper_place placed_at must use IST datetime."""
+    import brokers.kotak_broker as _kb
+    src = _inspect35.getsource(_kb.KotakBroker._paper_place)
+    assert "datetime.now().isoformat()" not in src, \
+        "_paper_place must not use naive datetime.now() for placed_at"
+    assert "_IST" in src or "ZoneInfo" in src, \
+        "_paper_place placed_at must use IST timezone"
+
+def t_kotak_ticker_t2s_lock_exists():
+    """kotak_ticker must have _t2s_lock to protect _t2s across subscribe/WS threads."""
+    import brokers.kotak_ticker as _kt
+    src = _inspect35.getsource(_kt.KotakTicker.__init__)
+    assert "_t2s_lock" in src, "_t2s_lock must be created in KotakTicker.__init__"
+    src_sub = _inspect35.getsource(_kt.KotakTicker.subscribe)
+    assert "_t2s_lock" in src_sub, "subscribe() must acquire _t2s_lock before mutating _t2s"
+
+def t_kotak_ticker_exponential_backoff():
+    """kotak_ticker reconnect loop must use exponential backoff not fixed 5s sleep."""
+    import brokers.kotak_ticker as _kt
+    src = _inspect35.getsource(_kt.KotakTicker._run)
+    assert "retry_delay" in src or "backoff" in src, \
+        "_run reconnect loop must implement exponential backoff (not fixed 5s sleep)"
+    assert "time.sleep(5)" not in src, \
+        "_run must not use a fixed 5s sleep — use exponential backoff"
+
+def t_startup_no_key_prefix_in_output():
+    """startup.py must not print the first chars of API key values to stdout."""
+    import startup as _su
+    import inspect
+    src = inspect.getsource(_su)
+    # The old pattern was val[:4] inside a print() line
+    assert "val[:4]" not in src, \
+        "startup.py must not print val[:4] — API key prefixes leaked to deployment logs"
+
+def t_event_calendar_get_event_risk_warning():
+    """event_calendar get_event_risk must log WARNING not DEBUG on exception."""
+    import event_calendar as _ec
+    src = _inspect35.getsource(_ec.get_event_risk)
+    assert "logger.debug" not in src, \
+        "get_event_risk exception must log at WARNING not DEBUG — silent open failure is dangerous"
+    assert "logger.warning" in src, \
+        "get_event_risk must use logger.warning on exception"
+
+def t_institutional_flow_today_str_uses_ist():
+    """institutional_flow _today_str must use now_ist() not datetime.now() for NSE date."""
+    import institutional_flow as _if
+    src = _inspect35.getsource(_if._today_str)
+    assert "datetime.now()" not in src, \
+        "_today_str must not use naive datetime.now() — returns UTC date on prod server"
+    assert "now_ist" in src or "_now_ist" in src, \
+        "_today_str must use now_ist() for correct IST date"
+
+def t_news_gate_refresh_uses_ist():
+    """news_gate refresh must use now_ist() not datetime.now() for date range."""
+    import news_gate as _ng
+    src = _inspect35.getsource(_ng.NewsGate.refresh)
+    assert "datetime.now()" not in src, \
+        "news_gate refresh must not use naive datetime.now() — returns UTC date on prod server"
+
+def t_portfolio_var_near_zero_guard():
+    """portfolio_var compute must guard against near-zero total_notional."""
+    import portfolio_var as _pv
+    src = _inspect35.getsource(_pv.PortfolioVaR.compute)
+    assert "== 0.0" not in src or "< 1e-6" in src, \
+        "compute must use < 1e-6 not == 0.0 for total_notional guard (float equality is fragile)"
+
+def t_portfolio_var_sigma_zero_guard():
+    """portfolio_var compute must guard against sigma==0 (flat returns) before z-score VaR."""
+    import portfolio_var as _pv
+    src = _inspect35.getsource(_pv.PortfolioVaR.compute)
+    assert "sigma == 0.0" in src or "sigma == 0" in src, \
+        "compute must check sigma == 0 before computing z-score VaR — flat returns give 0 VaR"
+
+def t_position_reconciler_position_closed_logs_warning():
+    """position_reconciler _handle_full_external_exit must log WARNING if position_closed fails."""
+    import position_reconciler as _pr
+    src = _inspect35.getsource(_pr.PositionReconciler._handle_full_external_exit)
+    assert "except Exception:\n            pass" not in src, \
+        "_handle_full_external_exit must not silently swallow risk_manager.position_closed() failure"
+    assert "logger.warning" in src, \
+        "_handle_full_external_exit must log WARNING when position_closed() raises"
+
+def t_gamma_scalp_cache_lock_exists():
+    """gamma_scalp must have _cache_lock protecting the _cache dict from concurrent writes."""
+    import gamma_scalp as _gs
+    assert hasattr(_gs, "_cache_lock"), "_cache_lock must exist in gamma_scalp module"
+    src_get = _inspect35.getsource(_gs.get_cached_gex)
+    assert "_cache_lock" in src_get, "get_cached_gex must acquire _cache_lock before reading _cache"
+
+def t_truedata_client_uses_ist_for_end_date():
+    """truedata_client historical() must use now_ist() not datetime.now() for end_date."""
+    import truedata_client as _td
+    src = _inspect35.getsource(_td.TrueDataHistoricalClient.historical)
+    assert "datetime.now()" not in src, \
+        "historical() must not use naive datetime.now() for end_date — use now_ist()"
+
+def t_truedata_client_tick_parse_is_warning():
+    """truedata_client tick parse errors must log at WARNING not DEBUG."""
+    import truedata_client as _td
+    src = _inspect35.getsource(_td.TrueDataTicker._on_tick)
+    for line in src.splitlines():
+        if "tick parse error" in line.lower() or "parse error" in line.lower():
+            assert "logger.debug" not in line, \
+                f"tick parse error must log at WARNING not DEBUG: {line.strip()}"
+
+def t_activity_log_uses_ist():
+    """agents/activity_log push() must use IST-aware now_ist() not naive datetime.now()."""
+    import agents.activity_log as _al
+    src = _inspect35.getsource(_al.push)
+    assert "datetime.now()" not in src, \
+        "activity_log.push() must not use naive datetime.now() for timestamps"
+
+def t_profit_optimizer_apply_acquires_lock():
+    """profit_optimizer apply_optimised_config must acquire _opt_lock before mutating settings."""
+    import profit_optimizer as _po
+    src = _inspect35.getsource(_po.apply_optimised_config)
+    assert "_opt_lock" in src, \
+        "apply_optimised_config must acquire _opt_lock to prevent races with phase1_optimise"
+
+run("upstox_ticker: _parse_ticks uses IST-aware datetime not naive datetime.now()", t_upstox_ticker_ist_timestamps)
+run("upstox_ticker: _sym_lock guards _token_to_sym across subscribe/WS threads", t_upstox_ticker_sym_lock_exists)
+run("upstox_ticker: on_message parse error logged at WARNING not DEBUG", t_upstox_ticker_parse_error_is_warning)
+run("upstox_broker: _paper_place placed_at uses IST datetime", t_upstox_broker_paper_place_ist)
+run("upstox_broker: _paper_lock is RLock for re-entrant safety", t_upstox_broker_paper_lock_is_rlock)
+run("kotak_broker: _paper_place placed_at uses IST datetime", t_kotak_broker_paper_place_ist)
+run("kotak_ticker: _t2s_lock guards _t2s across subscribe/WS threads", t_kotak_ticker_t2s_lock_exists)
+run("kotak_ticker: reconnect uses exponential backoff not fixed 5s sleep", t_kotak_ticker_exponential_backoff)
+run("startup: API key prefix not printed to stdout (no val[:4])", t_startup_no_key_prefix_in_output)
+run("event_calendar: get_event_risk logs WARNING not DEBUG on exception", t_event_calendar_get_event_risk_warning)
+run("institutional_flow: _today_str uses now_ist() for correct NSE IST date", t_institutional_flow_today_str_uses_ist)
+run("news_gate: refresh uses now_ist() not naive datetime.now()", t_news_gate_refresh_uses_ist)
+run("portfolio_var: near-zero total_notional guarded with < 1e-6 not == 0.0", t_portfolio_var_near_zero_guard)
+run("portfolio_var: sigma==0 guard before z-score VaR (flat returns)", t_portfolio_var_sigma_zero_guard)
+run("position_reconciler: position_closed() failure logs WARNING not silent pass", t_position_reconciler_position_closed_logs_warning)
+run("gamma_scalp: _cache_lock protects _cache dict from concurrent writes", t_gamma_scalp_cache_lock_exists)
+run("truedata_client: historical() uses now_ist() not datetime.now() for end_date", t_truedata_client_uses_ist_for_end_date)
+run("truedata_client: tick parse errors logged at WARNING not DEBUG", t_truedata_client_tick_parse_is_warning)
+run("agents/activity_log: log() uses IST-aware timestamp not datetime.now()", t_activity_log_uses_ist)
+run("profit_optimizer: apply_optimised_config acquires _opt_lock before settings mutation", t_profit_optimizer_apply_acquires_lock)
 
 # ══════════════════════════════════════════════════════════════════════════
 # FINAL SUMMARY

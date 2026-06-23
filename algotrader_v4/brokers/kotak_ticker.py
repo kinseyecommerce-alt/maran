@@ -57,6 +57,7 @@ class KotakTicker:
         self._ws: Any   = None
         self._thread: threading.Thread | None = None
         self._running   = False
+        self._t2s_lock  = threading.Lock()  # guards _t2s across subscribe/WS threads
 
     # ── Public API ────────────────────────────────────────────────────────────
 
@@ -82,9 +83,10 @@ class KotakTicker:
     def subscribe(self, tokens: list[int | str]) -> None:
         """Subscribe to live ticks for a list of instrument tokens."""
         # Persist tokens so _on_ws_open re-subscribes them after reconnect
-        for t in tokens:
-            if t not in self._t2s:
-                self._t2s[t] = str(t)
+        with self._t2s_lock:
+            for t in tokens:
+                if t not in self._t2s:
+                    self._t2s[t] = str(t)
         if not self._ws:
             return
         msg = json.dumps({
@@ -106,6 +108,7 @@ class KotakTicker:
             "Sid":           self._sid,
             "neo-fin-key":   "neotradeapi",
         }
+        retry_delay = 1.0
         while self._running:
             try:
                 self._ws = websocket.WebSocketApp(
@@ -117,19 +120,23 @@ class KotakTicker:
                     on_open=self._on_ws_open,
                 )
                 self._ws.run_forever(ping_interval=_PING_INTERVAL)
+                retry_delay = 1.0  # clean close: reset backoff
             except Exception as exc:
                 logger.error("[KotakTicker] connection error: {}", exc)
             if self._running:
-                logger.info("[KotakTicker] reconnecting in 5s…")
-                time.sleep(5)
+                logger.info("[KotakTicker] reconnecting in {}s…", retry_delay)
+                time.sleep(retry_delay)
+                retry_delay = min(retry_delay * 2, 60.0)
 
     def _on_ws_open(self, ws: Any) -> None:
         logger.info("[KotakTicker] connected")
         if self._on_connect:
             self._on_connect(ws, {})
         # Auto-subscribe all registered tokens
-        if self._t2s:
-            self.subscribe(list(self._t2s.keys()))
+        with self._t2s_lock:
+            tokens_snapshot = list(self._t2s.keys())
+        if tokens_snapshot:
+            self.subscribe(tokens_snapshot)
 
     def _on_ws_error(self, ws: Any, error: Any) -> None:
         logger.warning("[KotakTicker] error: {}", error)
@@ -156,7 +163,8 @@ class KotakTicker:
         if not token:   # guard: empty token means no usable instrument info
             return
 
-        symbol = self._t2s.get(token) or self._t2s.get(int(token) if token.isdigit() else token, token)
+        with self._t2s_lock:
+            symbol = self._t2s.get(token) or self._t2s.get(int(token) if token.isdigit() else token, token)
         lp     = data.get("lp", data.get("c", 0))
         # Kotak sends numeric fields as strings; empty strings must default to 0
         try:

@@ -17,6 +17,9 @@ import threading
 import uuid
 from datetime import datetime
 from typing import Any, Optional
+from zoneinfo import ZoneInfo
+
+_IST = ZoneInfo("Asia/Kolkata")
 
 import httpx
 from loguru import logger
@@ -98,7 +101,7 @@ class UpstoxBroker(BaseBroker):
         self._access_token: str = settings.upstox_access_token or ""
         self._paper_orders:    list[dict] = []
         self._paper_positions: list[dict] = []
-        self._paper_lock  = threading.Lock()
+        self._paper_lock  = threading.RLock()  # RLock: _paper_place and check_paper_triggers both call _update_paper_position under this lock
         self._token_lock  = threading.Lock()
 
     # ── Auth ─────────────────────────────────────────────────────────────────
@@ -508,7 +511,7 @@ class UpstoxBroker(BaseBroker):
             "trigger_price":    trigger_price,
             "status":           status,
             "tag":              tag,
-            "placed_at":        datetime.now().isoformat(),
+            "placed_at":        datetime.now(_IST).isoformat(),
         }
         with self._paper_lock:
             self._paper_orders.append(record)

@@ -28,6 +28,9 @@ import threading
 import time
 from datetime import datetime
 from typing import Any, Callable, Dict, Optional
+from zoneinfo import ZoneInfo
+
+_IST = ZoneInfo("Asia/Kolkata")
 
 import httpx
 from loguru import logger
@@ -65,6 +68,7 @@ class UpstoxTicker:
         self._ws: Any = None
         self._running = False
         self._thread: Optional[threading.Thread] = None
+        self._sym_lock = threading.Lock()  # guards _token_to_sym across subscribe/WS threads
 
     def connect(self, threaded: bool = True) -> None:
         """Start the WebSocket connection. If threaded=True, runs in a daemon thread."""
@@ -160,7 +164,7 @@ class UpstoxTicker:
                 if ticks and self.on_ticks:
                     self.on_ticks(ticks)
             except Exception as exc:
-                logger.debug("[UpstoxTicker] Message parse error: {}", exc)
+                logger.warning("[UpstoxTicker] Message parse error: {}", exc)
 
         def on_error(ws, error):
             logger.warning("[UpstoxTicker] WS error: {}", error)
@@ -216,7 +220,8 @@ class UpstoxTicker:
         feeds = data.get("feeds", {})
 
         for instrument_key, feed_data in feeds.items():
-            symbol = self._token_to_sym.get(instrument_key, instrument_key)
+            with self._sym_lock:
+                symbol = self._token_to_sym.get(instrument_key, instrument_key)
 
             # Navigate the nested structure
             ff = feed_data.get("ff", {})
@@ -236,12 +241,12 @@ class UpstoxTicker:
             sell_qty  = int(market_ff.get("tsq", 0))    # total sell qty
             atp       = float(market_ff.get("atp", ltp))  # avg trade price
 
-            # Parse last trade time
+            # Parse last trade time (IST-aware)
             ltt_raw = ltpc.get("ltt", "")
             try:
-                ltt = datetime.fromisoformat(ltt_raw) if ltt_raw else datetime.now()
+                ltt = datetime.fromisoformat(ltt_raw) if ltt_raw else datetime.now(_IST)
             except Exception:
-                ltt = datetime.now()
+                ltt = datetime.now(_IST)
 
             # Compute change %
             change = round((ltp - close) / close * 100, 4) if close else 0.0
@@ -272,7 +277,7 @@ class UpstoxTicker:
                 },
                 "change":           change,
                 "last_trade_time":  ltt,
-                "timestamp":        datetime.now(),
+                "timestamp":        datetime.now(_IST),
                 "oi":               int(market_ff.get("oi", 0)),
             }
             ticks.append(tick)
@@ -287,10 +292,11 @@ class UpstoxTicker:
     def subscribe(self, tokens: list) -> None:
         """Subscribe to instrument keys (KiteTicker-compatible API)."""
         new_tokens = []
-        for token in tokens:
-            if token not in self._token_to_sym:
-                self._token_to_sym[token] = str(token)
-                new_tokens.append(token)
+        with self._sym_lock:
+            for token in tokens:
+                if token not in self._token_to_sym:
+                    self._token_to_sym[token] = str(token)
+                    new_tokens.append(token)
         # Send incremental subscription if already connected; otherwise the
         # tokens will be included in the next on_open subscription message.
         if new_tokens and self._ws is not None and self._running:

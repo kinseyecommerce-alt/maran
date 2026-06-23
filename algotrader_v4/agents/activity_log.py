@@ -7,8 +7,9 @@ from __future__ import annotations
 
 import threading
 from collections import deque
-from datetime import datetime
 from typing import Optional
+
+from ist_clock import now_ist as _now_ist
 
 _log:  deque[dict]   = deque(maxlen=200)
 _lock: threading.Lock = threading.Lock()
@@ -54,7 +55,7 @@ def push(
 ) -> None:
     with _lock:
         _log.appendleft({
-            "time":        datetime.now().strftime("%H:%M:%S"),
+            "time":        _now_ist().strftime("%H:%M:%S"),
             "agent":       agent,
             "color":       AGENT_COLORS.get(agent, "#6b7280"),
             "event":       event,

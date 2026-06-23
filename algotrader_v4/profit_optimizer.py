@@ -34,6 +34,8 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
+from ist_clock import now_ist as _now_ist
+
 from loguru import logger
 
 from backtest_engine import BacktestEngine, BacktestResult
@@ -377,7 +379,7 @@ def phase3_regime_config(p1: dict, p2: dict, verbose: bool = True) -> dict:
     }
 
     with open(_REGIME_F, "w") as f:
-        json.dump({"generated_at": datetime.now().isoformat(),
+        json.dump({"generated_at": _now_ist().isoformat(),
                    "base_threshold": threshold,
                    "regimes": regime_config}, f, indent=2)
 
@@ -399,6 +401,11 @@ def apply_optimised_config(regime: str | None = None) -> dict:
     Apply the optimised parameters to the live settings object.
     If regime is given, use regime-specific overrides; otherwise use base optimised params.
     """
+    with _opt_lock:
+        return _apply_optimised_config_locked(regime)
+
+
+def _apply_optimised_config_locked(regime: str | None = None) -> dict:
     applied: dict[str, Any] = {}
 
     # Load regime config if available
@@ -438,6 +445,7 @@ def apply_optimised_config(regime: str | None = None) -> dict:
     return {"status": "applied", "regime": regime, "settings": applied}
 
 
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Persistence helpers
 # ─────────────────────────────────────────────────────────────────────────────
@@ -451,7 +459,7 @@ def _save_params(phase: str, data: dict) -> None:
         except (json.JSONDecodeError, OSError):
             logger.warning("[optimizer] corrupt params file — starting fresh")
     existing[phase] = data
-    existing["updated_at"] = datetime.now().isoformat()
+    existing["updated_at"] = _now_ist().isoformat()
     tmp = _PARAMS_F.with_suffix(".tmp")
     with open(tmp, "w") as f:
         json.dump(existing, f, indent=2)

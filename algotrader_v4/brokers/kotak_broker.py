@@ -15,9 +15,13 @@ Exchange segments: nse_cm (NSE equity), nse_fo (NSE F&O), bse_cm, bse_fo, mcx_fo
 """
 from __future__ import annotations
 
+import threading
 import uuid
 from datetime import datetime
 from threading import Lock
+from zoneinfo import ZoneInfo
+
+_IST = ZoneInfo("Asia/Kolkata")
 from typing import Any, Optional
 
 import httpx
@@ -118,7 +122,7 @@ class KotakBroker(BaseBroker):
         self._sid:          str = settings.kotak_sid or ""
         self._consumer_key: str = settings.kotak_consumer_key or ""
         self._paper_orders:    dict[str, dict] = {}
-        self._paper_orders_lock = Lock()
+        self._paper_orders_lock = threading.RLock()  # RLock: _paper_place and check_paper_triggers both call _update_paper_position under this lock
         self._paper_positions: list[dict] = []
         self._token_lock = Lock()
 
@@ -466,7 +470,7 @@ class KotakBroker(BaseBroker):
             "trigger_price":    trigger_price,
             "status":           status,
             "tag":              tag,
-            "placed_at":        datetime.now().isoformat(),
+            "placed_at":        datetime.now(_IST).isoformat(),
         }
         with self._paper_orders_lock:
             self._paper_orders[order_id] = record

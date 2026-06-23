@@ -24,6 +24,7 @@ from typing import Optional
 
 from loguru import logger
 
+from ist_clock import now_ist as _now_ist
 from market_data import nse_client
 
 # ── NSE API endpoints ──────────────────────────────────────────────────────────
@@ -61,8 +62,8 @@ def _get_refresh_lock() -> asyncio.Lock:
 # ── Helpers ────────────────────────────────────────────────────────────────────
 
 def _today_str() -> str:
-    """Return today's date as DD-MM-YYYY for NSE API."""
-    return datetime.now().strftime("%d-%m-%Y")
+    """Return today's IST date as DD-MM-YYYY for NSE API."""
+    return _now_ist().strftime("%d-%m-%Y")
 
 
 def _compute_delivery_score(delivery_pct: float) -> float:
@@ -317,7 +318,7 @@ def _build_cache_entry(
         "block_deal_direction": block_deal_direction,
         "block_deal_qty":       block_deal_qty,
         "institutional_score":  round(institutional_score, 2),
-        "refreshed_at":         datetime.now().isoformat(),
+        "refreshed_at":         _now_ist().isoformat(),
         "is_default":           is_default,
     }
 

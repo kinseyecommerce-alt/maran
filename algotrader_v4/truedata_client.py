@@ -250,7 +250,7 @@ class TrueDataTicker:
                 if not f.cancelled() and f.exception() else None
             )
         except Exception as exc:
-            logger.debug("[TrueDataTicker] tick parse error: {}", exc)
+            logger.warning("[TrueDataTicker] tick parse error: {}", exc)
 
     def stop(self) -> None:
         self._connected = False
@@ -286,7 +286,7 @@ class TrueDataHistoricalClient:
             return pd.DataFrame()
 
         bar_size   = self._INTERVAL_MAP.get(interval, "1 min")
-        end_date   = datetime.now()
+        end_date   = now_ist()
         start_date = end_date - timedelta(days=lookback_days)
         instrument = _td_symbol(symbol, exchange)
 
