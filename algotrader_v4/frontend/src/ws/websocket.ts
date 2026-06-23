@@ -8,8 +8,14 @@ export function connectWS() {
   const { apiBase, apiKey, setWsConnected, setTick, addToast } = useStore.getState()
   if (ws && ws.readyState === WebSocket.OPEN) return
 
-  const wsBase = apiBase.replace(/^http/, 'ws')
-  const url = `${wsBase}/ws${apiKey ? `?token=${apiKey}` : ''}`
+  let url: string
+  if (apiBase.startsWith('/')) {
+    const wsProto = window.location.protocol === 'https:' ? 'wss:' : 'ws:'
+    url = `${wsProto}//${window.location.host}/ws-proxy/ws${apiKey ? `?token=${apiKey}` : ''}`
+  } else {
+    const wsBase = apiBase.replace(/^http/, 'ws')
+    url = `${wsBase}/ws${apiKey ? `?token=${apiKey}` : ''}`
+  }
 
   ws = new WebSocket(url)
 

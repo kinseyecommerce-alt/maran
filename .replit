@@ -1,0 +1,68 @@
+modules = ["python-3.12", "web", "nodejs-20", "bash"]
+[agent]
+expertMode = true
+stack = "BEST_EFFORT_FALLBACK"
+
+[nix]
+channel = "stable-25_05"
+packages = ["cairo", "cargo", "ffmpeg-full", "freetype", "ghostscript", "glibcLocales", "gobject-introspection", "gtk3", "libiconv", "libxcrypt", "pkg-config", "qhull", "rustc", "tcl", "tk", "xsimd"]
+
+[workflows]
+runButton = "Project"
+
+[[workflows.workflow]]
+name = "Project"
+mode = "parallel"
+author = "agent"
+
+[[workflows.workflow.tasks]]
+task = "workflow.run"
+args = "Start application"
+
+[[workflows.workflow.tasks]]
+task = "workflow.run"
+args = "Backend API"
+
+[[workflows.workflow]]
+name = "Start application"
+author = "agent"
+
+[[workflows.workflow.tasks]]
+task = "shell.exec"
+args = "cd algotrader_v4/frontend && npm run dev"
+waitForPort = 5000
+
+[workflows.workflow.metadata]
+outputType = "webview"
+
+[[workflows.workflow]]
+name = "Backend API"
+author = "agent"
+
+[[workflows.workflow.tasks]]
+task = "shell.exec"
+args = "cd algotrader_v4 && uvicorn main:app --host localhost --port 8000 --workers 1 --log-level warning"
+waitForPort = 8000
+
+[workflows.workflow.metadata]
+outputType = "console"
+
+[[ports]]
+localPort = 5000
+externalPort = 80
+
+[[ports]]
+localPort = 8000
+externalPort = 8000
+exposeLocalhost = true
+
+[userenv]
+
+[userenv.shared]
+JWT_SECRET_KEY = "3328f4e5af26dae7ff4f6a920f9fb28e4db89c1cae33613c107d87daaf95e8f8"
+TRADING_MODE = "PAPER"
+
+[deployment]
+deploymentTarget = "vm"
+run = ["bash", "-c", "cd algotrader_v4 && uvicorn main:app --host 0.0.0.0 --port 5000 --workers 1 --loop uvloop --log-level warning"]
+build = ["bash", "-c", "cd algotrader_v4/frontend && npm install && npm run build"]
