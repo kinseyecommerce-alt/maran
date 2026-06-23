@@ -14289,6 +14289,285 @@ run("agents/activity_log: log() uses IST-aware timestamp not datetime.now()", t_
 run("profit_optimizer: apply_optimised_config acquires _opt_lock before settings mutation", t_profit_optimizer_apply_acquires_lock)
 
 # ══════════════════════════════════════════════════════════════════════════
+# 36. RUTHLESS AUDIT BATCH 36 (levels_engine, news_sentinel, signal_bus, iv_surface)
+# ══════════════════════════════════════════════════════════════════════════
+import inspect as _inspect36
+
+def t_levels_engine_download_error_is_warning():
+    """levels_engine yfinance download errors must log at WARNING not DEBUG."""
+    import levels_engine as _le
+    src = _inspect36.getsource(_le._refresh_symbol)
+    for line in src.splitlines():
+        if "download error" in line.lower():
+            assert "logger.debug" not in line, \
+                f"yfinance download error must log at WARNING not DEBUG: {line.strip()}"
+
+def t_levels_engine_empty_data_is_warning():
+    """levels_engine empty yfinance data must log at WARNING not DEBUG."""
+    import levels_engine as _le
+    src = _inspect36.getsource(_le._refresh_symbol)
+    for line in src.splitlines():
+        if "empty data" in line.lower():
+            assert "logger.debug" not in line, \
+                f"empty data must log at WARNING not DEBUG: {line.strip()}"
+
+def t_levels_engine_get_levels_explicit_none_check():
+    """get_levels must use explicit `is None` check, not falsy dict check."""
+    import levels_engine as _le
+    src = _inspect36.getsource(_le.get_levels)
+    assert "base is None" in src or "is not None" in src, \
+        "get_levels must check `base is None` explicitly — falsy check fails for empty dict"
+
+def t_news_sentinel_fetch_error_is_warning():
+    """NewsSentinel fetch errors must log at WARNING not DEBUG."""
+    import news_sentinel as _ns
+    src = _inspect36.getsource(_ns.NewsSentinel.get_headlines)
+    for line in src.splitlines():
+        if "fetch error" in line.lower():
+            assert "logger.debug" not in line, \
+                f"fetch error must log at WARNING not DEBUG: {line.strip()}"
+
+def t_news_sentinel_failed_fetch_removes_placeholder():
+    """NewsSentinel must remove the cache placeholder on fetch error so next call retries."""
+    import news_sentinel as _ns
+    src = _inspect36.getsource(_ns.NewsSentinel.get_headlines)
+    assert "pop" in src or "del self._cache" in src, \
+        "On fetch error, NewsSentinel must remove the cache placeholder to allow immediate retry"
+
+def t_signal_bus_prunes_empty_deques():
+    """SignalBus.publish must prune symbols with empty deques to prevent unbounded dict growth."""
+    import signal_bus as _sb
+    src = _inspect36.getsource(_sb.SignalBus.publish)
+    assert "empty_syms" in src or "del self._events" in src or "not d" in src, \
+        "publish() must prune empty symbol deques from _events to prevent memory leak"
+
+def t_iv_surface_evicts_stale_cache_entries():
+    """iv_surface.build_surface must evict stale cache entries to prevent unbounded growth."""
+    import iv_surface as _iv
+    src = _inspect36.getsource(_iv.build_surface)
+    assert "stale" in src or "_TTL * 2" in src or "del _cache" in src, \
+        "build_surface must evict stale _cache entries — cache currently has no eviction"
+
+run("levels_engine: yfinance download error logs WARNING not DEBUG", t_levels_engine_download_error_is_warning)
+run("levels_engine: empty yfinance data logs WARNING not DEBUG", t_levels_engine_empty_data_is_warning)
+run("levels_engine: get_levels uses explicit `is None` check not falsy dict check", t_levels_engine_get_levels_explicit_none_check)
+run("news_sentinel: fetch error logs WARNING not DEBUG", t_news_sentinel_fetch_error_is_warning)
+run("news_sentinel: failed fetch removes cache placeholder so next caller retries", t_news_sentinel_failed_fetch_removes_placeholder)
+run("signal_bus: publish() prunes empty symbol deques to prevent dict growth", t_signal_bus_prunes_empty_deques)
+run("iv_surface: build_surface evicts stale _cache entries to prevent unbounded growth", t_iv_surface_evicts_stale_cache_entries)
+
+def t_tick_recorder_uses_ist_for_fallback_ts():
+    """tick_recorder.record() must use now_ist() not datetime.now() for fallback tick timestamp."""
+    import tick_recorder as _tr
+    src = _inspect36.getsource(_tr.TickRecorder.record)
+    assert "datetime.now()" not in src, \
+        "tick_recorder.record() must not use naive datetime.now() for fallback timestamp — use now_ist()"
+
+def t_tick_recorder_stop_logs_commit_failure():
+    """tick_recorder.stop() must log WARNING not silently pass on final commit failure."""
+    import tick_recorder as _tr
+    src = _inspect36.getsource(_tr.TickRecorder.stop)
+    assert "except Exception" in src, "stop() must catch commit exceptions"
+    assert "logger.warning" in src or "logger.error" in src, \
+        "stop() must log WARNING/ERROR (not pass silently) when final commit fails"
+
+def t_twap_engine_lambda_captures_chunk_by_value():
+    """twap_engine.execute() lambda must capture chunk by value (lambda chunk=chunk:) not by reference."""
+    import twap_engine as _te
+    src = _inspect36.getsource(_te.TWAPEngine.execute)
+    assert "lambda chunk=chunk:" in src, \
+        "TWAP lambda must use default-argument capture (lambda chunk=chunk:) to avoid stale quantity on timeout"
+
+def t_broker_router_secondaries_under_lock():
+    """BrokerRouter.add_secondary must hold _lock while mutating _secondaries."""
+    import broker_router as _br
+    src = _inspect36.getsource(_br.BrokerRouter.add_secondary)
+    assert "self._lock" in src or "with self._lock" in src, \
+        "add_secondary must hold _lock when mutating _secondaries to prevent concurrent read races"
+
+def t_broker_router_slm_cancel_is_warning():
+    """BrokerRouter.mirror_exit SL-M cancel failure must log WARNING not DEBUG."""
+    import broker_router as _br
+    src = _inspect36.getsource(_br.BrokerRouter.mirror_exit)
+    for line in src.splitlines():
+        if "cancel SL-M" in line or "cancel sl-m" in line.lower():
+            assert "logger.debug" not in line, \
+                f"SL-M cancel failure must log at WARNING not DEBUG: {line.strip()}"
+
+def t_n8n_bridge_unexpected_error_is_warning():
+    """n8n_bridge unexpected webhook error must log WARNING not DEBUG."""
+    import n8n_bridge as _nb
+    src = _inspect36.getsource(_nb.notify)
+    for line in src.splitlines():
+        if "unexpected error" in line.lower():
+            assert "logger.debug" not in line, \
+                f"unexpected webhook error must log at WARNING not DEBUG: {line.strip()}"
+
+def t_historical_learner_params_access_under_lock():
+    """historical_learner must access adaptive_engine._params under _lock."""
+    import historical_learner as _hl
+    src = _inspect36.getsource(_hl._run_one)
+    assert "_lock" in src, \
+        "historical_learner must hold adaptive_engine._lock when reading/writing _params"
+
+def t_historical_learner_win_rate_float_guard():
+    """historical_learner must use < 1e-9 not == 0 for win_rate_20 float comparison."""
+    import historical_learner as _hl
+    src = _inspect36.getsource(_hl._run_one)
+    assert "win_rate_20 == 0" not in src, \
+        "win_rate_20 == 0 is unreliable for floats — use < 1e-9 instead"
+
+def t_adaptive_engine_get_params_holds_lock():
+    """adaptive_engine.get_params must acquire _lock before reading/writing _params."""
+    import adaptive_engine as _ae
+    src = _inspect36.getsource(_ae.AdaptiveLearningEngine.get_params)
+    assert "self._lock" in src, \
+        "get_params must hold _lock to prevent concurrent dict mutation from record_trade"
+
+def t_adaptive_engine_should_rebacktest_holds_lock():
+    """adaptive_engine.should_rebacktest must hold _lock while iterating _rebacktest_queue and _params."""
+    import adaptive_engine as _ae
+    src = _inspect36.getsource(_ae.AdaptiveLearningEngine.should_rebacktest)
+    assert "self._lock" in src, \
+        "should_rebacktest must hold _lock to prevent concurrent dict-changed-during-iteration"
+
+def t_adaptive_engine_summary_snapshots_under_lock():
+    """adaptive_engine.summary must take a snapshot of _params under _lock before iterating."""
+    import adaptive_engine as _ae
+    src = _inspect36.getsource(_ae.AdaptiveLearningEngine.summary)
+    assert "params_snap" in src or ("self._lock" in src and "list(self._params" in src), \
+        "summary must snapshot _params under _lock to avoid RuntimeError during concurrent mutation"
+
+def t_multi_timeframe_min_spread_guards_zero_lag():
+    """multi_timeframe._trend_direction must use _MIN_SPREAD to prevent zero-lag collapse."""
+    import multi_timeframe as _mt
+    src = _inspect36.getsource(_mt._trend_direction)
+    assert "_MIN_SPREAD" in src or "1e-9" in src, \
+        "_trend_direction must guard against diff_lag==0 zero-collapse with a minimum absolute spread"
+
+def t_backtest_engine_ema50_zero_guard():
+    """backtest_engine._generate_signals must guard ema50 division by near-zero."""
+    import backtest_engine as _be
+    src = _inspect36.getsource(_be.BacktestEngine._generate_signals)
+    assert "1e-9" in src or "_e50" in src, \
+        "_generate_signals must guard ema50 division — zero ema50 causes ZeroDivisionError"
+
+def t_backtest_engine_cache_reads_hold_lock():
+    """backtest_engine.get_approved_symbols and is_approved must hold _cache_lock."""
+    import backtest_engine as _be
+    src_gas = _inspect36.getsource(_be.BacktestEngine.get_approved_symbols)
+    src_ia  = _inspect36.getsource(_be.BacktestEngine.is_approved)
+    src_cc  = _inspect36.getsource(_be.BacktestEngine.clear_cache)
+    assert "_cache_lock" in src_gas, "get_approved_symbols must hold _cache_lock to prevent RuntimeError on concurrent writes"
+    assert "_cache_lock" in src_ia,  "is_approved must hold _cache_lock"
+    assert "_cache_lock" in src_cc,  "clear_cache must hold _cache_lock"
+
+def t_auto_backtest_runner_or_low_zero_guard():
+    """auto_backtest_runner._signals_orb must guard or_low division by zero."""
+    import auto_backtest_runner as _ab
+    src = _inspect36.getsource(_ab._signals_orb)
+    assert "1e-9" in src or "or_low < " in src, \
+        "_signals_orb must guard or_low division — zero or_low causes ZeroDivisionError"
+
+def t_market_regime_vix_history_inside_lock():
+    """market_regime.update must update _vix_history inside _state_lock."""
+    import market_regime as _mr
+    src = _inspect36.getsource(_mr.MarketRegimeDetector.update)
+    assert "_state_lock" in src, \
+        "update() must protect _vix_history mutations inside _state_lock — _vix_zscore can read it concurrently"
+
+def t_ml_signal_scorer_train_holds_lock():
+    """ml_signal_scorer.train must hold _lock when assigning _models and _loaded."""
+    import ml_signal_scorer as _ms
+    src = _inspect36.getsource(_ms.MLSignalScorer.train)
+    assert "self._lock" in src, \
+        "train() must hold _lock when assigning _models[symbol] and _loaded.add(symbol) to prevent race with score()"
+
+def t_trade_memory_trim_error_is_warning():
+    """trade_memory._trim_file_to_max_entries must log WARNING not DEBUG on error."""
+    import trade_memory as _tm
+    src = _inspect36.getsource(_tm._trim_file_to_max_entries)
+    for line in src.splitlines():
+        if "trim error" in line.lower():
+            assert "logger.debug" not in line, \
+                f"trim error must log at WARNING not DEBUG: {line.strip()}"
+
+def t_portfolio_backtest_calmar_uses_epsilon():
+    """portfolio_backtest Calmar guard must use abs > 1e-9 not != 0 for float safety."""
+    import portfolio_backtest as _pb
+    src = _inspect36.getsource(_pb.PortfolioBacktest._compute_metrics)
+    assert "1e-9" in src or "abs(max_dd_pct)" in src, \
+        "Calmar guard must use abs(max_dd_pct) > 1e-9 not != 0 to handle near-zero float accumulation"
+
+def t_portfolio_backtest_tx_costs_silent_failure_logged():
+    """portfolio_backtest compute_tx_costs failure must log WARNING not silently pass."""
+    import portfolio_backtest as _pb
+    src = _inspect36.getsource(_pb.PortfolioBacktest.run)
+    assert "logger.warning" in src or "logger.error" in src, \
+        "compute_tx_costs failure must log at WARNING not silently pass — costs will be understated"
+
+def t_strategy_signals_vwap_epsilon_guard():
+    """strategy_signals VWAP zero-check must use abs(v) < 1e-9 not v == 0."""
+    import strategy_signals as _ss
+    src = _inspect36.getsource(_ss._signals_vwap_reversion)
+    assert "1e-9" in src, \
+        "_signals_vwap_reversion must use abs(v) < 1e-9 not v == 0 for float-safe VWAP zero guard"
+
+def t_strategy_signals_atr_ma_epsilon_guard():
+    """strategy_signals ATR mean zero-check must use > 1e-9 not > 0."""
+    import strategy_signals as _ss
+    src = _inspect36.getsource(_ss._signals_short_straddle)
+    assert "1e-9" in src, \
+        "_signals_short_straddle must use atr_ma.iloc[i] > 1e-9 not > 0 for float-safe division"
+
+def t_bhavcopy_loader_uses_ist_for_latest_date():
+    """bhavcopy_loader.latest_available_date must use IST date not UTC date.today()."""
+    import bhavcopy_loader as _bl
+    src = _inspect36.getsource(_bl.latest_available_date)
+    assert "date.today()" not in src, \
+        "latest_available_date must not use date.today() on UTC server — use now_ist().date()"
+
+def t_adaptive_engine_queue_rebacktest_uses_ist():
+    """adaptive_engine._queue_rebacktest must use _now_ist() not datetime.now() for queued_at."""
+    import adaptive_engine as _ae
+    src = _inspect36.getsource(_ae.AdaptiveLearningEngine._queue_rebacktest)
+    assert "datetime.now()" not in src, \
+        "_queue_rebacktest must use _now_ist() for queued_at timestamp"
+
+def t_trade_memory_time_of_day_uses_ist():
+    """trade_memory._time_of_day must use now_ist() not datetime.now() for session bucketing."""
+    import trade_memory as _tm
+    src = _inspect36.getsource(_tm._time_of_day)
+    assert "datetime.now()" not in src, \
+        "_time_of_day must use _now_ist() — naive datetime.now() gives wrong session on UTC server"
+
+run("tick_recorder: record() fallback timestamp uses now_ist() not datetime.now()", t_tick_recorder_uses_ist_for_fallback_ts)
+run("tick_recorder: stop() logs WARNING on final commit failure (not silent pass)", t_tick_recorder_stop_logs_commit_failure)
+run("twap_engine: execute() lambda captures chunk by value to prevent stale qty on timeout", t_twap_engine_lambda_captures_chunk_by_value)
+run("broker_router: add_secondary holds _lock when mutating _secondaries", t_broker_router_secondaries_under_lock)
+run("broker_router: mirror_exit SL-M cancel failure logs WARNING not DEBUG", t_broker_router_slm_cancel_is_warning)
+run("n8n_bridge: unexpected webhook error logs WARNING not DEBUG", t_n8n_bridge_unexpected_error_is_warning)
+run("historical_learner: _params read/write under adaptive_engine._lock", t_historical_learner_params_access_under_lock)
+run("historical_learner: win_rate_20 guard uses < 1e-9 not == 0 (float safety)", t_historical_learner_win_rate_float_guard)
+run("adaptive_engine: get_params acquires _lock before reading/writing _params", t_adaptive_engine_get_params_holds_lock)
+run("adaptive_engine: should_rebacktest holds _lock while iterating _rebacktest_queue", t_adaptive_engine_should_rebacktest_holds_lock)
+run("adaptive_engine: summary snapshots _params under _lock to prevent RuntimeError", t_adaptive_engine_summary_snapshots_under_lock)
+run("multi_timeframe: _trend_direction uses _MIN_SPREAD to prevent zero-lag spurious signal", t_multi_timeframe_min_spread_guards_zero_lag)
+run("backtest_engine: _generate_signals guards ema50 near-zero before division", t_backtest_engine_ema50_zero_guard)
+run("backtest_engine: get_approved_symbols/is_approved/clear_cache hold _cache_lock", t_backtest_engine_cache_reads_hold_lock)
+run("auto_backtest_runner: _signals_orb guards or_low near-zero before division", t_auto_backtest_runner_or_low_zero_guard)
+run("market_regime: update() mutates _vix_history inside _state_lock", t_market_regime_vix_history_inside_lock)
+run("ml_signal_scorer: train() holds _lock when assigning _models and _loaded", t_ml_signal_scorer_train_holds_lock)
+run("trade_memory: _trim_file_to_max_entries logs WARNING not DEBUG on trim error", t_trade_memory_trim_error_is_warning)
+run("portfolio_backtest: Calmar guard uses abs(max_dd_pct) > 1e-9 not != 0", t_portfolio_backtest_calmar_uses_epsilon)
+run("portfolio_backtest: compute_tx_costs failure logs WARNING not silent pass", t_portfolio_backtest_tx_costs_silent_failure_logged)
+run("strategy_signals: VWAP zero guard uses abs(v) < 1e-9 not v == 0", t_strategy_signals_vwap_epsilon_guard)
+run("strategy_signals: ATR mean zero guard uses > 1e-9 not > 0", t_strategy_signals_atr_ma_epsilon_guard)
+run("bhavcopy_loader: latest_available_date uses now_ist().date() not date.today()", t_bhavcopy_loader_uses_ist_for_latest_date)
+run("adaptive_engine: _queue_rebacktest uses _now_ist() not datetime.now()", t_adaptive_engine_queue_rebacktest_uses_ist)
+run("trade_memory: _time_of_day uses _now_ist() not datetime.now() for session bucketing", t_trade_memory_time_of_day_uses_ist)
+
+# ══════════════════════════════════════════════════════════════════════════
 # FINAL SUMMARY
 # ══════════════════════════════════════════════════════════════════════════
 failed = summary()

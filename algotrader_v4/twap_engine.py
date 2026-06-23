@@ -88,7 +88,7 @@ class TWAPEngine:
                     # wait_for caps worst-case at 30s so a hung slice doesn't stall the loop.
                     order_id = await asyncio.wait_for(
                         asyncio.get_running_loop().run_in_executor(
-                            None, lambda: kite_client.place_order(
+                            None, lambda chunk=chunk: kite_client.place_order(
                                 tradingsymbol=symbol,
                                 exchange=exchange,
                                 transaction_type=action,

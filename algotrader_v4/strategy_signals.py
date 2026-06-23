@@ -69,7 +69,8 @@ def _signals_swing(df: pd.DataFrame) -> pd.Series:
     rsi    = ta.momentum.RSIIndicator(close, 14).rsi()
     adx    = ta.trend.ADXIndicator(high, low, close, 14).adx()
     for i in range(55, len(df)):
-        if (abs(close.iloc[i] - ema50.iloc[i]) / ema50.iloc[i] < 0.018
+        if (float(ema50.iloc[i]) > 1e-9
+                and abs(close.iloc[i] - ema50.iloc[i]) / ema50.iloc[i] < 0.018
                 and ema20.iloc[i] > ema50.iloc[i] and close.iloc[i] > ema200.iloc[i]
                 and 38 < rsi.iloc[i] < 60 and adx.iloc[i] > 20):
             s.iloc[i] = 1
@@ -131,7 +132,7 @@ def _signals_vwap_reversion(df: pd.DataFrame) -> pd.Series:
     adx  = ta.trend.ADXIndicator(high, low, close, 14).adx()
     for i in range(15, len(df)):
         v = float(vwap.iloc[i])
-        if not math.isfinite(v) or v == 0:
+        if not math.isfinite(v) or abs(v) < 1e-9:
             continue
         dev = abs(close.iloc[i] - v) / v * 100
         if 0.5 < dev < 2.5 and adx.iloc[i] < 22:
@@ -167,7 +168,7 @@ def _signals_short_straddle(df: pd.DataFrame) -> pd.Series:
     atr    = ta.volatility.AverageTrueRange(high, low, close, 14).average_true_range()
     atr_ma = atr.rolling(20).mean()
     for i in range(20, len(df)):
-        iv_low = atr.iloc[i] / atr_ma.iloc[i] < 0.85 if atr_ma.iloc[i] > 0 else False
+        iv_low = atr.iloc[i] / atr_ma.iloc[i] < 0.85 if atr_ma.iloc[i] > 1e-9 else False
         if adx.iloc[i] < 18 and iv_low:
             s.iloc[i] = 1
     return s

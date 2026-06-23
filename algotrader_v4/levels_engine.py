@@ -45,11 +45,11 @@ async def _refresh_symbol(symbol: str) -> None:
             yf.download, ticker, period="10d", interval="1d", progress=False, auto_adjust=True
         )
     except Exception as exc:
-        logger.debug("[levels] yfinance download error {}: {}", symbol, exc)
+        logger.warning("[levels] yfinance download error {}: {}", symbol, exc)
         raise
 
     if df is None or df.empty:
-        logger.debug("[levels] empty data for {}", symbol)
+        logger.warning("[levels] empty data for {}", symbol)
         return
 
     # Flatten MultiIndex columns that yfinance sometimes produces
@@ -113,7 +113,7 @@ def get_levels(symbol: str) -> dict:
     """
     with _levels_cache_lock:
         base = _levels_cache.get(symbol)
-        if not base:
+        if base is None:
             return {}
         result = dict(base)
 

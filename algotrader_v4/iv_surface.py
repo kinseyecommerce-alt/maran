@@ -137,6 +137,11 @@ def build_surface(symbol: str, chain: list[dict], spot: float) -> SkewData:
         gex_net=round(gex_net, 2), smile=smile,
     )
     with _cache_lock:
+        # Evict entries older than 2× TTL to prevent unbounded cache growth
+        now = time.time()
+        stale = [k for k, v in _cache.items() if now - v.updated_at > _TTL * 2]
+        for k in stale:
+            del _cache[k]
         _cache[symbol.upper()] = sd
     return sd
 

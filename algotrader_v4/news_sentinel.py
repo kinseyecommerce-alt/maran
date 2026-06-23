@@ -74,8 +74,12 @@ class NewsSentinel:
         try:
             headlines = self._fetch_headlines(sym_lower, max_headlines)
         except Exception as exc:
-            logger.debug("[NewsSentinel] {}: fetch error — {}", symbol, exc)
-            headlines = []
+            logger.warning("[NewsSentinel] {}: fetch error — {}", symbol, exc)
+            with self._cache_lock:
+                # Remove the placeholder so the next caller retries immediately
+                # rather than serving a stale empty list for the full TTL.
+                self._cache.pop(sym_upper, None)
+            return []
 
         with self._cache_lock:
             self._cache[sym_upper] = (time.time(), headlines)

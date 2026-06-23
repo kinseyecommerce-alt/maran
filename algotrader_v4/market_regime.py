@@ -278,10 +278,11 @@ class MarketRegimeDetector:
         )
 
         # Phase 3B: Update rolling VIX history for Z-score computation
-        if signals.india_vix > 0:
-            self._vix_history.append(signals.india_vix)
-            if len(self._vix_history) > 480:  # 480 = 20 trading days × 24 readings/day at 60s interval
-                self._vix_history = self._vix_history[-480:]
+        with self._state_lock:
+            if signals.india_vix > 0:
+                self._vix_history.append(signals.india_vix)
+                if len(self._vix_history) > 480:  # 480 = 20 trading days × 24 readings/day at 60s interval
+                    self._vix_history = self._vix_history[-480:]
         signals.vix_zscore = self._vix_zscore(signals.india_vix)
 
         # Populate 1-min NIFTY change % for flash crash detection

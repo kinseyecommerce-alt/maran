@@ -175,8 +175,9 @@ class MLSignalScorer:
             with open(model_path, "wb") as fh:
                 pickle.dump(pipe, fh)
 
-            self._models[symbol] = pipe
-            self._loaded.add(symbol)
+            with self._lock:
+                self._models[symbol] = pipe
+                self._loaded.add(symbol)
             logger.info("MLSignalScorer: trained and saved model for {}", symbol)
             return True
 

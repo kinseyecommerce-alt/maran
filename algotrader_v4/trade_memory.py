@@ -12,6 +12,8 @@ import json
 import os
 import threading
 from datetime import datetime
+
+from ist_clock import now_ist as _now_ist
 from pathlib import Path
 from typing import Any, Optional
 
@@ -46,7 +48,7 @@ def _ensure_log_dir() -> None:
 
 def _time_of_day(dt: Optional[datetime] = None) -> str:
     """Classify current (or given) time into a named market session."""
-    t = (dt or datetime.now()).time()
+    t = (dt or _now_ist()).time()
     if t <= datetime.strptime("11:30", "%H:%M").time():
         return "morning"
     if t <= datetime.strptime("13:30", "%H:%M").time():
@@ -133,7 +135,7 @@ def _trim_file_to_max_entries() -> None:
             tmp.write_text(content, encoding="utf-8")
             tmp.replace(MEMORY_FILE)   # atomic rename — safe on crash mid-write
     except Exception as exc:
-        logger.debug("[memory] trim error: {}", exc)
+        logger.warning("[memory] trim error: {}", exc)
 
 
 # ── Core record function ──────────────────────────────────────────────────────
@@ -180,7 +182,7 @@ async def record_trade(
 
         # ── Build and persist the memory entry ───────────────────────
         entry = {
-            "ts":           datetime.now().isoformat(),
+            "ts":           _now_ist().isoformat(),
             "symbol":       symbol,
             "strategy":     strategy,
             "action":       action,
@@ -380,7 +382,7 @@ async def weekly_synthesis() -> str:
         msg = (
             "<b>Weekly Trade Memory Synthesis</b>\n\n"
             f"{_html.escape(synthesis)}\n\n"
-            f"<i>Based on {len(entries)} trades — {datetime.now().strftime('%Y-%m-%d')}</i>"
+            f"<i>Based on {len(entries)} trades — {_now_ist().strftime('%Y-%m-%d')}</i>"
         )
         await send_telegram(msg)
         logger.info("[memory] weekly synthesis sent via Telegram")

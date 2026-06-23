@@ -14,6 +14,8 @@ import math
 from dataclasses import dataclass, field
 from datetime import datetime
 
+from ist_clock import now_ist as _now_ist
+
 import numpy as np
 import pandas as pd
 from loguru import logger
@@ -39,7 +41,7 @@ class PortfolioResult:
     max_concurrent_positions: int = 0
     per_symbol: dict[str, dict] = field(default_factory=dict)
     equity_curve: list[float] = field(default_factory=list)
-    run_at: str = field(default_factory=lambda: datetime.now().isoformat())
+    run_at: str = field(default_factory=lambda: _now_ist().isoformat())
 
     def to_dict(self) -> dict:
         return {
@@ -218,8 +220,8 @@ class PortfolioBacktest:
                     try:
                         from risk_manager import compute_tx_costs
                         cost = compute_tx_costs(qty, pos["entry_fill"], exit_fill, product)
-                    except Exception:
-                        pass
+                    except Exception as _exc:
+                        logger.warning("[portfolio_bt] compute_tx_costs failed: {}", _exc)
                 net_pnl = gross_pnl - cost
                 trades.append({
                     "symbol":      sym,
@@ -308,8 +310,8 @@ class PortfolioBacktest:
                     try:
                         from risk_manager import compute_tx_costs
                         cost = compute_tx_costs(qty, pos["entry_fill"], exit_fill, product)
-                    except Exception:
-                        pass
+                    except Exception as _exc:
+                        logger.warning("[portfolio_bt] compute_tx_costs failed: {}", _exc)
                 net_pnl = gross_pnl - cost
                 eod_pnl += net_pnl
                 trades.append({
@@ -385,7 +387,7 @@ class PortfolioBacktest:
         n_trades  = max(len(pnls), 1)
         ann_factor = min(252.0 / max(n_trades / 5, 1), 4.0)
         ann_return = (total_net_pnl / total_capital) * ann_factor
-        calmar = ann_return / abs(max_dd_pct / 100) if max_dd_pct != 0 else 0.0
+        calmar = ann_return / abs(max_dd_pct / 100) if abs(max_dd_pct) > 1e-9 else 0.0
 
         # Per-symbol breakdown
         per_symbol: dict[str, dict] = {}

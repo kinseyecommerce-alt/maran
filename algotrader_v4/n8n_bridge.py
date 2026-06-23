@@ -67,5 +67,5 @@ async def notify(event_type: str, data: dict) -> None:
             else:
                 logger.warning("[n8n] delivery failed after {} attempts ({}): {}", attempt + 1, event_type, exc)
         except Exception as exc:
-            logger.debug("[n8n] unexpected error ({}): {}", event_type, exc)
+            logger.warning("[n8n] unexpected error ({}): {}", event_type, exc)
             break

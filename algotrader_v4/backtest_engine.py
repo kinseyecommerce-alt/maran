@@ -347,17 +347,20 @@ class BacktestEngine:
         return summary
 
     def get_approved_symbols(self, strategy: str) -> list[str]:
-        return [
-            sym for (sym, strat), res in self._cache.items()
-            if strat == strategy and res.passed
-        ]
+        with self._cache_lock:
+            return [
+                sym for (sym, strat), res in self._cache.items()
+                if strat == strategy and res.passed
+            ]
 
     def is_approved(self, symbol: str, strategy: str) -> bool:
         key = (symbol, strategy)
-        return key in self._cache and self._cache[key].passed
+        with self._cache_lock:
+            return key in self._cache and self._cache[key].passed
 
     def clear_cache(self) -> None:
-        self._cache.clear()
+        with self._cache_lock:
+            self._cache.clear()
         logger.info("Backtest cache cleared")
 
     # ── Walk-forward ───────────────────────────────────────────────────────────
@@ -505,7 +508,10 @@ class BacktestEngine:
             ema20 = ta.trend.EMAIndicator(close, 20).ema_indicator()
             rsi   = ta.momentum.RSIIndicator(close, 14).rsi()
             for i in range(50, n - 1):
-                near   = abs(close.iloc[i] - ema50.iloc[i]) / ema50.iloc[i] < 0.015
+                _e50 = float(ema50.iloc[i])
+                if _e50 < 1e-9:
+                    continue
+                near   = abs(float(close.iloc[i]) - _e50) / _e50 < 0.015
                 ema_up = ema20.iloc[i] > ema50.iloc[i]
                 rsi_ok = 40 < rsi.iloc[i] < 60
                 if near and ema_up and rsi_ok:
