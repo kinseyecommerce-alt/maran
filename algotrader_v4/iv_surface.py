@@ -112,20 +112,22 @@ def build_surface(symbol: str, chain: list[dict], spot: float) -> SkewData:
         direction = "NEUTRAL"
 
     # Net GEX proxy: Σ call_oi×iv² – Σ put_oi×iv²  (dimensionless relative measure)
-    # Apply the same conditional normalisation used for smile/call_ivs/put_ivs:
-    # divide by 100 only when iv_raw > 1 (percentage format); leave decimal IVs
-    # unchanged.  Always dividing by 100 produces a ~10,000× error for decimal-
-    # format chains (0.225 → 0.00225 instead of 0.225).
+    # Use same heuristic as main loop: iv > 1.0 means %-encoded, else already decimal.
+    # Always dividing by 100 produces a ~10,000× error for decimal-format chains
+    # (0.225 → 0.00225 instead of 0.225).
+    def _gex_iv(raw) -> float:
+        """Normalise raw IV using >1.0 heuristic (c_raw > 1.0 → %-form, divide by 100)."""
+        c_raw = float(raw or 0)
+        return c_raw / 100.0 if c_raw > 1.0 else c_raw
+
     gex_terms = []
     for row in chain:
         if int(float(row.get("strike", 0))) <= 0:
             continue
-        c_raw = float((row.get("CE") or {}).get("iv") or 0)
-        p_raw = float((row.get("PE") or {}).get("iv") or 0)
-        c_iv  = c_raw / 100.0 if c_raw > 1.0 else c_raw
-        p_iv  = p_raw / 100.0 if p_raw > 1.0 else p_raw
         c_oi  = int(float((row.get("CE") or {}).get("oi", 0) or 0))
         p_oi  = int(float((row.get("PE") or {}).get("oi", 0) or 0))
+        c_iv  = _gex_iv((row.get("CE") or {}).get("iv", 0))
+        p_iv  = _gex_iv((row.get("PE") or {}).get("iv", 0))
         gex_terms.append(c_oi * c_iv ** 2 - p_oi * p_iv ** 2)
     gex_net = sum(gex_terms)
 

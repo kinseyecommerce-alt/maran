@@ -24,6 +24,7 @@
   <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600;700&display=swap" rel="stylesheet">
   <script src="/static/chart.min.js"></script>
   <script src="/static/lucide.min.js"></script>
+  <script src="https://unpkg.com/lightweight-charts@4.2.0/dist/lightweight-charts.standalone.production.js"></script>
   <style>
     /* ── Design tokens — Professional Dark Theme ──────────────── */
     :root {
@@ -1155,6 +1156,25 @@
     .section-gap { margin-bottom: 20px; }
     .row-gap { margin-bottom: 14px; }
     .two-col { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; margin-bottom: 16px; }
+
+    /* ── TradingView candlestick chart panel ────────────────── */
+    #tv-chart-panel { margin-bottom: 16px; }
+    #tv-chart-panel .chart-controls {
+      display: flex; align-items: center; gap: 10px; flex-wrap: wrap;
+      margin-bottom: 10px;
+    }
+    #tv-chart-panel select, #tv-chart-panel button {
+      background: var(--bg-hover); border: 1px solid var(--border);
+      color: var(--text-primary); border-radius: 6px; padding: 4px 10px;
+      font-size: 12px; cursor: pointer;
+    }
+    #tv-chart-panel button:hover { background: var(--brand); color: #fff; border-color: var(--brand); }
+    #tv-chart-container { width: 100%; height: 340px; }
+    .tv-ema-legend {
+      display: flex; gap: 14px; font-size: 11px; padding: 4px 0 0;
+    }
+    .tv-ema-legend span { display: flex; align-items: center; gap: 4px; }
+    .tv-ema-legend i { display: inline-block; width: 18px; height: 2px; border-radius: 1px; }
   </style>
 </head>
 <body>
@@ -1360,6 +1380,70 @@
             </div>
             <div class="chart-wrap">
               <canvas id="equity-chart"></canvas>
+            </div>
+          </div>
+
+          <!-- ── Candlestick Chart (TradingView Lightweight Charts) ── -->
+          <div class="card" id="tv-chart-panel">
+            <div class="chart-header">
+              <div>
+                <div class="chart-title"><i data-lucide="bar-chart-2" style="width:14px;height:14px;vertical-align:-2px;margin-right:4px;"></i> Candlestick Chart</div>
+                <div class="chart-sub" id="tv-chart-sub">Select a symbol to view intraday OHLCV</div>
+              </div>
+              <div class="chart-controls">
+                <select id="tv-symbol-select"><option value="">— Symbol —</option></select>
+                <select id="tv-tf-select">
+                  <option value="1min" selected>1 min</option>
+                  <option value="5min">5 min</option>
+                </select>
+                <button onclick="tvRefresh()">Refresh</button>
+              </div>
+            </div>
+            <div id="tv-chart-container"></div>
+            <div class="tv-ema-legend">
+              <span><i style="background:#818CF8"></i> EMA 9</span>
+              <span><i style="background:#34D399"></i> EMA 21</span>
+              <span><i style="background:#F59E0B"></i> VWAP</span>
+            </div>
+          </div>
+
+          <!-- ── L2 Order Book (real Kite WebSocket depth) ── -->
+          <div class="card" id="ob-panel">
+            <div class="chart-header">
+              <div>
+                <div class="chart-title"><i data-lucide="layers" style="width:14px;height:14px;vertical-align:-2px;margin-right:4px;"></i> Order Book <span style="font-size:11px;color:var(--text-muted);font-weight:400;">(live L2 · top 5)</span></div>
+                <div class="chart-sub" id="ob-sub">Select a symbol in the chart above</div>
+              </div>
+              <button style="background:var(--bg-hover);border:1px solid var(--border);color:var(--text-primary);border-radius:6px;padding:4px 10px;font-size:12px;cursor:pointer;" onclick="obRefresh()">Refresh</button>
+            </div>
+            <!-- Imbalance bar -->
+            <div style="display:flex;align-items:center;gap:8px;margin-bottom:10px;">
+              <span style="font-size:11px;color:var(--buy);min-width:30px;text-align:right" id="ob-bid-pct">—</span>
+              <div style="flex:1;height:6px;border-radius:3px;background:var(--bg-hover);overflow:hidden;position:relative;">
+                <div id="ob-imbalance-bar" style="height:100%;width:50%;background:linear-gradient(to right,#34D399,#F87171);border-radius:3px;transition:width 0.3s"></div>
+              </div>
+              <span style="font-size:11px;color:var(--sell);min-width:30px;" id="ob-ask-pct">—</span>
+            </div>
+            <!-- Bid/Ask ladder -->
+            <div style="display:grid;grid-template-columns:1fr auto auto 1fr;gap:2px 8px;font-size:12px;">
+              <span style="color:var(--text-muted);font-size:10px;padding-bottom:4px;">Qty</span>
+              <span style="color:var(--buy);font-size:10px;padding-bottom:4px;">Bid</span>
+              <span style="color:var(--sell);font-size:10px;padding-bottom:4px;">Ask</span>
+              <span style="color:var(--text-muted);font-size:10px;padding-bottom:4px;text-align:right;">Qty</span>
+              <template id="ob-row-tpl">
+                <span class="ob-bid-qty" style="color:var(--text-secondary);text-align:right">—</span>
+                <span class="ob-bid-px"  style="color:var(--buy);font-family:var(--font-mono)">—</span>
+                <span class="ob-ask-px"  style="color:var(--sell);font-family:var(--font-mono)">—</span>
+                <span class="ob-ask-qty" style="color:var(--text-secondary)">—</span>
+              </template>
+            </div>
+            <div id="ob-ladder" style="display:grid;grid-template-columns:1fr auto auto 1fr;gap:3px 8px;font-size:12px;margin-top:2px;">
+              <!-- filled by obRender() -->
+            </div>
+            <div style="display:flex;gap:14px;margin-top:8px;font-size:11px;">
+              <span>Spread: <b id="ob-spread" style="color:var(--text-primary)">—</b></span>
+              <span id="ob-wall-above" style="color:var(--sell);display:none">⚡ Sell wall above</span>
+              <span id="ob-wall-below" style="color:var(--buy);display:none">⚡ Buy wall below</span>
             </div>
           </div>
 
@@ -3042,6 +3126,195 @@ function makeEquityChart(canvasId) {
 
 const equityChart    = makeEquityChart('equity-chart');
 const analyticsChart = makeEquityChart('analytics-chart');
+
+// ── TradingView Lightweight Charts panel ─────────────────────────────
+(function () {
+  let _tvChart = null, _candleSeries = null, _ema9Series = null,
+      _ema21Series = null, _vwapSeries = null, _tvSymbol = '', _tvTf = '1min';
+  let _autoRefreshTimer = null;
+
+  function _initChart() {
+    const el = document.getElementById('tv-chart-container');
+    if (!el) return;
+    el.innerHTML = '';
+    if (typeof LightweightCharts === 'undefined') return;
+
+    _tvChart = LightweightCharts.createChart(el, {
+      width:  el.clientWidth,
+      height: 340,
+      layout: { background: { color: '#0E1420' }, textColor: '#94A3B8' },
+      grid:   { vertLines: { color: 'rgba(255,255,255,0.04)' },
+                horzLines: { color: 'rgba(255,255,255,0.04)' } },
+      crosshair: { mode: LightweightCharts.CrosshairMode.Normal },
+      timeScale: { borderColor: 'rgba(255,255,255,0.1)', timeVisible: true, secondsVisible: false },
+      rightPriceScale: { borderColor: 'rgba(255,255,255,0.1)' },
+    });
+
+    _candleSeries = _tvChart.addCandlestickSeries({
+      upColor: '#34D399', downColor: '#F87171',
+      borderUpColor: '#34D399', borderDownColor: '#F87171',
+      wickUpColor: '#34D399', wickDownColor: '#F87171',
+    });
+    _ema9Series  = _tvChart.addLineSeries({ color: '#818CF8', lineWidth: 1, priceLineVisible: false, lastValueVisible: false });
+    _ema21Series = _tvChart.addLineSeries({ color: '#34D399', lineWidth: 1, priceLineVisible: false, lastValueVisible: false });
+    _vwapSeries  = _tvChart.addLineSeries({ color: '#F59E0B', lineWidth: 1, lineStyle: LightweightCharts.LineStyle.Dashed, priceLineVisible: false, lastValueVisible: false });
+
+    new ResizeObserver(() => {
+      if (_tvChart) _tvChart.applyOptions({ width: el.clientWidth });
+    }).observe(el);
+  }
+
+  async function _loadCandles(sym, tf) {
+    if (!sym) return;
+    const token = localStorage.getItem('jwt_token');
+    const hdrs  = token ? { Authorization: `Bearer ${token}` } : {};
+    try {
+      const r = await fetch(`/market/candles/${sym}?tf=${tf}`, { headers: hdrs });
+      if (!r.ok) { console.warn('[tv-chart]', r.status); return; }
+      const d = await r.json();
+      const bars = d.bars || [];
+      if (!bars.length) return;
+
+      _candleSeries.setData(bars.map(b => ({
+        time: b.time, open: b.open, high: b.high, low: b.low, close: b.close
+      })));
+
+      // Compute simple EMAs from close prices
+      function ema(data, period) {
+        const k = 2 / (period + 1); let val = data[0];
+        return data.map((v, i) => { val = i === 0 ? v : v * k + val * (1 - k); return val; });
+      }
+      const closes = bars.map(b => b.close);
+      const ema9v  = ema(closes, 9);
+      const ema21v = ema(closes, 21);
+      _ema9Series.setData(bars.map((b, i) => ({ time: b.time, value: +ema9v[i].toFixed(2) })));
+      _ema21Series.setData(bars.map((b, i) => ({ time: b.time, value: +ema21v[i].toFixed(2) })));
+
+      // Compute VWAP (cumulative)
+      let cumPV = 0, cumV = 0;
+      const vwapData = bars.map(b => {
+        const tp = (b.high + b.low + b.close) / 3;
+        cumPV += tp * b.volume; cumV += b.volume;
+        return { time: b.time, value: cumV > 0 ? +(cumPV / cumV).toFixed(2) : b.close };
+      });
+      _vwapSeries.setData(vwapData);
+      _tvChart.timeScale().fitContent();
+
+      document.getElementById('tv-chart-sub').textContent =
+        `${sym} · ${tf} · ${bars.length} bars · last ${new Date(bars[bars.length-1].time*1000).toLocaleTimeString('en-IN',{hour:'2-digit',minute:'2-digit'})}`;
+    } catch(e) { console.error('[tv-chart]', e); }
+  }
+
+  window.tvRefresh = function() {
+    const sym = document.getElementById('tv-symbol-select')?.value;
+    const tf  = document.getElementById('tv-tf-select')?.value || '1min';
+    if (sym === _tvSymbol && tf === _tvTf && _tvChart) {
+      _loadCandles(sym, tf); return;
+    }
+    _tvSymbol = sym; _tvTf = tf;
+    if (!_tvChart) _initChart();
+    _loadCandles(sym, tf);
+    clearInterval(_autoRefreshTimer);
+    if (sym) _autoRefreshTimer = setInterval(() => _loadCandles(sym, tf), 60000); // refresh every 1 min
+  };
+
+  // Populate symbol dropdown from live market data
+  window.tvPopulateSymbols = function(symbols) {
+    const sel = document.getElementById('tv-symbol-select');
+    if (!sel) return;
+    const prev = sel.value;
+    sel.innerHTML = '<option value="">— Symbol —</option>';
+    (symbols || []).sort().forEach(s => {
+      const o = document.createElement('option');
+      o.value = s; o.textContent = s;
+      if (s === prev) o.selected = true;
+      sel.appendChild(o);
+    });
+  };
+
+  document.addEventListener('DOMContentLoaded', () => {
+    // Wire up tf/symbol change events
+    document.getElementById('tv-tf-select')?.addEventListener('change', () => window.tvRefresh());
+    document.getElementById('tv-symbol-select')?.addEventListener('change', () => window.tvRefresh());
+    _initChart();
+  });
+})();
+
+// ── L2 Order Book panel ──────────────────────────────────────────────
+(function () {
+  let _obSym = '', _obTimer = null;
+
+  function obRender(d) {
+    const ladder = document.getElementById('ob-ladder');
+    if (!ladder) return;
+    const bids = d.bids || [], asks = d.asks || [];
+    const rows = Math.max(bids.length, asks.length, 1);
+    let html = '';
+    for (let i = 0; i < rows; i++) {
+      const b = bids[i] || {}, a = asks[i] || {};
+      const bPx  = b.price ? b.price.toFixed(2) : '—';
+      const aPx  = a.price ? a.price.toFixed(2) : '—';
+      const bQty = b.qty   != null ? b.qty : '—';
+      const aQty = a.qty   != null ? a.qty : '—';
+      html += `<span style="color:var(--text-secondary);text-align:right">${bQty}</span>
+               <span style="color:var(--buy);font-family:var(--font-mono)">${bPx}</span>
+               <span style="color:var(--sell);font-family:var(--font-mono)">${aPx}</span>
+               <span style="color:var(--text-secondary)">${aQty}</span>`;
+    }
+    ladder.innerHTML = html;
+
+    // Imbalance bar: bid_pct drives the green portion width
+    const bT = d.bid_total || 0, aT = d.ask_total || 0, tot = bT + aT;
+    const bidPct = tot > 0 ? Math.round(bT / tot * 100) : 50;
+    const bar = document.getElementById('ob-imbalance-bar');
+    if (bar) bar.style.width = bidPct + '%';
+    const bPctEl = document.getElementById('ob-bid-pct');
+    const aPctEl = document.getElementById('ob-ask-pct');
+    if (bPctEl) bPctEl.textContent = bidPct + '%';
+    if (aPctEl) aPctEl.textContent = (100 - bidPct) + '%';
+
+    // Spread + wall alerts
+    const spreadEl = document.getElementById('ob-spread');
+    if (spreadEl) spreadEl.textContent = d.spread != null ? d.spread.toFixed(2) : '—';
+    const wallA = document.getElementById('ob-wall-above');
+    const wallB = document.getElementById('ob-wall-below');
+    if (wallA) wallA.style.display = d.wall_above ? '' : 'none';
+    if (wallB) wallB.style.display = d.wall_below ? '' : 'none';
+
+    const sub = document.getElementById('ob-sub');
+    if (sub) sub.textContent = `${d.symbol} · LTP ${d.ltp} · Bid ${d.bid} / Ask ${d.ask}`;
+  }
+
+  async function _fetchDepth(sym) {
+    if (!sym) return;
+    const token = localStorage.getItem('jwt_token');
+    const hdrs  = token ? { Authorization: `Bearer ${token}` } : {};
+    try {
+      const r = await fetch(`/market/depth/${sym}`, { headers: hdrs });
+      if (!r.ok) return;
+      const d = await r.json();
+      obRender(d);
+    } catch(e) { console.error('[ob]', e); }
+  }
+
+  window.obRefresh = function() {
+    const sym = document.getElementById('tv-symbol-select')?.value;
+    if (!sym) return;
+    if (sym !== _obSym) {
+      _obSym = sym;
+      clearInterval(_obTimer);
+      _obTimer = setInterval(() => _fetchDepth(_obSym), 2000); // 2-second refresh
+    }
+    _fetchDepth(sym);
+  };
+
+  // Auto-trigger when chart symbol changes
+  const origTvRefresh = window.tvRefresh;
+  window.tvRefresh = function() {
+    origTvRefresh && origTvRefresh();
+    window.obRefresh();
+  };
+})();
 
 function updateCharts() {
   const labels = state.timeLabels;
@@ -4766,7 +5039,13 @@ async function fetchPositions() {
 async function fetchAgents() {
   try {
     const d = await api('GET', '/agents');
-    if (d) state.agents = d;
+    if (d) {
+      state.agents = d;
+      // Keep the candlestick chart symbol picker in sync with active watchlists
+      const syms = new Set();
+      Object.values(d).forEach(a => (a.approved_symbols || []).forEach(s => syms.add(s)));
+      if (syms.size && typeof tvPopulateSymbols === 'function') tvPopulateSymbols([...syms]);
+    }
   } catch {}
 }
 

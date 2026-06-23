@@ -188,6 +188,7 @@ class Settings(BaseSettings):
     gate_thinking_budget: int = 2000               # thinking tokens per trade assessment (only used when use_extended_thinking=True)
     gate_api_timeout: float = 5.0                  # seconds — 5s fits Sonnet well; raise to 12s if switching back to Opus+thinking
     gate_bypass_min_score: int = 7                 # signals scoring ≥ this skip Claude gate entirely (auto-approve, ~65% of trades)
+    scalping_skip_gate: bool = True                # scalping holds 2-12 min; 400-800ms gate call causes meaningful slippage — skip by default
     use_multi_timeframe: bool = True      # require 5m/15m alignment with entry direction
     mtf_min_alignment: int = 2            # how many of 3 TFs must agree (1, 2, or 3)
     use_kelly_sizing: bool = True         # apply Claude gate's size_factor to qty

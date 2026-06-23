@@ -526,7 +526,7 @@ class IndicatorCalc:
 # last cumulative value per symbol; reset daily via the _session_date mechanism
 # in _process_tick().
 _rest_last_cum_vol: dict[str, int] = {}
-_rest_vol_lock = Lock()  # guards _rest_last_cum_vol across run_in_executor threads
+_rest_vol_lock = Lock()  # guards _rest_last_cum_vol across run_in_executor threads and asyncio loop
 
 
 def _kite_quote_to_quote(symbol: str, data: dict) -> Quote:
@@ -542,7 +542,7 @@ def _kite_quote_to_quote(symbol: str, data: dict) -> Quote:
     # no baseline to diff against); max(0, …) guards against feed resets.
     cum_vol = int(data.get("volume_traded", 0) or 0)
     with _rest_vol_lock:
-        last    = _rest_last_cum_vol.get(symbol)
+        last = _rest_last_cum_vol.get(symbol)
         vol_delta = max(0, cum_vol - last) if last is not None else 0
         _rest_last_cum_vol[symbol] = cum_vol
 
@@ -571,6 +571,8 @@ def _kite_quote_to_quote(symbol: str, data: dict) -> Quote:
 def _detect_walls(ltp: float, bid_depth: list, ask_depth: list) -> tuple[bool, bool, float]:
     """Return (wall_above, wall_below, depth_imbalance)."""
     if not bid_depth and not ask_depth:
+        return False, False, 0.5
+    if ltp <= 0:
         return False, False, 0.5
 
     bid_total = sum(q for _, q in bid_depth)
@@ -767,7 +769,8 @@ class TickEngine:
             self._ind_cache.clear()
             self._ind_cache_count.clear()
             self._ind_cache_ltp.clear()
-            _rest_last_cum_vol.clear()  # REST cumulative-volume baseline resets daily
+            with _rest_vol_lock:
+                _rest_last_cum_vol.clear()  # REST cumulative-volume baseline resets daily
             logger.info("TickEngine: daily buffer reset for IST session {}", tick_date)
 
         self._bufs_1min[symbol].push(tick.ltp, tick.volume, tick.timestamp)

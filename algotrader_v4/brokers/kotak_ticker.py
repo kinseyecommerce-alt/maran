@@ -52,6 +52,8 @@ class KotakTicker:
         self._t2s       = token_to_symbol          # instrument_token → symbol
         self._on_tick   = on_tick_cb
         self._on_connect = on_connect_cb
+        self._subscribed_tokens: set = set()       # track externally-added tokens for reconnect
+        self._lock = threading.Lock()              # guards _running and _ws across threads
         self._on_error  = on_error_cb
         self._on_close  = on_close_cb
         self._ws: Any   = None
@@ -67,16 +69,19 @@ class KotakTicker:
             logger.warning("[KotakTicker] websocket-client not installed — ticks unavailable. "
                            "Run: pip install websocket-client")
             return
-        self._running = True
+        with self._lock:
+            self._running = True
         self._thread  = threading.Thread(target=self._run, daemon=True, name="KotakWS")
         self._thread.start()
         logger.info("[KotakTicker] connecting to {}", _FEED_URL)
 
     def stop(self) -> None:
-        self._running = False
-        if self._ws:
+        with self._lock:
+            self._running = False
+            ws = self._ws
+        if ws:
             try:
-                self._ws.close()
+                ws.close()
             except Exception:
                 pass
 
@@ -87,16 +92,18 @@ class KotakTicker:
             for t in tokens:
                 if t not in self._t2s:
                     self._t2s[t] = str(t)
+        self._subscribed_tokens.update(str(t) for t in tokens)
         if not self._ws:
             return
         msg = json.dumps({
             "type":     "subscribe",
-            "scrips":   [str(t) for t in tokens],
+            "scrips":   list(self._subscribed_tokens),
             "channelNo": 1,
         })
         try:
-            self._ws.send(msg)
-            logger.debug("[KotakTicker] subscribed {} tokens", len(tokens))
+            ws = self._ws
+            ws.send(msg)
+            logger.debug("[KotakTicker] subscribed {} tokens", len(self._subscribed_tokens))
         except Exception as exc:
             logger.warning("[KotakTicker] subscribe failed: {}", exc)
 
@@ -129,14 +136,16 @@ class KotakTicker:
                 retry_delay = min(retry_delay * 2, 60.0)
 
     def _on_ws_open(self, ws: Any) -> None:
+        with self._lock:
+            self._ws = ws
         logger.info("[KotakTicker] connected")
         if self._on_connect:
             self._on_connect(ws, {})
-        # Auto-subscribe all registered tokens
+        # Re-subscribe all tokens (registered + externally subscribed) on every connect/reconnect
         with self._t2s_lock:
-            tokens_snapshot = list(self._t2s.keys())
-        if tokens_snapshot:
-            self.subscribe(tokens_snapshot)
+            all_tokens = set(str(k) for k in self._t2s.keys()) | self._subscribed_tokens
+        if all_tokens:
+            self.subscribe(list(all_tokens))
 
     def _on_ws_error(self, ws: Any, error: Any) -> None:
         logger.warning("[KotakTicker] error: {}", error)
@@ -151,7 +160,8 @@ class KotakTicker:
     def _on_message(self, ws: Any, raw: str) -> None:
         try:
             data = json.loads(raw)
-        except Exception:
+        except Exception as exc:
+            logger.debug("[KotakTicker] non-JSON frame ignored ({}): {!r:.80}", exc, raw)
             return
 
         # Kotak tick format: {"type": "ud", "tk": "token", "lp": "price", ...}

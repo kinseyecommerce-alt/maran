@@ -14,7 +14,7 @@ import asyncio
 import json
 import threading
 import time
-from datetime import date, datetime
+from datetime import date, datetime, timezone
 from pathlib import Path
 from typing import Optional
 
@@ -94,7 +94,8 @@ def _compute_iv_rank_percentile(symbol: str, current_iv: float) -> tuple[float, 
     Returns (iv_rank, iv_percentile) using the last 60 days of history.
     Falls back to (50.0, 50.0) when history is insufficient.
     """
-    history = _load_iv_history()
+    with _iv_hist_lock:
+        history = _load_iv_history()
     entries = history.get(symbol, [])
 
     # Need at least 2 historical points to compute meaningful statistics
@@ -458,7 +459,7 @@ async def get_iv_context(symbol: str) -> dict:
             "expiry":        parsed["expiry"],
             "total_ce_oi":   parsed["total_ce_oi"],
             "total_pe_oi":   parsed["total_pe_oi"],
-            "updated_at":    now_ist().isoformat(),
+            "updated_at":    datetime.now(timezone.utc).isoformat(),
         }
 
         # Store in in-memory cache

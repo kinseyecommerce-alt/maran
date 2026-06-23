@@ -108,6 +108,7 @@ _SENSITIVE_GETS = frozenset({
     "/symbols/selected",               # live per-strategy watchlists
     "/admin/users",                    # friend instance list — admin only
     "/portfolio/greeks",               # live options greeks — exposes position details
+    "/portfolio/implementation-shortfall",  # slippage analytics leaks order timing
 })
 
 @app.middleware("http")
@@ -205,6 +206,7 @@ _RATE_LIMITS = {
     "/orders/squareoff": 5,
     "/orders/multi-leg": 10,
     "/sebi/kill-switch": 3,
+    "/twap/place": 5,
 }
 
 @app.middleware("http")
@@ -787,7 +789,10 @@ async def stop_bot():
     return {"status": "stopped"}
 
 @app.post("/bot/test-order", tags=["Bot"])
-async def test_order(symbol: str = "SBIN", qty: int = 1):
+async def test_order(
+    symbol: str = Query(default="SBIN"),
+    qty: int = Query(default=1, gt=0, le=10),
+):
     """Place 1-share MARKET BUY to verify Kite connectivity, then immediately cancel."""
     if sebi_compliance._state.value == "KILLED":
         raise HTTPException(status_code=503, detail="Kill switch active — test order blocked")
@@ -846,6 +851,79 @@ async def option_chain(symbol: str):
     data = await tick_engine.get_option_chain(symbol)
     if not data: raise HTTPException(404, f"Option chain not available for {symbol}")
     return data
+
+@app.get("/market/candles/{symbol}", tags=["Market"])
+def market_candles(symbol: str, tf: str = "1min"):
+    """Return OHLCV candles for a symbol. tf=1min (default) or 5min.
+    Each bar: {time (Unix sec), open, high, low, close, volume}.
+    Used by the TradingView Lightweight Charts panel in the dashboard."""
+    symbol = _clean_symbol(symbol)
+    tf = tf if tf in ("1min", "5min") else "1min"
+    if tf == "1min":
+        bufs = tick_engine._bufs_1min
+    else:
+        bufs = tick_engine._bufs_5min
+    buf = bufs.get(symbol)
+    if buf is None:
+        raise HTTPException(404, f"No candle data for {symbol} — add it to a watchlist first")
+    candles = buf.candles()
+    bars = [
+        {
+            "time":   int(c.ts.timestamp()),
+            "open":   round(c.open,  2),
+            "high":   round(c.high,  2),
+            "low":    round(c.low,   2),
+            "close":  round(c.close, 2),
+            "volume": c.volume,
+        }
+        for c in candles
+    ]
+    return {"symbol": symbol, "tf": tf, "bars": bars}
+
+@app.get("/market/depth/{symbol}", tags=["Market"])
+def market_depth(symbol: str):
+    """Return real-time Level-2 order book (top-5 bid/ask) for a symbol.
+    Source: Kite WebSocket FULL-mode tick — live in LIVE trading mode.
+    In PAPER mode returns simulated zeros (no WebSocket feed active)."""
+    symbol = _clean_symbol(symbol)
+    tick = tick_engine._latest_tick.get(symbol)
+    if tick is None:
+        raise HTTPException(404, f"No tick data for {symbol} — add it to a watchlist first")
+
+    bid_depth = getattr(tick, "bid_depth", []) or []
+    ask_depth = getattr(tick, "ask_depth", []) or []
+
+    # Normalise: TickBuffer stores tuples (price, qty); REST tick path stores dicts
+    def _normalise(levels):
+        out = []
+        for lvl in levels[:5]:
+            if isinstance(lvl, (list, tuple)):
+                p, q = (lvl[0], lvl[1]) if len(lvl) >= 2 else (0.0, 0)
+            else:
+                p, q = float(lvl.get("price", 0)), int(lvl.get("quantity", 0))
+            out.append({"price": round(float(p), 2), "qty": int(q)})
+        return out
+
+    bids = _normalise(bid_depth)
+    asks = _normalise(ask_depth)
+    bid_total = sum(b["qty"] for b in bids)
+    ask_total = sum(a["qty"] for a in asks)
+    imbalance = round(bid_total / (bid_total + ask_total), 3) if (bid_total + ask_total) > 0 else 0.5
+
+    return {
+        "symbol":     symbol,
+        "ltp":        round(tick.ltp, 2),
+        "bid":        round(tick.bid, 2),
+        "ask":        round(tick.ask, 2),
+        "spread":     round(tick.ask - tick.bid, 2),
+        "bids":       bids,
+        "asks":       asks,
+        "bid_total":  bid_total,
+        "ask_total":  ask_total,
+        "imbalance":  imbalance,
+        "wall_above": getattr(tick_engine._latest_ind.get(symbol), "wall_above", False),
+        "wall_below": getattr(tick_engine._latest_ind.get(symbol), "wall_below", False),
+    }
 
 
 # ── Agents ────────────────────────────────────────────────────────────────────
@@ -2895,6 +2973,10 @@ async def on_startup():
         from position_reconciler import position_reconciler
         asyncio.create_task(position_reconciler.run_loop(), name="position_reconciler").add_done_callback(_log_task_exc)
 
+    # Pre-warm Kite HTTP connection pool — avoids ~50 ms TCP handshake on first live order.
+    loop = asyncio.get_running_loop()
+    loop.run_in_executor(None, kite_client.warm_connections)
+
     # Pre-warm the Claude gate connection so the first real trade doesn't pay
     # the cold-start TCP/TLS handshake cost (~300-500 ms).
     asyncio.create_task(_prewarm_gate(), name="prewarm_gate").add_done_callback(_log_task_exc)
@@ -3044,7 +3126,7 @@ async def prometheus_metrics():
 
 
 @app.get("/risk/stress-test", tags=["Risk"])
-async def stress_test(shock_pct: float = -5.0):
+async def stress_test(shock_pct: float = Query(default=-5.0, ge=-50.0, le=50.0)):
     """Simulate a market shock (default -5% Nifty) and compute portfolio impact."""
     from trailing_sl_engine import trailing_sl_engine as _tsl
     from risk_manager import _BETA_MAP
@@ -3110,7 +3192,8 @@ async def implementation_shortfall(days: int = 30):
             "total_shortfall_inr": round(sum(inr_list), 0),
         }
     except Exception as e:
-        return {"error": str(e)}
+        logger.error("implementation-shortfall error: {}", e)
+        raise HTTPException(500, "Unable to compute implementation shortfall")
 
 
 @app.post("/notifications/test", tags=["Operations"])
@@ -3122,7 +3205,8 @@ async def test_notification(body: dict = Body(default={"message": "AlgoTrader te
         _notifier.send(subject=msg, body="This is a test notification from AlgoTrader Pro.", level="INFO")
         return {"status": "sent", "message": msg}
     except Exception as e:
-        return {"status": "error", "detail": str(e)}
+        logger.error("Notification test failed: {}", e)
+        return {"status": "error", "detail": "Notification dispatch failed — check server logs"}
 
 
 
@@ -3333,15 +3417,16 @@ async def get_twap_status():
 
 @app.post("/twap/place", tags=["Orders"])
 async def place_twap_order(
-    symbol: str,
-    qty: int,
-    direction: str,
-    exchange: str = "NSE",
-    product: str = "MIS",
-    duration_sec: float = None,
-    slices: int = None,
+    symbol: str = Query(...),
+    qty: int = Query(..., gt=0, le=10_000),
+    direction: Literal["BUY", "SELL"] = Query(...),
+    exchange: Literal["NSE", "BSE", "NFO", "BFO", "CDS", "MCX"] = Query(default="NSE"),
+    product: Literal["MIS", "CNC", "NRML"] = Query(default="MIS"),
+    duration_sec: float = Query(default=None, ge=1.0, le=3600.0),
+    slices: int = Query(default=None, ge=1, le=100),
 ):
     """Manually place a TWAP order for a large lot. direction: BUY or SELL."""
+    symbol = _clean_symbol(symbol)
     from twap_executor import twap_executor
     loop = asyncio.get_running_loop()
     ids = await twap_executor.place_twap(
