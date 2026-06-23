@@ -2,6 +2,19 @@ import React, { useEffect, useState } from 'react'
 import { useStore } from '../../store'
 import { api } from '../../api/client'
 
+function fmtLastSignal(s: unknown): string {
+  if (!s) return '—'
+  if (typeof s === 'string') return s || '—'
+  if (typeof s === 'object' && s !== null) {
+    const o = s as Record<string, unknown>
+    if (Object.keys(o).length === 0) return '—'
+    const action = String(o.action || o.signal || '')
+    const symbol = String(o.symbol || '')
+    return action ? `${action}${symbol ? ' ' + symbol : ''}` : JSON.stringify(o).slice(0, 30)
+  }
+  return String(s)
+}
+
 const AGENT_META: Record<string, { emoji: string; name: string; desc: string }> = {
   intraday: { emoji: '⚡', name: 'INTRADAY',  desc: 'VWAP+EMA momentum · MIS · 8 trades/day' },
   fno:      { emoji: '📊', name: 'F&O',        desc: 'Options CE/PE · NRML · 4 trades/day' },
@@ -109,7 +122,7 @@ export default function AgentsTab() {
                 </div>
                 <div>
                   <div className="text-[10px] text-slate-500 uppercase tracking-wider">Last Signal</div>
-                  <div className="text-[11px] font-mono text-slate-400 truncate">{agent.last_signal || '—'}</div>
+                  <div className="text-[11px] font-mono text-slate-400 truncate">{fmtLastSignal(agent.last_signal)}</div>
                 </div>
               </div>
             )}

@@ -62,7 +62,7 @@ export default function OrdersTab() {
               <td className="px-4 py-2.5">
                 {(o.status === 'OPEN' || o.status === 'TRIGGER PENDING') && (
                   <Btn variant="ghost" size="sm" onClick={() => handleCancel(o.order_id)}
-                    className="text-red-600 hover:bg-red-50 text-xs py-1">Cancel</Btn>
+                    className="text-rose-400 hover:bg-rose-950/40 text-xs py-1">Cancel</Btn>
                 )}
               </td>
             </tr>
