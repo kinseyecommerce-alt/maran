@@ -17,12 +17,13 @@ export function connectWS() {
     url = `${wsBase}/ws${apiKey ? `?token=${apiKey}` : ''}`
   }
 
-  ws = new WebSocket(url)
+  const socket = new WebSocket(url)
+  ws = socket
 
-  ws.onopen = () => {
+  socket.onopen = () => {
     setWsConnected(true)
     if (reconnectTimer) { clearTimeout(reconnectTimer); reconnectTimer = null }
-    ws?.send('ping')
+    socket.send('ping')
   }
 
   ws.onclose = () => {
