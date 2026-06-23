@@ -1,29 +1,36 @@
 import axios from 'axios'
 import { useStore } from '../store'
 
-const getConfig = () => {
-  const { apiBase, apiKey } = useStore.getState()
-  return { base: apiBase, key: apiKey }
+const ax = () => {
+  const { apiBase, apiKey, token } = useStore.getState()
+  const headers: Record<string, string> = {}
+  if (apiKey)  headers['X-API-Key']     = apiKey
+  if (token)   headers['Authorization'] = `Bearer ${token}`
+  return axios.create({ baseURL: apiBase, headers, timeout: 10000, withCredentials: true })
 }
 
-const ax = () => {
-  const { base, key } = getConfig()
-  return axios.create({
-    baseURL: base,
-    headers: key ? { 'X-API-Key': key } : {},
+// Login uses OAuth2PasswordRequestForm (application/x-www-form-urlencoded)
+const loginRaw = (username: string, password: string) => {
+  const { apiBase } = useStore.getState()
+  const body = new URLSearchParams({ username, password })
+  return axios.post(`${apiBase}/auth/login`, body, {
+    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+    withCredentials: true,
     timeout: 10000,
   })
 }
 
 export const api = {
+  // ── Auth (login/logout don't need bearer) ───────────────────────────────────
+  login:      (username: string, password: string) => loginRaw(username, password),
+  authLogout: () => ax().post('/auth/logout'),
+  authMe:     () => ax().get('/auth/me'),
+
   // ── Health / System ────────────────────────────────────────────────────────
   health:          () => ax().get('/health'),
   configValidate:  () => ax().get('/config/validate'),
   connectionsStatus: () => ax().get('/connections/status'),
   brokerStatus:    () => ax().get('/broker/status'),
-
-  // ── Auth ────────────────────────────────────────────────────────────────────
-  authMe:          () => ax().get('/auth/me'),
   kiteStatus:      () => ax().get('/auth/kite/status'),
   kiteRefresh:     () => ax().post('/auth/kite/refresh'),
   upstoxStatus:    () => ax().get('/auth/upstox/status'),

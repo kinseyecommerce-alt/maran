@@ -59,6 +59,96 @@ function Toasts() {
   )
 }
 
+// ── Login Screen ──────────────────────────────────────────────────────────────
+function LoginScreen({ onSuccess }: { onSuccess: () => void }) {
+  const { setToken } = useStore()
+  const [username, setUsername] = useState('')
+  const [password, setPassword] = useState('')
+  const [error, setError]       = useState('')
+  const [loading, setLoading]   = useState(false)
+
+  const handleLogin = async (e: React.FormEvent) => {
+    e.preventDefault()
+    if (!username) return
+    setLoading(true)
+    setError('')
+    try {
+      const r = await api.login(username, password)
+      if (r.data?.access_token) {
+        setToken(r.data.access_token)
+      }
+      onSuccess()
+    } catch (err: any) {
+      setError(err.response?.data?.detail || 'Login failed — check credentials')
+    } finally {
+      setLoading(false)
+    }
+  }
+
+  return (
+    <div className="fixed inset-0 bg-slate-950 flex items-center justify-center z-50">
+      <div className="w-full max-w-sm px-4">
+        <div className="bg-slate-900 border border-slate-800 rounded-2xl p-8 shadow-2xl shadow-black/50">
+          {/* Logo */}
+          <div className="flex items-center gap-3 mb-8">
+            <div className="w-9 h-9 rounded-lg bg-emerald-500/20 border border-emerald-500/30 flex items-center justify-center">
+              <span className="text-emerald-400 font-bold text-base">A</span>
+            </div>
+            <div>
+              <div className="text-sm font-bold text-slate-100 tracking-widest font-mono">ALGOPRO</div>
+              <div className="text-[10px] text-slate-600 tracking-wider">COMMAND CENTER v4</div>
+            </div>
+          </div>
+
+          <form onSubmit={handleLogin} className="space-y-4">
+            <div>
+              <label className="block text-[11px] font-medium text-slate-500 uppercase tracking-widest mb-1.5">
+                Username
+              </label>
+              <input
+                type="text" autoComplete="username" autoFocus
+                value={username} onChange={e => setUsername(e.target.value)}
+                className="w-full px-4 py-2.5 bg-slate-800 border border-slate-700 rounded-lg text-slate-200 text-sm font-mono
+                           focus:outline-none focus:ring-1 focus:ring-emerald-500 focus:border-emerald-500 transition-all placeholder-slate-600"
+                placeholder="admin"
+              />
+            </div>
+            <div>
+              <label className="block text-[11px] font-medium text-slate-500 uppercase tracking-widest mb-1.5">
+                Password
+              </label>
+              <input
+                type="password" autoComplete="current-password"
+                value={password} onChange={e => setPassword(e.target.value)}
+                className="w-full px-4 py-2.5 bg-slate-800 border border-slate-700 rounded-lg text-slate-200 text-sm font-mono
+                           focus:outline-none focus:ring-1 focus:ring-emerald-500 focus:border-emerald-500 transition-all placeholder-slate-600"
+                placeholder="••••••••"
+              />
+            </div>
+
+            {error && (
+              <div className="text-xs text-rose-400 bg-rose-950/50 border border-rose-900 rounded-lg px-3 py-2">
+                {error}
+              </div>
+            )}
+
+            <button type="submit" disabled={loading || !username}
+              className="w-full py-2.5 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-white text-sm font-semibold
+                         transition-colors disabled:opacity-40 disabled:cursor-not-allowed mt-2">
+              {loading ? 'Authenticating…' : 'Sign In →'}
+            </button>
+          </form>
+
+          <p className="text-[10px] text-slate-700 text-center mt-6 font-mono">
+            AlgoTrader Pro · Authorized Access Only
+          </p>
+        </div>
+      </div>
+    </div>
+  )
+}
+
+// ── Main App ──────────────────────────────────────────────────────────────────
 export default function App() {
   const {
     agents, setAgents,
@@ -66,9 +156,10 @@ export default function App() {
     health, wsConnected,
     ticks, sparklines,
     positions, orders, botStatus, riskStatus,
-    addToast,
+    addToast, token, clearToken,
   } = useStore()
 
+  const [isAuthed, setIsAuthed] = useState<boolean | null>(null)
   const [opsOpen, setOpsOpen]   = useState(false)
   const [activeTab, setActiveTab] = useState<TabId>('positions')
   const [liveTime, setLiveTime]   = useState(
@@ -77,13 +168,24 @@ export default function App() {
   const [tickSince, setTickSince] = useState(0)
   const logRef = useRef<HTMLDivElement>(null)
 
+  // ── Auth check on mount ───────────────────────────────────────────────────
   useEffect(() => {
+    api.authMe()
+      .then(() => setIsAuthed(true))
+      .catch(err => {
+        if (err.response?.status === 401) setIsAuthed(false)
+        else setIsAuthed(true) // server error or network — still let through to dashboard
+      })
+  }, [token])
+
+  useEffect(() => {
+    if (!isAuthed) return
     connectWS()
     const ping = setInterval(() => {
       import('./ws/websocket').then(m => m.sendPing())
     }, 30000)
     return () => clearInterval(ping)
-  }, [])
+  }, [isAuthed])
 
   useEffect(() => {
     const t = setInterval(() => {
@@ -94,20 +196,22 @@ export default function App() {
   }, [])
 
   useEffect(() => {
+    if (!isAuthed) return
     const fetch = () => api.agents().then(r => setAgents(r.data)).catch(() => {})
     fetch()
     const t = setInterval(fetch, 5000)
     return () => clearInterval(t)
-  }, [])
+  }, [isAuthed])
 
   useEffect(() => {
+    if (!isAuthed) return
     api.agentActivity()
       .then(r => {
         const entries = Array.isArray(r.data) ? r.data : (r.data?.entries || r.data?.activity || [])
         if (entries.length > 0) setAgentActivity(entries)
       })
       .catch(() => {})
-  }, [])
+  }, [isAuthed])
 
   useEffect(() => { setTickSince(0) }, [agentActivity.length])
 
@@ -160,6 +264,24 @@ export default function App() {
 
   const openPositionCount = positions.filter(p => p.quantity !== 0).length
   const TabComponent = TAB_COMPONENTS[activeTab]
+
+  // ── Auth gates ────────────────────────────────────────────────────────────
+  if (isAuthed === null) {
+    return (
+      <div className="fixed inset-0 bg-slate-950 flex items-center justify-center">
+        <div className="text-emerald-500 font-mono text-xs animate-pulse tracking-widest">AUTHENTICATING…</div>
+      </div>
+    )
+  }
+  if (isAuthed === false) {
+    return <LoginScreen onSuccess={() => setIsAuthed(true)} />
+  }
+
+  const handleLogout = async () => {
+    try { await api.authLogout() } catch {}
+    clearToken()
+    setIsAuthed(false)
+  }
 
   return (
     <div className="flex flex-col h-screen bg-slate-950 text-slate-300 overflow-hidden selection:bg-emerald-900 selection:text-emerald-50">
@@ -516,13 +638,17 @@ export default function App() {
           <span className="flex items-center gap-1"><Database className="w-3 h-3" /> AlgoTrader Pro v4</span>
           <span className="flex items-center gap-1"><Clock className="w-3 h-3" /> {health?.version || '—'}</span>
         </div>
-        <div className="flex gap-4">
+        <div className="flex items-center gap-4">
           <span>ENGINE: {health?.master || '—'}</span>
           <span>TICKS: {health?.tick_engine || '—'}</span>
           <span>TICKER: {health?.ticker_source || '—'}</span>
           <span className={wsConnected ? 'text-emerald-500' : 'text-slate-600'}>
             {wsConnected ? '● LIVE' : '○ OFFLINE'}
           </span>
+          <button onClick={handleLogout}
+            className="text-slate-600 hover:text-rose-400 transition-colors ml-2 font-mono text-[10px]">
+            ⏻ LOGOUT
+          </button>
         </div>
       </footer>
 
