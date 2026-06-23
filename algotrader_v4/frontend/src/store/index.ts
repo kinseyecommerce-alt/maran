@@ -1,7 +1,12 @@
 import { create } from 'zustand'
-import type { TickData, Position, Order, Bracket, RiskStatus, Agent, BotStatus, HealthData } from '../types'
+import type { TickData, Position, Order, Bracket, RiskStatus, Agent, BotStatus, HealthData, AgentActivityEntry } from '../types'
 
 interface AppStore {
+  // Auth
+  token: string
+  setToken: (t: string) => void
+  clearToken: () => void
+
   // Connection
   apiKey: string
   apiBase: string
@@ -16,7 +21,7 @@ interface AppStore {
 
   // Ticks
   ticks: Record<string, TickData>
-  sparklines: Record<string, number[]>   // 60-point rolling LTP
+  sparklines: Record<string, number[]>
   setTick: (t: TickData) => void
 
   // Selected symbol for chart
@@ -45,6 +50,11 @@ interface AppStore {
   agents: Record<string, Agent>
   setAgents: (a: Record<string, Agent>) => void
 
+  // Agent activity log
+  agentActivity: AgentActivityEntry[]
+  setAgentActivity: (a: AgentActivityEntry[]) => void
+  prependActivityEntry: (e: AgentActivityEntry) => void
+
   // Toasts
   toasts: { id: string; msg: string; type: 'buy' | 'sell' | 'info' | 'error' }[]
   addToast: (msg: string, type?: 'buy' | 'sell' | 'info' | 'error') => void
@@ -52,12 +62,15 @@ interface AppStore {
 }
 
 export const useStore = create<AppStore>((set, get) => ({
-  apiKey: localStorage.getItem('api_key') || '',
-  // Priority: localStorage override → build-time env var → localhost fallback
+  token:      localStorage.getItem('jwt_token') || '',
+  setToken:   (t) => { localStorage.setItem('jwt_token', t); set({ token: t }) },
+  clearToken: () => { localStorage.removeItem('jwt_token'); set({ token: '' }) },
+
+  apiKey:  localStorage.getItem('api_key') || '',
   apiBase: localStorage.getItem('api_base') || import.meta.env.VITE_API_BASE_URL || 'http://localhost:8000',
   wsConnected: false,
-  setApiKey: (k) => { localStorage.setItem('api_key', k); set({ apiKey: k }) },
-  setApiBase: (b) => { localStorage.setItem('api_base', b); set({ apiBase: b }) },
+  setApiKey:   (k) => { localStorage.setItem('api_key', k); set({ apiKey: k }) },
+  setApiBase:  (b) => { localStorage.setItem('api_base', b); set({ apiBase: b }) },
   setWsConnected: (v) => set({ wsConnected: v }),
 
   health: null,
@@ -66,10 +79,10 @@ export const useStore = create<AppStore>((set, get) => ({
   ticks: {},
   sparklines: {},
   setTick: (t) => set((state) => {
-    const prev = state.sparklines[t.symbol] || []
+    const prev  = state.sparklines[t.symbol] || []
     const spark = [...prev, t.ltp].slice(-60)
     return {
-      ticks: { ...state.ticks, [t.symbol]: t },
+      ticks:      { ...state.ticks,      [t.symbol]: t },
       sparklines: { ...state.sparklines, [t.symbol]: spark },
     }
   }),
@@ -81,9 +94,9 @@ export const useStore = create<AppStore>((set, get) => ({
   setBotStatus: (b) => set({ botStatus: b }),
 
   positions: [],
-  orders: [],
+  orders:    [],
   setPositions: (p) => set({ positions: p }),
-  setOrders: (o) => set({ orders: o }),
+  setOrders:    (o) => set({ orders: o }),
 
   brackets: [],
   setBrackets: (b) => set({ brackets: b }),
@@ -93,6 +106,10 @@ export const useStore = create<AppStore>((set, get) => ({
 
   agents: {},
   setAgents: (a) => set({ agents: a }),
+
+  agentActivity: [],
+  setAgentActivity:   (a) => set({ agentActivity: a }),
+  prependActivityEntry: (e) => set((s) => ({ agentActivity: [e, ...s.agentActivity].slice(0, 100) })),
 
   toasts: [],
   addToast: (msg, type = 'info') => {

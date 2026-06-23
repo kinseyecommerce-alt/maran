@@ -1,0 +1,6 @@
+- [V3 Dark UI Architecture](v3-ui-architecture.md) — App.tsx IS the command center; no separate overlay component needed.
+- [WS Signal Routing](ws-signal-routing.md) — signal/regime_change WS events pipe into Zustand agentActivity via prependActivityEntry.
+- [Escaped Backtick Fix](escaped-backtick-fix.md) — DESIGN subagents emit \` and \${ — always sed-fix after any subagent .tsx file.
+- [Backend-Frontend Full Alignment](backend-frontend-alignment.md) — all 60+ endpoints wired; Settings panels fully real (no more coming-soon).
+- [Agent last_signal is a dict not a string](agent-last-signal-dict.md) — `AgentState.last_signal` is `dict`, defaults `{}`, causes React "Objects as React child" crash if rendered with `||`. Use fmtLastSignal() helper.
+- [Ops Panel Layout](ops-panel-layout.md) — All tabs (Positions/Orders/Brackets/Risk/Agents/SEBI) live inside a collapsible bottom "OPERATIONS PANEL"; must click the toggle bar to expand before tabs are reachable.

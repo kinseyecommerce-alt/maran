@@ -189,6 +189,21 @@ async def _ip_whitelist_gate(request: Request, call_next):
     return await call_next(request)
 
 
+# ── Production SPA: strip /api prefix so the React build's /api/* calls route correctly
+# This is the outermost middleware (defined last) so it runs first on every request.
+@app.middleware("http")
+async def _strip_api_prefix(request: Request, call_next):
+    path = request.scope.get("path", "")
+    if path.startswith("/api/"):
+        new_path = path[4:]  # /api/health → /health
+        request.scope["path"] = new_path
+        request.scope["raw_path"] = new_path.encode()
+    elif path == "/api":
+        request.scope["path"] = "/"
+        request.scope["raw_path"] = b"/"
+    return await call_next(request)
+
+
 # ── MED-2: In-memory rate limiter for orders and AI signals ──────────────────
 _rate_store: dict[str, list[float]] = defaultdict(list)
 _rate_store_lock = threading.Lock()
@@ -372,8 +387,19 @@ class CapitalAllocationRequest(BaseModel):
     max_swing_positions:     int | None   = Field(None, ge=1, le=10)
 
 class CredentialsUpdateRequest(BaseModel):
+    # Zerodha Kite
     kite_api_key:      str | None = Field(default=None, min_length=1)
     kite_api_secret:   str | None = Field(default=None, min_length=1)
+    # Upstox
+    upstox_api_key:     str | None = Field(default=None, min_length=1)
+    upstox_api_secret:  str | None = Field(default=None, min_length=1)
+    upstox_redirect_url: str | None = Field(default=None, min_length=1)
+    # Kotak Neo
+    kotak_consumer_key:    str | None = Field(default=None, min_length=1)
+    kotak_consumer_secret: str | None = Field(default=None, min_length=1)
+    kotak_mobile_number:   str | None = Field(default=None, min_length=1)
+    kotak_password:        str | None = Field(default=None, min_length=1)
+    # Third-party data / AI
     anthropic_api_key: str | None = Field(default=None, min_length=1)
     truedata_username: str | None = Field(default=None, min_length=1)
     truedata_password: str | None = Field(default=None, min_length=1)
@@ -425,16 +451,21 @@ def login_page():
 
 @app.get("/dashboard", include_in_schema=False)
 def dashboard_page():
-    """Serve the main trading dashboard."""
-    p = _HERE / "static" / "dashboard.html"
-    if not p.exists():
-        return HTMLResponse("<h2>Dashboard not found — run deploy to build static assets.</h2>", status_code=404)
-    return HTMLResponse(p.read_text())
+    """Serve the React SPA (production build)."""
+    _dist_index = _HERE / "frontend" / "dist" / "index.html"
+    if _dist_index.exists():
+        from fastapi.responses import FileResponse
+        return FileResponse(str(_dist_index))
+    return HTMLResponse("<h2>Frontend not built. Run: cd frontend && npm run build</h2>", status_code=503)
 
 @app.get("/", include_in_schema=False)
-def root_redirect():
-    from fastapi.responses import RedirectResponse
-    return RedirectResponse(url="/dashboard")
+def root_page():
+    """Serve the React SPA root."""
+    _dist_index = _HERE / "frontend" / "dist" / "index.html"
+    if _dist_index.exists():
+        from fastapi.responses import FileResponse
+        return FileResponse(str(_dist_index))
+    return HTMLResponse("<h2>Frontend not built. Run: cd frontend && npm run build</h2>", status_code=503)
 
 @app.get("/agents/activity", tags=["Agents"])
 def agent_activity(n: int = 100):
@@ -1485,10 +1516,27 @@ def patch_capital_allocation(req: CapitalAllocationRequest):
 
 @app.post("/settings/credentials", tags=["Settings"])
 def update_credentials(req: CredentialsUpdateRequest):
-    """Update API credentials. TrueData creds persisted to SQLite; Kite to accounts store."""
+    """Update API credentials for all supported brokers plus data/AI services."""
     from state_store import set_kv
-    if req.kite_api_key      is not None: settings.kite_api_key      = req.kite_api_key
-    if req.kite_api_secret   is not None: settings.kite_api_secret   = req.kite_api_secret
+    # ── Zerodha Kite ────────────────────────────────────────────────────────
+    if req.kite_api_key    is not None: settings.kite_api_key    = req.kite_api_key
+    if req.kite_api_secret is not None: settings.kite_api_secret = req.kite_api_secret
+    if req.kite_api_key is not None or req.kite_api_secret is not None:
+        active = kite_accounts.get_active()
+        name = active["name"] if active else "default"
+        kite_accounts.add_or_update(name, settings.kite_api_key or "", settings.kite_api_secret or "")
+        if not active:
+            kite_accounts.activate(name)
+    # ── Upstox ──────────────────────────────────────────────────────────────
+    if req.upstox_api_key      is not None: settings.upstox_api_key      = req.upstox_api_key
+    if req.upstox_api_secret   is not None: settings.upstox_api_secret   = req.upstox_api_secret
+    if req.upstox_redirect_url is not None: settings.upstox_redirect_url = req.upstox_redirect_url
+    # ── Kotak Neo ────────────────────────────────────────────────────────────
+    if req.kotak_consumer_key    is not None: settings.kotak_consumer_key    = req.kotak_consumer_key
+    if req.kotak_consumer_secret is not None: settings.kotak_consumer_secret = req.kotak_consumer_secret
+    if req.kotak_mobile_number   is not None: settings.kotak_mobile_number   = req.kotak_mobile_number
+    if req.kotak_password        is not None: settings.kotak_password        = req.kotak_password
+    # ── Data / AI ────────────────────────────────────────────────────────────
     if req.anthropic_api_key is not None: settings.anthropic_api_key = req.anthropic_api_key
     if req.truedata_username is not None:
         settings.truedata_username = req.truedata_username
@@ -1496,21 +1544,21 @@ def update_credentials(req: CredentialsUpdateRequest):
     if req.truedata_password is not None:
         settings.truedata_password = req.truedata_password
         set_kv("truedata_password", req.truedata_password)
-    # Mirror into the accounts store so the active account stays in sync
-    if req.kite_api_key is not None or req.kite_api_secret is not None:
-        active = kite_accounts.get_active()
-        name = active["name"] if active else "default"
-        kite_accounts.add_or_update(
-            name,
-            settings.kite_api_key or "",
-            settings.kite_api_secret or "",
-        )
-        if not active:
-            kite_accounts.activate(name)
-    creds = kite_client.validate_credentials()
-    creds["truedata_username"] = bool(settings.truedata_username)
-    creds["truedata_password"] = bool(settings.truedata_password)
-    return {"status": "updated", "credentials": creds}
+    kite_creds = kite_client.validate_credentials()
+    return {
+        "status": "updated",
+        "credentials": {
+            **kite_creds,
+            "truedata_username":    bool(settings.truedata_username),
+            "truedata_password":    bool(settings.truedata_password),
+            "anthropic_api_key":    bool(settings.anthropic_api_key),
+            "upstox_api_key":       bool(settings.upstox_api_key),
+            "upstox_api_secret":    bool(settings.upstox_api_secret),
+            "kotak_consumer_key":   bool(settings.kotak_consumer_key),
+            "kotak_consumer_secret":bool(settings.kotak_consumer_secret),
+            "kotak_mobile_number":  bool(settings.kotak_mobile_number),
+        },
+    }
 
 
 class AddKiteAccountRequest(BaseModel):
@@ -1849,6 +1897,13 @@ async def ws_endpoint(ws: WebSocket):
     except WebSocketDisconnect:
         if ws in ws_clients:
             ws_clients.remove(ws)
+
+
+# Production alias: Vite dev proxy rewrites /ws-proxy/ws → /ws; in production
+# FastAPI must expose the same path directly so the React build connects correctly.
+@app.websocket("/ws-proxy/ws")
+async def ws_proxy_endpoint(ws: WebSocket):
+    await ws_endpoint(ws)
 
 
 # ── Regime ────────────────────────────────────────────────────────────────────
@@ -3434,3 +3489,21 @@ async def place_twap_order(
         tag="manual-twap", duration_sec=duration_sec, slices=slices, loop=loop,
     )
     return {"symbol": symbol.upper(), "order_ids": ids, "qty": qty}
+
+
+# ── Production SPA: serve the built React app for all non-API routes ──────────
+_DIST = _HERE / "frontend" / "dist"
+if _DIST.exists():
+    # Serve compiled JS/CSS/image assets under /assets (Vite's default output dir)
+    _assets_dir = _DIST / "assets"
+    if _assets_dir.exists():
+        app.mount("/assets", StaticFiles(directory=str(_assets_dir)), name="spa-assets")
+
+@app.get("/{full_path:path}", include_in_schema=False)
+async def spa_fallback(full_path: str):
+    """SPA catch-all — return index.html for every unmatched GET so React Router works."""
+    from fastapi.responses import FileResponse
+    index = _DIST / "index.html"
+    if index.exists():
+        return FileResponse(str(index))
+    return HTMLResponse("<h2>Frontend not built. Run: cd frontend && npm run build</h2>", status_code=503)

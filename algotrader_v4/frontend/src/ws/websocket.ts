@@ -8,15 +8,22 @@ export function connectWS() {
   const { apiBase, apiKey, setWsConnected, setTick, addToast } = useStore.getState()
   if (ws && ws.readyState === WebSocket.OPEN) return
 
-  const wsBase = apiBase.replace(/^http/, 'ws')
-  const url = `${wsBase}/ws${apiKey ? `?token=${apiKey}` : ''}`
+  let url: string
+  if (apiBase.startsWith('/')) {
+    const wsProto = window.location.protocol === 'https:' ? 'wss:' : 'ws:'
+    url = `${wsProto}//${window.location.host}/ws-proxy/ws${apiKey ? `?token=${apiKey}` : ''}`
+  } else {
+    const wsBase = apiBase.replace(/^http/, 'ws')
+    url = `${wsBase}/ws${apiKey ? `?token=${apiKey}` : ''}`
+  }
 
-  ws = new WebSocket(url)
+  const socket = new WebSocket(url)
+  ws = socket
 
-  ws.onopen = () => {
+  socket.onopen = () => {
     setWsConnected(true)
     if (reconnectTimer) { clearTimeout(reconnectTimer); reconnectTimer = null }
-    ws?.send('ping')
+    socket.send('ping')
   }
 
   ws.onclose = () => {
@@ -42,6 +49,23 @@ export function connectWS() {
         })
       } else if (data.event === 'signal') {
         addToast(`Signal: ${data.signal?.action || data.signal} on ${data.symbol}`, 'info')
+        const action = data.signal?.action || data.signal || 'SIGNAL'
+        const entryType = action === 'BUY' ? 'buy' : action === 'SELL' ? 'sell' : 'analyze'
+        useStore.getState().prependActivityEntry({
+          time: new Date().toLocaleTimeString('en-IN', { hour12: false, timeZone: 'Asia/Kolkata' }),
+          agent: (data.strategy || 'SYSTEM').toUpperCase(),
+          action: `${action} ${data.symbol}${data.price ? ` @ ${data.price}` : ''}`,
+          type: entryType,
+          cat: 'SIG',
+        })
+      } else if (data.event === 'regime_change') {
+        useStore.getState().prependActivityEntry({
+          time: new Date().toLocaleTimeString('en-IN', { hour12: false, timeZone: 'Asia/Kolkata' }),
+          agent: 'SYSTEM',
+          action: `MARKET REGIME CHANGED: ${data.from || ''} → ${data.to || data.regime || 'UNKNOWN'}`,
+          type: 'alert',
+          cat: 'WARN',
+        })
       }
     } catch { /* ignore parse errors */ }
   }
