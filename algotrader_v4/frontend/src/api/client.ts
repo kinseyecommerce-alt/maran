@@ -71,10 +71,35 @@ export const api = {
   // Regime
   regimeStatus: () => ax().get('/regime/status'),
 
-  // Credentials
+  // Broker status endpoints
+  brokerStatus: () => ax().get('/broker/status'),
+  kiteStatus: () => ax().get('/auth/kite/status'),
+  upstoxStatus: () => ax().get('/auth/upstox/status'),
+  upstoxLoginUrl: () => ax().get('/auth/upstox/login-url'),
+  upstoxSetToken: (access_token: string) =>
+    ax().post('/auth/upstox/token', { access_token }),
+  kotakStatus: () => ax().get('/auth/kotak/status'),
+  kotakSendOtp: () => ax().post('/auth/kotak/send-otp'),
+  kotakVerifyOtp: (otp: string, password: string) =>
+    ax().post('/auth/kotak/verify-otp', { otp, password }),
+  kotakSetToken: (access_token: string, sid: string) =>
+    ax().post('/auth/kotak/token', { access_token, sid }),
+
+  // Credentials — covers all brokers + data/AI services
   updateCredentials: (data: {
+    // Zerodha
     kite_api_key?: string
     kite_api_secret?: string
+    // Upstox
+    upstox_api_key?: string
+    upstox_api_secret?: string
+    upstox_redirect_url?: string
+    // Kotak Neo
+    kotak_consumer_key?: string
+    kotak_consumer_secret?: string
+    kotak_mobile_number?: string
+    kotak_password?: string
+    // Data / AI
     anthropic_api_key?: string
     truedata_username?: string
     truedata_password?: string

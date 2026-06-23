@@ -372,8 +372,19 @@ class CapitalAllocationRequest(BaseModel):
     max_swing_positions:     int | None   = Field(None, ge=1, le=10)
 
 class CredentialsUpdateRequest(BaseModel):
+    # Zerodha Kite
     kite_api_key:      str | None = Field(default=None, min_length=1)
     kite_api_secret:   str | None = Field(default=None, min_length=1)
+    # Upstox
+    upstox_api_key:     str | None = Field(default=None, min_length=1)
+    upstox_api_secret:  str | None = Field(default=None, min_length=1)
+    upstox_redirect_url: str | None = Field(default=None, min_length=1)
+    # Kotak Neo
+    kotak_consumer_key:    str | None = Field(default=None, min_length=1)
+    kotak_consumer_secret: str | None = Field(default=None, min_length=1)
+    kotak_mobile_number:   str | None = Field(default=None, min_length=1)
+    kotak_password:        str | None = Field(default=None, min_length=1)
+    # Third-party data / AI
     anthropic_api_key: str | None = Field(default=None, min_length=1)
     truedata_username: str | None = Field(default=None, min_length=1)
     truedata_password: str | None = Field(default=None, min_length=1)
@@ -1485,10 +1496,27 @@ def patch_capital_allocation(req: CapitalAllocationRequest):
 
 @app.post("/settings/credentials", tags=["Settings"])
 def update_credentials(req: CredentialsUpdateRequest):
-    """Update API credentials. TrueData creds persisted to SQLite; Kite to accounts store."""
+    """Update API credentials for all supported brokers plus data/AI services."""
     from state_store import set_kv
-    if req.kite_api_key      is not None: settings.kite_api_key      = req.kite_api_key
-    if req.kite_api_secret   is not None: settings.kite_api_secret   = req.kite_api_secret
+    # ── Zerodha Kite ────────────────────────────────────────────────────────
+    if req.kite_api_key    is not None: settings.kite_api_key    = req.kite_api_key
+    if req.kite_api_secret is not None: settings.kite_api_secret = req.kite_api_secret
+    if req.kite_api_key is not None or req.kite_api_secret is not None:
+        active = kite_accounts.get_active()
+        name = active["name"] if active else "default"
+        kite_accounts.add_or_update(name, settings.kite_api_key or "", settings.kite_api_secret or "")
+        if not active:
+            kite_accounts.activate(name)
+    # ── Upstox ──────────────────────────────────────────────────────────────
+    if req.upstox_api_key      is not None: settings.upstox_api_key      = req.upstox_api_key
+    if req.upstox_api_secret   is not None: settings.upstox_api_secret   = req.upstox_api_secret
+    if req.upstox_redirect_url is not None: settings.upstox_redirect_url = req.upstox_redirect_url
+    # ── Kotak Neo ────────────────────────────────────────────────────────────
+    if req.kotak_consumer_key    is not None: settings.kotak_consumer_key    = req.kotak_consumer_key
+    if req.kotak_consumer_secret is not None: settings.kotak_consumer_secret = req.kotak_consumer_secret
+    if req.kotak_mobile_number   is not None: settings.kotak_mobile_number   = req.kotak_mobile_number
+    if req.kotak_password        is not None: settings.kotak_password        = req.kotak_password
+    # ── Data / AI ────────────────────────────────────────────────────────────
     if req.anthropic_api_key is not None: settings.anthropic_api_key = req.anthropic_api_key
     if req.truedata_username is not None:
         settings.truedata_username = req.truedata_username
@@ -1496,21 +1524,21 @@ def update_credentials(req: CredentialsUpdateRequest):
     if req.truedata_password is not None:
         settings.truedata_password = req.truedata_password
         set_kv("truedata_password", req.truedata_password)
-    # Mirror into the accounts store so the active account stays in sync
-    if req.kite_api_key is not None or req.kite_api_secret is not None:
-        active = kite_accounts.get_active()
-        name = active["name"] if active else "default"
-        kite_accounts.add_or_update(
-            name,
-            settings.kite_api_key or "",
-            settings.kite_api_secret or "",
-        )
-        if not active:
-            kite_accounts.activate(name)
-    creds = kite_client.validate_credentials()
-    creds["truedata_username"] = bool(settings.truedata_username)
-    creds["truedata_password"] = bool(settings.truedata_password)
-    return {"status": "updated", "credentials": creds}
+    kite_creds = kite_client.validate_credentials()
+    return {
+        "status": "updated",
+        "credentials": {
+            **kite_creds,
+            "truedata_username":    bool(settings.truedata_username),
+            "truedata_password":    bool(settings.truedata_password),
+            "anthropic_api_key":    bool(settings.anthropic_api_key),
+            "upstox_api_key":       bool(settings.upstox_api_key),
+            "upstox_api_secret":    bool(settings.upstox_api_secret),
+            "kotak_consumer_key":   bool(settings.kotak_consumer_key),
+            "kotak_consumer_secret":bool(settings.kotak_consumer_secret),
+            "kotak_mobile_number":  bool(settings.kotak_mobile_number),
+        },
+    }
 
 
 class AddKiteAccountRequest(BaseModel):
