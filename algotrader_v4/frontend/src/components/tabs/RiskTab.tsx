@@ -133,8 +133,8 @@ export default function RiskTab() {
           </div>
           {regime.drivers && (
             <div className="mt-2 flex flex-wrap gap-1">
-              {Object.entries(regime.drivers as Record<string, string>).slice(0, 4).map(([k, v]) => (
-                <span key={k} className="text-[10px] bg-slate-700 text-slate-400 px-1.5 py-0.5 rounded font-mono">{k}: {v}</span>
+              {Object.entries(regime.drivers as Record<string, unknown>).slice(0, 4).map(([k, v]) => (
+                <span key={k} className="text-[10px] bg-slate-700 text-slate-400 px-1.5 py-0.5 rounded font-mono">{k}: {String(v ?? '')}</span>
               ))}
             </div>
           )}
@@ -171,7 +171,7 @@ export default function RiskTab() {
         <StatCard label="Live Connections">
           <div className="space-y-1">
             {[
-              { label: 'Zerodha Kite', ok: connections.kite?.connected, sub: connections.kite?.account_id },
+              { label: 'Zerodha Kite', ok: connections.kite?.connected, sub: String(connections.kite?.account_id ?? '') || undefined },
               { label: 'TrueData',     ok: connections.truedata?.connected, sub: connections.truedata?.active ? 'active feed' : connections.truedata?.configured ? 'configured' : 'not set' },
               { label: 'Claude AI',    ok: connections.claude?.available, sub: connections.claude?.available ? 'API key set' : 'not configured' },
               ...((connections.secondary ?? []) as any[]).map((b: any) => ({

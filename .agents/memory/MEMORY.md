@@ -2,3 +2,4 @@
 - [WS Signal Routing](ws-signal-routing.md) — signal/regime_change WS events pipe into Zustand agentActivity via prependActivityEntry.
 - [Escaped Backtick Fix](escaped-backtick-fix.md) — DESIGN subagents emit \` and \${ — always sed-fix after any subagent .tsx file.
 - [Backend-Frontend Full Alignment](backend-frontend-alignment.md) — all 60+ endpoints wired; Settings panels fully real (no more coming-soon).
+- [Agent last_signal is a dict not a string](agent-last-signal-dict.md) — `AgentState.last_signal` is `dict`, defaults `{}`, causes React "Objects as React child" crash if rendered with `||`.

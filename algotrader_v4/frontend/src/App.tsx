@@ -207,7 +207,9 @@ export default function App() {
     if (!isAuthed) return
     api.agentActivity()
       .then(r => {
-        const entries = Array.isArray(r.data) ? r.data : (r.data?.entries || r.data?.activity || [])
+        const entries = Array.isArray(r.data)
+          ? r.data
+          : (r.data?.events || r.data?.entries || r.data?.activity || [])
         if (entries.length > 0) setAgentActivity(entries)
       })
       .catch(() => {})
@@ -265,6 +267,12 @@ export default function App() {
   const openPositionCount = positions.filter(p => p.quantity !== 0).length
   const TabComponent = TAB_COMPONENTS[activeTab]
 
+  const handleLogout = async () => {
+    try { await api.authLogout() } catch {}
+    clearToken()
+    setIsAuthed(false)
+  }
+
   // ── Auth gates ────────────────────────────────────────────────────────────
   if (isAuthed === null) {
     return (
@@ -275,12 +283,6 @@ export default function App() {
   }
   if (isAuthed === false) {
     return <LoginScreen onSuccess={() => setIsAuthed(true)} />
-  }
-
-  const handleLogout = async () => {
-    try { await api.authLogout() } catch {}
-    clearToken()
-    setIsAuthed(false)
   }
 
   return (
@@ -381,17 +383,17 @@ export default function App() {
                       </div>
 
                       <div className="mt-3 space-y-1 text-xs">
-                        {agent?.trades_today !== undefined && (
+                        {agent?.trades_today != null && (
                           <div className="flex justify-between">
                             <span className="text-slate-500">Trades</span>
-                            <span className="font-mono text-slate-300">{agent.trades_today}</span>
+                            <span className="font-mono text-slate-300">{Number(agent.trades_today)}</span>
                           </div>
                         )}
-                        {agent?.win_rate !== undefined && (
+                        {agent?.win_rate != null && (
                           <div className="flex justify-between">
                             <span className="text-slate-500">Win Rate</span>
-                            <span className={`font-mono ${agent.win_rate >= 55 ? 'text-emerald-400' : 'text-rose-400'}`}>
-                              {agent.win_rate.toFixed(1)}%
+                            <span className={`font-mono ${Number(agent.win_rate) >= 55 ? 'text-emerald-400' : 'text-rose-400'}`}>
+                              {Number(agent.win_rate).toFixed(1)}%
                             </span>
                           </div>
                         )}
@@ -399,9 +401,20 @@ export default function App() {
 
                       <div className="mt-3 bg-slate-950 rounded p-2.5 border border-slate-800">
                         <div className="text-[10px] text-slate-500 uppercase tracking-wider mb-1">Last Signal</div>
-                        <div className="font-mono text-xs text-slate-300 truncate" title={agent?.last_signal || '—'}>
-                          {agent?.last_signal || '—'}
-                        </div>
+                        {(() => {
+                          const ls = agent?.last_signal as unknown
+                          let display = '—'
+                          if (typeof ls === 'string' && ls) display = ls
+                          else if (ls && typeof ls === 'object') {
+                            const s = ls as Record<string, unknown>
+                            display = [s.symbol, s.action].filter(Boolean).join(' ') || '—'
+                          }
+                          return (
+                            <div className="font-mono text-xs text-slate-300 truncate" title={display}>
+                              {display}
+                            </div>
+                          )
+                        })()}
                       </div>
 
                       <div className="mt-3 flex gap-2">
