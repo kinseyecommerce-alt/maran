@@ -1,0 +1,353 @@
+import React, { useState, useEffect } from "react";
+import { 
+  Activity, 
+  Terminal, 
+  Cpu, 
+  Wifi, 
+  ShieldCheck, 
+  AlertTriangle, 
+  TrendingUp, 
+  TrendingDown,
+  BarChart3,
+  Clock,
+  Zap,
+  Play,
+  Square,
+  ChevronRight,
+  Database,
+  Crosshair
+} from "lucide-react";
+
+export function AgentCommandCenter() {
+  const [time, setTime] = useState(new Date().toLocaleTimeString("en-IN", { timeZone: "Asia/Kolkata" }));
+
+  useEffect(() => {
+    const timer = setInterval(() => {
+      setTime(new Date().toLocaleTimeString("en-IN", { timeZone: "Asia/Kolkata" }));
+    }, 1000);
+    return () => clearInterval(timer);
+  }, []);
+
+  const agents = [
+    {
+      id: "AGN-01",
+      name: "SCALPING",
+      status: "ACTIVE",
+      strategy: "Orderbook Imbalance",
+      pnl: "+₹14,250",
+      pnlClass: "text-emerald-400",
+      uptime: "4h 12m",
+      lastAction: "Bought 150 INFY",
+      confidence: "84%",
+      memory: "128 MB",
+    },
+    {
+      id: "AGN-02",
+      name: "MOMENTUM",
+      status: "ACTIVE",
+      strategy: "VWAP Breakout",
+      pnl: "+₹32,100",
+      pnlClass: "text-emerald-400",
+      uptime: "4h 12m",
+      lastAction: "Holding RELIANCE",
+      confidence: "92%",
+      memory: "256 MB",
+    },
+    {
+      id: "AGN-03",
+      name: "INTRADAY",
+      status: "PAUSED",
+      strategy: "Mean Reversion",
+      pnl: "-₹1,450",
+      pnlClass: "text-red-400",
+      uptime: "0h 0m",
+      lastAction: "Stopped out HDFC",
+      confidence: "--",
+      memory: "0 MB",
+    },
+    {
+      id: "AGN-04",
+      name: "SWING",
+      status: "ACTIVE",
+      strategy: "Multi-Timeframe Trend",
+      pnl: "+₹8,900",
+      pnlClass: "text-emerald-400",
+      uptime: "4h 12m",
+      lastAction: "Sold 50 TCS",
+      confidence: "76%",
+      memory: "512 MB",
+    }
+  ];
+
+  const logs = [
+    { time: "09:42:15", agent: "SCALPING", action: "BOUGHT 150 INFY @ 1,842.50", conf: "84%", type: "buy" },
+    { time: "09:41:02", agent: "MOMENTUM", action: "TRAILING SL UPDATED RELIANCE TO 2,840.00", conf: "--", type: "system" },
+    { time: "09:38:45", agent: "SWING", action: "SOLD 50 TCS @ 3,920.10 (PROFIT BOOKING)", conf: "91%", type: "sell" },
+    { time: "09:35:12", agent: "SYSTEM", action: "MARKET REGIME DETECTED: HIGH VOLATILITY", conf: "98%", type: "alert" },
+    { time: "09:31:05", agent: "SCALPING", action: "DETECTED ORDERBOOK IMBALANCE IN INFY (BULLISH)", conf: "82%", type: "analyze" },
+    { time: "09:25:00", agent: "INTRADAY", action: "STOP LOSS HIT HDFC @ 1,420.50. AGENT PAUSED.", conf: "--", type: "loss" },
+    { time: "09:15:05", agent: "SYSTEM", action: "NSE PRE-OPEN COMPLETE. ALL ACTIVE AGENTS ENGAGED.", conf: "100%", type: "system" },
+  ];
+
+  const watchlist = [
+    { sym: "NIFTY50", price: "22,450.20", chg: "+1.2%", chgVal: "+265.40", type: "up" },
+    { sym: "RELIANCE", price: "2,845.30", chg: "+0.8%", chgVal: "+22.60", type: "up" },
+    { sym: "TCS", price: "3,910.05", chg: "-0.4%", chgVal: "-15.60", type: "down" },
+    { sym: "INFY", price: "1,842.50", chg: "+2.1%", chgVal: "+37.80", type: "up" },
+    { sym: "HDFCBANK", price: "1,422.10", chg: "-1.5%", chgVal: "-21.60", type: "down" },
+  ];
+
+  return (
+    <div className="min-h-screen bg-slate-950 text-slate-300 font-sans flex flex-col overflow-hidden selection:bg-emerald-900 selection:text-emerald-50">
+      
+      {/* HEADER */}
+      <header className="h-14 bg-slate-900 border-b border-slate-800 flex items-center justify-between px-4 shrink-0">
+        <div className="flex items-center gap-4">
+          <div className="flex items-center gap-2 text-emerald-400 font-bold tracking-widest text-lg">
+            <Cpu className="w-5 h-5" />
+            <span>ALGO<span className="text-white">PRO</span> <span className="text-xs text-slate-500 font-mono tracking-normal">v4.2.1</span></span>
+          </div>
+          <div className="h-5 w-px bg-slate-700 mx-2" />
+          <div className="flex items-center gap-2 text-xs font-mono">
+            <div className="flex items-center gap-1.5 text-emerald-400 bg-emerald-400/10 px-2 py-1 rounded">
+              <span className="relative flex h-2 w-2">
+                <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-emerald-400 opacity-75"></span>
+                <span className="relative inline-flex rounded-full h-2 w-2 bg-emerald-500"></span>
+              </span>
+              NSE CONNECTED
+            </div>
+            <div className="flex items-center gap-1.5 text-slate-400 px-2 py-1">
+              <Wifi className="w-3 h-3" /> 12ms
+            </div>
+          </div>
+        </div>
+
+        <div className="flex items-center gap-6">
+          <div className="flex flex-col items-end">
+            <span className="text-[10px] text-slate-500 font-mono uppercase tracking-wider">Net P&L Today</span>
+            <span className="text-emerald-400 font-mono font-bold text-base">+₹53,800.00</span>
+          </div>
+          <div className="flex flex-col items-end">
+            <span className="text-[10px] text-slate-500 font-mono uppercase tracking-wider">Used Margin</span>
+            <span className="text-slate-200 font-mono text-base">₹4,25,000.00</span>
+          </div>
+          <div className="flex items-center gap-3 ml-4 pl-4 border-l border-slate-800">
+            <ShieldCheck className="w-4 h-4 text-emerald-500" />
+            <span className="font-mono text-sm text-slate-300">{time} IST</span>
+          </div>
+        </div>
+      </header>
+
+      {/* MAIN LAYOUT */}
+      <div className="flex flex-1 overflow-hidden">
+        
+        {/* LEFT COLUMN - AGENTS & LOGS */}
+        <div className="flex-1 flex flex-col min-w-0 border-r border-slate-800 bg-[#070b14]">
+          
+          {/* AGENTS SECTION */}
+          <div className="p-4 shrink-0">
+            <div className="flex items-center justify-between mb-4">
+              <h2 className="text-sm font-semibold tracking-widest text-slate-400 flex items-center gap-2">
+                <Zap className="w-4 h-4 text-emerald-500" /> 
+                AUTONOMOUS AGENTS
+              </h2>
+              <div className="text-xs font-mono text-slate-500 flex gap-4">
+                <span>ACTIVE: <span className="text-emerald-400">3</span></span>
+                <span>PAUSED: <span className="text-amber-500">1</span></span>
+                <span>CPU: 42%</span>
+              </div>
+            </div>
+            
+            <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4">
+              {agents.map((agent) => (
+                <div key={agent.id} className={`border rounded-lg bg-slate-900/50 p-4 relative overflow-hidden transition-colors ${agent.status === 'ACTIVE' ? 'border-emerald-500/30 hover:border-emerald-500/60' : 'border-slate-800 opacity-75'}`}>
+                  {agent.status === 'ACTIVE' && (
+                    <div className="absolute top-0 right-0 w-24 h-24 bg-emerald-500/5 rounded-full blur-2xl transform translate-x-1/2 -translate-y-1/2" />
+                  )}
+                  
+                  <div className="flex justify-between items-start mb-3">
+                    <div>
+                      <div className="flex items-center gap-2">
+                        <span className="font-mono text-[10px] text-slate-500">{agent.id}</span>
+                        {agent.status === 'ACTIVE' ? (
+                          <span className="flex h-1.5 w-1.5 rounded-full bg-emerald-500 shadow-[0_0_8px_rgba(16,185,129,0.8)]"></span>
+                        ) : (
+                          <span className="flex h-1.5 w-1.5 rounded-full bg-amber-500"></span>
+                        )}
+                      </div>
+                      <h3 className="font-bold text-slate-200 mt-1">{agent.name}</h3>
+                    </div>
+                    <div className={`text-xs font-mono px-2 py-0.5 rounded border ${agent.status === 'ACTIVE' ? 'border-emerald-500/20 text-emerald-400 bg-emerald-500/10' : 'border-amber-500/20 text-amber-500 bg-amber-500/10'}`}>
+                      {agent.status}
+                    </div>
+                  </div>
+                  
+                  <div className="space-y-2 mb-4">
+                    <div className="flex justify-between text-xs">
+                      <span className="text-slate-500">Strategy</span>
+                      <span className="text-slate-300">{agent.strategy}</span>
+                    </div>
+                    <div className="flex justify-between text-xs">
+                      <span className="text-slate-500">Day P&L</span>
+                      <span className={`font-mono font-medium ${agent.pnlClass}`}>{agent.pnl}</span>
+                    </div>
+                  </div>
+
+                  <div className="bg-slate-950 rounded p-2.5 border border-slate-800">
+                    <div className="text-[10px] text-slate-500 uppercase tracking-wider mb-1 flex justify-between">
+                      <span>Last Action</span>
+                      <span>Conf: {agent.confidence}</span>
+                    </div>
+                    <div className="font-mono text-xs text-slate-300 truncate" title={agent.lastAction}>
+                      {agent.lastAction}
+                    </div>
+                  </div>
+                  
+                  <div className="mt-3 flex gap-2">
+                    {agent.status === 'ACTIVE' ? (
+                      <button className="flex-1 flex items-center justify-center gap-1 bg-slate-800 hover:bg-slate-700 text-slate-300 text-xs py-1.5 rounded transition-colors border border-slate-700">
+                        <Square className="w-3 h-3" /> Stop
+                      </button>
+                    ) : (
+                      <button className="flex-1 flex items-center justify-center gap-1 bg-emerald-500/20 hover:bg-emerald-500/30 text-emerald-400 text-xs py-1.5 rounded transition-colors border border-emerald-500/30">
+                        <Play className="w-3 h-3 fill-current" /> Start
+                      </button>
+                    )}
+                    <button className="px-2 bg-slate-800 hover:bg-slate-700 text-slate-400 text-xs py-1.5 rounded transition-colors border border-slate-700">
+                      <TrendingUp className="w-3 h-3" />
+                    </button>
+                  </div>
+                </div>
+              ))}
+            </div>
+          </div>
+
+          {/* ACTIVITY LOG */}
+          <div className="flex-1 flex flex-col p-4 border-t border-slate-800 bg-slate-950 overflow-hidden">
+            <h2 className="text-sm font-semibold tracking-widest text-slate-400 flex items-center gap-2 mb-4 shrink-0">
+              <Terminal className="w-4 h-4 text-emerald-500" /> 
+              LIVE DECISION STREAM
+            </h2>
+            
+            <div className="flex-1 overflow-y-auto space-y-1 font-mono text-xs pr-2 custom-scrollbar">
+              {logs.map((log, i) => (
+                <div key={i} className="flex gap-4 py-1.5 px-2 hover:bg-slate-900/50 rounded group border-l-2 border-transparent hover:border-slate-700 transition-colors">
+                  <span className="text-slate-600 shrink-0 w-20">{log.time}</span>
+                  <span className="text-slate-400 shrink-0 w-24">[{log.agent}]</span>
+                  <span className={`flex-1 ${
+                    log.type === 'buy' ? 'text-emerald-400' :
+                    log.type === 'sell' ? 'text-rose-400' :
+                    log.type === 'alert' ? 'text-amber-400' :
+                    log.type === 'loss' ? 'text-rose-500 font-bold' :
+                    'text-slate-300'
+                  }`}>
+                    {log.action}
+                  </span>
+                  <span className="text-slate-600 shrink-0 w-20 text-right opacity-0 group-hover:opacity-100 transition-opacity">
+                    C: {log.conf}
+                  </span>
+                </div>
+              ))}
+              <div className="flex gap-4 py-1.5 px-2">
+                <span className="text-emerald-500/50 shrink-0 w-20">...</span>
+                <span className="text-slate-600">Waiting for signals...</span>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        {/* RIGHT SIDEBAR - WATCHLIST & SECONDARY CHART */}
+        <div className="w-80 flex flex-col bg-slate-900 shrink-0">
+          
+          {/* WATCHLIST */}
+          <div className="flex-1 border-b border-slate-800 flex flex-col min-h-0">
+            <div className="p-3 border-b border-slate-800 flex justify-between items-center bg-slate-950/50 shrink-0">
+              <h3 className="text-xs font-semibold tracking-widest text-slate-400 flex items-center gap-2">
+                <Activity className="w-3.5 h-3.5" />
+                MARKET OVERVIEW
+              </h3>
+            </div>
+            <div className="flex-1 overflow-y-auto custom-scrollbar">
+              {watchlist.map((item, i) => (
+                <div key={i} className="flex justify-between items-center p-3 border-b border-slate-800/50 hover:bg-slate-800/30 cursor-pointer transition-colors">
+                  <div>
+                    <div className="font-bold text-slate-200 text-sm">{item.sym}</div>
+                    <div className="text-[10px] text-slate-500 mt-0.5">NSE EQ</div>
+                  </div>
+                  <div className="text-right">
+                    <div className="font-mono text-sm text-slate-200">{item.price}</div>
+                    <div className={`font-mono text-[10px] flex items-center justify-end gap-1 mt-0.5 ${item.type === 'up' ? 'text-emerald-400' : 'text-rose-400'}`}>
+                      {item.type === 'up' ? <TrendingUp className="w-3 h-3" /> : <TrendingDown className="w-3 h-3" />}
+                      {item.chgVal} ({item.chg})
+                    </div>
+                  </div>
+                </div>
+              ))}
+            </div>
+          </div>
+
+          {/* SECONDARY CHART CONTEXT */}
+          <div className="h-64 p-3 bg-slate-950/30 flex flex-col shrink-0">
+            <div className="flex justify-between items-center mb-3">
+              <h3 className="text-xs font-semibold tracking-widest text-slate-400 flex items-center gap-2">
+                <BarChart3 className="w-3.5 h-3.5" />
+                NIFTY50 TREND
+              </h3>
+              <span className="text-[10px] bg-slate-800 px-1.5 py-0.5 rounded text-slate-400">1M</span>
+            </div>
+            
+            {/* Mock Chart Area */}
+            <div className="flex-1 relative border border-slate-800 rounded bg-[#0b1120] overflow-hidden group">
+              <div className="absolute inset-0 flex items-end">
+                {/* Fake chart bars */}
+                <div className="w-full h-full flex items-end justify-between px-1 opacity-40 group-hover:opacity-60 transition-opacity">
+                  {[...Array(30)].map((_, i) => (
+                    <div key={i} className="w-[2%] bg-emerald-500/20 rounded-t-sm" style={{ height: `${20 + Math.random() * 60}%` }}></div>
+                  ))}
+                </div>
+                {/* Fake line */}
+                <svg className="absolute inset-0 h-full w-full opacity-60" preserveAspectRatio="none">
+                  <path d="M0,100 Q10,80 20,90 T40,60 T60,70 T80,30 T100,40 L100,100 L0,100 Z" fill="rgba(16,185,129,0.05)" />
+                  <path d="M0,100 Q10,80 20,90 T40,60 T60,70 T80,30 T100,40" fill="none" stroke="rgba(16,185,129,0.8)" strokeWidth="1.5" vectorEffect="non-scaling-stroke" />
+                </svg>
+              </div>
+              <div className="absolute top-2 left-2 flex items-center gap-1.5 bg-slate-900/80 backdrop-blur border border-slate-700/50 px-2 py-1 rounded text-[10px] font-mono text-emerald-400">
+                <Crosshair className="w-3 h-3" />
+                UPTREND STRONG
+              </div>
+            </div>
+          </div>
+          
+        </div>
+      </div>
+      
+      {/* FOOTER */}
+      <footer className="h-8 bg-slate-950 border-t border-slate-900 flex justify-between items-center px-4 text-[10px] font-mono text-slate-500 shrink-0">
+        <div className="flex gap-4">
+          <span className="flex items-center gap-1"><Database className="w-3 h-3" /> MEM: 3.2GB / 16GB</span>
+          <span className="flex items-center gap-1"><Clock className="w-3 h-3" /> UPTIME: 14d 6h</span>
+        </div>
+        <div className="flex gap-4">
+          <span>ALGORITHM ENGINE: ONLINE</span>
+          <span>EXECUTION: LIVE</span>
+        </div>
+      </footer>
+      
+      <style dangerouslySetInnerHTML={{__html: `
+        .custom-scrollbar::-webkit-scrollbar {
+          width: 4px;
+        }
+        .custom-scrollbar::-webkit-scrollbar-track {
+          background: rgba(15, 23, 42, 0.5);
+        }
+        .custom-scrollbar::-webkit-scrollbar-thumb {
+          background: rgba(51, 65, 85, 0.5);
+          border-radius: 4px;
+        }
+        .custom-scrollbar::-webkit-scrollbar-thumb:hover {
+          background: rgba(71, 85, 105, 0.8);
+        }
+      `}} />
+    </div>
+  );
+}
