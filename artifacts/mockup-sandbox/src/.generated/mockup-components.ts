@@ -2,6 +2,8 @@
 type ModuleMap = Record<string, () => Promise<Record<string, unknown>>>;
 export const modules: ModuleMap = {
   "./components/mockups/algotrader-dashboard/AgentCommandCenter.tsx": () => import("../components/mockups/algotrader-dashboard/AgentCommandCenter.tsx"),
+  "./components/mockups/algotrader-dashboard/AgentCommandCenterV2.tsx": () => import("../components/mockups/algotrader-dashboard/AgentCommandCenterV2.tsx"),
+  "./components/mockups/algotrader-dashboard/AgentCommandCenterV3.tsx": () => import("../components/mockups/algotrader-dashboard/AgentCommandCenterV3.tsx"),
   "./components/mockups/algotrader-dashboard/PrecisionInstrument.tsx": () => import("../components/mockups/algotrader-dashboard/PrecisionInstrument.tsx"),
   "./components/mockups/algotrader-dashboard/RiskFirstDashboard.tsx": () => import("../components/mockups/algotrader-dashboard/RiskFirstDashboard.tsx")
 };
