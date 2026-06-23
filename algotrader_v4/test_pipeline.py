@@ -6364,10 +6364,13 @@ def t_risk_manager_fii_bullish_scaling_not_cancelled():
     from config import settings
     rm = _RM.__new__(_RM)
     _RM.__init__(rm)
-    # Force FII score > 0.4 via alt_data mock
+    # Force FII score > 0.4 via alt_data mock; also suppress event-day halving
+    # so the test is isolated to FII scaling vs cap-clamp (not calendar-sensitive)
     from alt_data import alt_data_engine
-    _orig = alt_data_engine.get_fii_sentiment
+    _orig_fii = alt_data_engine.get_fii_sentiment
+    _orig_hrd = alt_data_engine.is_high_risk_day
     alt_data_engine.get_fii_sentiment = lambda: 0.45   # strong bull → +20%
+    alt_data_engine.is_high_risk_day = lambda: False    # no event-day halving
     try:
         base_cap = settings.total_capital * settings.intraday_capital_pct / 100 / settings.max_intraday_positions
         price = 100.0
@@ -6378,7 +6381,8 @@ def t_risk_manager_fii_bullish_scaling_not_cancelled():
             f"FII bullish scaling was reversed: got {qty} < base {base_qty}"
         )
     finally:
-        alt_data_engine.get_fii_sentiment = _orig
+        alt_data_engine.get_fii_sentiment = _orig_fii
+        alt_data_engine.is_high_risk_day = _orig_hrd
 
 run("risk_manager: loss notification spawns thread (not inside lock)", t_risk_manager_loss_notification_not_under_lock)
 run("risk_manager: FII +20% qty scaling not cancelled by per-agent cap", t_risk_manager_fii_bullish_scaling_not_cancelled)
