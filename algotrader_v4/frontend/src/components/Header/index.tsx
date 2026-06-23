@@ -630,11 +630,363 @@ function AppLoginPanel({ appForm, setAppForm, appSaving, onSave, vis, setVis }: 
   )
 }
 
-function ComingSoonPanel({ label, icon }: { label: string; icon: string }) {
+// ─── Trading Config Panel ─────────────────────────────────────────────────────
+
+function NumInput({ label, value, onChange, min, max, step = 1, hint }: {
+  label: string; value: number; onChange: (v: number) => void
+  min?: number; max?: number; step?: number; hint?: string
+}) {
   return (
-    <div className="flex flex-col items-center justify-center h-48 gap-3">
-      <span className="text-3xl opacity-20">{icon}</span>
-      <p className="text-sm text-slate-600">{label} coming soon</p>
+    <FieldRow label={label} hint={hint}>
+      <input type="number" value={value} min={min} max={max} step={step}
+        onChange={e => onChange(Number(e.target.value))}
+        className="w-full px-3 py-2 bg-slate-900 border border-slate-700 rounded-lg text-slate-200 text-xs font-mono focus:outline-none focus:ring-1 focus:ring-emerald-500 transition-all"
+      />
+    </FieldRow>
+  )
+}
+
+function Toggle({ label, hint, checked, onChange }: {
+  label: string; hint?: string; checked: boolean; onChange: (v: boolean) => void
+}) {
+  return (
+    <FieldRow label={label} hint={hint}>
+      <button onClick={() => onChange(!checked)}
+        className={`relative w-10 h-5 rounded-full transition-colors ${checked ? 'bg-emerald-600' : 'bg-slate-700'}`}>
+        <span className={`absolute top-0.5 w-4 h-4 rounded-full bg-white shadow transition-all ${checked ? 'left-5' : 'left-0.5'}`} />
+      </button>
+    </FieldRow>
+  )
+}
+
+function SaveSection({ onSave, saving, label = 'Save' }: { onSave: () => void; saving: boolean; label?: string }) {
+  return (
+    <div className="flex justify-end pt-2 border-t border-slate-800">
+      <button onClick={onSave} disabled={saving}
+        className="text-xs px-4 py-2 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-white font-semibold transition-colors disabled:opacity-50">
+        {saving ? 'Saving…' : label}
+      </button>
+    </div>
+  )
+}
+
+function TradingConfigPanel({ addToast }: { addToast: (msg: string, type?: any) => void }) {
+  const [mode, setMode]             = useState('PAPER')
+  const [modeConfirm, setModeConfirm] = useState(false)
+  const [modeSaving, setModeSaving] = useState(false)
+
+  const [cap, setCap] = useState({
+    total_capital: 100000, intraday_capital_pct: 40, swing_capital_pct: 20,
+    options_capital_pct: 20, futures_capital_pct: 20,
+    max_intraday_positions: 5, max_scalping_positions: 3, max_swing_positions: 3,
+  })
+  const [capSaving, setCapSaving] = useState(false)
+
+  const [limits, setLimits] = useState({
+    max_trades_intraday: 8, max_trades_options: 4, max_trades_futures: 4,
+    max_trades_swing: 3, max_trades_scalping: 20, cooldown_after_loss_sec: 300,
+  })
+  const [limSaving, setLimSaving] = useState(false)
+
+  const [intel, setIntel] = useState({
+    use_claude_trade_gate: false, claude_gate_threshold: 65,
+    use_multi_timeframe: true, mtf_min_alignment: 2, use_kelly_sizing: false,
+  })
+  const [intelSaving, setIntelSaving] = useState(false)
+
+  const [enables, setEnables] = useState({ intraday: true, fno: true, swing: true, scalping: true })
+  const [enasBusy, setEnasBusy] = useState(false)
+
+  useEffect(() => {
+    api.getTradingMode().then(r => setMode(r.data.trading_mode ?? 'PAPER')).catch(() => {})
+    api.getCapitalAllocation().then(r => {
+      const d = r.data
+      setCap({
+        total_capital: d.total_capital ?? 100000,
+        intraday_capital_pct: d.intraday_capital_pct ?? 40,
+        swing_capital_pct: d.swing_capital_pct ?? 20,
+        options_capital_pct: d.options_capital_pct ?? 20,
+        futures_capital_pct: d.futures_capital_pct ?? 20,
+        max_intraday_positions: d.max_positions?.intraday ?? 5,
+        max_scalping_positions: d.max_positions?.scalping ?? 3,
+        max_swing_positions:    d.max_positions?.swing ?? 3,
+      })
+    }).catch(() => {})
+    api.getTradingLimits().then(r => setLimits(r.data)).catch(() => {})
+    api.getIntelligence().then(r => setIntel(r.data)).catch(() => {})
+    api.getAgentEnables().then(r => setEnables(r.data)).catch(() => {})
+  }, [])
+
+  const handleModeSwitch = async (target: string) => {
+    if (target === 'LIVE' && !modeConfirm) { setModeConfirm(true); return }
+    setModeSaving(true)
+    try {
+      const r = await api.setTradingMode(target as 'PAPER' | 'LIVE', target === 'LIVE')
+      setMode(r.data.trading_mode)
+      setModeConfirm(false)
+      addToast(`Switched to ${r.data.trading_mode} mode (in-memory)`, target === 'LIVE' ? 'buy' : 'info')
+    } catch (e: any) {
+      addToast(e.response?.data?.detail || 'Mode switch failed', 'error')
+    } finally { setModeSaving(false) }
+  }
+
+  const handleSaveCap = async () => {
+    const sum = cap.intraday_capital_pct + cap.swing_capital_pct + cap.options_capital_pct + cap.futures_capital_pct
+    if (sum > 100) { addToast('Capital percentages exceed 100%', 'error'); return }
+    setCapSaving(true)
+    try {
+      await api.patchCapitalAllocation(cap)
+      addToast('Capital allocation saved', 'buy')
+    } catch (e: any) {
+      addToast(e.response?.data?.detail || 'Save failed', 'error')
+    } finally { setCapSaving(false) }
+  }
+
+  const handleSaveLimits = async () => {
+    setLimSaving(true)
+    try { await api.patchTradingLimits(limits); addToast('Trading limits saved', 'buy') }
+    catch (e: any) { addToast(e.response?.data?.detail || 'Save failed', 'error') }
+    finally { setLimSaving(false) }
+  }
+
+  const handleSaveIntel = async () => {
+    setIntelSaving(true)
+    try { await api.patchIntelligence(intel); addToast('Intelligence settings saved', 'buy') }
+    catch (e: any) { addToast(e.response?.data?.detail || 'Save failed', 'error') }
+    finally { setIntelSaving(false) }
+  }
+
+  const handleSaveEnables = async () => {
+    setEnasBusy(true)
+    try { await api.setAgentEnables(enables); addToast('Agent enables saved', 'buy') }
+    catch (e: any) { addToast(e.response?.data?.detail || 'Save failed', 'error') }
+    finally { setEnasBusy(false) }
+  }
+
+  return (
+    <div className="space-y-6">
+      <div>
+        <h3 className="text-sm font-semibold text-slate-100 mb-0.5">Trading Configuration</h3>
+        <p className="text-xs text-slate-500">Runtime settings — changes are in-memory and revert on restart unless saved to .env.</p>
+      </div>
+
+      {/* Trading Mode */}
+      <div className="space-y-3">
+        <SectionLabel>Trading Mode</SectionLabel>
+        <FieldRow label="Active Mode" hint="LIVE uses real broker orders">
+          <div className="flex items-center gap-2">
+            {(['PAPER', 'LIVE'] as const).map(m => (
+              <button key={m} onClick={() => handleModeSwitch(m)} disabled={modeSaving}
+                className={`px-4 py-1.5 rounded-lg text-xs font-bold transition-colors ${
+                  mode === m
+                    ? m === 'LIVE' ? 'bg-rose-600 text-white' : 'bg-emerald-700 text-white'
+                    : 'bg-slate-800 text-slate-400 hover:text-slate-200 border border-slate-700'
+                }`}>{m}</button>
+            ))}
+            {modeConfirm && (
+              <div className="flex items-center gap-2 ml-2">
+                <span className="text-xs text-rose-400">⚠ Confirm switch to LIVE?</span>
+                <button onClick={() => handleModeSwitch('LIVE')}
+                  className="text-xs px-2 py-1 bg-rose-600 text-white rounded-lg">Yes</button>
+                <button onClick={() => setModeConfirm(false)}
+                  className="text-xs px-2 py-1 border border-slate-600 text-slate-300 rounded-lg">No</button>
+              </div>
+            )}
+          </div>
+        </FieldRow>
+        <p className="text-[11px] text-slate-600">Current mode: <span className={`font-mono font-semibold ${mode === 'LIVE' ? 'text-rose-400' : 'text-emerald-400'}`}>{mode}</span></p>
+      </div>
+
+      {/* Capital Allocation */}
+      <div className="space-y-3">
+        <SectionLabel>Capital Allocation</SectionLabel>
+        <NumInput label="Total Capital (₹)" value={cap.total_capital} min={10000} step={5000}
+          onChange={v => setCap(p => ({ ...p, total_capital: v }))} hint="Deployable capital across all strategies" />
+        <NumInput label="Intraday %" value={cap.intraday_capital_pct} min={0} max={100}
+          onChange={v => setCap(p => ({ ...p, intraday_capital_pct: v }))} />
+        <NumInput label="Swing %" value={cap.swing_capital_pct} min={0} max={100}
+          onChange={v => setCap(p => ({ ...p, swing_capital_pct: v }))} />
+        <NumInput label="Options %" value={cap.options_capital_pct} min={0} max={100}
+          onChange={v => setCap(p => ({ ...p, options_capital_pct: v }))} />
+        <NumInput label="Futures %" value={cap.futures_capital_pct} min={0} max={100}
+          onChange={v => setCap(p => ({ ...p, futures_capital_pct: v }))}
+          hint={`Sum: ${cap.intraday_capital_pct + cap.swing_capital_pct + cap.options_capital_pct + cap.futures_capital_pct}% (must be ≤ 100)`} />
+        <NumInput label="Max Intraday Pos" value={cap.max_intraday_positions} min={1} max={20}
+          onChange={v => setCap(p => ({ ...p, max_intraday_positions: v }))} />
+        <NumInput label="Max Scalping Pos" value={cap.max_scalping_positions} min={1} max={20}
+          onChange={v => setCap(p => ({ ...p, max_scalping_positions: v }))} />
+        <NumInput label="Max Swing Pos" value={cap.max_swing_positions} min={1} max={10}
+          onChange={v => setCap(p => ({ ...p, max_swing_positions: v }))} />
+        <SaveSection onSave={handleSaveCap} saving={capSaving} label="Save Capital" />
+      </div>
+
+      {/* Trading Limits */}
+      <div className="space-y-3">
+        <SectionLabel>Daily Trade Limits</SectionLabel>
+        <NumInput label="Max Intraday Trades" value={limits.max_trades_intraday} min={1} max={50}
+          onChange={v => setLimits(p => ({ ...p, max_trades_intraday: v }))} />
+        <NumInput label="Max Scalping Trades" value={limits.max_trades_scalping} min={1} max={100}
+          onChange={v => setLimits(p => ({ ...p, max_trades_scalping: v }))} />
+        <NumInput label="Max Options Trades" value={limits.max_trades_options} min={1} max={20}
+          onChange={v => setLimits(p => ({ ...p, max_trades_options: v }))} />
+        <NumInput label="Max Futures Trades" value={limits.max_trades_futures} min={1} max={20}
+          onChange={v => setLimits(p => ({ ...p, max_trades_futures: v }))} />
+        <NumInput label="Max Swing Trades" value={limits.max_trades_swing} min={1} max={10}
+          onChange={v => setLimits(p => ({ ...p, max_trades_swing: v }))} />
+        <NumInput label="Loss Cooldown (sec)" value={limits.cooldown_after_loss_sec} min={0} max={3600}
+          onChange={v => setLimits(p => ({ ...p, cooldown_after_loss_sec: v }))}
+          hint="Pause duration after a losing trade" />
+        <SaveSection onSave={handleSaveLimits} saving={limSaving} label="Save Limits" />
+      </div>
+
+      {/* Intelligence */}
+      <div className="space-y-3">
+        <SectionLabel>AI Intelligence</SectionLabel>
+        <Toggle label="Claude Trade Gate" hint="LLM review before every order"
+          checked={intel.use_claude_trade_gate}
+          onChange={v => setIntel(p => ({ ...p, use_claude_trade_gate: v }))} />
+        {intel.use_claude_trade_gate && (
+          <NumInput label="Gate Threshold" value={intel.claude_gate_threshold} min={40} max={90}
+            hint="Min Claude confidence to allow trade"
+            onChange={v => setIntel(p => ({ ...p, claude_gate_threshold: v }))} />
+        )}
+        <Toggle label="Multi-Timeframe" hint="Require 5m + 15m alignment"
+          checked={intel.use_multi_timeframe}
+          onChange={v => setIntel(p => ({ ...p, use_multi_timeframe: v }))} />
+        {intel.use_multi_timeframe && (
+          <NumInput label="MTF Min Alignment" value={intel.mtf_min_alignment} min={1} max={3}
+            onChange={v => setIntel(p => ({ ...p, mtf_min_alignment: v }))} />
+        )}
+        <Toggle label="Kelly Sizing" hint="Position size via Kelly Criterion"
+          checked={intel.use_kelly_sizing}
+          onChange={v => setIntel(p => ({ ...p, use_kelly_sizing: v }))} />
+        <SaveSection onSave={handleSaveIntel} saving={intelSaving} label="Save Intelligence" />
+      </div>
+
+      {/* Agent Enables */}
+      <div className="space-y-3">
+        <SectionLabel>Agent Enables</SectionLabel>
+        {(['intraday', 'fno', 'swing', 'scalping'] as const).map(k => (
+          <FieldRow key={k} label={k.toUpperCase()}>
+            <button onClick={() => setEnables(p => ({ ...p, [k]: !p[k] }))}
+              className={`relative w-10 h-5 rounded-full transition-colors ${enables[k] ? 'bg-emerald-600' : 'bg-slate-700'}`}>
+              <span className={`absolute top-0.5 w-4 h-4 rounded-full bg-white shadow transition-all ${enables[k] ? 'left-5' : 'left-0.5'}`} />
+            </button>
+          </FieldRow>
+        ))}
+        <SaveSection onSave={handleSaveEnables} saving={enasBusy} label="Save Enables" />
+      </div>
+    </div>
+  )
+}
+
+// ─── Risk Limits Panel ────────────────────────────────────────────────────────
+
+function RiskLimitsPanel({ addToast }: { addToast: (msg: string, type?: any) => void }) {
+  const [portfolio, setPortfolio] = useState({
+    max_daily_loss: 5000, max_position_size: 50000,
+    stop_loss_pct: 1.5, target_pct: 3.0,
+  })
+  const [portSaving, setPortSaving] = useState(false)
+
+  const [agentRisk, setAgentRisk] = useState<Record<string, any>>({})
+  const [agentSaving, setAgentSaving] = useState(false)
+
+  useEffect(() => {
+    api.riskStatus().then(r => {
+      const d = r.data
+      setPortfolio(p => ({
+        ...p,
+        max_daily_loss: d.max_daily_loss ?? p.max_daily_loss,
+        max_position_size: d.max_position_size ?? p.max_position_size,
+      }))
+    }).catch(() => {})
+    api.getAgentRisk().then(r => setAgentRisk(r.data)).catch(() => {})
+  }, [])
+
+  const handleSavePortfolio = async () => {
+    setPortSaving(true)
+    try { await api.riskUpdate(portfolio); addToast('Risk limits saved', 'buy') }
+    catch (e: any) { addToast(e.response?.data?.detail || 'Save failed', 'error') }
+    finally { setPortSaving(false) }
+  }
+
+  const handleSaveAgentRisk = async () => {
+    setAgentSaving(true)
+    try {
+      const payload: Record<string, number> = {}
+      Object.entries(agentRisk).forEach(([k, v]) => { if (v !== undefined) payload[k] = Number(v) })
+      await api.patchAgentRisk(payload)
+      addToast('Per-agent risk saved', 'buy')
+    } catch (e: any) { addToast(e.response?.data?.detail || 'Save failed', 'error') }
+    finally { setAgentSaving(false) }
+  }
+
+  const agents = ['intraday', 'scalping', 'options', 'futures', 'swing'] as const
+
+  return (
+    <div className="space-y-6">
+      <div>
+        <h3 className="text-sm font-semibold text-slate-100 mb-0.5">Risk Limits</h3>
+        <p className="text-xs text-slate-500">Circuit breakers and position limits applied before every order.</p>
+      </div>
+
+      {/* Portfolio Risk */}
+      <div className="space-y-3">
+        <SectionLabel>Portfolio Limits</SectionLabel>
+        <NumInput label="Max Daily Loss (₹)" value={portfolio.max_daily_loss} min={100} step={500}
+          hint="Bot halts when daily loss reaches this"
+          onChange={v => setPortfolio(p => ({ ...p, max_daily_loss: v }))} />
+        <NumInput label="Max Position Size (₹)" value={portfolio.max_position_size} min={1000} step={1000}
+          hint="Single trade value cap"
+          onChange={v => setPortfolio(p => ({ ...p, max_position_size: v }))} />
+        <NumInput label="Stop-Loss %" value={portfolio.stop_loss_pct} min={0.1} max={10} step={0.1}
+          onChange={v => setPortfolio(p => ({ ...p, stop_loss_pct: v }))} />
+        <NumInput label="Target %" value={portfolio.target_pct} min={0.1} max={20} step={0.1}
+          onChange={v => setPortfolio(p => ({ ...p, target_pct: v }))} />
+        <SaveSection onSave={handleSavePortfolio} saving={portSaving} label="Save Portfolio Limits" />
+      </div>
+
+      {/* Per-Agent Risk */}
+      <div className="space-y-3">
+        <SectionLabel>Per-Agent Risk</SectionLabel>
+        <div className="overflow-x-auto">
+          <table className="w-full text-[11px] font-mono">
+            <thead>
+              <tr className="text-slate-600">
+                <th className="text-left py-1 pr-3 font-normal">Strategy</th>
+                <th className="text-center py-1 px-2 font-normal">SL%</th>
+                <th className="text-center py-1 px-2 font-normal">TGT%</th>
+                <th className="text-center py-1 px-2 font-normal">Min Score</th>
+                <th className="text-center py-1 px-2 font-normal">Cooldown(s)</th>
+              </tr>
+            </thead>
+            <tbody>
+              {agents.map(ag => (
+                <tr key={ag} className="border-t border-slate-800">
+                  <td className="py-1.5 pr-3 text-slate-400 capitalize">{ag}</td>
+                  {([
+                    [`sl_pct_${ag}`, 0.1, 60, 0.1],
+                    [`tgt_pct_${ag}`, 0.1, 100, 0.1],
+                    [`min_score_${ag}`, 1, 10, 1],
+                    [`cooldown_${ag}`, 0, 3600, 30],
+                  ] as [string, number, number, number][]).map(([field, min, max, step]) => (
+                    <td key={field} className="py-1.5 px-2">
+                      <input
+                        type="number" min={min} max={max} step={step}
+                        value={agentRisk[field] ?? ''}
+                        onChange={e => setAgentRisk(p => ({ ...p, [field]: Number(e.target.value) }))}
+                        className="w-16 px-1.5 py-1 bg-slate-900 border border-slate-700 rounded text-slate-200 text-[11px] font-mono focus:outline-none focus:ring-1 focus:ring-emerald-500 text-center"
+                      />
+                    </td>
+                  ))}
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+        <SaveSection onSave={handleSaveAgentRisk} saving={agentSaving} label="Save Agent Risk" />
+      </div>
     </div>
   )
 }
@@ -933,8 +1285,8 @@ export default function Header() {
                     appSaving={appSaving} onSave={handleSaveAppLogin}
                     vis={vis} setVis={setVis} />
                 )}
-                {activeNav === 'trading' && <ComingSoonPanel label="Trading Config" icon="⚙️" />}
-                {activeNav === 'risk'    && <ComingSoonPanel label="Risk Limits" icon="🛡️" />}
+                {activeNav === 'trading' && <TradingConfigPanel addToast={addToast} />}
+                {activeNav === 'risk'    && <RiskLimitsPanel addToast={addToast} />}
               </div>
             </main>
           </div>
