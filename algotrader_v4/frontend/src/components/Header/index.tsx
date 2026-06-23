@@ -172,11 +172,9 @@ function SaveBar({ onCancel, onSave, saving, label = 'Save & Reconnect' }: {
 
 // ─── Zerodha detail ───────────────────────────────────────────────────────────
 
-function ZerodhaDetail({ onBack, tempBase, setTempBase, tempKey, setTempKey, credForm, setCredForm,
+function ZerodhaDetail({ onBack, credForm, setCredForm,
   credStatus, credSaving, onSave, vis, setVis, brokerStatus }: {
   onBack: () => void; brokerStatus: BrokerStatus
-  tempBase: string; setTempBase: (v: string) => void
-  tempKey: string; setTempKey: (v: string) => void
   credForm: Record<string, string>; setCredForm: (fn: (p: any) => any) => void
   credStatus: Record<string, boolean>; credSaving: boolean; onSave: () => void
   vis: Record<string, boolean>; setVis: (fn: (p: any) => any) => void
@@ -186,7 +184,7 @@ function ZerodhaDetail({ onBack, tempBase, setTempBase, tempKey, setTempKey, cre
       const r = await api.kiteStatus()
       if (!r.data.login_url) { window.open('/auth/kite/login', '_blank'); return }
       window.open(r.data.login_url, '_blank')
-    } catch { window.open(tempBase + '/auth/kite/login', '_blank') }
+    } catch { window.open('/auth/kite/login', '_blank') }
   }
 
   return (
@@ -195,26 +193,9 @@ function ZerodhaDetail({ onBack, tempBase, setTempBase, tempKey, setTempKey, cre
 
       {brokerStatus === 'error' && (
         <div className="bg-rose-950/40 border border-rose-900/60 rounded-lg px-4 py-3 text-xs text-rose-300">
-          ⚠️ Not connected — verify credentials and backend URL below.
+          ⚠️ Not connected — verify credentials below.
         </div>
       )}
-
-      <div className="space-y-3">
-        <SectionLabel>AlgoPro Backend</SectionLabel>
-        <FieldRow label="Backend URL" hint="FastAPI server URL">
-          <DarkInput value={tempBase} onChange={e => setTempBase(e.target.value)} placeholder="http://localhost:8000" />
-        </FieldRow>
-        <FieldRow label="Backend API Key" hint="X-API-Key header">
-          <div className="relative">
-            <DarkInput type={vis['_api_key'] ? 'text' : 'password'} value={tempKey}
-              onChange={e => setTempKey(e.target.value)} placeholder="Leave empty if not set" className="pr-9" />
-            <button type="button" onClick={() => setVis(p => ({ ...p, _api_key: !p._api_key }))}
-              className="absolute right-2.5 top-1/2 -translate-y-1/2 text-slate-500 hover:text-slate-300">
-              {vis['_api_key'] ? <EyeOff className="w-3.5 h-3.5" /> : <Eye className="w-3.5 h-3.5" />}
-            </button>
-          </div>
-        </FieldRow>
-      </div>
 
       <div className="space-y-3">
         <SectionLabel>Kite API Credentials</SectionLabel>
@@ -442,8 +423,6 @@ function BrokersPanel(props: {
   wsConnected: boolean
   credStatus: Record<string, boolean>
   brokerStatuses: Record<string, BrokerStatus>
-  tempBase: string; setTempBase: (v: string) => void
-  tempKey: string; setTempKey: (v: string) => void
   credForm: Record<string, string>; setCredForm: (fn: (p: any) => any) => void
   credSaving: boolean
   handleSaveZerodha: () => void
@@ -463,8 +442,6 @@ function BrokersPanel(props: {
 
   if (selected === 'zerodha') return (
     <ZerodhaDetail onBack={() => setSelected(null)} brokerStatus={bStatus('zerodha')}
-      tempBase={props.tempBase} setTempBase={props.setTempBase}
-      tempKey={props.tempKey} setTempKey={props.setTempKey}
       credForm={props.credForm} setCredForm={props.setCredForm}
       credStatus={props.credStatus} credSaving={props.credSaving}
       onSave={props.handleSaveZerodha} vis={props.vis} setVis={props.setVis} />
@@ -994,14 +971,11 @@ function RiskLimitsPanel({ addToast }: { addToast: (msg: string, type?: any) => 
 // ─── Main Header ──────────────────────────────────────────────────────────────
 
 export default function Header() {
-  const { health, botStatus, wsConnected, apiKey, apiBase, setApiKey, setApiBase, setHealth, setBotStatus, addToast } = useStore()
+  const { health, botStatus, wsConnected, setHealth, setBotStatus, addToast } = useStore()
 
   const [time, setTime]         = useState(new Date())
   const [configOpen, setConfigOpen] = useState(false)
   const [activeNav, setActiveNav]   = useState('brokers')
-
-  const [tempKey, setTempKey]   = useState(apiKey)
-  const [tempBase, setTempBase] = useState(apiBase)
 
   const [credForm, setCredForm] = useState<Record<string, string>>({
     kite_api_key: '', kite_api_secret: '',
@@ -1108,8 +1082,6 @@ export default function Header() {
   }
 
   const handleSaveZerodha = async () => {
-    setApiKey(tempKey)
-    setApiBase(tempBase)
     await saveBrokerCreds(['kite_api_key', 'kite_api_secret'], 'Zerodha credentials saved')
   }
 
@@ -1141,7 +1113,6 @@ export default function Header() {
   }
 
   const openSettings = () => {
-    setTempKey(apiKey); setTempBase(apiBase)
     setActiveNav('brokers')
     setCredForm({
       kite_api_key: '', kite_api_secret: '',
@@ -1264,8 +1235,6 @@ export default function Header() {
                     credStatus={credStatus}
                     brokerStatuses={brokerStatuses}
                     activeBroker={activeBroker}
-                    tempBase={tempBase} setTempBase={setTempBase}
-                    tempKey={tempKey}   setTempKey={setTempKey}
                     credForm={credForm} setCredForm={setCredForm}
                     credSaving={credSaving}
                     handleSaveZerodha={handleSaveZerodha}
