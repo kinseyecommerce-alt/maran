@@ -15,6 +15,7 @@ Cache: logs/bhavcopy/{YYYY}/{MON}/cm{DD}{MON}{YYYY}bhav.csv
 """
 from __future__ import annotations
 
+import asyncio
 import io
 import os
 import threading
@@ -149,9 +150,25 @@ def latest_available_date() -> date:
     return candidate
 
 
+async def async_load_symbol(
+    symbol: str,
+    from_date: date,
+    to_date: date,
+    series: str = "EQ",
+) -> "pd.DataFrame":
+    """
+    Non-blocking version of load_symbol.
+    Offloads the blocking HTTP downloads + lock acquisition to a thread-pool executor
+    so the FastAPI event loop is never stalled during bhavcopy fetches.
+    """
+    loop = asyncio.get_event_loop()
+    return await loop.run_in_executor(None, load_symbol, symbol, from_date, to_date, series)
+
+
 # Module-level singleton (stateless — just functions, but expose as object for tests)
 class BhavCopyLoader:
     load_symbol        = staticmethod(load_symbol)
+    async_load_symbol  = staticmethod(async_load_symbol)
     latest_available_date = staticmethod(latest_available_date)
 
 

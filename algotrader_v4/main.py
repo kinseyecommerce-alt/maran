@@ -780,52 +780,111 @@ async def kite_token_refresh():
 
 
 # ── Bot control ──────────────────────────────────────────────────────────────
+
+# Tracks the async background startup phase so /bot/status can surface progress.
+# Phases: "idle" | "scanning_instruments" | "loading_instruments" | "started" | "error"
+_bot_start_status: dict = {"phase": "idle", "error": None}
+
+
+async def _do_start_bg(req: BotStartRequest, strategies: list[str]) -> None:
+    """
+    Background coroutine launched by /bot/start.
+
+    1. Resolve watchlist (auto_start_watchlist shortcut → no scanner needed).
+    2. Run symbol scanner (async, non-blocking) when needed.
+    3. Pre-compute per-agent filter_watchlist in a thread executor to keep the
+       event loop free during bhavcopy HTTP downloads.
+    4. Hand the pre-filtered watchlists to master_agent.start() so its
+       synchronous path skips every blocking I/O call.
+    """
+    global _bot_start_status
+    try:
+        watchlist = req.watchlist
+
+        # ── Fast path: manual watchlist from .env / request body ──────────────
+        if not watchlist and settings.auto_start_watchlist:
+            syms = [s.strip() for s in settings.auto_start_watchlist.split(",") if s.strip()]
+            watchlist = [{"symbol": s, "exchange": "NSE"} for s in syms]
+            logger.info("[bot/start] AUTO_START_WATCHLIST active — {} symbols, scanner skipped",
+                        len(watchlist))
+
+        # ── Symbol scanner (async — does NOT block the event loop) ─────────────
+        if not watchlist:
+            _bot_start_status["phase"] = "scanning_instruments"
+            await symbol_scanner.run(strategies=strategies, force=req.force_scan)
+            watchlist = symbol_scanner.all_selected_flat()
+            if not watchlist:
+                from symbol_scanner import NIFTY_50
+                watchlist = [{"symbol": s, "exchange": "NSE"} for s in NIFTY_50]
+                logger.warning("[bot/start] Scanner returned no results — Nifty 50 fallback ({} symbols)",
+                               len(watchlist))
+
+        # ── Pre-compute per-agent approved lists in thread pool ────────────────
+        # filter_watchlist calls backtest_engine.run() → bhavcopy HTTP downloads.
+        # Running each one in the thread executor keeps the event loop responsive.
+        _bot_start_status["phase"] = "loading_instruments"
+        loop = asyncio.get_event_loop()
+        prefiltered: dict[str, list[dict]] = {}
+        for strat in strategies:
+            from agents.strategy_agents import ALL_AGENTS as _ALL
+            import bot_state as _bs
+            agent = _ALL.get(strat)
+            if agent and _bs.is_agent_enabled(strat):
+                approved = await loop.run_in_executor(None, agent.filter_watchlist, watchlist)
+                prefiltered[strat] = approved
+                logger.info("[bot/start] {} pre-filtered: {}/{} symbols approved",
+                            strat, len(approved), len(watchlist))
+
+        # ── Start master agent (no blocking I/O remaining) ─────────────────────
+        report = master_agent.start(strategies, watchlist, prefiltered=prefiltered)
+
+        _bot_start_status["phase"] = "started"
+        logger.info("[bot/start] Background start complete — agents running")
+
+    except Exception as exc:
+        logger.error("[bot/start] Background start failed: {}", exc)
+        _bot_start_status["phase"] = "error"
+        _bot_start_status["error"] = str(exc)
+        master_agent.running = False
+
+
 @app.post("/bot/start", tags=["Bot"])
 async def start_bot(req: BotStartRequest):
+    """
+    Start trading agents.  Returns **202 Accepted** immediately; the heavy
+    work (symbol scanner + bhavcopy backtest gate) runs in the background.
+    Poll ``GET /bot/status`` — the ``start_phase`` field shows progress:
+      * ``scanning_instruments`` — symbol scanner running
+      * ``loading_instruments``  — backtest/bhavcopy filter running in thread pool
+      * ``started``              — agents are live
+      * ``error``                — startup failed (see ``start_error``)
+    """
+    global _bot_start_status
     if master_agent.running:
         raise HTTPException(400, "Already running")
+    if _bot_start_status.get("phase") in ("scanning_instruments", "loading_instruments"):
+        raise HTTPException(400, "Start already in progress — poll /bot/status for updates")
     strategies = [s for s in req.strategies if bot_state.is_agent_enabled(s)]
     if not strategies:
         raise HTTPException(400, "All requested strategies are disabled")
-    watchlist = req.watchlist
-    symbol_selection = "manual"
-    if not watchlist:
-        symbol_selection = "auto-scanned"
-        selected = await symbol_scanner.run(strategies=strategies, force=req.force_scan)
-        watchlist = symbol_scanner.all_selected_flat()
-        if not watchlist:
-            from symbol_scanner import NIFTY_50
-            watchlist = [{"symbol": s, "exchange": "NSE"} for s in NIFTY_50]
-            symbol_selection = "nifty50-fallback"
-            logger.warning("[bot/start] Symbol scanner returned no results — using Nifty 50 fallback ({} symbols)", len(watchlist))
 
-    # Run master_agent.start() in a thread so it never blocks the async event loop.
-    # kite.profile() and filter_watchlist() are synchronous blocking calls that can
-    # take 1-30 s on a cold start; keeping them on the loop causes the server to freeze.
-    _wl_snapshot = list(watchlist)
-    _st_snapshot = list(strategies)
-    try:
-        report = await asyncio.to_thread(master_agent.start, _st_snapshot, _wl_snapshot)
-    except RuntimeError as e:
-        raise HTTPException(503, str(e))
+    _bot_start_status = {"phase": "scanning_instruments" if not req.watchlist and not settings.auto_start_watchlist else "loading_instruments", "error": None}
+    asyncio.create_task(_do_start_bg(req, strategies))
 
-    kite_connected = False
-    kite_user = None
-    if settings.trading_mode == "LIVE":
-        try:
-            p = await asyncio.to_thread(kite_client.kite.profile)
-            kite_connected = True
-            kite_user = p.get("user_name")
-        except Exception:
-            pass
-    return {"status": "started", "architecture": "tick-driven 1s",
+    return JSONResponse(
+        {
+            "status": "starting",
+            "message": "Bot start is in progress. Poll GET /bot/status for updates.",
+            "start_phase": _bot_start_status["phase"],
             "trading_mode": settings.trading_mode,
-            "kite_connected": kite_connected, "kite_user": kite_user,
-            "symbol_selection": symbol_selection,
-            "watchlist": [w["symbol"] for w in _wl_snapshot], "report": report}
+        },
+        status_code=202,
+    )
 
 @app.post("/bot/stop", tags=["Bot"])
 async def stop_bot():
+    global _bot_start_status
+    _bot_start_status = {"phase": "idle", "error": None}
     await master_agent.stop()
     return {"status": "stopped"}
 
@@ -852,7 +911,11 @@ async def test_order(
             "note": "PAPER: simulated. LIVE: placed then cancelled."}
 
 @app.get("/bot/status", tags=["Bot"])
-def bot_status(): return master_agent.get_status()
+def bot_status():
+    status = master_agent.get_status()
+    status["start_phase"] = _bot_start_status.get("phase", "idle")
+    status["start_error"] = _bot_start_status.get("error")
+    return status
 
 @app.get("/bot/directives", tags=["Bot"])
 def directives(): return master_agent.last_directives

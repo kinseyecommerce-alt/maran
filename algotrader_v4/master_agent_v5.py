@@ -160,7 +160,24 @@ class MasterAgent:
 
     # ── Lifecycle ──────────────────────────────────────────────────────────────
 
-    def start(self, strategies: list[str], watchlist: list[dict]) -> dict:
+    def start(
+        self,
+        strategies: list[str],
+        watchlist: list[dict],
+        prefiltered: "dict[str, list[dict]] | None" = None,
+    ) -> dict:
+        """
+        Start the master agent.
+
+        Parameters
+        ----------
+        strategies:   list of strategy names to activate.
+        watchlist:    full combined watchlist (used when prefiltered is None).
+        prefiltered:  optional per-strategy approved symbol lists already computed
+                      (avoids calling the blocking filter_watchlist / bhavcopy path
+                      on the event-loop thread).  When supplied, filter_watchlist is
+                      skipped entirely for each strategy that has an entry here.
+        """
         if self.running and self._scheduler.running:
             logger.warning("[master_v5] Bot already running — skipping duplicate start()")
             return {}
@@ -198,7 +215,18 @@ class MasterAgent:
                 continue
             if not is_agent_enabled(strat):
                 continue
-            approved = agent.filter_watchlist(watchlist)
+            # Use pre-computed approved list when provided — avoids blocking bhavcopy
+            # HTTP calls on the event-loop thread.  Fall back to filter_watchlist when
+            # the caller hasn't pre-computed (backward-compatible).
+            if prefiltered is not None and strat in prefiltered:
+                approved = prefiltered[strat]
+                # Sync state into agent without running backtest
+                agent._approved = {item["symbol"] for item in approved}
+                agent.state.approved_symbols = [a["symbol"] for a in approved]
+                logger.info("[master_v5] {} using pre-filtered watchlist ({} symbols)",
+                            strat, len(approved))
+            else:
+                approved = agent.filter_watchlist(watchlist)
             self._agent_watchlists[strat] = approved
             report[strat] = {
                 "total": len(watchlist),
