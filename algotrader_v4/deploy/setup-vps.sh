@@ -55,6 +55,11 @@ apt-get install -y --no-install-recommends \
 
 $IS_DOMAIN && apt-get install -y --no-install-recommends certbot python3-certbot-nginx
 
+# Node.js 20 LTS (required to build the React frontend)
+echo "▶ Installing Node.js 20 LTS…"
+curl -fsSL https://deb.nodesource.com/setup_20.x | bash -
+apt-get install -y --no-install-recommends nodejs
+
 # ── 2. App user ───────────────────────────────────────────────────────────────
 id -u "$APP_USER" &>/dev/null || useradd -m -s /bin/bash "$APP_USER"
 
@@ -91,6 +96,13 @@ sudo -u "$APP_USER" "$VENV/bin/pip" install -q -r "$APP_DIR/requirements.txt"
 # Performance: faster uvloop event loop
 sudo -u "$APP_USER" "$VENV/bin/pip" install -q uvloop httptools 2>/dev/null || true
 
+# ── 4b. Build React frontend ──────────────────────────────────────────────────
+echo "▶ Building React frontend…"
+cd "$APP_DIR/frontend"
+sudo -u "$APP_USER" npm ci --prefer-offline
+sudo -u "$APP_USER" npm run build
+cd "$APP_DIR"
+
 # ── 5. .env ───────────────────────────────────────────────────────────────────
 ENV_FILE="$APP_DIR/.env"
 if [[ ! -f "$ENV_FILE" ]]; then
@@ -115,6 +127,13 @@ if [[ ! -f "$ENV_FILE" ]]; then
         sed -i "s|^KITE_REDIRECT_URL=.*|KITE_REDIRECT_URL=https://$DOMAIN/auth/kite/callback|" "$ENV_FILE"
     else
         sed -i "s|^KITE_REDIRECT_URL=.*|KITE_REDIRECT_URL=http://$DOMAIN/auth/kite/callback|" "$ENV_FILE"
+    fi
+
+    # Auto-set ALLOWED_ORIGINS so browser requests from the Droplet IP/domain are not CORS-blocked
+    if $IS_DOMAIN; then
+        sed -i "s|^ALLOWED_ORIGINS=.*|ALLOWED_ORIGINS=https://$DOMAIN,http://$DOMAIN,http://localhost:8000|" "$ENV_FILE"
+    else
+        sed -i "s|^ALLOWED_ORIGINS=.*|ALLOWED_ORIGINS=http://$DOMAIN,http://localhost:8000|" "$ENV_FILE"
     fi
 
     # Auto-set SEBI_WHITELISTED_IPS to the VPS public IP

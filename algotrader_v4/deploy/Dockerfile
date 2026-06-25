@@ -1,3 +1,11 @@
+FROM node:20-slim AS frontend-builder
+
+WORKDIR /frontend
+COPY frontend/package*.json ./
+RUN npm ci --prefer-offline
+COPY frontend/ ./
+RUN npm run build
+
 FROM python:3.11-slim AS builder
 
 WORKDIR /build
@@ -13,6 +21,9 @@ WORKDIR /app
 
 COPY --from=builder /install /usr/local
 COPY . .
+
+# Overlay the compiled frontend (dist/ is gitignored; build it from source)
+COPY --from=frontend-builder /frontend/dist ./frontend/dist
 
 # Don't bake secrets into the image — mount .env at runtime
 RUN rm -f .env
