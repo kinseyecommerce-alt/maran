@@ -209,17 +209,18 @@ systemctl enable algotrader
 
 # ── 8. nginx reverse proxy ────────────────────────────────────────────────────
 echo "▶ Configuring nginx…"
-cat > /etc/nginx/sites-available/algotrader <<NGINX
+
+if $IS_DOMAIN; then
+    # Temporary HTTP-only config so nginx starts and certbot can complete its
+    # ACME HTTP-01 challenge.  Replaced by the hardened TLS config in step 9.
+    cat > /etc/nginx/sites-available/algotrader <<NGINX
 upstream algotrader_upstream {
     server 127.0.0.1:8000;
     keepalive 32;
 }
-
 server {
     listen 80;
     server_name $DOMAIN;
-
-    # WebSocket + long-poll support
     location / {
         proxy_pass         http://algotrader_upstream;
         proxy_http_version 1.1;
@@ -234,6 +235,31 @@ server {
     }
 }
 NGINX
+else
+    # IP-only deployment — plain HTTP (no TLS without a real domain)
+    cat > /etc/nginx/sites-available/algotrader <<NGINX
+upstream algotrader_upstream {
+    server 127.0.0.1:8000;
+    keepalive 32;
+}
+server {
+    listen 80;
+    server_name $DOMAIN;
+    location / {
+        proxy_pass         http://algotrader_upstream;
+        proxy_http_version 1.1;
+        proxy_set_header   Upgrade \$http_upgrade;
+        proxy_set_header   Connection "upgrade";
+        proxy_set_header   Host \$host;
+        proxy_set_header   X-Real-IP \$remote_addr;
+        proxy_set_header   X-Forwarded-For \$proxy_add_x_forwarded_for;
+        proxy_set_header   X-Forwarded-Proto \$scheme;
+        proxy_read_timeout 300s;
+        proxy_connect_timeout 10s;
+    }
+}
+NGINX
+fi
 
 ln -sfn /etc/nginx/sites-available/algotrader /etc/nginx/sites-enabled/algotrader
 rm -f /etc/nginx/sites-enabled/default
@@ -242,10 +268,31 @@ nginx -t && systemctl reload nginx
 # ── 9. TLS (Let's Encrypt) ────────────────────────────────────────────────────
 if $IS_DOMAIN; then
     echo "▶ Requesting TLS certificate for $DOMAIN…"
-    certbot --nginx -d "$DOMAIN" --non-interactive --agree-tos \
-        --email "admin@$DOMAIN" --redirect || \
-        echo "⚠ TLS setup failed — check DNS is pointing to this server, then run: sudo certbot --nginx -d $DOMAIN"
-    systemctl enable certbot.timer 2>/dev/null || true
+    # certbot --nginx obtains the certificate and completes the ACME challenge.
+    # On success we replace the temporary config with the hardened nginx.conf from
+    # the deploy directory (security headers, gzip, WS support, HTTP→HTTPS redirect).
+    if certbot --nginx -d "$DOMAIN" --non-interactive --agree-tos \
+            --email "admin@$DOMAIN" --redirect; then
+
+        echo "▶ Installing production nginx config from deploy/nginx.conf…"
+        # Substitute the placeholder domain and write to sites-available
+        sed "s/yourdomain\.com/$DOMAIN/g" "$APP_DIR/deploy/nginx.conf" \
+            > /etc/nginx/sites-available/algotrader
+
+        nginx -t && systemctl reload nginx \
+            && echo "▶ TLS active — dashboard reachable at https://$DOMAIN" \
+            || echo "⚠ nginx reload failed after installing TLS config — check: nginx -t"
+    else
+        echo "⚠ TLS setup failed — check DNS is pointing to this server, then run:"
+        echo "    sudo certbot --nginx -d $DOMAIN"
+        echo "    sudo sed \"s/yourdomain\\.com/$DOMAIN/g\" $APP_DIR/deploy/nginx.conf > /etc/nginx/sites-available/algotrader"
+        echo "    sudo nginx -t && sudo systemctl reload nginx"
+    fi
+
+    # Enable automatic certificate renewal
+    systemctl enable certbot.timer 2>/dev/null || \
+        { (crontab -l 2>/dev/null; echo "0 3 * * * certbot renew --quiet --deploy-hook 'systemctl reload nginx'") | crontab -; } \
+        2>/dev/null || true
 fi
 
 # ── 10. UFW firewall ──────────────────────────────────────────────────────────
