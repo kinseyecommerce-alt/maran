@@ -1,10 +1,11 @@
 [phases.setup]
-nixPkgs = ["python311", "gcc", "libffi"]
+nixPkgs = ["python311", "nodejs_20", "gcc", "libffi"]
 
 [phases.install]
 cmds = [
   "pip install --upgrade 'setuptools<60' wheel --quiet",
-  "pip install -r requirements.txt --quiet"
+  "pip install -r requirements.txt --quiet",
+  "cd frontend && npm ci --prefer-offline && npm run build && cd .."
 ]
 
 [start]
