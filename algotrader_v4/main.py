@@ -788,22 +788,32 @@ async def start_bot(req: BotStartRequest):
     if not strategies:
         raise HTTPException(400, "All requested strategies are disabled")
     watchlist = req.watchlist
+    symbol_selection = "manual"
     if not watchlist:
+        symbol_selection = "auto-scanned"
         selected = await symbol_scanner.run(strategies=strategies, force=req.force_scan)
         watchlist = symbol_scanner.all_selected_flat()
         if not watchlist:
             from symbol_scanner import NIFTY_50
             watchlist = [{"symbol": s, "exchange": "NSE"} for s in NIFTY_50]
+            symbol_selection = "nifty50-fallback"
             logger.warning("[bot/start] Symbol scanner returned no results — using Nifty 50 fallback ({} symbols)", len(watchlist))
+
+    # Run master_agent.start() in a thread so it never blocks the async event loop.
+    # kite.profile() and filter_watchlist() are synchronous blocking calls that can
+    # take 1-30 s on a cold start; keeping them on the loop causes the server to freeze.
+    _wl_snapshot = list(watchlist)
+    _st_snapshot = list(strategies)
     try:
-        report = master_agent.start(strategies, watchlist)
+        report = await asyncio.to_thread(master_agent.start, _st_snapshot, _wl_snapshot)
     except RuntimeError as e:
         raise HTTPException(503, str(e))
+
     kite_connected = False
     kite_user = None
     if settings.trading_mode == "LIVE":
         try:
-            p = kite_client.kite.profile()
+            p = await asyncio.to_thread(kite_client.kite.profile)
             kite_connected = True
             kite_user = p.get("user_name")
         except Exception:
@@ -811,8 +821,8 @@ async def start_bot(req: BotStartRequest):
     return {"status": "started", "architecture": "tick-driven 1s",
             "trading_mode": settings.trading_mode,
             "kite_connected": kite_connected, "kite_user": kite_user,
-            "symbol_selection": "auto-scanned" if not req.watchlist else "manual",
-            "watchlist": [w["symbol"] for w in watchlist], "report": report}
+            "symbol_selection": symbol_selection,
+            "watchlist": [w["symbol"] for w in _wl_snapshot], "report": report}
 
 @app.post("/bot/stop", tags=["Bot"])
 async def stop_bot():

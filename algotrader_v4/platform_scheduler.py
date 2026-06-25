@@ -202,7 +202,7 @@ class PlatformScheduler:
             return
 
         try:
-            report = master.start(strategies, watchlist)
+            report = await asyncio.to_thread(master.start, strategies, watchlist)
             lines = [f"🚀 <b>Bot auto-started</b> | Mode: {settings.trading_mode}"]
             for strat, data in report.items():
                 lines.append(f"  {strat}: {data['approved']}/{data['total']} symbols approved")
