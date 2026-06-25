@@ -1057,7 +1057,11 @@ export default function Header() {
         setBotStatus(null)
       } else {
         const r = await api.botStart(['intraday', 'scalping'])
-        addToast(`Bot started — ${r.data.watchlist?.length || 0} symbols`, 'buy')
+        if (r.status === 202 || r.data.status === 'starting') {
+          addToast('Loading instruments… agents will be live in a few seconds', 'info')
+        } else {
+          addToast(`Bot started — ${r.data.watchlist?.length || 0} symbols`, 'buy')
+        }
         setBotStatus(r.data)
       }
     } catch (e: any) {
@@ -1172,10 +1176,15 @@ export default function Header() {
 
         <div className="flex-1" />
 
-        <DarkBtn variant={botStatus?.master_running ? 'danger' : 'buy'} onClick={handleBotToggle} disabled={botLoading}>
+        <DarkBtn variant={botStatus?.master_running ? 'danger' : 'buy'} onClick={handleBotToggle}
+          disabled={botLoading || ['scanning_instruments','loading_instruments'].includes(botStatus?.start_phase ?? '')}>
           {botStatus?.master_running
             ? <><ZapOff className="w-3.5 h-3.5 mr-1.5" />Stop Bot</>
-            : <><Zap   className="w-3.5 h-3.5 mr-1.5" />Start Bot</>}
+            : botStatus?.start_phase === 'scanning_instruments'
+              ? <><Zap className="w-3.5 h-3.5 mr-1.5 animate-pulse" />Scanning…</>
+              : botStatus?.start_phase === 'loading_instruments'
+              ? <><Zap className="w-3.5 h-3.5 mr-1.5 animate-pulse" />Loading instruments…</>
+              : <><Zap className="w-3.5 h-3.5 mr-1.5" />Start Bot</>}
         </DarkBtn>
 
         <button onClick={openSettings}

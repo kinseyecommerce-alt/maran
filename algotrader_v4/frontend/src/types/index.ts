@@ -81,6 +81,9 @@ export interface BotStatus {
   master_running: boolean
   strategies: string[]
   watchlist: string[]
+  start_phase?: 'idle' | 'scanning_instruments' | 'loading_instruments' | 'started' | 'error'
+  start_error?: string | null
+  status?: string
   performance?: {
     total_trades: number
     daily_pnl: number
