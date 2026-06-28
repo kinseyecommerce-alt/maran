@@ -1,4 +1,5 @@
 import re
+import secrets
 from pydantic_settings import BaseSettings
 from pydantic import Field, field_validator, model_validator
 from typing import Literal
@@ -51,7 +52,7 @@ class Settings(BaseSettings):
     admin_username: str = "admin"
     admin_password: str = ""            # plain fallback for dev only
     admin_password_hash: str = ""       # bcrypt hash — takes precedence
-    jwt_secret_key: str = ""
+    jwt_secret_key: str = ""  # auto-generated at boot if empty
     jwt_expire_hours: int = 8
 
     # Trading
@@ -331,6 +332,8 @@ class Settings(BaseSettings):
     @field_validator("jwt_secret_key")
     @classmethod
     def validate_jwt_secret(cls, v: str) -> str:
+        if v == "":
+            return secrets.token_hex(32)
         if len(v) < 32:
             raise ValueError("jwt_secret_key must be at least 32 characters for HS256 security")
         return v
