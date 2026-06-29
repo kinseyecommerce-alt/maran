@@ -611,6 +611,15 @@ def redoc_ui() -> HTMLResponse:
 @app.get("/auth/login-url", tags=["Auth"])
 def login_url(): return {"login_url": kite_client.login_url()}
 
+@app.get("/auth/kite/login", tags=["Auth"], include_in_schema=False)
+def kite_login_redirect():
+    """Browser redirect → Zerodha Kite OAuth login page."""
+    from fastapi.responses import RedirectResponse
+    url = kite_client.login_url()
+    if not url:
+        raise HTTPException(503, "Kite API key not configured")
+    return RedirectResponse(url=url, status_code=302)
+
 @app.post("/auth/token", tags=["Auth"])
 def set_token(req: TokenRequest):
     t = kite_client.set_access_token(req.request_token, req.access_token)
