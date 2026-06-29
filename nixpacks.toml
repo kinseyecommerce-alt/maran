@@ -1,10 +1,11 @@
 [phases.setup]
-nixPkgs = ["python312", "gcc", "libffi"]
+nixPkgs = ["python312", "nodejs_20", "gcc", "libffi"]
 
 [phases.install]
 cmds = [
   "cd algotrader_v4 && pip install --upgrade pip setuptools wheel",
   "cd algotrader_v4 && pip install -r requirements.txt",
+  "cd algotrader_v4/frontend && npm ci --prefer-offline && npm run build",
 ]
 
 [start]

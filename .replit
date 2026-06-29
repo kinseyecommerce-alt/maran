@@ -2,10 +2,11 @@ modules = ["python-3.12", "web", "nodejs-20", "bash"]
 [agent]
 expertMode = true
 stack = "BEST_EFFORT_FALLBACK"
+integrations = ["digitalocean:1.0.0"]
 
 [nix]
 channel = "stable-25_05"
-packages = ["cairo", "cargo", "ffmpeg-full", "freetype", "ghostscript", "glibcLocales", "gobject-introspection", "gtk3", "libiconv", "libxcrypt", "pkg-config", "qhull", "rustc", "tcl", "tk", "xsimd"]
+packages = ["cairo", "cargo", "ffmpeg-full", "freetype", "ghostscript", "glibcLocales", "gobject-introspection", "gtk3", "libiconv", "libuv", "libxcrypt", "pkg-config", "qhull", "rustc", "tcl", "tk", "xsimd"]
 
 [workflows]
 runButton = "Project"

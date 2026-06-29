@@ -1,17 +1,51 @@
-name: algotrader
+name: squid-app
 region: blr
+
 services:
-  - name: web
-    source_dir: /
-    build_command: pip install -r algotrader_v4/requirements.txt
-    run_command: cd algotrader_v4 && uvicorn main:app --host 0.0.0.0 --port $PORT --workers 1 --log-level warning
-    http_port: 8080
+  - name: maran
     github:
+      repo: kinseyecommerce-alt/maran
       branch: main
       deploy_on_push: true
-    instance_size_slug: basic-xs
+    source_dir: /
+    run_command: cd algotrader_v4 && uvicorn main:app --host 0.0.0.0 --port $PORT --workers 1 --loop uvloop --http httptools --log-level warning --access-log
+    http_port: 8080
+    instance_size_slug: apps-d-1vcpu-4gb
     instance_count: 1
     health_check:
       http_path: /readiness
       timeout_seconds: 10
       period_seconds: 30
+    envs:
+      - key: DATABASE_URL
+        value: ${dev-db-667063.DATABASE_URL}
+        scope: RUN_TIME
+      - key: JWT_SECRET_KEY
+        scope: RUN_TIME
+        type: SECRET
+      - key: ADMIN_PASSWORD
+        scope: RUN_TIME
+        type: SECRET
+      - key: API_KEY
+        scope: RUN_TIME
+        type: SECRET
+      - key: ALLOWED_ORIGINS
+        value: https://squid-app-qlx35.ondigitalocean.app
+        scope: RUN_TIME
+
+databases:
+  - name: dev-db-667063
+    engine: PG
+    version: "17"
+
+alerts:
+  - rule: DEPLOYMENT_FAILED
+  - rule: DOMAIN_FAILED
+
+ingress:
+  rules:
+    - match:
+        path:
+          prefix: /
+      component:
+        name: maran
