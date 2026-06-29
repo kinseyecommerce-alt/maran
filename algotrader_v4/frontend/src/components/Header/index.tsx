@@ -173,18 +173,19 @@ function SaveBar({ onCancel, onSave, saving, label = 'Save & Reconnect' }: {
 // ─── Zerodha detail ───────────────────────────────────────────────────────────
 
 function ZerodhaDetail({ onBack, credForm, setCredForm,
-  credStatus, credSaving, onSave, vis, setVis, brokerStatus }: {
+  credStatus, credSaving, onSave, vis, setVis, brokerStatus, addToast }: {
   onBack: () => void; brokerStatus: BrokerStatus
   credForm: Record<string, string>; setCredForm: (fn: (p: any) => any) => void
   credStatus: Record<string, boolean>; credSaving: boolean; onSave: () => void
   vis: Record<string, boolean>; setVis: (fn: (p: any) => any) => void
+  addToast: (msg: string, type?: any) => void
 }) {
   const connectKite = async () => {
     try {
-      const r = await api.kiteStatus()
-      if (!r.data.login_url) { window.open('/auth/kite/login', '_blank'); return }
-      window.open(r.data.login_url, '_blank')
-    } catch { window.open('/auth/kite/login', '_blank') }
+      const r = await api.kiteLoginUrl()
+      if (r.data.login_url) { window.open(r.data.login_url, '_blank'); return }
+      addToast('Kite API key not configured', 'error')
+    } catch { addToast('Could not get Kite login URL', 'error') }
   }
 
   return (
@@ -444,7 +445,8 @@ function BrokersPanel(props: {
     <ZerodhaDetail onBack={() => setSelected(null)} brokerStatus={bStatus('zerodha')}
       credForm={props.credForm} setCredForm={props.setCredForm}
       credStatus={props.credStatus} credSaving={props.credSaving}
-      onSave={props.handleSaveZerodha} vis={props.vis} setVis={props.setVis} />
+      onSave={props.handleSaveZerodha} vis={props.vis} setVis={props.setVis}
+      addToast={props.addToast} />
   )
   if (selected === 'upstox') return (
     <UpstoxDetail onBack={() => setSelected(null)} brokerStatus={bStatus('upstox')}

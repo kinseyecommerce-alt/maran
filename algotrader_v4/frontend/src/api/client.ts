@@ -32,6 +32,7 @@ export const api = {
   connectionsStatus: () => ax().get('/connections/status'),
   brokerStatus:    () => ax().get('/broker/status'),
   kiteStatus:      () => ax().get('/auth/kite/status'),
+  kiteLoginUrl:    () => ax().get('/auth/login-url'),
   kiteRefresh:     () => ax().post('/auth/kite/refresh'),
   upstoxStatus:    () => ax().get('/auth/upstox/status'),
   upstoxLoginUrl:  () => ax().get('/auth/upstox/login-url'),
