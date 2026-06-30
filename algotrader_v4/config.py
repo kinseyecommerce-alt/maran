@@ -179,17 +179,17 @@ class Settings(BaseSettings):
     skip_startup_backtest: bool = False   # use pre-learned approved_symbols.json
     use_nifty100_watchlist: bool = False  # auto-use full Nifty 100 as watchlist
 
-    # Intelligence layer
-    use_claude_trade_gate: bool = True    # per-trade Claude assessment via Opus
-    claude_gate_model: str = "claude-sonnet-4-6"  # Sonnet: ~10× faster than Opus, sufficient accuracy for intraday gates
-    claude_gate_threshold: int = 30       # min confidence to enter — Opus must be very confident a trade is BAD to block it
+    # Intelligence layer — Claude Opus real-time market timing gate
+    use_claude_trade_gate: bool = True    # per-trade Opus assessment before every order
+    claude_gate_model: str = "claude-opus-4-8"   # Opus: deepest reasoning for trade timing
+    claude_gate_threshold: int = 25       # min confidence to enter — low bar keeps good trades flowing
     master_review_model: str = "claude-opus-4-8"   # regime review model
     signal_engine_model: str = "claude-opus-4-8"   # signal generation model
-    use_extended_thinking: bool = False            # extended thinking off — Sonnet doesn't need it; re-enable for Opus deep-review
-    gate_thinking_budget: int = 2000               # thinking tokens per trade assessment (only used when use_extended_thinking=True)
-    gate_api_timeout: float = 5.0                  # seconds — 5s fits Sonnet well; raise to 12s if switching back to Opus+thinking
-    gate_bypass_min_score: int = 7                 # signals scoring ≥ this skip Claude gate entirely (auto-approve, ~65% of trades)
-    scalping_skip_gate: bool = True                # scalping holds 2-12 min; 400-800ms gate call causes meaningful slippage — skip by default
+    use_extended_thinking: bool = True             # Opus extended thinking — deeper market analysis per trade
+    gate_thinking_budget: int = 4000               # thinking tokens per assessment (Opus quality gate)
+    gate_api_timeout: float = 15.0                 # seconds — Opus + extended thinking needs 10-15s
+    gate_bypass_min_score: int = 9                 # only the very highest-conviction signals skip gate (top ~10%)
+    scalping_skip_gate: bool = False               # scalping now gets gate via 5-min regime cache: first call pays latency, subsequent calls <1ms
     use_multi_timeframe: bool = True      # require 5m/15m alignment with entry direction
     mtf_min_alignment: int = 1            # how many of 3 TFs must agree (1, 2, or 3)
     use_kelly_sizing: bool = True         # apply Claude gate's size_factor to qty

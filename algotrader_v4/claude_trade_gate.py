@@ -48,36 +48,72 @@ def _sanitize_untrusted(text) -> str:
     return text[:_MAX_UNTRUSTED_LEN]
 
 
-_SYSTEM_PROMPT = """You are the world's most capable NSE/BSE quantitative trader — an elite market operator who has managed billions in Indian equities and derivatives. Your role is to assess individual trade setups with exceptional accuracy: enter every genuinely high-quality opportunity, protect capital from every weak setup.
+_SYSTEM_PROMPT = """You are the world's finest NSE/BSE algorithmic trading intelligence — a Claude Opus system with extended thinking, purpose-built to make real-time market timing decisions for an elite 8-agent Indian equity trading platform.
 
-MISSION: A missed good trade is just as costly as a bad trade taken. Bias towards approval for setups with clear edge; bias towards rejection only when multiple factors align against the trade.
+You assess every trade setup before order placement. Your extended thinking budget lets you reason deeply about market context, regime alignment, and edge quality before deciding.
 
-OPPORTUNITY CAPTURE RULES (false negatives are costly):
-1. If R:R ≥ 1.5 and trend aligned and volume confirms → approve unless ≥3 red flags
-2. Missing data or incomplete context → approve with tighter SL (never veto for data gaps)
-3. If Kelly fraction > 0 and win_rate > 50% → strong prior towards approval
-4. Near-open (first 15 min) or near-close (last 20 min) → scale size_factor 0.75 but still enter
+MISSION: Capture every genuine edge. A missed good trade is as costly as a bad trade taken. Approve setups with clear edge — veto only when multiple factors clearly destroy it.
 
-RISK FILTER RULES (filter only genuine edge destroyers):
-5. Regime BEAR + BUY signal + confidence < 50 → veto
-6. RSI > 80 (overbought BUY) or RSI < 20 (oversold SELL) → reduce size_factor 0.5, allow
-7. Negative news in last 2h for this symbol → veto if HIGH or CRITICAL news risk, else tighter SL
-8. Event risk HIGH or CRITICAL within 4h → veto options, reduce equity to size_factor 0.5
+═══ STRATEGY-AWARE TIMING RULES ═══
 
-ADJUSTMENT PROTOCOL:
-- "enter": true  → execute the trade (use your adjustments to protect the edge)
-- "enter": false → skip this trade (reserve for clear edge destroyers only)
-- Adjust SL tighter when risk is elevated (never skip when you can adjust instead)
-- size_factor 0.25 = minimal size; 0.5 = cautious; 0.75 = standard; 1.0 = full conviction
+INTRADAY (MIS, exits by 14:50 IST):
+- VWAP side must match direction: BUY needs ltp > VWAP, SELL needs ltp < VWAP
+- EMA stack must align (9>21>50 for BUY); mixed stack → reduce size_factor 0.75
+- First 15 min is valid if volume_ratio ≥ 2.0 (opening-range breakout edge)
 
-Output ONLY valid JSON — no markdown, no explanation outside the JSON:
+FUTURES (NIFTY/BANKNIFTY/FINNIFTY index only):
+- VIX Z-score > 2.0 = elevated vol → reduce size_factor 0.75, widen SL 20%
+- Multi-TF alignment score < 2/3 → skip unless score ≥ 8
+- High conviction if: VWAP aligned + multi-TF aligned + VIX stable
+
+SCALPING (holds 2-12 min):
+- Bid-ask spread > 0.05% of price → skip (cost kills edge)
+- Only enter on depth_imbalance ≥ 3:1 in entry direction
+- RSI-7 extreme (< 25 or > 75) = strong timing signal for contrarian entries
+
+SWING (CNC, holds 3-15 days):
+- Golden cross (EMA50 > EMA200) required for BUY in BULL regime
+- Skip if regime is BEAR_TREND or BEAR_VOLATILE (don't catch falling knives)
+- High delivery_pct (> 60%) = strong institutional conviction for BUY
+
+MOMENTUM (breakouts):
+- Volume surge ≥ 2× required; 3× = high conviction → size_factor 1.0
+- ADX must be > 25; skip if ADX < 20 (no trend momentum)
+- Gap plays: only trade gap continuation if first 5-bar volume confirms
+
+MEAN REVERSION (contrarian):
+- Only fires at ≥ 2σ from VWAP; 3σ = maximum size
+- Regime must be RANGING or BLACK_SWAN stabilisation; never in strong trend
+- RSI < 25 (BUY) or > 75 (SELL) = required confirmation
+
+PAIRS ARBITRAGE (stat-arb):
+- Z-score ±4σ = maximum conviction (size_factor 1.0)
+- Z-score ±2σ = standard entry (size_factor 0.75)
+- Skip in HIGH_VOLATILE or BLACK_SWAN — correlation breaks down
+
+OPTIONS (CE/PE/Spreads):
+- Event risk HIGH within 4h → veto naked long options; allow spreads at 0.5 size
+- IV rank > 80 → sell premium (straddle/condor); IV rank < 20 → buy premium
+- Regime RANGING = iron condor edge; BULL/BEAR_VOLATILE = directional spreads
+
+═══ UNIVERSAL FILTERS (all strategies) ═══
+1. R:R ≥ 1.5 + trend aligned + volume confirms → approve unless ≥ 3 red flags
+2. Missing data → approve with tighter SL (never veto for data gaps)
+3. Kelly fraction > 0 + win_rate > 50% → strong prior towards approval
+4. Regime BEAR + BUY signal + confidence < 50 → veto
+5. News risk CRITICAL within 2h → veto; HIGH → tighter SL, reduce size_factor 0.5
+6. Event CRITICAL within 4h → veto options; equities → size_factor 0.5
+7. Daily loss > 70% of max → size_factor 0.25 on all new entries
+8. Near squareoff (< 20 min) → size_factor 0.5 (intraday only)
+
+Output ONLY valid JSON — no markdown, no preamble:
 {
   "confidence": 0-100,
   "enter": true|false,
   "adjusted_sl_pct": <float or null>,
   "adjusted_target_pct": <float or null>,
   "size_factor": <0.25|0.5|0.75|1.0 — default 1.0>,
-  "reason": "<one crisp sentence explaining the key factor that drove this decision>",
+  "reason": "<one crisp sentence — the single decisive factor>",
   "warnings": ["<string>", ...]
 }"""
 
@@ -109,6 +145,155 @@ def _get_client() -> anthropic.AsyncAnthropic:
     if _client is None:
         _client = anthropic.AsyncAnthropic(api_key=settings.anthropic_api_key)
     return _client
+
+
+def _build_strategy_context(snap, action: str, signal: dict, strategy: str) -> dict:
+    """Build agent-specific context that enriches Opus's timing decision per strategy."""
+    ind = snap.indicators
+    ctx: dict = {
+        "pattern": signal.get("pattern", ""),
+        "score":   signal.get("score", 0),
+    }
+
+    if strategy == "intraday":
+        vwap_dev = None
+        if ind.vwap and ind.vwap > 0:
+            vwap_dev = round((snap.tick.ltp - ind.vwap) / ind.vwap * 100, 3)
+        ema_stack = (
+            "bullish" if ind.ema9 > ind.ema21 > ind.ema50 > 0 else
+            "bearish" if ind.ema9 < ind.ema21 < ind.ema50 else "mixed"
+        )
+        try:
+            from market_regime import regime_detector
+            sigs = regime_detector.current_signals
+            fii = round(getattr(sigs, "fii_dii_ratio", 1.0), 2) if sigs else None
+        except Exception:
+            fii = None
+        ctx.update({
+            "vwap_deviation_pct": vwap_dev,
+            "ema_stack_alignment": ema_stack,
+            "vwap_side": "above" if ind.vwap and snap.tick.ltp > ind.vwap else "below",
+            "volume_surge": round(ind.volume_ratio, 2),
+            "fii_sentiment_ratio": fii,
+            "note": "MIS intraday — must exit by 14:50 IST; first-15-min ORB valid if vol≥2×",
+        })
+
+    elif strategy == "futures":
+        try:
+            from market_regime import regime_detector
+            sigs = regime_detector.current_signals
+            vix_z = round(getattr(sigs, "vix_zscore", 0.0), 2) if sigs else None
+            vix   = round(sigs.india_vix, 1) if sigs else None
+        except Exception:
+            vix_z = None
+            vix   = None
+        mtf = getattr(snap, "mtf_alignment", {}) or {}
+        ctx.update({
+            "vix_zscore":       vix_z,
+            "vix_level":        vix,
+            "multi_tf_aligned": mtf.get("aligned", False),
+            "multi_tf_score":   mtf.get("score", 0),
+            "multi_tf_tfs":     mtf.get("aligned_tfs", []),
+            "lot_size":         signal.get("lot_size", 0),
+            "atr_14":           round(ind.atr_14, 4),
+            "vwap_side":        "above" if ind.vwap and snap.tick.ltp > ind.vwap else "below",
+            "note": "Index futures ONLY (NIFTY/BANKNIFTY/FINNIFTY/etc); VIX>2σ → widen SL 20%",
+        })
+
+    elif strategy == "scalping":
+        spread = None
+        spread_bps = None
+        if snap.tick.ask and snap.tick.bid and snap.tick.ask > 0:
+            spread     = round(snap.tick.ask - snap.tick.bid, 3)
+            spread_bps = round(spread / snap.tick.ltp * 10000, 1)
+        ctx.update({
+            "bid_ask_spread":     spread,
+            "bid_ask_spread_bps": spread_bps,
+            "depth_imbalance":    signal.get("depth_imbalance"),
+            "tick_velocity":      signal.get("tick_velocity"),
+            "rsi_7":              getattr(ind, "rsi_7", None),
+            "volume_ratio":       round(ind.volume_ratio, 2),
+            "note": "Holds 2-12 min; spread>0.05% destroys edge; depth_imbalance≥3:1 required",
+        })
+
+    elif strategy == "swing":
+        ema200 = round(getattr(ind, "ema200", 0.0), 2)
+        ctx.update({
+            "ema50":           round(ind.ema50, 2),
+            "ema200":          ema200,
+            "golden_cross":    ind.ema50 > ema200 if ema200 > 0 else None,
+            "delivery_pct":    signal.get("delivery_pct"),
+            "weeks_in_trend":  signal.get("weeks_in_trend"),
+            "prev_week_high":  signal.get("prev_week_high"),
+            "prev_week_low":   signal.get("prev_week_low"),
+            "hold_days":       signal.get("hold_days", "3-15 days"),
+            "sector":          signal.get("sector", ""),
+            "note": "CNC delivery; golden_cross required for BUY; skip in BEAR regimes",
+        })
+        try:
+            from market_regime import regime_detector
+            sigs = regime_detector.current_signals
+            ctx["sector_leaders"] = getattr(sigs, "sector_leaders", [])[:3] if sigs else []
+        except Exception:
+            pass
+
+    elif strategy == "momentum":
+        ctx.update({
+            "breakout_bar_pct":     signal.get("breakout_bar_pct"),
+            "volume_surge_x":       round(ind.volume_ratio, 2),
+            "adx":                  signal.get("adx"),
+            "velocity_surge":       signal.get("velocity_surge"),
+            "gap_type":             signal.get("gap_type", "none"),
+            "prior_consol_bars":    signal.get("prior_consolidation_bars"),
+            "days_since_high":      signal.get("days_since_high"),
+            "note": "ADX>25 + vol≥2× required; 3× vol = max size; gap plays need 5-bar confirmation",
+        })
+
+    elif strategy == "mean_reversion":
+        vwap_dev = None
+        if ind.vwap and ind.vwap > 0:
+            vwap_dev = round((snap.tick.ltp - ind.vwap) / ind.vwap * 100, 3)
+        bb_pos = (
+            "above_upper" if snap.tick.ltp > ind.bb_upper else
+            "below_lower" if snap.tick.ltp < ind.bb_lower else "inside"
+        )
+        ctx.update({
+            "sigma_level":       signal.get("sigma_level", 2.0),
+            "bb_position":       bb_pos,
+            "vwap_deviation_pct": vwap_dev,
+            "rsi_extreme": (
+                "oversold" if ind.rsi_14 < 30 else
+                "overbought" if ind.rsi_14 > 70 else "neutral"
+            ),
+            "note": "Contrarian fade; regime MUST be RANGING; 3σ = max size; never in trending regime",
+        })
+
+    elif strategy == "pairs":
+        ctx.update({
+            "zscore":           signal.get("zscore"),
+            "zscore_4sigma":    signal.get("zscore_extreme", False),
+            "correlation_30d":  signal.get("correlation_30d"),
+            "leg_a":            signal.get("leg_a", ""),
+            "leg_b":            signal.get("leg_b", ""),
+            "leg_a_qty":        signal.get("leg_a_qty"),
+            "leg_b_qty":        signal.get("leg_b_qty"),
+            "days_since_entry": signal.get("days_since_entry", 0),
+            "convergence_days": signal.get("convergence_days", "3-8"),
+            "note": "Beta-neutral stat-arb; ±4σ=full size, ±2σ=0.75; skip in HIGH_VOLATILE regime",
+        })
+
+    elif strategy == "options":
+        ctx.update({
+            "iv_rank":          signal.get("iv_rank"),
+            "pcr":              signal.get("pcr"),
+            "dte":              signal.get("dte"),
+            "option_type":      signal.get("option_type", ""),
+            "strike":           signal.get("strike"),
+            "underlying_trend": "bullish" if ind.ema9 > ind.ema21 else "bearish",
+            "note": "IV rank>80=sell premium; <20=buy premium; event risk CRITICAL=veto naked long",
+        })
+
+    return ctx
 
 
 def _build_context(snap, action: str, signal: dict, strategy: str) -> dict:
@@ -240,6 +425,8 @@ def _build_context(snap, action: str, signal: dict, strategy: str) -> dict:
         except Exception:
             pass
 
+    strategy_context = _build_strategy_context(snap, action, signal, strategy)
+
     return {
         "symbol":   snap.symbol,
         "strategy": strategy,
@@ -247,6 +434,7 @@ def _build_context(snap, action: str, signal: dict, strategy: str) -> dict:
         "ltp":      snap.tick.ltp,
         "proposed_sl_pct":     signal.get("stop_loss_pct",  settings.stop_loss_pct),
         "proposed_target_pct": signal.get("target_pct",     settings.target_pct),
+        "strategy_context": strategy_context,
         "indicators": {
             "rsi_14":       round(ind.rsi_14, 2),
             "ema9":         round(ind.ema9,  2),
@@ -506,7 +694,7 @@ def _log(symbol: str, strategy: str, action: str, d: GateDecision, rsi: float) -
         "✅" if d.enter else "🚫", verdict, action, symbol,
         d.confidence, d.size_factor, d.reason, warn, d.latency_ms,
     )
-    _gate_log.appendleft({
+    entry = {
         "time":        _now_ist().strftime("%H:%M:%S"),
         "symbol":      symbol,
         "strategy":    strategy,
@@ -517,7 +705,18 @@ def _log(symbol: str, strategy: str, action: str, d: GateDecision, rsi: float) -
         "reason":      d.reason,
         "warnings":    d.warnings,
         "latency_ms":  d.latency_ms,
-    })
+    }
+    _gate_log.appendleft(entry)
+    try:
+        from state_store import add_gate_log_entry_async
+        add_gate_log_entry_async(
+            symbol=symbol, strategy=strategy, signal=action,
+            confidence=d.confidence, decision=verdict,
+            size_factor=d.size_factor, reason=d.reason,
+            warnings=d.warnings, latency_ms=d.latency_ms,
+        )
+    except Exception:
+        pass
 
 
 def get_gate_log(n: int = 50) -> list[dict]:

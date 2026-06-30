@@ -1368,11 +1368,14 @@ def orders():
 
 # ── Claude Gate Log (dashboard) ──────────────────────────────────────────────
 @app.get("/gate/log", tags=["AI Signal"])
-def gate_log(n: int = 50):
-    """Return last n Claude trade-gate decisions (newest first). Used by dashboard."""
+def gate_log(n: int = 100):
+    """Return last n Claude Opus gate decisions (newest first). DB-backed with in-memory fallback."""
     from claude_trade_gate import get_gate_log
-    decisions = get_gate_log(n)
-    # Normalise: add `enter` bool from decision string if needed
+    from state_store import get_gate_log_db
+    # Try DB first — survives restarts; fall back to in-memory ring buffer
+    decisions = get_gate_log_db(n)
+    if not decisions:
+        decisions = get_gate_log(n)
     for d in decisions:
         if "enter" not in d:
             d["enter"] = d.get("decision", "").upper() == "ENTER"

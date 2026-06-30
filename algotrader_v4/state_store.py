@@ -96,6 +96,77 @@ def upsert_position_async(*args, **kwargs) -> None:
     _enqueue(upsert_position, *args, **kwargs)
 
 
+def add_gate_log_entry(
+    symbol: str, strategy: str, signal: str,
+    confidence: int, decision: str, size_factor: float,
+    reason: str, warnings: list, latency_ms: int,
+) -> None:
+    """Persist one Claude gate decision to the gate_log table."""
+    import json as _json
+    ph = _ph()
+    sql = (
+        f"INSERT INTO gate_log (symbol, strategy, signal, confidence, decision, "
+        f"size_factor, reason, warnings, latency_ms) "
+        f"VALUES ({ph},{ph},{ph},{ph},{ph},{ph},{ph},{ph},{ph})"
+    )
+    params = (
+        symbol, strategy, signal, confidence, decision,
+        size_factor, reason, _json.dumps(warnings or []), latency_ms,
+    )
+    with _conn() as c:
+        if _USE_PG:
+            cur = c.cursor()
+            cur.execute(sql, params)
+            c.commit()
+        else:
+            c.execute(sql, params)
+    # Prune old rows — keep last 500
+    try:
+        with _conn() as c2:
+            if _USE_PG:
+                cur2 = c2.cursor()
+                cur2.execute(
+                    "DELETE FROM gate_log WHERE id NOT IN "
+                    "(SELECT id FROM gate_log ORDER BY id DESC LIMIT 500)"
+                )
+                c2.commit()
+            else:
+                c2.execute(
+                    "DELETE FROM gate_log WHERE id NOT IN "
+                    "(SELECT id FROM gate_log ORDER BY id DESC LIMIT 500)"
+                )
+    except Exception:
+        pass
+
+
+def add_gate_log_entry_async(**kwargs) -> None:
+    """Non-blocking version of add_gate_log_entry."""
+    _enqueue(add_gate_log_entry, **kwargs)
+
+
+def get_gate_log_db(n: int = 100) -> list[dict]:
+    """Return last n gate decisions from DB (newest first). Falls back to []."""
+    import json as _json
+    ph = _ph()
+    try:
+        rows = _fetchall(
+            _conn(),
+            f"SELECT ts, symbol, strategy, signal, confidence, decision, "
+            f"size_factor, reason, warnings, latency_ms "
+            f"FROM gate_log ORDER BY id DESC LIMIT {ph}",
+            (n,),
+        )
+        for r in rows:
+            try:
+                r["warnings"] = _json.loads(r.get("warnings") or "[]")
+            except Exception:
+                r["warnings"] = []
+            r["time"] = r.pop("ts", "")
+        return rows
+    except Exception:
+        return []
+
+
 import os as _os_pg
 _PG_URL: str = _os_pg.environ.get("DATABASE_URL", "")
 _USE_PG: bool = bool(_PG_URL and _PG_URL.startswith("postgres"))
@@ -223,12 +294,28 @@ def _init_sqlite() -> None:
                 updated_at TEXT DEFAULT (datetime('now'))
             );
 
+            CREATE TABLE IF NOT EXISTS gate_log (
+                id          INTEGER PRIMARY KEY AUTOINCREMENT,
+                ts          TEXT DEFAULT (datetime('now','localtime')),
+                symbol      TEXT,
+                strategy    TEXT,
+                signal      TEXT,
+                confidence  INTEGER,
+                decision    TEXT,
+                size_factor REAL,
+                reason      TEXT,
+                warnings    TEXT DEFAULT '[]',
+                latency_ms  INTEGER DEFAULT 0
+            );
+
             CREATE INDEX IF NOT EXISTS idx_trades_trade_date  ON trades(trade_date);
             CREATE INDEX IF NOT EXISTS idx_trades_strategy     ON trades(strategy);
             CREATE INDEX IF NOT EXISTS idx_trades_exit_time    ON trades(exit_time);
             CREATE INDEX IF NOT EXISTS idx_trades_symbol       ON trades(symbol);
             CREATE INDEX IF NOT EXISTS idx_positions_is_open   ON positions(is_open);
             CREATE INDEX IF NOT EXISTS idx_positions_symbol    ON positions(symbol, strategy);
+            CREATE INDEX IF NOT EXISTS idx_gate_log_ts         ON gate_log(ts DESC);
+            CREATE INDEX IF NOT EXISTS idx_gate_log_strategy   ON gate_log(strategy);
         """)
         c.execute("INSERT OR IGNORE INTO schema_version (id, version) VALUES (1, 1)")
 
@@ -324,12 +411,27 @@ def _init_pg() -> None:
             value      TEXT,
             updated_at TEXT DEFAULT NOW()::TEXT
         )""",
+        """CREATE TABLE IF NOT EXISTS gate_log (
+            id          SERIAL PRIMARY KEY,
+            ts          TEXT DEFAULT NOW()::TEXT,
+            symbol      TEXT,
+            strategy    TEXT,
+            signal      TEXT,
+            confidence  INTEGER,
+            decision    TEXT,
+            size_factor DOUBLE PRECISION,
+            reason      TEXT,
+            warnings    TEXT DEFAULT '[]',
+            latency_ms  INTEGER DEFAULT 0
+        )""",
         "CREATE INDEX IF NOT EXISTS idx_trades_trade_date ON trades(trade_date)",
         "CREATE INDEX IF NOT EXISTS idx_trades_strategy   ON trades(strategy)",
         "CREATE INDEX IF NOT EXISTS idx_trades_exit_time  ON trades(exit_time)",
         "CREATE INDEX IF NOT EXISTS idx_trades_symbol     ON trades(symbol)",
         "CREATE INDEX IF NOT EXISTS idx_positions_is_open ON positions(is_open)",
         "CREATE INDEX IF NOT EXISTS idx_positions_symbol  ON positions(symbol, strategy)",
+        "CREATE INDEX IF NOT EXISTS idx_gate_log_ts       ON gate_log(ts DESC)",
+        "CREATE INDEX IF NOT EXISTS idx_gate_log_strategy ON gate_log(strategy)",
     ]
     with _conn() as c:
         cur = c.cursor()

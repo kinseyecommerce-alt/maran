@@ -3,7 +3,7 @@ import {
   Activity, Terminal, Cpu, WifiOff, ShieldCheck,
   TrendingUp, TrendingDown, BarChart3,
   Zap, Play, Square, Database, Crosshair,
-  LayoutDashboard, ClipboardList, Target, Scale, History,
+  LayoutDashboard, ClipboardList, Target, Scale, History, Brain,
 } from 'lucide-react'
 import Header from './components/Header'
 import PositionsTab from './components/tabs/PositionsTab'
@@ -13,6 +13,7 @@ import RiskTab from './components/tabs/RiskTab'
 import AgentsTab from './components/tabs/AgentsTab'
 import SebiTab from './components/tabs/SebiTab'
 import TradeHistoryTab from './components/tabs/TradeHistoryTab'
+import ClaudeGateTab from './components/tabs/ClaudeGateTab'
 import { connectWS } from './ws/websocket'
 import { useStore } from './store'
 import { api } from './api/client'
@@ -40,6 +41,7 @@ const TAB_COMPONENTS: Record<string, React.ComponentType> = {
   agents:    AgentsTab,
   sebi:      SebiTab,
   history:   TradeHistoryTab,
+  gate:      ClaudeGateTab,
 }
 
 const SIDEBAR_NAV: { id: PageId; label: string; Icon: React.ComponentType<{ className?: string }> }[] = [
@@ -51,6 +53,7 @@ const SIDEBAR_NAV: { id: PageId; label: string; Icon: React.ComponentType<{ clas
   { id: 'agents',    label: 'Agents',        Icon: Cpu             },
   { id: 'sebi',      label: 'SEBI',          Icon: Scale           },
   { id: 'history',   label: 'Trade History', Icon: History         },
+  { id: 'gate',      label: 'Claude Gate',   Icon: Brain           },
 ]
 
 function Toasts() {
