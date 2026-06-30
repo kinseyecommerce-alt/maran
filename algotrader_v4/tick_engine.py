@@ -921,8 +921,14 @@ class TickEngine:
         During off-market hours, slows to every 30 seconds (to check status).
         Symbols already receiving WebSocket ticks are skipped to avoid duplicate processing.
         """
+        _last_order_expiry = time.monotonic()
         while self._running:
             t_start = time.monotonic()
+
+            # ── Auto-expire stale OPEN LIMIT orders every 5 minutes ──────────
+            if settings.trading_mode == "PAPER" and t_start - _last_order_expiry >= 300:
+                kite_client.expire_stale_paper_limit_orders()
+                _last_order_expiry = t_start
 
             if not is_market_open() and settings.trading_mode == "LIVE":
                 await asyncio.sleep(30)

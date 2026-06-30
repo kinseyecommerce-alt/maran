@@ -55,9 +55,10 @@ _RETRY_BASE_SEC       = 1.0     # doubles each attempt: 1 2 4 8
 _IST = ZoneInfo("Asia/Kolkata")
 
 # Paper-order lifecycle
-_PAPER_TERMINAL_STATUSES = ("COMPLETE", "CANCELLED", "REJECTED")
-_PAPER_PRUNE_AGE_SEC     = 30 * 60   # drop terminal paper orders older than 30 min
-_PAPER_TERMINAL_MAX      = 2_000     # hard cap on retained terminal paper orders
+_PAPER_TERMINAL_STATUSES  = ("COMPLETE", "CANCELLED", "REJECTED")
+_PAPER_PRUNE_AGE_SEC      = 30 * 60   # drop terminal paper orders older than 30 min
+_PAPER_TERMINAL_MAX       = 2_000     # hard cap on retained terminal paper orders
+_PAPER_LIMIT_EXPIRY_SEC   = 15 * 60   # cancel unfilled OPEN LIMIT orders after 15 min
 
 
 # ── F&O lot sizes (NSE — as of 2025, update after each expiry revision) ────
@@ -772,6 +773,28 @@ class KiteClient:
                     transaction_type, tradingsymbol, order_type,
                     quantity, fill_price, order_id)
         return order_id
+
+    def expire_stale_paper_limit_orders(self) -> int:
+        """Cancel OPEN LIMIT/SL orders that have not filled within _PAPER_LIMIT_EXPIRY_SEC.
+
+        Real NSE orders expire at EOD or are cancelled by the broker if they sit
+        unfilled too long. In paper mode they accumulate forever without this call.
+        Returns the number of orders cancelled.
+        """
+        now = time.time()
+        cancelled = 0
+        with self._paper_orders_lock:
+            for order in self._paper_orders.values():
+                if order.get("status") not in ("OPEN", "TRIGGER PENDING"):
+                    continue
+                age = now - order.get("placed_ts", now)
+                if age >= _PAPER_LIMIT_EXPIRY_SEC:
+                    order["status"] = "CANCELLED"
+                    cancelled += 1
+        if cancelled:
+            logger.info("[PAPER] Auto-expired {} stale OPEN/TRIGGER-PENDING orders (>{}min unfilled)",
+                        cancelled, _PAPER_LIMIT_EXPIRY_SEC // 60)
+        return cancelled
 
     def _prune_paper_orders_locked(self) -> None:
         """Drop stale terminal paper orders. Caller MUST hold _paper_orders_lock.
