@@ -878,6 +878,11 @@ async def _do_start_bg(req: BotStartRequest, strategies: list[str]) -> None:
         # ── Start master agent (no blocking I/O remaining) ─────────────────────
         report = master_agent.start(strategies, watchlist, prefiltered=prefiltered)
 
+        # ── Always subscribe index symbols for chart/regime data ────────────────
+        from nifty100 import INDEX_SYMBOLS as _IDX
+        tick_engine.subscribe(_IDX)
+        logger.info("[bot/start] Index symbols subscribed: {}", [i["symbol"] for i in _IDX])
+
         _bot_start_status["phase"] = "started"
         logger.info("[bot/start] Background start complete — agents running")
 
@@ -1102,11 +1107,14 @@ async def resume_agent(name: str):
     a.state.approved_symbols = [item["symbol"] for item in wl]
 
     # Ensure tick engine is subscribed + running before starting the agent
+    from nifty100 import INDEX_SYMBOLS as _IDX
     if not tick_engine._running:
         tick_engine.subscribe(wl)
+        tick_engine.subscribe(_IDX)
         tick_engine.start_loop()   # also triggers _backfill_bufs() internally
     else:
         tick_engine.subscribe(wl)   # idempotent — adds new symbols only
+        tick_engine.subscribe(_IDX)
         # Backfill any newly added symbols so agent can fire signals immediately
         asyncio.create_task(tick_engine._backfill_bufs())
 
@@ -3095,6 +3103,14 @@ async def on_startup():
     #   • risk_manager.open_position_count is accurate (PAPER mode)
     # For LIVE mode, cross-check against the broker to detect naked positions.
     await _reconcile_open_positions()
+
+    # ── Always subscribe index symbols (NIFTY 50, NIFTY BANK) at startup ─────────
+    # These are needed for the dashboard chart and regime detection regardless
+    # of whether the bot has been started. tick_engine.subscribe is idempotent.
+    from nifty100 import INDEX_SYMBOLS as _IDX
+    tick_engine.subscribe(_IDX)
+    tick_engine.start_loop()
+    logger.info("[startup] Index symbols subscribed: {}", [i["symbol"] for i in _IDX])
 
     # Load SEBI IP whitelist from env at startup so restarts don't reset it
     if settings.sebi_whitelisted_ips:

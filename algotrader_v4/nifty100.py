@@ -53,6 +53,12 @@ SWING_UNIVERSE = NIFTY_100  # All 100 for swing (hold overnight)
 
 INTRADAY_UNIVERSE = NIFTY_100  # All 100 for intraday MIS
 
+# ── Index symbols — subscribed for price/chart data, NOT traded directly ───────
+INDEX_SYMBOLS = [
+    {"symbol": "NIFTY 50",   "exchange": "NSE"},
+    {"symbol": "NIFTY BANK", "exchange": "NSE"},
+]
+
 # Watchlist dict format expected by agents
 def as_watchlist(symbols: list[str], exchange: str = "NSE") -> list[dict]:
     return [{"symbol": s, "exchange": exchange} for s in symbols]
