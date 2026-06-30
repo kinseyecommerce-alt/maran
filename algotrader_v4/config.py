@@ -189,7 +189,9 @@ class Settings(BaseSettings):
     gate_thinking_budget: int = 5000               # thinking tokens per trade assessment (Opus with extended thinking)
     gate_api_timeout: float = 15.0                 # seconds — 15s accommodates Opus + extended thinking latency
     gate_bypass_min_score: int = 20                 # raised to 20 — effectively disabled; all signals route through Opus gate
-    scalping_skip_gate: bool = False                # False — scalping now gates through Opus like all other agents    use_multi_timeframe: bool = True      # require 5m/15m alignment with entry direction
+    scalping_skip_gate: bool = False                # False — scalping now gates through Opus like all other agents
+    gate_max_concurrent: int = 4                    # max simultaneous Claude Opus gate calls; overflow degrades to cache/allow
+    use_multi_timeframe: bool = True      # require 5m/15m alignment with entry direction
     mtf_min_alignment: int = 1            # how many of 3 TFs must agree (1, 2, or 3)
     use_kelly_sizing: bool = True         # apply Claude gate's size_factor to qty
 

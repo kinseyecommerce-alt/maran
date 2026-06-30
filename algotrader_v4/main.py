@@ -1370,7 +1370,7 @@ def orders():
 @app.get("/gate/log", tags=["AI Signal"])
 def gate_log(n: int = 100):
     """Return last n Claude Opus gate decisions (newest first). DB-backed with in-memory fallback."""
-    from claude_trade_gate import get_gate_log
+    from claude_trade_gate import get_gate_log, get_gate_stats
     from state_store import get_gate_log_db
     # Try DB first — survives restarts; fall back to in-memory ring buffer
     decisions = get_gate_log_db(n)
@@ -1379,7 +1379,8 @@ def gate_log(n: int = 100):
     for d in decisions:
         if "enter" not in d:
             d["enter"] = d.get("decision", "").upper() == "ENTER"
-    return {"decisions": decisions, "count": len(decisions)}
+    stats = get_gate_stats()
+    return {"decisions": decisions, "count": len(decisions), **stats}
 
 
 # ── Signals / Risk ──────────────────────────────────────────────────────────

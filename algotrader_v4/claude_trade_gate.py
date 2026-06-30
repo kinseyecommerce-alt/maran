@@ -27,6 +27,17 @@ from ist_clock import now_ist as _now_ist, minutes_since_open, minutes_to_square
 # ── Gate decision log (ring buffer, read by /gate/log endpoint) ───────────────
 _gate_log: deque[dict] = deque(maxlen=500)
 
+# ── Concurrency limiter — prevents rate-limit exhaustion during signal bursts ──
+# Lazily created on first assess() call so it binds to the running event loop.
+_gate_semaphore: Optional[asyncio.Semaphore] = None
+_semaphore_create_lock = threading.Lock()
+
+# Latency histogram buckets (ms) — populated per assess() call
+_latency_samples: deque[int] = deque(maxlen=1000)
+# Overflow counter — incremented whenever semaphore is full and we degrade
+_overflow_count: int = 0
+_overflow_lock = threading.Lock()
+
 # ── Prompt-injection guard for untrusted free-text context fields ─────────────
 # news_context / key_levels / event descriptions originate from external sources
 # (news feeds, NSE announcements, user-supplied headlines). They are truncated
@@ -145,6 +156,16 @@ def _get_client() -> anthropic.AsyncAnthropic:
     if _client is None:
         _client = anthropic.AsyncAnthropic(api_key=settings.anthropic_api_key)
     return _client
+
+
+def _get_gate_semaphore() -> asyncio.Semaphore:
+    """Return the module-level gate semaphore, creating it lazily on first call."""
+    global _gate_semaphore
+    if _gate_semaphore is None:
+        with _semaphore_create_lock:
+            if _gate_semaphore is None:
+                _gate_semaphore = asyncio.Semaphore(settings.gate_max_concurrent)
+    return _gate_semaphore
 
 
 def _build_strategy_context(snap, action: str, signal: dict, strategy: str) -> dict:
@@ -773,8 +794,13 @@ async def assess(snap, action: str, signal: dict, strategy: str) -> GateDecision
     """
     Ask Claude to assess this trade setup.
     Always returns a GateDecision — never raises.
+
+    A module-level asyncio.Semaphore(gate_max_concurrent) caps simultaneous Opus
+    calls. During high-signal bursts, overflow callers degrade instantly to the
+    regime-cache hit (no API call) or the reduced-size ALLOW_ON_ERROR fallback —
+    preventing rate-limit exhaustion and circuit-breaker cascade.
     """
-    global _consec_failures
+    global _consec_failures, _overflow_count
     if not settings.anthropic_api_key or not settings.use_claude_trade_gate:
         return GateDecision(confidence=70, enter=True, reason="Gate disabled — rule-based approval")
 
@@ -783,89 +809,122 @@ async def assess(snap, action: str, signal: dict, strategy: str) -> GateDecision
         return GateDecision(confidence=60, enter=True, size_factor=0.5,
                             reason="Gate circuit breaker open — reduced size, no AI assessment")
 
-    t0 = asyncio.get_running_loop().time()
-    # Pre-warm news cache in a thread so _build_context()'s sync read is a hit,
-    # not a blocking urlopen that would stall the event loop for up to 6 seconds.
+    # ── Concurrency gate: acquire semaphore slot or degrade immediately ────────
+    sem = _get_gate_semaphore()
+    sem_acquired = False
     try:
-        from news_sentinel import news_sentinel as _ns
-        await asyncio.to_thread(_ns.get_headlines, snap.symbol)
-    except Exception:
-        pass
-    ctx = _build_context(snap, action, signal, strategy)
-
-    try:
-        extra: dict = {}
-        if settings.use_extended_thinking:
-            extra["thinking"] = {"type": "enabled", "budget_tokens": settings.gate_thinking_budget}
-
-        async def _call():
-            return await asyncio.wait_for(
-                _get_client().messages.create(
-                    model=settings.claude_gate_model,
-                    max_tokens=(settings.gate_thinking_budget + 1024) if settings.use_extended_thinking else 1024,
-                    system=[{"type": "text", "text": _SYSTEM_PROMPT, "cache_control": {"type": "ephemeral"}}],
-                    messages=[{"role": "user", "content": _UNTRUSTED_FIELDS_NOTE + json.dumps(ctx)}],
-                    **extra,
-                ),
-                timeout=settings.gate_api_timeout,
-            )
-
-        try:
-            resp = await _call()
-        except asyncio.TimeoutError:
-            # One fast retry — a single transient timeout shouldn't skip assessment
-            logger.warning("[gate] {} timeout — retrying once", snap.symbol)
-            resp = await _call()
-        latency = int((asyncio.get_running_loop().time() - t0) * 1000)
-        with _breaker_lock:
-            _consec_failures = 0
-
-        # FIX 4: wrap response parsing so any unexpected format falls back safely
-        try:
-            text_block = next(b for b in resp.content if b.type == "text")
-            raw = text_block.text.strip()
-            if raw.startswith("```"):
-                raw = raw.split("\n", 1)[-1].rsplit("```", 1)[0].strip()
-            d   = json.loads(raw)
-
-            conf   = int(d.get("confidence", 60))
-            enter  = bool(d.get("enter", True))
-            reason = d.get("reason", "")
-
-            # Hard threshold: if Opus approved but confidence is below the bar, downgrade to skip.
-            # This lets master_agent_v5 tighten/loosen the bar per regime without code changes.
-            if enter and conf < settings.claude_gate_threshold:
-                enter  = False
-                reason = f"conf {conf} < threshold {settings.claude_gate_threshold} — {reason}"
-
-            decision = GateDecision(
-                confidence=conf,
-                enter=enter,
-                adjusted_sl_pct=d.get("adjusted_sl_pct"),
-                adjusted_target_pct=d.get("adjusted_target_pct"),
-                size_factor=float(d.get("size_factor", 1.0)),
-                reason=reason,
-                warnings=d.get("warnings", []),
-                latency_ms=latency,
-            )
-        except Exception as parse_exc:
-            logger.warning(
-                "[gate] {} response parse error ({}) — defaulting to allow with reduced size",
-                snap.symbol, parse_exc,
-            )
-            return _ALLOW_ON_ERROR
-
-        _log(snap.symbol, strategy, action, decision, ctx["indicators"]["rsi_14"])
-        return decision
-
+        # Non-blocking attempt: give up after 10 ms so overflow callers never wait
+        await asyncio.wait_for(sem.acquire(), timeout=0.01)
+        sem_acquired = True
     except asyncio.TimeoutError:
-        _record_gate_failure()
-        logger.warning("[gate] {} timeout (after retry) — allowing trade with reduced size", snap.symbol)
-        return _ALLOW_ON_ERROR
-    except Exception as exc:
-        _record_gate_failure()
-        logger.warning("[gate] {} API error ({}) — allowing trade with reduced size", snap.symbol, exc)
-        return _ALLOW_ON_ERROR
+        with _overflow_lock:
+            _overflow_count += 1
+        # Degrade: serve regime-cache decision if available, else reduced-size allow
+        cached = get_regime_decision(snap.symbol, strategy, action)
+        if cached is not None:
+            logger.info(
+                "[gate] {} semaphore full ({}/{}) — serving regime-cache decision",
+                snap.symbol, settings.gate_max_concurrent, settings.gate_max_concurrent,
+            )
+            return _apply_tick_adjustments(cached, snap, signal)
+        logger.warning(
+            "[gate] {} semaphore full, no cache hit — falling back to allow (overflow #{})",
+            snap.symbol, _overflow_count,
+        )
+        return GateDecision(
+            confidence=60, enter=True,
+            reason="gate_concurrency_limit — semaphore full, defaulting to allow",
+            size_factor=0.75,
+        )
+
+    try:
+        t0 = asyncio.get_running_loop().time()
+        # Pre-warm news cache in a thread so _build_context()'s sync read is a hit,
+        # not a blocking urlopen that would stall the event loop for up to 6 seconds.
+        try:
+            from news_sentinel import news_sentinel as _ns
+            await asyncio.to_thread(_ns.get_headlines, snap.symbol)
+        except Exception:
+            pass
+        ctx = _build_context(snap, action, signal, strategy)
+
+        try:
+            extra: dict = {}
+            if settings.use_extended_thinking:
+                extra["thinking"] = {"type": "enabled", "budget_tokens": settings.gate_thinking_budget}
+
+            async def _call():
+                return await asyncio.wait_for(
+                    _get_client().messages.create(
+                        model=settings.claude_gate_model,
+                        max_tokens=(settings.gate_thinking_budget + 1024) if settings.use_extended_thinking else 1024,
+                        system=[{"type": "text", "text": _SYSTEM_PROMPT, "cache_control": {"type": "ephemeral"}}],
+                        messages=[{"role": "user", "content": _UNTRUSTED_FIELDS_NOTE + json.dumps(ctx)}],
+                        **extra,
+                    ),
+                    timeout=settings.gate_api_timeout,
+                )
+
+            try:
+                resp = await _call()
+            except asyncio.TimeoutError:
+                # One fast retry — a single transient timeout shouldn't skip assessment
+                logger.warning("[gate] {} timeout — retrying once", snap.symbol)
+                resp = await _call()
+            latency = int((asyncio.get_running_loop().time() - t0) * 1000)
+            _latency_samples.append(latency)
+            with _breaker_lock:
+                _consec_failures = 0
+
+            # FIX 4: wrap response parsing so any unexpected format falls back safely
+            try:
+                text_block = next(b for b in resp.content if b.type == "text")
+                raw = text_block.text.strip()
+                if raw.startswith("```"):
+                    raw = raw.split("\n", 1)[-1].rsplit("```", 1)[0].strip()
+                d   = json.loads(raw)
+
+                conf   = int(d.get("confidence", 60))
+                enter  = bool(d.get("enter", True))
+                reason = d.get("reason", "")
+
+                # Hard threshold: if Opus approved but confidence is below the bar, downgrade to skip.
+                # This lets master_agent_v5 tighten/loosen the bar per regime without code changes.
+                if enter and conf < settings.claude_gate_threshold:
+                    enter  = False
+                    reason = f"conf {conf} < threshold {settings.claude_gate_threshold} — {reason}"
+
+                decision = GateDecision(
+                    confidence=conf,
+                    enter=enter,
+                    adjusted_sl_pct=d.get("adjusted_sl_pct"),
+                    adjusted_target_pct=d.get("adjusted_target_pct"),
+                    size_factor=float(d.get("size_factor", 1.0)),
+                    reason=reason,
+                    warnings=d.get("warnings", []),
+                    latency_ms=latency,
+                )
+            except Exception as parse_exc:
+                logger.warning(
+                    "[gate] {} response parse error ({}) — defaulting to allow with reduced size",
+                    snap.symbol, parse_exc,
+                )
+                return _ALLOW_ON_ERROR
+
+            _log(snap.symbol, strategy, action, decision, ctx["indicators"]["rsi_14"])
+            return decision
+
+        except asyncio.TimeoutError:
+            _record_gate_failure()
+            logger.warning("[gate] {} timeout (after retry) — allowing trade with reduced size", snap.symbol)
+            return _ALLOW_ON_ERROR
+        except Exception as exc:
+            _record_gate_failure()
+            logger.warning("[gate] {} API error ({}) — allowing trade with reduced size", snap.symbol, exc)
+            return _ALLOW_ON_ERROR
+    finally:
+        if sem_acquired:
+            sem.release()
 
 
 def _log(symbol: str, strategy: str, action: str, d: GateDecision, rsi: float) -> None:
@@ -905,3 +964,64 @@ def _log(symbol: str, strategy: str, action: str, d: GateDecision, rsi: float) -
 def get_gate_log(n: int = 50) -> list[dict]:
     """Return last n gate decisions (newest first)."""
     return list(_gate_log)[:n]
+
+
+def get_gate_stats() -> dict:
+    """
+    Return aggregate gate statistics including a latency histogram.
+    Used by /gate/log to enrich the response with concurrency and performance data.
+    """
+    import statistics as _stats
+
+    samples = list(_latency_samples)
+
+    latency_hist: dict = {}
+    if samples:
+        sorted_s = sorted(samples)
+        n = len(sorted_s)
+
+        def _pct(p: float) -> int:
+            idx = max(0, int(p / 100 * n) - 1)
+            return sorted_s[min(idx, n - 1)]
+
+        latency_hist = {
+            "p50_ms":  _pct(50),
+            "p90_ms":  _pct(90),
+            "p95_ms":  _pct(95),
+            "p99_ms":  _pct(99),
+            "min_ms":  sorted_s[0],
+            "max_ms":  sorted_s[-1],
+            "mean_ms": int(_stats.mean(samples)),
+            "samples": n,
+        }
+
+    sem = _gate_semaphore
+    # Derive active count from the semaphore's public interface: if locked() is True
+    # the internal counter is 0 (all slots busy). Use that as a boolean signal;
+    # for an exact count we subtract the remaining capacity from the limit.
+    # asyncio.Semaphore exposes no public remaining-capacity method, so we read the
+    # internal _value only for stats (non-critical; never used for control flow).
+    try:
+        active = (settings.gate_max_concurrent - sem._value) if sem is not None else 0
+    except Exception:
+        active = -1
+    concurrent_info = {
+        "max_concurrent": settings.gate_max_concurrent,
+        "current_active": active,
+        "overflow_total": _overflow_count,
+    }
+
+    decisions = list(_gate_log)
+    enter_count = sum(1 for d in decisions if d.get("enter"))
+    skip_count  = len(decisions) - enter_count
+
+    return {
+        "latency_histogram": latency_hist,
+        "concurrency":       concurrent_info,
+        "decisions_summary": {
+            "total":  len(decisions),
+            "enter":  enter_count,
+            "skip":   skip_count,
+            "enter_pct": round(enter_count / max(len(decisions), 1) * 100, 1),
+        },
+    }
