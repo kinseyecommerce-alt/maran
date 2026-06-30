@@ -343,106 +343,100 @@ export default function App() {
         <div className="flex-1 flex flex-col min-w-0 border-r border-slate-800 bg-[#070b14]">
 
           {/* AGENTS GRID */}
-          <div className="p-4 shrink-0">
+          <div className="px-4 pt-4 pb-2 shrink-0">
             <div className="flex items-center justify-between mb-3">
               <h2 className="text-xs font-semibold tracking-widest text-slate-400 flex items-center gap-2">
                 <Zap className="w-4 h-4 text-emerald-500" />
                 AUTONOMOUS AGENTS
+                <span className="text-slate-600 font-normal">({AGENT_ORDER.length})</span>
               </h2>
               <div className="text-xs font-mono text-slate-500 flex gap-4">
+                <span>ACTIVE: <span className="text-emerald-400">{activeCount}</span></span>
+                <span>PAUSED: <span className="text-amber-500">{pausedCount}</span></span>
                 {health?.tick_engine && <span>ENGINE: <span className="text-slate-300">{health.tick_engine}</span></span>}
                 {health?.mode      && <span>MODE: <span className={health.mode === 'LIVE' ? 'text-rose-400' : 'text-amber-400'}>{health.mode}</span></span>}
               </div>
             </div>
 
-            <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">
+            {/* Horizontally scrollable single-row strip — all 8 agents always visible */}
+            <div className="flex gap-3 overflow-x-auto pb-2" style={{ scrollbarWidth: 'thin' }}>
               {AGENT_ORDER.map(key => {
                 const agent  = agents[key]
                 const meta   = AGENT_META[key]
                 const active = agent?.running ?? false
 
+                const ls = agent?.last_signal as unknown
+                let sigDisplay = '—'
+                if (typeof ls === 'string' && ls) sigDisplay = ls
+                else if (ls && typeof ls === 'object') {
+                  const s = ls as Record<string, unknown>
+                  sigDisplay = [s.symbol, s.action].filter(Boolean).join(' ') || '—'
+                }
+
                 return (
                   <div
                     key={key}
-                    className={`rounded-lg bg-slate-900/50 relative overflow-hidden flex flex-col transition-colors border ${
-                      active ? 'border-slate-800 border-l-2 border-l-emerald-500/60' : 'border-slate-800 opacity-75'
+                    className={`rounded-lg bg-slate-900/50 flex flex-col border shrink-0 transition-colors overflow-hidden ${
+                      active ? 'border-emerald-700/40 border-l-2 border-l-emerald-500' : 'border-slate-800 opacity-80'
                     }`}
+                    style={{ minWidth: '175px', width: 'calc(12.5% - 10px)' }}
                   >
-                    <div className="p-4 flex-1">
-                      <div className="flex justify-between items-start mb-1">
+                    <div className="p-3 flex-1">
+                      {/* Header row */}
+                      <div className="flex items-center justify-between mb-1.5">
+                        <div className="flex items-center gap-1.5">
+                          <span className="font-mono text-[9px] text-slate-600">{meta.id}</span>
+                          <span className={`w-1.5 h-1.5 rounded-full ${active ? 'bg-emerald-500 shadow-[0_0_6px_#10b981]' : 'bg-amber-500'}`} />
+                        </div>
+                        <span className={`text-[10px] font-mono px-1.5 py-0.5 rounded ${active ? 'text-emerald-400 bg-emerald-500/10' : 'text-amber-500 bg-amber-500/10'}`}>
+                          {active ? 'ON' : 'OFF'}
+                        </span>
+                      </div>
+                      <div className="font-bold text-sm text-white leading-none">{meta.displayName}</div>
+                      <div className="text-[10px] text-slate-500 italic mt-0.5 truncate">{meta.strategy}</div>
+
+                      {/* Stats */}
+                      <div className="mt-2 flex gap-3 text-[10px]">
                         <div>
-                          <div className="flex items-center gap-2">
-                            <span className="font-mono text-[10px] text-slate-500">{meta.id}</span>
-                            {active
-                              ? <span className="flex h-1.5 w-1.5 rounded-full bg-emerald-500 shadow-[0_0_8px_rgba(16,185,129,0.8)]" />
-                              : <span className="flex h-1.5 w-1.5 rounded-full bg-amber-500" />
-                            }
-                          </div>
-                          <h3 className="text-base font-bold text-white leading-tight mt-1">{meta.displayName}</h3>
-                          <p className="text-[11px] text-slate-500 italic mt-0.5">{meta.strategy}</p>
+                          <div className="text-slate-600">Trades</div>
+                          <div className="font-mono text-slate-300">{agent?.trades_today ?? 0}</div>
                         </div>
-                        <div className={`text-xs font-mono px-2 py-0.5 rounded border ${active ? 'border-emerald-500/20 text-emerald-400 bg-emerald-500/10' : 'border-amber-500/20 text-amber-500 bg-amber-500/10'}`}>
-                          {active ? 'ACTIVE' : 'PAUSED'}
-                        </div>
-                      </div>
-
-                      <div className="mt-3 space-y-1 text-xs">
-                        {agent?.trades_today != null && (
-                          <div className="flex justify-between">
-                            <span className="text-slate-500">Trades</span>
-                            <span className="font-mono text-slate-300">{Number(agent.trades_today)}</span>
-                          </div>
-                        )}
                         {agent?.win_rate != null && (
-                          <div className="flex justify-between">
-                            <span className="text-slate-500">Win Rate</span>
-                            <span className={`font-mono ${Number(agent.win_rate) >= 55 ? 'text-emerald-400' : 'text-rose-400'}`}>
-                              {Number(agent.win_rate).toFixed(1)}%
-                            </span>
+                          <div>
+                            <div className="text-slate-600">Win%</div>
+                            <div className={`font-mono ${Number(agent.win_rate) >= 55 ? 'text-emerald-400' : 'text-rose-400'}`}>
+                              {Number(agent.win_rate).toFixed(0)}%
+                            </div>
                           </div>
                         )}
                       </div>
 
-                      <div className="mt-3 bg-slate-950 rounded p-2.5 border border-slate-800">
-                        <div className="text-[10px] text-slate-500 uppercase tracking-wider mb-1">Last Signal</div>
-                        {(() => {
-                          const ls = agent?.last_signal as unknown
-                          let display = '—'
-                          if (typeof ls === 'string' && ls) display = ls
-                          else if (ls && typeof ls === 'object') {
-                            const s = ls as Record<string, unknown>
-                            display = [s.symbol, s.action].filter(Boolean).join(' ') || '—'
-                          }
-                          return (
-                            <div className="font-mono text-xs text-slate-300 truncate" title={display}>
-                              {display}
-                            </div>
-                          )
-                        })()}
+                      {/* Last signal */}
+                      <div className="mt-2 bg-slate-950 rounded px-2 py-1.5 border border-slate-800/60">
+                        <div className="text-[9px] text-slate-600 uppercase tracking-wider">Signal</div>
+                        <div className="font-mono text-[10px] text-slate-400 truncate mt-0.5" title={sigDisplay}>{sigDisplay}</div>
                       </div>
 
-                      <div className="mt-3 flex gap-2">
+                      {/* Action buttons */}
+                      <div className="mt-2 flex gap-1.5">
                         {active ? (
                           <button
-                            className="flex-1 flex items-center justify-center gap-1 bg-slate-800 hover:bg-slate-700 text-slate-300 text-xs py-1.5 rounded transition-colors border border-slate-700"
+                            className="flex-1 flex items-center justify-center gap-1 bg-slate-800 hover:bg-slate-700 text-slate-300 text-[10px] py-1.5 rounded transition-colors"
                             onClick={() => handlePause(key)}
                           >
-                            <Square className="w-3 h-3" /> Pause
+                            <Square className="w-2.5 h-2.5" /> Pause
                           </button>
                         ) : (
                           <button
-                            className="flex-1 flex items-center justify-center gap-1 bg-emerald-500/20 hover:bg-emerald-500/30 text-emerald-400 text-xs py-1.5 rounded transition-colors border border-emerald-500/30"
+                            className="flex-1 flex items-center justify-center gap-1 bg-emerald-500/20 hover:bg-emerald-500/30 text-emerald-400 text-[10px] py-1.5 rounded transition-colors border border-emerald-500/30"
                             onClick={() => handleResume(key)}
                           >
-                            <Play className="w-3 h-3 fill-current" /> Resume
+                            <Play className="w-2.5 h-2.5 fill-current" /> Resume
                           </button>
                         )}
-                        <button className="px-2 bg-slate-800 hover:bg-slate-700 text-slate-400 text-xs py-1.5 rounded transition-colors border border-slate-700">
-                          <TrendingUp className="w-3 h-3" />
-                        </button>
                       </div>
                     </div>
-                    <div className={`h-[3px] w-full mt-auto ${active ? 'bg-emerald-500/80 animate-pulse' : 'bg-amber-500/60'}`} />
+                    <div className={`h-[2px] w-full ${active ? 'bg-emerald-500 animate-pulse' : 'bg-amber-600/50'}`} />
                   </div>
                 )
               })}
