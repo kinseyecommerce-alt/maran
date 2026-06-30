@@ -180,12 +180,8 @@ function ZerodhaDetail({ onBack, credForm, setCredForm,
   vis: Record<string, boolean>; setVis: (fn: (p: any) => any) => void
   addToast: (msg: string, type?: any) => void
 }) {
-  const connectKite = async () => {
-    try {
-      const r = await api.kiteLoginUrl()
-      if (r.data.login_url) { window.open(r.data.login_url, '_blank'); return }
-      addToast('Kite API key not configured', 'error')
-    } catch { addToast('Could not get Kite login URL', 'error') }
+  const connectKite = () => {
+    window.open('/auth/kite/login', '_blank')
   }
 
   return (
@@ -204,8 +200,8 @@ function ZerodhaDetail({ onBack, credForm, setCredForm,
         <SecretField label="Kite API Secret" fieldKey="kite_api_secret" form={credForm} setForm={setCredForm} vis={vis} setVis={setVis} credStatus={credStatus} />
       </div>
 
-      <FieldRow label="OAuth Login" hint="Complete the Kite session via browser">
-        <button onClick={connectKite}
+      <FieldRow label="OAuth Login" hint="Save credentials first, then click to open Zerodha login">
+        <button type="button" onClick={connectKite}
           className="flex items-center gap-1.5 text-xs px-3 py-2 rounded-lg border border-slate-700 text-slate-300 hover:bg-slate-800 transition-colors">
           <ExternalLink className="w-3 h-3" /> Connect Kite Account
         </button>
