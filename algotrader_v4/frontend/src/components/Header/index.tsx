@@ -181,8 +181,15 @@ function ZerodhaDetail({ onBack, credForm, setCredForm,
   addToast: (msg: string, type?: any) => void
 }) {
   const [copied, setCopied] = useState(false)
+  const [kiteInfo, setKiteInfo] = useState<{ connected: boolean; name?: string; account_id?: string } | null>(null)
+  const [balance, setBalance] = useState<{ available: number; used: number; paper_mode?: boolean } | null>(null)
   const callbackUrl = `${window.location.origin}/auth/kite/callback`
   const hasCredentials = credStatus.kite_api_key && credStatus.kite_api_secret
+
+  useEffect(() => {
+    api.kiteStatus().then(r => setKiteInfo(r.data)).catch(() => setKiteInfo({ connected: false }))
+    api.kiteBalance().then(r => setBalance(r.data)).catch(() => {})
+  }, [])
 
   const copyUrl = () => {
     navigator.clipboard.writeText(callbackUrl).then(() => {
@@ -191,9 +198,50 @@ function ZerodhaDetail({ onBack, credForm, setCredForm,
     }).catch(() => addToast('Copy failed — select and copy manually', 'error'))
   }
 
+  const fmt = (n: number) => '₹' + n.toLocaleString('en-IN', { maximumFractionDigits: 0 })
+
   return (
     <div className="space-y-5">
       <BrokerDetailHeader brokerId="zerodha" brokerName="Zerodha Kite" color="#387ed1" logo="Z" status={brokerStatus} onBack={onBack} />
+
+      {/* Live connection + balance */}
+      <div className={`rounded-lg border px-4 py-3 space-y-2 ${kiteInfo?.connected ? 'bg-emerald-950/30 border-emerald-900/50' : 'bg-slate-900 border-slate-700'}`}>
+        <div className="flex items-center justify-between">
+          <div className="flex items-center gap-2">
+            <span className={`w-2 h-2 rounded-full ${kiteInfo?.connected ? 'bg-emerald-400 shadow-[0_0_6px_#34d399]' : 'bg-rose-500'}`} />
+            <span className="text-xs font-semibold text-slate-200">
+              {kiteInfo === null ? 'Checking…' : kiteInfo.connected ? 'Kite Connected' : 'Not Connected'}
+            </span>
+            {kiteInfo?.connected && kiteInfo.account_id && (
+              <span className="text-[10px] font-mono text-slate-400">{kiteInfo.account_id}</span>
+            )}
+          </div>
+          {kiteInfo?.connected && (
+            <a href="/auth/kite/login" target="_blank" rel="noreferrer"
+              className="text-[10px] text-blue-400 hover:text-blue-300 transition-colors">
+              Re-login ↗
+            </a>
+          )}
+        </div>
+        {kiteInfo?.connected && balance && (
+          <div className="grid grid-cols-3 gap-2 pt-1 border-t border-slate-800">
+            <div>
+              <div className="text-[10px] text-slate-500 uppercase tracking-wider">Available</div>
+              <div className="text-sm font-mono font-bold text-emerald-400">{fmt(balance.available)}</div>
+            </div>
+            <div>
+              <div className="text-[10px] text-slate-500 uppercase tracking-wider">Used</div>
+              <div className="text-sm font-mono font-bold text-rose-400">{fmt(balance.used)}</div>
+            </div>
+            <div>
+              <div className="text-[10px] text-slate-500 uppercase tracking-wider">Mode</div>
+              <div className={`text-sm font-mono font-bold ${balance.paper_mode ? 'text-amber-400' : 'text-rose-400'}`}>
+                {balance.paper_mode ? 'PAPER' : 'LIVE'}
+              </div>
+            </div>
+          </div>
+        )}
+      </div>
 
       {/* Step 1 */}
       <div className="space-y-3">

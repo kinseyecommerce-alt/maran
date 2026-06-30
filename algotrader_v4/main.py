@@ -544,6 +544,24 @@ def kite_status():
     except Exception:
         return {"connected": False, "message": "No valid Kite session. Use Connect Kite Account."}
 
+@app.get("/auth/kite/balance", tags=["Auth"])
+def kite_balance():
+    """Return Kite available margin and cash balance."""
+    try:
+        margins = kite_client.margins()
+        equity  = margins.get("equity", {})
+        avail   = equity.get("available", {})
+        util    = equity.get("utilised", {})
+        return {
+            "available":        round(avail.get("live_balance",    avail.get("cash", 0)), 2),
+            "cash":             round(avail.get("cash",            0), 2),
+            "opening_balance":  round(avail.get("opening_balance", 0), 2),
+            "used":             round(util.get("debits",           0), 2),
+            "paper_mode":       settings.trading_mode == "PAPER",
+        }
+    except Exception as e:
+        return {"available": 0, "cash": 0, "opening_balance": 0, "used": 0, "error": str(e)}
+
 @app.get("/auth/kite/callback", tags=["Auth"], include_in_schema=False)
 def kite_callback(request_token: str = "", action: str = "", status: str = ""):
     """Zerodha redirects here after OAuth. Auto-captures the request_token."""

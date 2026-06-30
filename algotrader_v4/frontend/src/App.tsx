@@ -17,12 +17,16 @@ import { api } from './api/client'
 import type { TabId } from './types'
 
 const AGENT_META: Record<string, { strategy: string; displayName: string; id: string }> = {
-  intraday: { strategy: 'VWAP Breakout',         displayName: 'INTRADAY', id: 'AGN-01' },
-  fno:      { strategy: 'Options CE/PE',          displayName: 'F&O',      id: 'AGN-02' },
-  swing:    { strategy: 'Multi-TF Trend',         displayName: 'SWING',    id: 'AGN-03' },
-  scalping: { strategy: 'Orderbook Imbalance',    displayName: 'SCALPING', id: 'AGN-04' },
+  intraday:      { strategy: 'VWAP Breakout',      displayName: 'INTRADAY',  id: 'AGN-01' },
+  options:       { strategy: 'Options CE/PE',       displayName: 'F&O',       id: 'AGN-02' },
+  swing:         { strategy: 'Multi-TF Trend',      displayName: 'SWING',     id: 'AGN-03' },
+  scalping:      { strategy: 'Orderbook Imbalance', displayName: 'SCALPING',  id: 'AGN-04' },
+  futures:       { strategy: 'Futures Momentum',    displayName: 'FUTURES',   id: 'AGN-05' },
+  momentum:      { strategy: 'Price Momentum',      displayName: 'MOMENTUM',  id: 'AGN-06' },
+  mean_reversion:{ strategy: 'Mean Reversion',      displayName: 'MEAN REV',  id: 'AGN-07' },
+  pairs:         { strategy: 'Statistical Arb',     displayName: 'PAIRS ARB', id: 'AGN-08' },
 }
-const AGENT_ORDER = ['intraday', 'fno', 'swing', 'scalping']
+const AGENT_ORDER = ['intraday', 'options', 'swing', 'scalping', 'futures', 'momentum', 'mean_reversion', 'pairs']
 
 const OPS_TABS: { id: TabId; label: string }[] = [
   { id: 'positions', label: 'Positions' },
