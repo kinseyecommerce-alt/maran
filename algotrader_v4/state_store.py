@@ -297,16 +297,17 @@ def _init_sqlite() -> None:
             CREATE TABLE IF NOT EXISTS gate_log (
                 id          INTEGER PRIMARY KEY AUTOINCREMENT,
                 ts          TEXT DEFAULT (datetime('now','localtime')),
+                time_ist    TEXT,
                 symbol      TEXT,
                 strategy    TEXT,
                 signal      TEXT,
                 confidence  INTEGER,
                 decision    TEXT,
+                enter       INTEGER DEFAULT 0,
                 size_factor REAL,
                 reason      TEXT,
                 warnings    TEXT DEFAULT '[]',
-                latency_ms  INTEGER DEFAULT 0
-            );
+                latency_ms  INTEGER DEFAULT 0            );
 
             CREATE INDEX IF NOT EXISTS idx_trades_trade_date  ON trades(trade_date);
             CREATE INDEX IF NOT EXISTS idx_trades_strategy     ON trades(strategy);
@@ -414,16 +415,17 @@ def _init_pg() -> None:
         """CREATE TABLE IF NOT EXISTS gate_log (
             id          SERIAL PRIMARY KEY,
             ts          TEXT DEFAULT NOW()::TEXT,
+            time_ist    TEXT,
             symbol      TEXT,
             strategy    TEXT,
             signal      TEXT,
             confidence  INTEGER,
             decision    TEXT,
+            enter       INTEGER DEFAULT 0,
             size_factor DOUBLE PRECISION,
             reason      TEXT,
             warnings    TEXT DEFAULT '[]',
-            latency_ms  INTEGER DEFAULT 0
-        )""",
+            latency_ms  INTEGER DEFAULT 0        )""",
         "CREATE INDEX IF NOT EXISTS idx_trades_trade_date ON trades(trade_date)",
         "CREATE INDEX IF NOT EXISTS idx_trades_strategy   ON trades(strategy)",
         "CREATE INDEX IF NOT EXISTS idx_trades_exit_time  ON trades(exit_time)",
@@ -554,6 +556,85 @@ def set_kv(key: str, value: str) -> None:
                 f"VALUES ({p},{p},datetime('now'))",
                 (key, value),
             )
+
+
+def record_gate_log(entry: dict) -> None:
+    """Persist one Claude gate decision to DB; auto-trims to last 500 rows."""
+    p = _ph()
+    warnings_json = json.dumps(entry.get("warnings") or [])
+    with _conn() as c:
+        if _USE_PG:
+            cur = c.cursor()
+            cur.execute(
+                f"""INSERT INTO gate_log
+                    (time_ist, symbol, strategy, signal, confidence, decision,
+                     enter, size_factor, reason, warnings, latency_ms)
+                    VALUES ({p},{p},{p},{p},{p},{p},{p},{p},{p},{p},{p})""",
+                (entry.get("time", ""), entry.get("symbol", ""),
+                 entry.get("strategy", ""), entry.get("signal", ""),
+                 int(entry.get("confidence", 0)),
+                 entry.get("decision", ""),
+                 1 if entry.get("enter") else 0,
+                 float(entry.get("size_factor", 1.0)),
+                 entry.get("reason", ""),
+                 warnings_json,
+                 int(entry.get("latency_ms", 0))),
+            )
+            # Keep last 500
+            cur.execute(
+                "DELETE FROM gate_log WHERE id NOT IN "
+                "(SELECT id FROM gate_log ORDER BY id DESC LIMIT 500)"
+            )
+            c.commit()
+        else:
+            c.execute(
+                f"""INSERT INTO gate_log
+                    (time_ist, symbol, strategy, signal, confidence, decision,
+                     enter, size_factor, reason, warnings, latency_ms)
+                    VALUES ({p},{p},{p},{p},{p},{p},{p},{p},{p},{p},{p})""",
+                (entry.get("time", ""), entry.get("symbol", ""),
+                 entry.get("strategy", ""), entry.get("signal", ""),
+                 int(entry.get("confidence", 0)),
+                 entry.get("decision", ""),
+                 1 if entry.get("enter") else 0,
+                 float(entry.get("size_factor", 1.0)),
+                 entry.get("reason", ""),
+                 warnings_json,
+                 int(entry.get("latency_ms", 0))),
+            )
+            # Keep last 500
+            c.execute(
+                "DELETE FROM gate_log WHERE id NOT IN "
+                "(SELECT id FROM gate_log ORDER BY id DESC LIMIT 500)"
+            )
+
+
+def record_gate_log_async(entry: dict) -> None:
+    """Non-blocking gate log write — safe to call from async callbacks."""
+    _enqueue(record_gate_log, entry)
+
+
+def get_gate_log_db(n: int = 100) -> list[dict]:
+    """Return last n gate decisions from DB (newest first)."""
+    p = _ph()
+    with _conn() as c:
+        rows = _fetchall(
+            c,
+            f"SELECT time_ist as time, symbol, strategy, signal, confidence, "
+            f"decision, enter, size_factor, reason, warnings, latency_ms "
+            f"FROM gate_log ORDER BY id DESC LIMIT {p}",
+            (n,),
+        )
+    result = []
+    for r in rows:
+        row = dict(r)
+        try:
+            row["warnings"] = json.loads(row.get("warnings") or "[]")
+        except Exception:
+            row["warnings"] = []
+        row["enter"] = bool(row.get("enter"))
+        result.append(row)
+    return result
 
 
 def get_kv(key: str, default: str = "") -> str:

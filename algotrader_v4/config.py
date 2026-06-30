@@ -185,12 +185,11 @@ class Settings(BaseSettings):
     claude_gate_threshold: int = 25       # min confidence to enter — low bar keeps good trades flowing
     master_review_model: str = "claude-opus-4-8"   # regime review model
     signal_engine_model: str = "claude-opus-4-8"   # signal generation model
-    use_extended_thinking: bool = True             # Opus extended thinking — deeper market analysis per trade
-    gate_thinking_budget: int = 4000               # thinking tokens per assessment (Opus quality gate)
-    gate_api_timeout: float = 15.0                 # seconds — Opus + extended thinking needs 10-15s
-    gate_bypass_min_score: int = 9                 # only the very highest-conviction signals skip gate (top ~10%)
-    scalping_skip_gate: bool = False               # scalping now gets gate via 5-min regime cache: first call pays latency, subsequent calls <1ms
-    use_multi_timeframe: bool = True      # require 5m/15m alignment with entry direction
+    use_extended_thinking: bool = True             # extended thinking ON — Opus deep-reasons before every trade
+    gate_thinking_budget: int = 5000               # thinking tokens per trade assessment (Opus with extended thinking)
+    gate_api_timeout: float = 15.0                 # seconds — 15s accommodates Opus + extended thinking latency
+    gate_bypass_min_score: int = 20                 # raised to 20 — effectively disabled; all signals route through Opus gate
+    scalping_skip_gate: bool = False                # False — scalping now gates through Opus like all other agents    use_multi_timeframe: bool = True      # require 5m/15m alignment with entry direction
     mtf_min_alignment: int = 1            # how many of 3 TFs must agree (1, 2, or 3)
     use_kelly_sizing: bool = True         # apply Claude gate's size_factor to qty
 

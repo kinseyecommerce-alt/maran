@@ -25,7 +25,7 @@ from config import settings
 from ist_clock import now_ist as _now_ist, minutes_since_open, minutes_to_squareoff as _mts
 
 # ── Gate decision log (ring buffer, read by /gate/log endpoint) ───────────────
-_gate_log: deque[dict] = deque(maxlen=100)
+_gate_log: deque[dict] = deque(maxlen=500)
 
 # ── Prompt-injection guard for untrusted free-text context fields ─────────────
 # news_context / key_levels / event descriptions originate from external sources
@@ -425,8 +425,190 @@ def _build_context(snap, action: str, signal: dict, strategy: str) -> dict:
         except Exception:
             pass
 
-    strategy_context = _build_strategy_context(snap, action, signal, strategy)
+    # ── Per-strategy context (agent-specific enrichment) ──────────────────────
+    strategy_context: dict = {}
 
+    if strategy == "intraday":
+        vwap_dev = None
+        if ind.vwap and ind.vwap > 0:
+            vwap_dev = round((snap.tick.ltp - ind.vwap) / ind.vwap * 100, 3)
+        orb_pattern = signal.get("pattern", "")
+        strategy_context = {
+            "pattern":             orb_pattern,
+            "vwap_deviation_pct":  vwap_dev,
+            "fii_sentiment_score": institutional.get("score"),
+            "opening_range_direction": (
+                "BULLISH" if action == "BUY" else "BEARISH"
+            ) if "ORB" in orb_pattern else None,
+            "score": signal.get("score"),
+        }
+
+    elif strategy == "options":
+        strategy_context = {
+            "pattern":        signal.get("pattern", ""),
+            "iv_rank":        signal.get("iv_rank"),
+            "atm_iv":         signal.get("atm_iv"),
+            "entry_delta":    signal.get("entry_delta"),
+            "days_to_expiry": signal.get("days_to_expiry"),
+            "is_sell":        signal.get("is_sell", False),
+            "is_straddle":    signal.get("is_straddle", False),
+            "option_type":    signal.get("option_type"),
+        }
+
+    elif strategy == "swing":
+        ema200 = getattr(ind, "ema200", 0.0) or 0.0
+        ema50  = getattr(ind, "ema50",  0.0) or 0.0
+        weekly_align = "BULLISH" if (ema50 > ema200 > 0) else ("BEARISH" if ema200 > 0 else "UNKNOWN")
+        price_vs_ema200 = round((snap.tick.ltp - ema200) / ema200 * 100, 2) if ema200 > 0 else None
+
+        candles_50 = list(getattr(snap, "candles_1min", []))[-50:]
+        prev_week_high = max((c.high for c in candles_50 if getattr(c, "high", 0)), default=None)
+        prev_week_low  = min((c.low  for c in candles_50 if getattr(c, "low",  0)), default=None)
+        pct_from_high  = round((snap.tick.ltp - prev_week_high) / prev_week_high * 100, 2) if prev_week_high else None
+        pct_from_low   = round((snap.tick.ltp - prev_week_low)  / prev_week_low  * 100, 2) if prev_week_low  else None
+
+        inst_score = institutional.get("score", 50) or 50
+        sector_etf_trend = (
+            "ALIGNED_BULL" if (ema50 > ema200 > 0 and inst_score > 60) else
+            "ALIGNED_BEAR" if (ema200 > ema50 > 0 and inst_score < 40) else "MIXED"
+        )
+        delivery_pct_val = institutional.get("delivery_pct") or 0
+        strategy_context = {
+            "pattern":              signal.get("pattern", ""),
+            "weekly_ema_alignment": weekly_align,
+            "ema200":               round(ema200, 2) if ema200 > 0 else None,
+            "price_vs_ema200_pct":  price_vs_ema200,
+            "prev_week_high":       round(prev_week_high, 2) if prev_week_high else None,
+            "prev_week_low":        round(prev_week_low,  2) if prev_week_low  else None,
+            "pct_from_structure_high": pct_from_high,
+            "pct_from_structure_low":  pct_from_low,
+            "sector_etf_trend":     sector_etf_trend,
+            "delivery_pct":         institutional.get("delivery_pct"),
+            "delivery_pct_trend":   "HIGH" if delivery_pct_val > 55 else "LOW",
+            "has_block_deal":       institutional.get("has_block_deal"),
+        }
+
+    elif strategy == "scalping":
+        candles_5sc = list(getattr(snap, "candles_1min", []))[-5:]
+        avg_vol_5 = (sum(getattr(c, "volume", 0) for c in candles_5sc) / max(len(candles_5sc), 1)) or 1
+        surge_bars = sum(1 for c in candles_5sc if getattr(c, "volume", 0) > avg_vol_5 * 1.5)
+        tick_velocity = round(surge_bars / max(len(candles_5sc), 1), 2)
+        strategy_context = {
+            "pattern":              signal.get("pattern", ""),
+            "l2_depth_imbalance":   round(getattr(ind, "depth_imbalance", 0.5), 3),
+            "bid_ask_spread":       round(getattr(ind, "spread", 0.0), 2),
+            "volume_ratio":         round(ind.volume_ratio, 2),
+            "hma_dir":              getattr(ind, "hma_dir", "NEUTRAL"),
+            "wall_above":           getattr(ind, "wall_above", False),
+            "wall_below":           getattr(ind, "wall_below", False),
+            "tick_velocity_surge_fraction": tick_velocity,
+            "surge_bars_last_5":    surge_bars,
+            "time_since_last_signal_secs": signal.get("seconds_since_last_trade"),
+        }
+
+    elif strategy == "futures":
+        _ema200_f = getattr(ind, "ema200", 0.0) or 0.0
+        _ema50_f  = getattr(ind, "ema50",  0.0) or 0.0
+        _ema21_f  = getattr(ind, "ema21",  0.0) or 0.0
+        mtf_ema200_trend  = "BULL" if (_ema50_f > _ema200_f > 0) else ("BEAR" if _ema200_f > 0 else "UNKNOWN")
+        mtf_ema50_vs_ema21 = "BULL" if (_ema50_f > _ema21_f > 0) else ("BEAR" if _ema21_f > 0 else "UNKNOWN")
+        entry_dir = "BULL" if action == "BUY" else "BEAR"
+        rollover_flag = bool(signal.get("rollover", False))
+        strategy_context = {
+            "pattern":               signal.get("pattern", ""),
+            "lot_size":              signal.get("lot_size"),
+            "rollover_period":       rollover_flag,
+            "rollover_oi_trend":     "BUILDING" if rollover_flag else "STABLE",
+            "futures_symbol":        signal.get("futures_symbol", ""),
+            "vix_zscore":            round(sigs.vix_zscore, 2) if sigs and hasattr(sigs, "vix_zscore") else None,
+            "score":                 signal.get("score"),
+            "atr_sl":                signal.get("atr_sl"),
+            "mtf_ema200_trend":      mtf_ema200_trend,
+            "mtf_ema50_vs_ema21":    mtf_ema50_vs_ema21,
+            "ema_stack_aligned":     (mtf_ema200_trend == mtf_ema50_vs_ema21 == entry_dir),
+            "supertrend_dir":        getattr(ind, "supertrend_dir", None),
+        }
+
+    elif strategy == "mean_reversion":
+        bb_upper = ind.bb_upper or 0.0
+        bb_lower = ind.bb_lower or 0.0
+        bb_mid   = getattr(ind, "bb_mid", 0.0) or 0.0
+        bb_band  = bb_upper - bb_lower if bb_upper > bb_lower else 1.0
+        vwap_dist = None
+        if ind.vwap and ind.vwap > 0:
+            vwap_dist = round((snap.tick.ltp - ind.vwap) / ind.vwap * 100, 3)
+        sigma = None
+        if bb_band > 0 and bb_mid > 0:
+            sigma = round((snap.tick.ltp - bb_mid) / (bb_band / 4), 2)
+        bb_pos = round((snap.tick.ltp - bb_lower) / bb_band * 100, 1) if bb_band > 0 else None
+
+        candles_20mr = list(getattr(snap, "candles_1min", []))[-20:]
+        reversal_count = 0
+        if bb_mid > 0 and len(candles_20mr) >= 2:
+            prev_side_mr = None
+            for _c in candles_20mr:
+                if not getattr(_c, "close", 0):
+                    continue
+                _side = "above" if _c.close >= bb_mid else "below"
+                if prev_side_mr and _side != prev_side_mr:
+                    reversal_count += 1
+                prev_side_mr = _side
+
+        strategy_context = {
+            "pattern":                signal.get("pattern", ""),
+            "deviation_sigma":        sigma,
+            "bb_position_pct":        bb_pos,
+            "distance_from_vwap_pct": vwap_dist,
+            "bb_upper":               round(bb_upper, 2) if bb_upper else None,
+            "bb_lower":               round(bb_lower, 2) if bb_lower else None,
+            "recent_reversal_count":  reversal_count,
+            "mean_reversion_quality": "HIGH" if reversal_count >= 3 else "LOW",
+        }
+
+    elif strategy == "momentum":
+        candles_1m_mom = list(getattr(snap, "candles_1min", []))
+        last_bar_vel = 0.0
+        if candles_1m_mom:
+            _lb = candles_1m_mom[-1]
+            _lb_open = getattr(_lb, "open", 0) or 0
+            if _lb_open > 0:
+                last_bar_vel = round(abs(getattr(_lb, "close", 0) - _lb_open) / _lb_open * 100, 3)
+        candles_20m = candles_1m_mom[-20:]
+        consol_bars = sum(
+            1 for _c in candles_20m
+            if (getattr(_c, "open", 0) or 0) > 0
+            and abs(getattr(_c, "close", 0) - _c.open) / _c.open < 0.002
+        )
+        gap_pct = round(getattr(ind, "change_pct", 0.0) if hasattr(ind, "change_pct") else 0.0, 2)
+        strategy_context = {
+            "pattern":                   signal.get("pattern", ""),
+            "volume_surge_multiple":     round(ind.volume_ratio, 2),
+            "adx_14":                    round(getattr(ind, "adx_14", 0.0), 1),
+            "macd_hist":                 round(ind.macd_hist, 4),
+            "momentum_trend":            ind.trend,
+            "vix_zscore":                round(sigs.vix_zscore, 2) if sigs and hasattr(sigs, "vix_zscore") else None,
+            "score":                     signal.get("score"),
+            "gap_pct":                   gap_pct,
+            "breakout_bar_velocity_pct": last_bar_vel,
+            "consolidation_bars_prior":  consol_bars,
+            "momentum_quality":          "HIGH" if (getattr(ind, "adx_14", 0) >= 25 and ind.volume_ratio >= 1.5) else "LOW",
+        }
+
+    elif strategy == "pairs":
+        _zscore_val = signal.get("zscore") or 0
+        strategy_context = {
+            "pair":                  signal.get("pair", ""),
+            "zscore":                _zscore_val,
+            "zscore_extreme":        "HIGH" if abs(_zscore_val) > 2.5 else "NORMAL",
+            "size_factor":           signal.get("size_factor"),
+            "side":                  signal.get("side", action),
+            "leg_a":                 signal.get("leg_a"),
+            "leg_b":                 signal.get("leg_b"),
+            "days_since_entry":      signal.get("days_since_entry"),
+            "correlation_stability": signal.get("correlation_stability", "UNKNOWN"),
+            "mean_reversion_type":   "SPREAD_CONTRACTION",
+            "note": "pairs arb — mean-reversion on price ratio spread; zscore drives conviction",
+        }
     return {
         "symbol":   snap.symbol,
         "strategy": strategy,
@@ -701,6 +883,7 @@ def _log(symbol: str, strategy: str, action: str, d: GateDecision, rsi: float) -
         "signal":      action,
         "confidence":  d.confidence,
         "decision":    verdict,
+        "enter":       d.enter,
         "size_factor": d.size_factor,
         "reason":      d.reason,
         "warnings":    d.warnings,

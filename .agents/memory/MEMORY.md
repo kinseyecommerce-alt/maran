@@ -5,3 +5,4 @@
 - [Agent last_signal is a dict not a string](agent-last-signal-dict.md) — `AgentState.last_signal` is `dict`, defaults `{}`, causes React "Objects as React child" crash if rendered with `||`. Use fmtLastSignal() helper.
 - [Ops Panel Layout](ops-panel-layout.md) — Tabs now live in a LEFT SIDEBAR (w-44); each is a full-page view. Dashboard is the default page. No more bottom collapsible panel.
 - [Paper Trading Signal Pipeline](paper-trading-signal-pipeline.md) — 4 root causes kept signals_fired=0; candle sort, MTF window, GBM sigma, _approved set.
+- [.env overrides pydantic defaults](env-overrides-pydantic.md) — algotrader_v4/.env has hardcoded values that override config.py defaults; always update BOTH files when changing settings.
