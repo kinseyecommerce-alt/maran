@@ -3004,6 +3004,25 @@ async def _reconcile_open_positions() -> None:
         except Exception as exc:
             logger.error("[Reconcile] TSL register failed for {}: {}", order_id, exc)
 
+        # Repopulate _tsl_sl_orders so the position reconciler can look up the
+        # actual traded instrument (e.g. NIFTY25JULCE vs underlying NIFTY).
+        # tradingsymbol was added to the DB in a migration; fall back to symbol
+        # for older rows that don't have it yet.
+        _tsym = pos.get("tradingsymbol") or symbol
+        try:
+            from agents.base_agent import _tsl_sl_orders, _tsl_sl_orders_lock
+            with _tsl_sl_orders_lock:
+                if order_id not in _tsl_sl_orders:
+                    _tsl_sl_orders[order_id] = {
+                        "sl_order_id":   None,
+                        "product":       pos.get("product", "MIS"),
+                        "exchange":      "NSE",
+                        "tradingsymbol": _tsym,
+                        "pattern":       pos.get("pattern", ""),
+                    }
+        except Exception as exc:
+            logger.warning("[Reconcile] _tsl_sl_orders repopulate failed for {}: {}", order_id, exc)
+
         # In PAPER mode the broker returns empty positions; track the count manually
         if settings.trading_mode == "PAPER":
             risk_manager.position_opened()

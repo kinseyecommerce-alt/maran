@@ -232,6 +232,13 @@ class PositionReconciler:
             logger.warning("[Reconciler] cleanup failed for {} (guard_released={}): {}",
                            pos["symbol"], guard_released, exc)
 
+        # Mark position closed in DB so it doesn't reappear on next restart
+        try:
+            from state_store import close_position_async
+            close_position_async(pos["order_id"])
+        except Exception as exc:
+            logger.warning("[Reconciler] DB close_position failed for {}: {}", pos["order_id"], exc)
+
         self.stats.full_exits += 1
         return {"type": "FULL_EXTERNAL_EXIT", "symbol": trade_sym,
                 "order_id": pos["order_id"], "qty": expected,

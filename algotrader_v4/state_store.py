@@ -169,17 +169,18 @@ def _init_sqlite() -> None:
         c.commit()
         c.executescript("""
             CREATE TABLE IF NOT EXISTS positions (
-                order_id   TEXT PRIMARY KEY,
-                symbol     TEXT,
-                strategy   TEXT,
-                side       TEXT,
-                entry_price REAL,
-                quantity   INTEGER,
-                sl_price   REAL,
-                target     REAL,
-                product    TEXT,
-                opened_at  TEXT,
-                is_open    INTEGER DEFAULT 1
+                order_id      TEXT PRIMARY KEY,
+                symbol        TEXT,
+                strategy      TEXT,
+                side          TEXT,
+                entry_price   REAL,
+                quantity      INTEGER,
+                sl_price      REAL,
+                target        REAL,
+                product       TEXT,
+                opened_at     TEXT,
+                is_open       INTEGER DEFAULT 1,
+                tradingsymbol TEXT DEFAULT ''
             );
 
             CREATE TABLE IF NOT EXISTS trades (
@@ -248,6 +249,15 @@ def _init_sqlite() -> None:
                 (len(migrated_cols),),
             )
 
+        # Migrate positions table
+        existing_pos = {row[1] for row in c.execute("PRAGMA table_info(positions)")}
+        pos_migrations: list[tuple[str, str]] = [
+            ("tradingsymbol", "TEXT DEFAULT ''"),
+        ]
+        for col, defn in pos_migrations:
+            if col not in existing_pos:
+                c.execute(f"ALTER TABLE positions ADD COLUMN {col} {defn}")
+
         from config import settings as _cfg
         if _cfg.trading_mode == "PAPER":
             result = c.execute(
@@ -265,17 +275,18 @@ def _init_pg() -> None:
     """Create tables in PostgreSQL. Uses SERIAL / CURRENT_DATE instead of SQLite-isms."""
     stmts = [
         """CREATE TABLE IF NOT EXISTS positions (
-            order_id    TEXT PRIMARY KEY,
-            symbol      TEXT,
-            strategy    TEXT,
-            side        TEXT,
-            entry_price DOUBLE PRECISION,
-            quantity    INTEGER,
-            sl_price    DOUBLE PRECISION,
-            target      DOUBLE PRECISION,
-            product     TEXT,
-            opened_at   TEXT,
-            is_open     INTEGER DEFAULT 1
+            order_id      TEXT PRIMARY KEY,
+            symbol        TEXT,
+            strategy      TEXT,
+            side          TEXT,
+            entry_price   DOUBLE PRECISION,
+            quantity      INTEGER,
+            sl_price      DOUBLE PRECISION,
+            target        DOUBLE PRECISION,
+            product       TEXT,
+            opened_at     TEXT,
+            is_open       INTEGER DEFAULT 1,
+            tradingsymbol TEXT DEFAULT ''
         )""",
         """CREATE TABLE IF NOT EXISTS trades (
             id                  SERIAL PRIMARY KEY,
@@ -344,6 +355,32 @@ def _init_pg() -> None:
         for col, defn in pg_migrations:
             if col not in existing_pg:
                 cur.execute(f"ALTER TABLE trades ADD COLUMN IF NOT EXISTS {col} {defn}")
+
+        # Migrate positions table in PostgreSQL
+        cur.execute(
+            "SELECT column_name FROM information_schema.columns "
+            "WHERE table_name = 'positions'"
+        )
+        existing_pos_pg = {r["column_name"] if isinstance(r, dict) else r[0]
+                           for r in cur.fetchall()}
+        pg_pos_migrations = [
+            ("tradingsymbol", "TEXT DEFAULT ''"),
+        ]
+        for col, defn in pg_pos_migrations:
+            if col not in existing_pos_pg:
+                cur.execute(f"ALTER TABLE positions ADD COLUMN IF NOT EXISTS {col} {defn}")
+
+        # Clear stale PAPER open positions on startup — paper broker resets on
+        # restart so any previously-tracked positions are phantom.
+        from config import settings as _cfg_pg
+        if _cfg_pg.trading_mode == "PAPER":
+            cur.execute(
+                "UPDATE positions SET is_open=0 WHERE is_open=1 AND order_id LIKE 'PAPER-%'"
+            )
+            import logging as _log
+            _log.getLogger(__name__).info(
+                "[state_store] Cleared stale PAPER is_open positions on startup (PG)"
+            )
         c.commit()
 
 
@@ -358,9 +395,14 @@ def upsert_position(
     target: float,
     product: str,
     pattern: str = "",
+    tradingsymbol: str = "",
 ) -> None:
     """Insert or replace a position record (marks as open)."""
     p = _ph()
+    # tradingsymbol is the actual instrument traded (futures/options contract or
+    # the equity symbol itself). Storing it lets us correctly rehydrate _tsl_sl_orders
+    # after a restart without needing to re-derive the contract name.
+    tsym = tradingsymbol or symbol
     with _conn() as c:
         if _USE_PG:
             cur = c.cursor()
@@ -368,14 +410,15 @@ def upsert_position(
                 f"""
                 INSERT INTO positions
                   (order_id, symbol, strategy, side, entry_price, quantity,
-                   sl_price, target, product, opened_at, is_open)
-                VALUES ({p},{p},{p},{p},{p},{p},{p},{p},{p},NOW()::TEXT,1)
+                   sl_price, target, product, opened_at, is_open, tradingsymbol)
+                VALUES ({p},{p},{p},{p},{p},{p},{p},{p},{p},NOW()::TEXT,1,{p})
                 ON CONFLICT (order_id) DO UPDATE SET
                   entry_price=EXCLUDED.entry_price, sl_price=EXCLUDED.sl_price,
-                  target=EXCLUDED.target, is_open=1
+                  target=EXCLUDED.target, is_open=1,
+                  tradingsymbol=EXCLUDED.tradingsymbol
                 """,
                 (order_id, symbol, strategy, side, entry_price, quantity,
-                 sl_price, target, product),
+                 sl_price, target, product, tsym),
             )
             c.commit()
         else:
@@ -383,11 +426,11 @@ def upsert_position(
                 f"""
                 INSERT OR REPLACE INTO positions
                   (order_id, symbol, strategy, side, entry_price, quantity,
-                   sl_price, target, product, opened_at, is_open)
-                VALUES ({p},{p},{p},{p},{p},{p},{p},{p},{p},datetime('now'),1)
+                   sl_price, target, product, opened_at, is_open, tradingsymbol)
+                VALUES ({p},{p},{p},{p},{p},{p},{p},{p},{p},datetime('now'),1,{p})
                 """,
                 (order_id, symbol, strategy, side, entry_price, quantity,
-                 sl_price, target, product),
+                 sl_price, target, product, tsym),
             )
 
 

@@ -2941,9 +2941,11 @@ class FuturesAgent(BaseAgent):
     product = "NRML"
     min_candles_1min = 15
 
-    # NSE/BSE index futures lot sizes (same underlying as options)
+    # NSE/BSE index futures lot sizes — FuturesAgent only trades these symbols.
+    # Stock futures are excluded: their lot sizes change every expiry revision
+    # and liquidity / spread characteristics differ from index futures.
     LOT_SIZES: dict = {"NIFTY": 75, "BANKNIFTY": 15, "MIDCPNIFTY": 75,
-                       "FINNIFTY": 40, "SENSEX": 10}
+                       "FINNIFTY": 40, "SENSEX": 10, "BANKEX": 15}
     MIN_SCORE = 4
     COOL_S    = 180
 
@@ -2985,6 +2987,13 @@ class FuturesAgent(BaseAgent):
         ltp = snap.tick.ltp
         now = now_ist()
         t   = now.time().replace(tzinfo=None)
+
+        # Index-only guard: FuturesAgent only trades index futures (NIFTY,
+        # BANKNIFTY, etc.) where lot sizes are known and liquidity is deep.
+        # Stock futures are excluded — lot sizes change every expiry and their
+        # futures contracts are not in the tick subscription.
+        if sym not in self.LOT_SIZES:
+            return "HOLD", None
 
         # Rollover awareness: last 3 calendar days of expiry month → close early
         _rollover = self._is_rollover_period()

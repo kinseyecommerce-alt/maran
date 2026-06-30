@@ -1247,8 +1247,11 @@ class BaseAgent(ABC):
                     order_guard.release_order(sym, self.name, action, 0)
                     raise
             else:
-                entry_type = "LIMIT" if use_limit else "MARKET"
-                entry_px   = limit_px if use_limit else ltp  # PAPER uses price as fill hint
+                # Paper mode: always MARKET — paper has no real order book and
+                # LIMIT orders for instruments without a tick feed (e.g. futures
+                # contracts) accumulate and never fill.
+                entry_type = "MARKET"
+                entry_px   = ltp
                 results = await asyncio.gather(
                     loop.run_in_executor(None, lambda: kite_client.place_order(
                         tradingsymbol=trade_sym, exchange=exch, transaction_type=action, quantity=qty,
@@ -1388,6 +1391,7 @@ class BaseAgent(ABC):
                 sl_price=sl,
                 target=signal.get("target", risk_manager.target_price(ltp, action)),
                 product=product, pattern=signal.get("pattern", ""),
+                tradingsymbol=trade_sym,
             )
         except Exception:
             pass
@@ -1465,6 +1469,14 @@ class BaseAgent(ABC):
         qty = self._compute_qty(snap, action, signal)  # after pre-claim: avoids aggregator side-effect on vetoed trades
         if qty <= 0:
             return
+
+        # F&O lot-size boundary: futures/options agents embed their lot size in
+        # the signal. Raw qty from _compute_qty is based on capital/price and is
+        # NOT rounded — snap it to the nearest valid lot boundary (minimum 1 lot).
+        _lot_sz = signal.get("lot_size", 1)
+        if _lot_sz > 1:
+            _lots = max(1, round(qty / _lot_sz))
+            qty   = _lots * _lot_sz
 
         # L2 fill-quality gate: a thin book turns a MARKET order into real
         # slippage. Shrink to what the visible book can absorb, or skip.

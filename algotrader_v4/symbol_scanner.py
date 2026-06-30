@@ -71,8 +71,9 @@ NIFTY_BANK = [s for s in NSE_TOP_100 if s in {
     "BANKBARODA","PNB","CANBK",
 }]
 
-# Indices (for F&O — not equity symbols)
-INDICES = ["NIFTY50","BANKNIFTY","FINNIFTY","MIDCPNIFTY"]
+# Indices (for F&O — must match FuturesAgent.LOT_SIZES keys exactly so the
+# index-only guard passes and _futures_symbol builds the correct contract name)
+INDICES = ["NIFTY","BANKNIFTY","FINNIFTY","MIDCPNIFTY"]
 
 # Single canonical universe used everywhere
 FULL_UNIVERSE: list[str] = NSE_TOP_100
@@ -210,7 +211,7 @@ CRITERIA: dict[str, SelectionCriteria] = {
         description     = "NSE top 100 by liquidity — highest volume for tight bid-ask scalping",
     ),
     "futures": SelectionCriteria(
-        universe        = list(set(NIFTY_50 + ["NIFTY50","BANKNIFTY","FINNIFTY","MIDCPNIFTY"])),
+        universe        = list(set(NIFTY_50 + ["NIFTY","BANKNIFTY","FINNIFTY","MIDCPNIFTY"])),
         top_n           = 10,
         min_avg_volume  = 1_000_000,
         min_atr_pct     = 1.0,

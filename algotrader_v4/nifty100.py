@@ -55,8 +55,8 @@ INTRADAY_UNIVERSE = NIFTY_100  # All 100 for intraday MIS
 
 # ── Index symbols — subscribed for price/chart data, NOT traded directly ───────
 INDEX_SYMBOLS = [
-    {"symbol": "NIFTY 50",   "exchange": "NSE"},
-    {"symbol": "NIFTY BANK", "exchange": "NSE"},
+    {"symbol": "NIFTY",     "exchange": "NSE"},
+    {"symbol": "BANKNIFTY", "exchange": "NSE"},
 ]
 
 # Watchlist dict format expected by agents
