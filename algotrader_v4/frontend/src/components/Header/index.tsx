@@ -180,34 +180,82 @@ function ZerodhaDetail({ onBack, credForm, setCredForm,
   vis: Record<string, boolean>; setVis: (fn: (p: any) => any) => void
   addToast: (msg: string, type?: any) => void
 }) {
-  const connectKite = () => {
-    window.open('/auth/kite/login', '_blank')
+  const [copied, setCopied] = useState(false)
+  const callbackUrl = `${window.location.origin}/auth/kite/callback`
+  const hasCredentials = credStatus.kite_api_key && credStatus.kite_api_secret
+
+  const copyUrl = () => {
+    navigator.clipboard.writeText(callbackUrl).then(() => {
+      setCopied(true)
+      setTimeout(() => setCopied(false), 2500)
+    }).catch(() => addToast('Copy failed — select and copy manually', 'error'))
   }
 
   return (
     <div className="space-y-5">
       <BrokerDetailHeader brokerId="zerodha" brokerName="Zerodha Kite" color="#387ed1" logo="Z" status={brokerStatus} onBack={onBack} />
 
-      {brokerStatus === 'error' && (
-        <div className="bg-rose-950/40 border border-rose-900/60 rounded-lg px-4 py-3 text-xs text-rose-300">
-          ⚠️ Not connected — verify credentials below.
-        </div>
-      )}
-
+      {/* Step 1 */}
       <div className="space-y-3">
-        <SectionLabel>Kite API Credentials</SectionLabel>
+        <SectionLabel>Step 1 — Kite API Credentials</SectionLabel>
         <SecretField label="Kite API Key" fieldKey="kite_api_key" form={credForm} setForm={setCredForm} vis={vis} setVis={setVis} credStatus={credStatus} />
         <SecretField label="Kite API Secret" fieldKey="kite_api_secret" form={credForm} setForm={setCredForm} vis={vis} setVis={setVis} credStatus={credStatus} />
+        <div className="flex items-center justify-end pt-1">
+          <button type="button" onClick={onSave} disabled={credSaving}
+            className="text-xs px-4 py-2 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-white font-semibold transition-colors disabled:opacity-50">
+            {credSaving ? 'Saving…' : 'Save Credentials'}
+          </button>
+        </div>
       </div>
 
-      <FieldRow label="OAuth Login" hint="Save credentials first, then click to open Zerodha login">
-        <button type="button" onClick={connectKite}
-          className="flex items-center gap-1.5 text-xs px-3 py-2 rounded-lg border border-slate-700 text-slate-300 hover:bg-slate-800 transition-colors">
-          <ExternalLink className="w-3 h-3" /> Connect Kite Account
-        </button>
-      </FieldRow>
+      {/* Step 2 */}
+      <div className="space-y-3 border-t border-slate-800 pt-4">
+        <SectionLabel>Step 2 — Set Redirect URL in Kite Console</SectionLabel>
+        <p className="text-xs text-slate-400 leading-relaxed">
+          In your <a href="https://developers.kite.trade/apps" target="_blank" rel="noreferrer"
+            className="text-blue-400 underline underline-offset-2 hover:text-blue-300">Kite Connect developer app</a>,
+          set the <strong className="text-slate-300">Redirect URL</strong> to this exact value:
+        </p>
+        <div className="flex items-center gap-2">
+          <code className="flex-1 px-3 py-2 bg-slate-900 border border-slate-700 rounded-lg text-xs text-emerald-400 font-mono break-all select-all">
+            {callbackUrl}
+          </code>
+          <button type="button" onClick={copyUrl}
+            className="shrink-0 text-xs px-3 py-2 rounded-lg border border-slate-700 text-slate-300 hover:bg-slate-800 transition-colors whitespace-nowrap">
+            {copied ? '✓ Copied' : 'Copy'}
+          </button>
+        </div>
+        <a href="https://developers.kite.trade/apps" target="_blank" rel="noreferrer"
+          className="inline-flex items-center gap-1.5 text-xs text-blue-400 hover:text-blue-300 transition-colors">
+          <ExternalLink className="w-3 h-3" /> Open Kite Developer Console
+        </a>
+      </div>
 
-      <SaveBar onCancel={onBack} onSave={onSave} saving={credSaving} />
+      {/* Step 3 */}
+      <div className="space-y-3 border-t border-slate-800 pt-4">
+        <SectionLabel>Step 3 — Login to Zerodha</SectionLabel>
+        {!hasCredentials ? (
+          <div className="rounded-lg bg-amber-950/40 border border-amber-900/60 px-3 py-2.5 text-xs text-amber-300">
+            Complete Step 1 first — save your API Key and Secret above.
+          </div>
+        ) : (
+          <div className="space-y-2">
+            <p className="text-xs text-slate-400">Opens Zerodha login in a new tab. After login, you will be redirected back automatically.</p>
+            <a
+              href="/auth/kite/login"
+              target="_blank"
+              rel="noreferrer"
+              className="inline-flex items-center gap-2 text-xs px-4 py-2.5 rounded-lg bg-blue-700 hover:bg-blue-600 text-white font-semibold transition-colors"
+            >
+              <ExternalLink className="w-3.5 h-3.5" /> Open Zerodha Login
+            </a>
+          </div>
+        )}
+      </div>
+
+      <div className="flex items-center justify-start pt-2 border-t border-slate-800">
+        <button type="button" onClick={onBack} className="text-xs text-slate-500 hover:text-slate-300 transition-colors">← Back</button>
+      </div>
     </div>
   )
 }

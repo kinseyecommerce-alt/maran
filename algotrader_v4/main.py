@@ -613,11 +613,24 @@ def login_url(): return {"login_url": kite_client.login_url()}
 
 @app.get("/auth/kite/login", tags=["Auth"], include_in_schema=False)
 def kite_login_redirect():
-    """Browser redirect → Zerodha Kite OAuth login page."""
+    """Browser redirect → Zerodha Kite OAuth login page (pykiteconnect flow)."""
     from fastapi.responses import RedirectResponse
-    url = kite_client.login_url()
-    if not url:
-        raise HTTPException(503, "Kite API key not configured")
+    if not settings.kite_api_key:
+        return HTMLResponse(
+            "<html><head><title>Kite API Key Missing</title></head>"
+            "<body style='font-family:sans-serif;background:#0d1117;color:#e6edf3;"
+            "display:flex;align-items:center;justify-content:center;height:100vh'>"
+            "<div style='text-align:center'>"
+            "<div style='font-size:2.5rem'>⚠️</div>"
+            "<h2 style='color:#f0a500'>Kite API Key not configured</h2>"
+            "<p style='color:#8b949e'>Go to Settings → Brokers → Zerodha and save your API Key first.</p>"
+            "<p><a href='/' style='color:#58a6ff'>← Back to Dashboard</a></p>"
+            "</div></body></html>",
+            status_code=400,
+        )
+    from kiteconnect import KiteConnect
+    kite = KiteConnect(api_key=settings.kite_api_key)
+    url = kite.login_url()
     return RedirectResponse(url=url, status_code=302)
 
 @app.post("/auth/token", tags=["Auth"])
