@@ -101,7 +101,7 @@ export interface HealthData {
   time: string
 }
 
-export type TabId = 'positions' | 'orders' | 'brackets' | 'risk' | 'agents' | 'sebi'
+export type TabId = 'positions' | 'orders' | 'brackets' | 'risk' | 'agents' | 'sebi' | 'history'
 
 export interface AgentActivityEntry {
   time?: string

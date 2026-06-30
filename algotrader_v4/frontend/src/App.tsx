@@ -11,6 +11,7 @@ import BracketsTab from './components/tabs/BracketsTab'
 import RiskTab from './components/tabs/RiskTab'
 import AgentsTab from './components/tabs/AgentsTab'
 import SebiTab from './components/tabs/SebiTab'
+import TradeHistoryTab from './components/tabs/TradeHistoryTab'
 import { connectWS } from './ws/websocket'
 import { useStore } from './store'
 import { api } from './api/client'
@@ -29,12 +30,13 @@ const AGENT_META: Record<string, { strategy: string; displayName: string; id: st
 const AGENT_ORDER = ['intraday', 'options', 'swing', 'scalping', 'futures', 'momentum', 'mean_reversion', 'pairs']
 
 const OPS_TABS: { id: TabId; label: string }[] = [
-  { id: 'positions', label: 'Positions' },
-  { id: 'orders',   label: 'Orders'    },
-  { id: 'brackets', label: 'Brackets'  },
-  { id: 'risk',     label: 'Risk'      },
-  { id: 'agents',   label: 'Agents'    },
-  { id: 'sebi',     label: 'SEBI'      },
+  { id: 'positions', label: 'Positions'     },
+  { id: 'orders',   label: 'Orders'         },
+  { id: 'brackets', label: 'Brackets'       },
+  { id: 'risk',     label: 'Risk'           },
+  { id: 'agents',   label: 'Agents'         },
+  { id: 'sebi',     label: 'SEBI'           },
+  { id: 'history',  label: 'Trade History'  },
 ]
 const TAB_COMPONENTS: Record<TabId, React.ComponentType> = {
   positions: PositionsTab,
@@ -43,6 +45,7 @@ const TAB_COMPONENTS: Record<TabId, React.ComponentType> = {
   risk:      RiskTab,
   agents:    AgentsTab,
   sebi:      SebiTab,
+  history:   TradeHistoryTab,
 }
 
 function Toasts() {

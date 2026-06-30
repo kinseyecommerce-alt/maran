@@ -211,6 +211,10 @@ export const api = {
   deleteAccount:    (name: string) => ax().delete(`/accounts/${name}`),
   activateAccount:  (name: string) => ax().post(`/accounts/${name}/activate`),
 
+  // ── Trade History ────────────────────────────────────────────────────────────
+  tradeHistory: (days: number = 30, agent: string = '') =>
+                  ax().get('/portfolio/trades/history', { params: { days, agent } }),
+
   // ── Backtest ─────────────────────────────────────────────────────────────────
   backtestRun: (data: { symbol: string; strategy: string; days?: number }) =>
                  ax().post('/backtest/run', data),
