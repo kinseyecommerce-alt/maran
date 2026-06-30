@@ -1086,10 +1086,23 @@ async def resume_agent(name: str):
     if not a: raise HTTPException(404, "Not found")
     if not bot_state.is_agent_enabled(name):
         raise HTTPException(400, f"Agent '{name}' is disabled")
+
     wl = master_agent._agent_watchlists.get(name, [])
-    if wl:
-        q = tick_engine.add_subscriber(f"agent_{name}")
-        a.start(q)
+    if not wl:
+        # No watchlist yet (bot/start not called) — use Nifty 50 fallback
+        from symbol_scanner import NIFTY_50
+        wl = [{"symbol": s, "exchange": "NSE"} for s in NIFTY_50]
+        master_agent._agent_watchlists[name] = wl
+
+    # Ensure tick engine is subscribed + running before starting the agent
+    if not tick_engine._running:
+        tick_engine.subscribe(wl)
+        tick_engine.start_loop()
+    elif wl:
+        tick_engine.subscribe(wl)   # idempotent — adds new symbols only
+
+    q = tick_engine.add_subscriber(f"agent_{name}")
+    a.start(q)
     return {"status": "resumed", "symbols": [w["symbol"] for w in wl]}
 
 
