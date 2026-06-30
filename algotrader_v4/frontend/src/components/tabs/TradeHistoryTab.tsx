@@ -103,7 +103,7 @@ function DetailModal({ trade, onClose }: DetailModalProps) {
             {trade.gate_confidence != null && (
               <div className="flex justify-between text-xs">
                 <span className="text-slate-500">AI Confidence</span>
-                <span className="font-mono text-violet-400">{(trade.gate_confidence * 100).toFixed(0)}%</span>
+                <span className="font-mono text-emerald-400">{(trade.gate_confidence * 100).toFixed(0)}%</span>
               </div>
             )}
           </div>
@@ -228,7 +228,7 @@ export default function TradeHistoryTab() {
           <select
             value={days}
             onChange={e => { setDays(Number(e.target.value)); setPage(1) }}
-            className="bg-slate-800 border border-slate-700 text-slate-200 text-xs rounded-lg px-3 py-2 focus:outline-none focus:ring-1 focus:ring-violet-500 focus:border-violet-500 min-w-[100px]"
+            className="bg-slate-800 border border-slate-700 text-slate-200 text-xs rounded-lg px-3 py-2 focus:outline-none focus:ring-1 focus:ring-emerald-500 focus:border-emerald-500 min-w-[100px]"
           >
             <option value={7}>Last 7 days</option>
             <option value={14}>Last 14 days</option>
@@ -244,7 +244,7 @@ export default function TradeHistoryTab() {
           <select
             value={filterType}
             onChange={e => { setFilterType(e.target.value); setPage(1) }}
-            className="bg-slate-800 border border-slate-700 text-slate-200 text-xs rounded-lg px-3 py-2 focus:outline-none focus:ring-1 focus:ring-violet-500 focus:border-violet-500 min-w-[120px]"
+            className="bg-slate-800 border border-slate-700 text-slate-200 text-xs rounded-lg px-3 py-2 focus:outline-none focus:ring-1 focus:ring-emerald-500 focus:border-emerald-500 min-w-[120px]"
           >
             <option value="">All</option>
             {strategies.map(s => <option key={s} value={s}>{s}</option>)}
@@ -257,7 +257,7 @@ export default function TradeHistoryTab() {
           <select
             value={filterSymbol}
             onChange={e => { setFilterSymbol(e.target.value); setPage(1) }}
-            className="bg-slate-800 border border-slate-700 text-slate-200 text-xs rounded-lg px-3 py-2 focus:outline-none focus:ring-1 focus:ring-violet-500 focus:border-violet-500 min-w-[140px]"
+            className="bg-slate-800 border border-slate-700 text-slate-200 text-xs rounded-lg px-3 py-2 focus:outline-none focus:ring-1 focus:ring-emerald-500 focus:border-emerald-500 min-w-[140px]"
           >
             <option value="">All</option>
             {symbols.map(s => <option key={s} value={s}>{s}</option>)}
@@ -270,7 +270,7 @@ export default function TradeHistoryTab() {
           <select
             value={filterSide}
             onChange={e => { setFilterSide(e.target.value); setPage(1) }}
-            className="bg-slate-800 border border-slate-700 text-slate-200 text-xs rounded-lg px-3 py-2 focus:outline-none focus:ring-1 focus:ring-violet-500 focus:border-violet-500 min-w-[100px]"
+            className="bg-slate-800 border border-slate-700 text-slate-200 text-xs rounded-lg px-3 py-2 focus:outline-none focus:ring-1 focus:ring-emerald-500 focus:border-emerald-500 min-w-[100px]"
           >
             <option value="">All</option>
             <option value="BUY">BUY</option>
@@ -281,7 +281,7 @@ export default function TradeHistoryTab() {
         {/* Reset */}
         <button
           onClick={handleReset}
-          className="flex items-center gap-1.5 px-4 py-2 rounded-lg bg-violet-600 hover:bg-violet-500 text-white text-xs font-medium transition-colors self-end"
+          className="flex items-center gap-1.5 px-4 py-2 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-white text-xs font-medium transition-colors self-end"
         >
           <RotateCcw className="w-3.5 h-3.5" />
           Reset
@@ -304,7 +304,7 @@ export default function TradeHistoryTab() {
           {pnlPos ? '+' : ''}₹{Math.abs(totalPnl).toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
         </span>
         <span className="text-[11px] text-slate-600 ml-2">{filtered.length} trade{filtered.length !== 1 ? 's' : ''}</span>
-        {loading && <span className="text-xs text-violet-400 font-mono animate-pulse ml-2">Loading…</span>}
+        {loading && <span className="text-xs text-emerald-400 font-mono animate-pulse ml-2">Loading…</span>}
       </div>
 
       {/* TABLE */}
@@ -314,17 +314,17 @@ export default function TradeHistoryTab() {
         ) : (
           <table className="w-full text-xs border-collapse min-w-[900px]">
             <thead className="sticky top-0 z-10">
-              <tr className="bg-violet-700/90 text-white uppercase tracking-wide text-[11px]">
-                <th className="px-3 py-2.5 text-center font-semibold border-r border-violet-600/50 w-12">S.No.</th>
-                <th className="px-3 py-2.5 text-center font-semibold border-r border-violet-600/50 w-32">Entry Time</th>
-                <th className="px-3 py-2.5 text-center font-semibold border-r border-violet-600/50 w-32">Exit Time</th>
-                <th className="px-3 py-2.5 text-center font-semibold border-r border-violet-600/50">Symbol</th>
-                <th className="px-3 py-2.5 text-center font-semibold border-r border-violet-600/50">Strategy</th>
-                <th className="px-3 py-2.5 text-center font-semibold border-r border-violet-600/50 w-24">Entry Type</th>
-                <th className="px-3 py-2.5 text-center font-semibold border-r border-violet-600/50 w-20">Entry Qty</th>
-                <th className="px-3 py-2.5 text-center font-semibold border-r border-violet-600/50 w-24">Entry Price</th>
-                <th className="px-3 py-2.5 text-center font-semibold border-r border-violet-600/50 w-24">Exit Price</th>
-                <th className="px-3 py-2.5 text-center font-semibold border-r border-violet-600/50 w-28">Total P&L</th>
+              <tr className="bg-slate-800/80 text-slate-300 uppercase tracking-wide text-[11px] border-b border-slate-700">
+                <th className="px-3 py-2.5 text-center font-semibold border-r border-slate-700/60 w-12">S.No.</th>
+                <th className="px-3 py-2.5 text-center font-semibold border-r border-slate-700/60 w-32">Entry Time</th>
+                <th className="px-3 py-2.5 text-center font-semibold border-r border-slate-700/60 w-32">Exit Time</th>
+                <th className="px-3 py-2.5 text-center font-semibold border-r border-slate-700/60">Symbol</th>
+                <th className="px-3 py-2.5 text-center font-semibold border-r border-slate-700/60">Strategy</th>
+                <th className="px-3 py-2.5 text-center font-semibold border-r border-slate-700/60 w-24">Entry Type</th>
+                <th className="px-3 py-2.5 text-center font-semibold border-r border-slate-700/60 w-20">Entry Qty</th>
+                <th className="px-3 py-2.5 text-center font-semibold border-r border-slate-700/60 w-24">Entry Price</th>
+                <th className="px-3 py-2.5 text-center font-semibold border-r border-slate-700/60 w-24">Exit Price</th>
+                <th className="px-3 py-2.5 text-center font-semibold border-r border-slate-700/60 w-28">Total P&L</th>
                 <th className="px-3 py-2.5 text-center font-semibold w-14">Detail</th>
               </tr>
             </thead>
@@ -343,7 +343,7 @@ export default function TradeHistoryTab() {
                 return (
                   <tr
                     key={trade.id}
-                    className={`${rowBg} hover:bg-violet-900/15 transition-colors border-b border-slate-800/60`}
+                    className={`${rowBg} hover:bg-emerald-500/5 transition-colors border-b border-slate-800/60`}
                   >
                     <td className="px-3 py-2.5 text-center text-slate-400 font-mono border-r border-slate-800/40">{rowNum}</td>
                     <td className="px-3 py-2.5 border-r border-slate-800/40">{fmtTimeCell(trade.entry_time)}</td>
@@ -375,7 +375,7 @@ export default function TradeHistoryTab() {
                     <td className="px-3 py-2.5 text-center">
                       <button
                         onClick={() => setDetailTrade(trade)}
-                        className="p-1.5 rounded bg-slate-800 hover:bg-violet-700/60 text-slate-400 hover:text-white transition-colors"
+                        className="p-1.5 rounded bg-slate-800 hover:bg-emerald-500/20 text-slate-400 hover:text-emerald-400 transition-colors"
                         title="View detail"
                       >
                         <Eye className="w-3.5 h-3.5" />
@@ -395,7 +395,7 @@ export default function TradeHistoryTab() {
           <select
             value={pageSize}
             onChange={e => { setPageSize(Number(e.target.value)); setPage(1) }}
-            className="bg-slate-800 border border-slate-700 text-slate-300 text-xs rounded px-2 py-1.5 focus:outline-none focus:ring-1 focus:ring-violet-500"
+            className="bg-slate-800 border border-slate-700 text-slate-300 text-xs rounded px-2 py-1.5 focus:outline-none focus:ring-1 focus:ring-emerald-500"
           >
             {PAGE_SIZE_OPTIONS.map(n => <option key={n} value={n}>{n}</option>)}
           </select>
@@ -418,7 +418,7 @@ export default function TradeHistoryTab() {
                 onClick={() => setPage(Number(n))}
                 className={`w-7 h-7 text-xs rounded font-mono transition-colors ${
                   safePage === Number(n)
-                    ? 'bg-violet-600 text-white font-bold'
+                    ? 'bg-emerald-600 text-white font-bold'
                     : 'bg-slate-800 text-slate-400 hover:bg-slate-700 hover:text-white'
                 }`}
               >
