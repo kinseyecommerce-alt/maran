@@ -678,6 +678,9 @@ class TickEngine:
         self._running = True
         self._loop = asyncio.get_running_loop()
         self._task = asyncio.create_task(self._poll_loop())
+        # Pre-seed candle buffers so agents can fire signals immediately
+        if self._symbols:
+            asyncio.create_task(self._backfill_bufs())
 
         # Start tick WebSocket in LIVE mode — TrueData preferred, Kite as fallback
         if settings.trading_mode == "LIVE":
@@ -1086,6 +1089,53 @@ class TickEngine:
         return "STABILIZING"
 
     # ── Historical data (for backtesting + warm-up) ───────────────────
+
+    async def _backfill_bufs(self, max_symbols: int = 30) -> None:
+        """Seed 1-min and 5-min candle buffers with yfinance history.
+
+        Called once after start_loop() so agents have enough candle history
+        to fire signals immediately in PAPER mode, rather than waiting 10-50
+        minutes for real-time ticks to fill the buffers.
+        """
+        loop = asyncio.get_running_loop()
+        syms = [s for s in self._symbols if s in self._bufs_1min][:max_symbols]
+        if not syms:
+            return
+
+        logger.info("TickEngine: backfilling {} symbols from yfinance 1-min history", len(syms))
+
+        seeded = 0
+        for sym in syms:
+            buf1 = self._bufs_1min.get(sym)
+            buf5 = self._bufs_5min.get(sym)
+            if buf1 is None:
+                continue
+            # Skip if buffer already has data (e.g. bot restarted mid-day)
+            if len(buf1.candles()) > 5:
+                continue
+            try:
+                exch = self._exchange.get(sym, "NSE")
+                df = await loop.run_in_executor(
+                    None, lambda s=sym, e=exch: yf_client.historical(s, e, "1m", "2d")
+                )
+                if df is None or df.empty:
+                    continue
+                # Keep the last 200 bars (enough for any strategy's min_candles)
+                df = df.tail(200)
+                for row in df.itertuples(index=False):
+                    ts = row.date
+                    if hasattr(ts, "to_pydatetime"):
+                        ts = ts.to_pydatetime()
+                    close = float(row.close)
+                    vol   = int(getattr(row, "volume", 0))
+                    buf1.push(close, vol, ts)
+                    if buf5:
+                        buf5.push(close, vol, ts)
+                seeded += 1
+            except Exception as exc:
+                logger.debug("TickEngine: backfill failed for {}: {}", sym, exc)
+
+        logger.info("TickEngine: backfill complete — {}/{} symbols seeded", seeded, len(syms))
 
     def get_historical(
         self, symbol: str, exchange: str = "NSE",

@@ -1097,9 +1097,11 @@ async def resume_agent(name: str):
     # Ensure tick engine is subscribed + running before starting the agent
     if not tick_engine._running:
         tick_engine.subscribe(wl)
-        tick_engine.start_loop()
-    elif wl:
+        tick_engine.start_loop()   # also triggers _backfill_bufs() internally
+    else:
         tick_engine.subscribe(wl)   # idempotent — adds new symbols only
+        # Backfill any newly added symbols so agent can fire signals immediately
+        asyncio.create_task(tick_engine._backfill_bufs())
 
     q = tick_engine.add_subscriber(f"agent_{name}")
     a.start(q)
