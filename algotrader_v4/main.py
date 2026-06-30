@@ -1094,6 +1094,13 @@ async def resume_agent(name: str):
         wl = [{"symbol": s, "exchange": "NSE"} for s in NIFTY_50]
         master_agent._agent_watchlists[name] = wl
 
+    # Populate approved symbols directly — skip the backtest gate for manual
+    # resume.  filter_watchlist is a /bot/start quality gate; here the user
+    # is explicitly starting an agent and we should respect that intent.
+    for item in wl:
+        a._approved.add(item["symbol"])
+    a.state.approved_symbols = [item["symbol"] for item in wl]
+
     # Ensure tick engine is subscribed + running before starting the agent
     if not tick_engine._running:
         tick_engine.subscribe(wl)

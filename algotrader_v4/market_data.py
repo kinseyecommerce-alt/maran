@@ -407,6 +407,12 @@ class PaperTickSimulator:
         self._prev_close: dict[str, float] = {}
         self._session_date = None
         self._lock = _threading.Lock()  # seed() and next_tick() called from concurrent threads
+        # Regime-switching state: +1=bull, 0=sideways, -1=bear.
+        # Each regime persists for 200-800 ticks (~50s – 3min at 250ms/tick),
+        # then switches randomly. This creates realistic trending periods that
+        # allow RSI/MACD/EMA crossover signals to fire in PAPER mode.
+        self._regimes:           dict[str, int] = {}
+        self._regime_countdown:  dict[str, int] = {}
 
     def seed(self, symbols: list[str], exchanges: dict[str, str]) -> None:
         import concurrent.futures as _cf
@@ -453,11 +459,30 @@ class PaperTickSimulator:
                     del self._prices[k]
 
             price = self._prices.get(symbol, 1000.0)
-            # Scale GBM sigma by sqrt(dt) so per-second realized vol is constant
-            # regardless of tick_interval_ms (0.00008 per-second sigma baseline).
             dt = settings.tick_interval_ms / 1000.0
-            shock = random.gauss(0, 0.00008 * math.sqrt(dt))
-            price = max(price * math.exp(shock), 1.0)
+
+            # ── Regime-switching GBM ───────────────────────────────────────
+            # Tick down the regime counter; switch when it hits zero.
+            countdown = self._regime_countdown.get(symbol, 0) - 1
+            if countdown <= 0:
+                # New regime: 25% bear, 50% sideways, 25% bull
+                regime = random.choices([-1, 0, 1], weights=[1, 2, 1])[0]
+                self._regimes[symbol] = regime
+                # Persist 200–800 ticks (~50 s – 3 min at 250 ms/tick)
+                self._regime_countdown[symbol] = random.randint(200, 800)
+            else:
+                self._regime_countdown[symbol] = countdown
+
+            regime = self._regimes.get(symbol, 0)
+            # Drift: ±0.00006 per second in trend, 0 sideways.
+            # Per-minute drift ≈ ±0.36 % → RSI/MACD reach signal thresholds
+            # in ~3–5 candles without making daily moves unrealistically large.
+            drift  = regime * 0.00006 * dt
+            # Sigma: 0.00025/√s (≈ 0.19 %/min).  Previous 0.00008 was too flat
+            # for momentum indicators to show meaningful values.
+            sigma  = 0.00025 * math.sqrt(dt)
+            shock  = drift + random.gauss(0, sigma)
+            price  = max(price * math.exp(shock), 1.0)
             self._prices[symbol] = price
 
             # Session baseline (= prev_close): set once per symbol per session

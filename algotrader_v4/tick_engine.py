@@ -211,6 +211,10 @@ class TickBuffer:
             result = list(self._candles)
             if self._current:
                 result.append(self._current)
+            # Always return in chronological order. The backfill task may seed
+            # historical bars AFTER a few live GBM ticks have already been
+            # appended, leaving the deque non-monotonic in time.
+            result.sort(key=lambda c: c.ts)
             return result
 
     def reset(self) -> None:
@@ -221,7 +225,7 @@ class TickBuffer:
             self._current_ts = None
 
     def as_dataframe(self) -> pd.DataFrame:
-        cs = self.candles()
+        cs = self.candles()   # already sorted chronologically by candles()
         if not cs:
             return pd.DataFrame()
         return pd.DataFrame([{
@@ -829,7 +833,7 @@ class TickEngine:
 
         snap = MarketSnapshot(
             symbol=symbol, tick=tick, indicators=ind,
-            candles_1min=self._bufs_1min[symbol].candles()[-60:],
+            candles_1min=self._bufs_1min[symbol].candles()[-200:],
             candles_5min=self._bufs_5min[symbol].candles()[-30:],
         )
 
@@ -1110,9 +1114,18 @@ class TickEngine:
             buf5 = self._bufs_5min.get(sym)
             if buf1 is None:
                 continue
-            # Skip if buffer already has data (e.g. bot restarted mid-day)
-            if len(buf1.candles()) > 5:
+            # Skip if buffer already has substantial history (mid-day restart).
+            # Threshold >50 lets us clear the handful of live GBM ticks that
+            # race into the buffer before this async task runs on cold start,
+            # while preserving a legitimately-populated mid-session buffer.
+            existing = buf1.candles()
+            if len(existing) > 50:
                 continue
+            # Clear any GBM ticks that raced ahead so historical bars land
+            # at the chronologically-correct start of the deque.
+            buf1.reset()
+            if buf5:
+                buf5.reset()
             try:
                 exch = self._exchange.get(sym, "NSE")
                 df = await loop.run_in_executor(

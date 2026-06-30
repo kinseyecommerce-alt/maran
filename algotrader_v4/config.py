@@ -191,7 +191,7 @@ class Settings(BaseSettings):
     gate_bypass_min_score: int = 7                 # signals scoring ≥ this skip Claude gate entirely (auto-approve, ~65% of trades)
     scalping_skip_gate: bool = True                # scalping holds 2-12 min; 400-800ms gate call causes meaningful slippage — skip by default
     use_multi_timeframe: bool = True      # require 5m/15m alignment with entry direction
-    mtf_min_alignment: int = 2            # how many of 3 TFs must agree (1, 2, or 3)
+    mtf_min_alignment: int = 1            # how many of 3 TFs must agree (1, 2, or 3)
     use_kelly_sizing: bool = True         # apply Claude gate's size_factor to qty
 
     # Auto-start (set to enable fully-lights-out operation)
