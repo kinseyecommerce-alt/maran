@@ -656,6 +656,16 @@ def set_token(req: TokenRequest):
     t = kite_client.set_access_token(req.request_token, req.access_token)
     return {"status": "ok", "token_set": bool(t)}
 
+@app.get("/auth/kite/token", tags=["Auth"])
+def get_kite_token():
+    """Return the current Kite access token (last 8 chars masked).
+    Use this on your production server to copy the token to another environment."""
+    tok = settings.kite_access_token or ""
+    if not tok:
+        return {"token": "", "has_token": False}
+    masked = "*" * (len(tok) - 8) + tok[-8:]
+    return {"token": tok, "masked": masked, "has_token": True}
+
 @app.get("/auth/upstox/status", tags=["Auth"])
 def upstox_status():
     """Check whether a valid Upstox access token is loaded."""

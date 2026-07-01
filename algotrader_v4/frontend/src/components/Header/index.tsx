@@ -301,9 +301,98 @@ function ZerodhaDetail({ onBack, credForm, setCredForm,
         )}
       </div>
 
+      {/* Step 4 — manual token paste (for dev / multi-environment) */}
+      <KiteTokenPaste addToast={addToast} />
+
       <div className="flex items-center justify-start pt-2 border-t border-slate-800">
         <button type="button" onClick={onBack} className="text-xs text-slate-500 hover:text-slate-300 transition-colors">← Back</button>
       </div>
+    </div>
+  )
+}
+
+function KiteTokenPaste({ addToast }: { addToast: (msg: string, type?: any) => void }) {
+  const [open, setOpen] = useState(false)
+  const [tokenInput, setTokenInput] = useState('')
+  const [saving, setSaving] = useState(false)
+  const [copied, setCopied] = useState(false)
+  const [currentToken, setCurrentToken] = useState<string | null>(null)
+
+  const loadCurrentToken = async () => {
+    try {
+      const r = await api.kiteGetToken()
+      if (r.data.has_token) setCurrentToken(r.data.token)
+      else setCurrentToken(null)
+    } catch { setCurrentToken(null) }
+  }
+
+  const handleCopyToken = async () => {
+    await loadCurrentToken()
+    if (currentToken) {
+      navigator.clipboard.writeText(currentToken)
+      setCopied(true)
+      setTimeout(() => setCopied(false), 2000)
+      addToast('Token copied to clipboard', 'buy')
+    } else {
+      addToast('No active token — log in first', 'error')
+    }
+  }
+
+  const handleSetToken = async () => {
+    if (!tokenInput.trim()) return
+    setSaving(true)
+    try {
+      await api.kiteSetToken(tokenInput.trim())
+      setTokenInput('')
+      setOpen(false)
+      addToast('Kite token set — agents now using live data', 'buy')
+      window.location.reload()
+    } catch (e: any) {
+      addToast(e.response?.data?.detail || 'Failed to set token', 'error')
+    } finally { setSaving(false) }
+  }
+
+  return (
+    <div className="space-y-2 border-t border-slate-800 pt-4">
+      <SectionLabel>Step 4 — Use in Another Environment</SectionLabel>
+      <p className="text-xs text-slate-400">
+        Running two servers (e.g. production + dev)? Copy the live token from one and paste it into the other.
+      </p>
+      <div className="flex gap-2 flex-wrap">
+        <button
+          type="button"
+          onClick={handleCopyToken}
+          className="inline-flex items-center gap-1.5 text-xs px-3 py-2 rounded-lg bg-slate-700 hover:bg-slate-600 text-slate-200 font-medium transition-colors"
+        >
+          {copied ? '✓ Copied!' : 'Copy this server\'s token'}
+        </button>
+        <button
+          type="button"
+          onClick={() => setOpen(o => !o)}
+          className="inline-flex items-center gap-1.5 text-xs px-3 py-2 rounded-lg bg-slate-700 hover:bg-slate-600 text-slate-200 font-medium transition-colors"
+        >
+          Paste token from another server
+        </button>
+      </div>
+      {open && (
+        <div className="flex gap-2 mt-1">
+          <input
+            type="password"
+            value={tokenInput}
+            onChange={e => setTokenInput(e.target.value)}
+            placeholder="Paste access token here"
+            className="flex-1 bg-slate-800 border border-slate-600 rounded-lg px-3 py-2 text-xs text-slate-200 placeholder-slate-500 focus:outline-none focus:border-blue-500"
+          />
+          <button
+            type="button"
+            onClick={handleSetToken}
+            disabled={saving || !tokenInput.trim()}
+            className="text-xs px-3 py-2 rounded-lg bg-emerald-700 hover:bg-emerald-600 disabled:opacity-50 text-white font-semibold transition-colors"
+          >
+            {saving ? '…' : 'Set'}
+          </button>
+        </div>
+      )}
     </div>
   )
 }
