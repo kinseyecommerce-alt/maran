@@ -138,11 +138,14 @@ def recipes():
             mk("INFY", 1626, rsi=58, vwap=1612, macd_hist=1.4, volume_ratio=1.9,
                ema9=1624, ema21=1618, ema50=1612, ema200=1500, n_candles=30),
         ])),
-        ("futures", build_simple(FuturesAgent(), "SBIN", [
-            mk("SBIN", 790, rsi=55, vwap=785, macd_hist=0.3, volume_ratio=1.6,
-               ema9=788, ema21=790, ema50=786, n_candles=30),
-            mk("SBIN", 795, rsi=60, vwap=785, macd_hist=1.5, volume_ratio=2.0,
-               ema9=798, ema21=792, ema50=787, n_candles=30),
+        # FuturesAgent only trades INDEX futures (LOT_SIZES) — a stock like SBIN is
+        # rejected by the index-only guard. Use NIFTY (funded futures bucket below
+        # covers its ~₹360k margin/lot; F&O is exempt from the ₹1M value cap).
+        ("futures", build_simple(FuturesAgent(), "NIFTY", [
+            mk("NIFTY", 24000, rsi=55, vwap=23850, macd_hist=0.3, volume_ratio=1.6,
+               ema9=23960, ema21=24000, ema50=23880, n_candles=30),
+            mk("NIFTY", 24150, rsi=60, vwap=23850, macd_hist=1.5, volume_ratio=2.0,
+               ema9=24200, ema21=24080, ema50=23950, n_candles=30),
         ])),
         ("mean_reversion", build_mean_reversion()),
         ("momentum",       build_momentum()),
@@ -279,12 +282,17 @@ async def main() -> int:
         "maxpos":  settings.max_open_positions,
         "maxsize": settings.max_position_size,
         "maxloss": settings.max_daily_loss,
+        "capital": settings.total_capital,
     }
     settings.use_multi_timeframe = False
     settings.use_kelly_sizing    = False
     settings.max_open_positions  = 50
     settings.max_position_size   = 10_000_000.0
     settings.max_daily_loss      = 10_000_000.0
+    # Index futures size on NRML margin: fund the futures bucket so it covers
+    # ≥1 NIFTY lot's margin (75 × ~24k × 20% ≈ ₹360k). bucket = total_capital ×
+    # futures_capital_pct(10%); ₹5M → ₹500k bucket → 1 lot.
+    settings.total_capital       = 5_000_000.0
     try:
         await stage_all_agents()
         await stage_live_switch()
@@ -294,6 +302,7 @@ async def main() -> int:
         settings.max_open_positions  = saved["maxpos"]
         settings.max_position_size   = saved["maxsize"]
         settings.max_daily_loss      = saved["maxloss"]
+        settings.total_capital       = saved["capital"]
         reset_state()
 
     return summary()
