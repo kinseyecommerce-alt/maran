@@ -5,12 +5,12 @@ Real-time market data engine.
 
 Data sources:
   Live mode  → KiteConnect WebSocket (true real-time) + kite.quote() REST batch fallback
-  Paper mode → GBM simulator seeded from yfinance last price
+  Paper mode → GBM simulator seeded from Kite last price (0 → default seed)
 
 Architecture:
   LIVE: KiteConnect WebSocket (threaded) → _ingest_kite_tick()
         kite.quote() batch REST fallback for symbols not yet received via WebSocket
-  PAPER: GBM simulator seeded from yfinance last price
+  PAPER: GBM simulator seeded from Kite last price (0 → default seed)
   Both → TickBuffer (1s / 1min / 5min candles)
        → IndicatorCalc (EMA, RSI, MACD, BB, VWAP, ATR…)
        → MarketSnapshot → asyncio.Queue per agent
@@ -605,7 +605,7 @@ class TickEngine:
     """
     In LIVE mode: KiteConnect WebSocket (true real-time sub-second ticks) with
     NSE India API fallback for symbols not yet received via WebSocket.
-    In PAPER mode: GBM simulator seeded from yfinance last price.
+    In PAPER mode: GBM simulator seeded from Kite last price.
     """
 
     def __init__(self) -> None:
@@ -1101,7 +1101,7 @@ class TickEngine:
     # ── Historical data (for backtesting + warm-up) ───────────────────
 
     async def _backfill_bufs(self, max_symbols: int = 30) -> None:
-        """Seed 1-min and 5-min candle buffers with yfinance history.
+        """Seed 1-min and 5-min candle buffers with Kite historical bars.
 
         Called once after start_loop() so agents have enough candle history
         to fire signals immediately in PAPER mode, rather than waiting 10-50
@@ -1112,7 +1112,7 @@ class TickEngine:
         if not syms:
             return
 
-        logger.info("TickEngine: backfilling {} symbols from Kite/yf_client 1-min history", len(syms))
+        logger.info("TickEngine: backfilling {} symbols from Kite 1-min history", len(syms))
 
         seeded = 0
         for sym in syms:
@@ -1160,7 +1160,7 @@ class TickEngine:
         self, symbol: str, exchange: str = "NSE",
         interval: str = "1m", period: str = "5d",
     ) -> pd.DataFrame:
-        """Fetch OHLCV from yfinance — used by backtest engine and signal engine."""
+        """Fetch OHLCV from Kite historical — used by backtest engine and signal engine."""
         return yf_client.historical(symbol, exchange, interval, period)
 
     # ── Market status ─────────────────────────────────────────────────

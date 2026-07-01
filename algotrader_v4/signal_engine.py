@@ -93,7 +93,7 @@ class SignalEngine:
     def _fetch_candles(
         self, symbol: str, exchange: str, strategy: STRATEGY
     ) -> pd.DataFrame | None:
-        """Fetch candles from yfinance — no Kite dependency."""
+        """Fetch candles from Kite historical (via market-data client)."""
         yf_interval, period = self._YF_MAP.get(strategy, ("15m", "5d"))
         df = yf_client.historical(symbol, exchange, yf_interval, period)
         if df.empty:

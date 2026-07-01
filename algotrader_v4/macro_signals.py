@@ -1,7 +1,12 @@
 """
 macro_signals.py — cross-asset macro indicators for AlgoTrader Pro v4.
-Fetches USD/INR, Crude WTI, S&P 500 futures, US VIX every 300 s in a
-background thread; exposes a [-1, 1] score to filter BUY entries.
+Exposes a [-1, 1] score to filter BUY entries.
+
+Yahoo Finance has been removed. The only global/cross-asset feed still
+available without an external provider is India VIX, sourced directly from the
+NSE allIndices API. USD/INR, Crude WTI and S&P 500 futures have no Kite/NSE
+equivalent, so they fall back to their last-known / neutral cached values and
+the macro score is driven primarily by India VIX.
 """
 from __future__ import annotations
 
@@ -72,21 +77,6 @@ def _fetch_india_vix_nse() -> Optional[float]:
     return None
 
 
-def _fetch_ticker_last_two(symbol: str) -> tuple[float | None, float]:
-    """Return (prev_close, last_close) for *symbol* via yfinance. Raises on failure.
-    prev_close is None when only 1 bar is available (weekend/holiday)."""
-    import yfinance as yf  # lazy import
-    df = yf.download(symbol, period="5d", interval="1d", progress=False, auto_adjust=True)
-    if df is None or len(df) < 1:
-        raise ValueError(f"No data for {symbol}")
-    if isinstance(df.columns, __import__("pandas").MultiIndex):
-        df.columns = df.columns.get_level_values(0)
-    closes = df["Close"].dropna()
-    last = float(closes.iloc[-1])
-    prev = float(closes.iloc[-2]) if len(closes) >= 2 else None
-    return prev, last
-
-
 class MacroSignals:
     """Thread-safe singleton; fetches cross-asset macro indicators every 300 s."""
 
@@ -97,8 +87,8 @@ class MacroSignals:
         self._last_refresh: float     = 0.0
         self._refresh_interval: float = 300.0  # 5 minutes
         # Single-flight guard — only one background refresh thread at a time
-        # (refresh() does 4 sequential yfinance downloads; without this, every
-        # caller during a stale window spawned its own thread).
+        # (refresh() hits the NSE India VIX endpoint; without this, every caller
+        # during a stale window spawned its own thread).
         self._refreshing              = threading.Event()
         # Monotonic time of the last refresh that fetched at least one REAL
         # value. Failure-fallback defaults no longer masquerade as fresh data.
@@ -124,33 +114,17 @@ class MacroSignals:
         """
         usdinr = crude = sp_last = sp_prev = us_vix = None
 
-        try:
-            _, usdinr = _fetch_ticker_last_two("USDINR=X")
-        except Exception as exc:
-            logger.debug("Macro: USDINR fetch failed — {}", exc)
-
-        try:
-            _, crude = _fetch_ticker_last_two("CL=F")
-        except Exception as exc:
-            logger.debug("Macro: Crude (CL=F) fetch failed — {}", exc)
-
-        try:
-            sp_prev, sp_last = _fetch_ticker_last_two("ES=F")
-            if sp_prev is None:
-                logger.debug("Macro: S&P change unavailable (single bar — weekend/holiday)")
-        except Exception as exc:
-            logger.debug("Macro: S&P futures (ES=F) fetch failed — {}", exc)
-
+        # USD/INR, Crude WTI and S&P 500 futures were sourced from Yahoo Finance,
+        # which has been removed. Kite/NSE offer no free equivalent, so these are
+        # left as None here and fall back to their last-known / neutral cached
+        # values below. India VIX is still available directly from NSE.
         try:
             us_vix = _fetch_india_vix_nse()
-            if us_vix is None:
-                _, us_vix = _fetch_ticker_last_two("^VIX")
-                logger.debug("Macro: India VIX unavailable — using US VIX")
         except Exception as exc:
-            logger.debug("Macro: VIX fetch failed — {}", exc)
+            logger.debug("Macro: India VIX fetch failed — {}", exc)
             us_vix = None
 
-        fetched_any = any(v is not None for v in (usdinr, crude, sp_last, us_vix))
+        fetched_any = us_vix is not None
 
         with self._lock:
             prev = self._data

@@ -7,7 +7,9 @@ Data sources (priority order for OHLCV history):
   1. Kite Connect historical API (when access token is set)
   2. NSE Bhavcopy (daily bars only — survivorship-bias-free)
   3. TrueData (when credentials are configured)
-  4. yfinance (fallback only — unreliable for NSE .NS symbols)
+
+  Yahoo Finance (yfinance) has been removed — Kite is the sole live/historical
+  price source for NSE/BSE. No external market-data provider is used.
 
   Live quotes   → NSE India official website API (free, real-time, no auth)
   Option chain  → NSE India option-chain API (free)
@@ -33,7 +35,6 @@ from ist_clock import now_ist as _now_ist
 from typing import Optional
 
 import httpx
-import yfinance as yf
 import pandas as pd
 from loguru import logger
 from pathlib import Path
@@ -283,22 +284,21 @@ class NSEClient:
             await self._client.aclose()
 
 
-# ── yfinance historical data ────────────────────────────────────────────
+# ── Historical OHLCV data (Kite / bhavcopy / TrueData — no yfinance) ──────
 import threading as _threading
 
 
 class YFinanceClient:
+    # Historical OHLCV client. Named YFinanceClient for backward compatibility
+    # with existing imports, but Yahoo Finance has been removed entirely — data
+    # now comes from Kite Connect, NSE bhavcopy, or TrueData only.
+    #
     # In-memory CSV cache: avoids re-reading the same file from disk on every
     # signal-generation call in the tick path. Key: (symbol, timeframe).
     # Value: (DataFrame, insert_timestamp) — TTL enforced to prevent stale OHLCV.
     _csv_cache: dict[tuple[str, str], tuple[pd.DataFrame, float]] = {}
     _csv_cache_lock: _threading.Lock = _threading.Lock()
     _CSV_CACHE_TTL: float = 3600.0  # 1 hour — intraday data stales within a session
-
-    @staticmethod
-    def _ticker(symbol: str, exchange: str = "NSE") -> str:
-        suffix = ".NS" if exchange.upper() == "NSE" else ".BO"
-        return symbol + suffix
 
     def historical(self, symbol, exchange="NSE", interval="1m", period="5d") -> pd.DataFrame:
         _CACHE_ALIASES = {"60m": "1h", "60min": "1h", "1hour": "1h"}
@@ -323,7 +323,7 @@ class YFinanceClient:
         from config import settings as _s
 
         # Bhavcopy: survivorship-bias-free daily data for backtests.
-        # Only applies to daily interval — intraday still uses yfinance/TrueData.
+        # Only applies to daily interval — intraday uses Kite / TrueData.
         if interval in ("1d", "daily"):
             try:
                 from datetime import timedelta as _td
@@ -355,37 +355,23 @@ class YFinanceClient:
             except Exception as exc:
                 logger.debug("TrueData historical — falling back to Kite for {}: {}", symbol, exc)
 
-        # ── Kite Connect (primary for live/paper-with-token mode) ─────────────
+        # ── Kite Connect (sole source for live/paper-with-token mode) ─────────
         df_kite = self._kite_historical(symbol, exchange, interval, period)
         if not df_kite.empty:
             return df_kite
 
-        # ── yfinance (last resort — often fails for NSE .NS symbols) ─────────
-        ticker = self._ticker(symbol, exchange)
-        try:
-            df = yf.download(ticker, period=period, interval=interval,
-                             progress=False, auto_adjust=True)
-            if df.empty:
-                return pd.DataFrame()
-            if isinstance(df.columns, pd.MultiIndex):
-                df.columns = df.columns.get_level_values(0)
-            df = df.rename(columns={"Open": "open", "High": "high", "Low": "low",
-                                    "Close": "close", "Volume": "volume"})
-            df.index.name = "date"
-            df = df.reset_index()
-            df["date"] = pd.to_datetime(df["date"])
-            df = df[["date", "open", "high", "low", "close", "volume"]].dropna()
-            return df.sort_values("date").reset_index(drop=True)
-        except Exception as exc:
-            logger.debug("yfinance fallback also failed {}: {}", ticker, exc)
-            return pd.DataFrame()
+        # No further fallback — Yahoo Finance has been removed. When Kite is
+        # unavailable (e.g. PAPER mode without a token) return an empty frame;
+        # callers already handle the empty-DataFrame case.
+        return pd.DataFrame()
 
     def _kite_historical(self, symbol: str, exchange: str,
                          interval: str, period: str) -> pd.DataFrame:
         """
         Fetch OHLCV from Kite Connect historical API.
         Returns empty DataFrame when Kite is not connected / PAPER mode without token.
-        Kite returns [] in PAPER mode automatically — falls through to yfinance.
+        Kite returns [] in PAPER mode automatically — the caller then returns an
+        empty frame (no Yahoo Finance fallback).
         """
         try:
             from kite_client import kite_client as _kc
@@ -438,12 +424,20 @@ class YFinanceClient:
             except Exception:
                 pass
 
-        ticker = self._ticker(symbol, exchange)
+        # Kite live quote — sole price source (Yahoo Finance removed).
+        # Returns 0.0 in PAPER mode without a token; callers fall back to a
+        # default seed price.
         try:
-            info = yf.Ticker(ticker).fast_info
-            return float(info.last_price or info.previous_close or 0)
+            from kite_client import kite_client as _kc
+            key = f"{exchange.upper()}:{symbol.upper()}"
+            raw = _kc.quote_kite([key])
+            data = raw.get(key) if raw else None
+            if data:
+                ltp = data.get("last_price") or data.get("ohlc", {}).get("close") or 0
+                return float(ltp)
         except Exception:
-            return 0.0
+            pass
+        return 0.0
 
 
 # ── Market hours helper ──────────────────────────────────────────────────

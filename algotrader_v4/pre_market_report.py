@@ -51,46 +51,12 @@ _NSE_FIIDII_URL = "https://www.nseindia.com/api/fiidiiTradeReact"
 
 # ── Data fetchers ──────────────────────────────────────────────────────────────
 
-def _fetch_yf_change(ticker: str) -> Optional[dict]:
-    """Synchronous yfinance fetch for global futures — run inside asyncio.to_thread."""
-    try:
-        import yfinance as yf  # lazy — only used for global FX/commodity symbols
-        df = yf.download(ticker, period="2d", interval="60m", progress=False, auto_adjust=True)
-        if df.empty or len(df) < 2:
-            return None
-        if hasattr(df.columns, "get_level_values"):
-            df.columns = df.columns.get_level_values(0)
-        closes = df["Close"].dropna()
-        if len(closes) < 2:
-            return None
-        last_close = float(closes.iloc[-1])
-        prev_close = float(closes.iloc[-2])
-        change_pct = round((last_close - prev_close) / prev_close * 100, 2) if prev_close and prev_close > 0 else 0.0
-        return {
-            "ticker":     ticker,
-            "last":       round(last_close, 4),
-            "prev":       round(prev_close, 4),
-            "change_pct": change_pct,
-        }
-    except Exception as exc:
-        logger.debug("[pre_market] global futures {} fetch failed: {}", ticker, exc)
-        return None
-
-
 async def _fetch_global_futures() -> dict[str, Optional[dict]]:
-    tasks = {
-        ticker: asyncio.to_thread(_fetch_yf_change, ticker)
-        for ticker in _GLOBAL_FUTURES
-    }
-    results = await asyncio.gather(*tasks.values(), return_exceptions=True)
-    out: dict[str, Optional[dict]] = {}
-    for ticker, result in zip(tasks.keys(), results):
-        if isinstance(result, Exception):
-            logger.debug("[pre_market] {} exception: {}", ticker, result)
-            out[ticker] = None
-        else:
-            out[ticker] = result
-    return out
+    """Global futures (S&P/Nasdaq/Crude/Gold/DXY) were sourced from Yahoo
+    Finance, which has been removed. Kite/NSE offer no equivalent free feed, so
+    these cues are unavailable — return all-None and let the Claude synthesis
+    proceed on India-specific data (indices, FII/DII, sectors)."""
+    return {ticker: None for ticker in _GLOBAL_FUTURES}
 
 
 async def _fetch_india_indices() -> dict[str, Optional[dict]]:

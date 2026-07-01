@@ -2,7 +2,8 @@
 download_historical.py
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 Download 1 month of OHLCV data for all NSE Top-100 symbols
-across all trading timeframes via Yahoo Finance (yfinance).
+across all trading timeframes via the Kite Connect historical API.
+(Yahoo Finance has been removed — requires a valid Kite access token.)
 
 Downloads last 7 days across all timeframes.
 
@@ -41,8 +42,7 @@ logger.add(sys.stderr,
 
 ALL_TIMEFRAMES = ["1m", "5m", "15m", "30m", "1h", "1d"]
 
-# Yahoo Finance period string per timeframe
-# 1m is capped at 7d by Yahoo; everything else uses 1mo
+# Lookback period string per timeframe (mapped to Kite date windows downstream)
 YF_PERIOD: dict[str, str] = {
     "1m":  "7d",
     "5m":  "7d",
@@ -52,7 +52,7 @@ YF_PERIOD: dict[str, str] = {
     "1d":  "7d",
 }
 
-# Yahoo Finance interval string per timeframe
+# Interval string per timeframe (mapped to Kite interval names downstream)
 YF_INTERVAL: dict[str, str] = {
     "1m":  "1m",
     "5m":  "5m",
@@ -83,21 +83,16 @@ def _save_summary(summary: dict) -> None:
 
 
 def _yf_fetch(symbol: str, interval: str, period: str):
-    """Fetch directly from yfinance — no TrueData routing."""
-    import yfinance as yf
+    """Fetch OHLCV straight from the Kite Connect historical API.
+
+    Goes directly to Kite (not yf_client.historical) to bypass the on-disk CSV
+    cache this script itself writes — otherwise a re-download would just echo
+    the existing file instead of fetching fresh bars."""
     import pandas as pd
-    ticker = symbol + ".NS"
-    df = yf.download(ticker, period=period, interval=interval,
-                     progress=False, auto_adjust=True)
-    if df.empty:
+    from market_data import yf_client
+    df = yf_client._kite_historical(symbol, "NSE", interval, period)
+    if df is None or df.empty:
         return pd.DataFrame()
-    if isinstance(df.columns, pd.MultiIndex):
-        df.columns = df.columns.get_level_values(0)
-    df = df.rename(columns={"Open": "open", "High": "high", "Low": "low",
-                             "Close": "close", "Volume": "volume"})
-    df.index.name = "date"
-    df = df.reset_index()
-    df["date"] = pd.to_datetime(df["date"])
     cols = [c for c in ("date", "open", "high", "low", "close", "volume") if c in df.columns]
     return df[cols].dropna().sort_values("date").reset_index(drop=True)
 
@@ -138,7 +133,7 @@ def _download_one(symbol: str, tf: str, resume: bool) -> dict:
 
 def main() -> None:
     parser = argparse.ArgumentParser(
-        description="Download 1-month historical OHLCV data from Yahoo Finance")
+        description="Download historical OHLCV data from the Kite Connect API")
     parser.add_argument("--symbols",
                         default="",
                         help="Comma-separated symbols (default: all NSE Top 100)")
@@ -174,13 +169,13 @@ def main() -> None:
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
     summary = _load_summary()
     summary["started"]    = datetime.now().isoformat()
-    summary["source"]     = "Yahoo Finance (yfinance)"
+    summary["source"]     = "Kite Connect historical API"
     summary["symbols"]    = symbols
     summary["timeframes"] = timeframes
     summary["total"]      = total
 
     logger.info("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
-    logger.info("Yahoo Finance Historical Downloader")
+    logger.info("Kite Connect Historical Downloader")
     logger.info("  Symbols    : {} ({})",
                 len(symbols), "all NSE Top 100" if not args.symbols else "custom")
     logger.info("  Timeframes : {}", ", ".join(timeframes))
