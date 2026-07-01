@@ -14,13 +14,12 @@ from datetime import datetime
 from typing import Optional
 
 import anthropic
-import yfinance as yf
 from loguru import logger
 
 from config import settings
 from agents.base_agent import send_telegram
 from ist_clock import now_ist as _now_ist
-from market_data import nse_client
+from market_data import nse_client, yf_client, ALL_INDICES
 
 
 # ── Tickers ────────────────────────────────────────────────────────────────────
@@ -34,8 +33,8 @@ _GLOBAL_FUTURES: dict[str, str] = {
 }
 
 _INDIA_INDICES: dict[str, str] = {
-    "^NSEI":    "Nifty 50",
-    "^NSEBANK": "Bank Nifty",
+    "NIFTY 50":   "Nifty 50",
+    "NIFTY BANK": "Bank Nifty",
 }
 
 _SECTOR_ETFS: dict[str, str] = {
@@ -53,12 +52,12 @@ _NSE_FIIDII_URL = "https://www.nseindia.com/api/fiidiiTradeReact"
 # ── Data fetchers ──────────────────────────────────────────────────────────────
 
 def _fetch_yf_change(ticker: str) -> Optional[dict]:
-    """Synchronous yfinance fetch — run inside asyncio.to_thread."""
+    """Synchronous yfinance fetch for global futures — run inside asyncio.to_thread."""
     try:
+        import yfinance as yf  # lazy — only used for global FX/commodity symbols
         df = yf.download(ticker, period="2d", interval="60m", progress=False, auto_adjust=True)
         if df.empty or len(df) < 2:
             return None
-        # Flatten multi-index columns if present
         if hasattr(df.columns, "get_level_values"):
             df.columns = df.columns.get_level_values(0)
         closes = df["Close"].dropna()
@@ -74,7 +73,7 @@ def _fetch_yf_change(ticker: str) -> Optional[dict]:
             "change_pct": change_pct,
         }
     except Exception as exc:
-        logger.debug("[pre_market] yfinance {} fetch failed: {}", ticker, exc)
+        logger.debug("[pre_market] global futures {} fetch failed: {}", ticker, exc)
         return None
 
 
@@ -95,18 +94,28 @@ async def _fetch_global_futures() -> dict[str, Optional[dict]]:
 
 
 async def _fetch_india_indices() -> dict[str, Optional[dict]]:
-    tasks = {
-        ticker: asyncio.to_thread(_fetch_yf_change, ticker)
-        for ticker in _INDIA_INDICES
-    }
-    results = await asyncio.gather(*tasks.values(), return_exceptions=True)
+    """Fetch India index data from NSE allIndices API (Kite-independent, real-time)."""
     out: dict[str, Optional[dict]] = {}
-    for ticker, result in zip(tasks.keys(), results):
-        if isinstance(result, Exception):
-            logger.debug("[pre_market] {} exception: {}", ticker, result)
-            out[ticker] = None
-        else:
-            out[ticker] = result
+    try:
+        data = await nse_client.get(ALL_INDICES)
+        if not data:
+            return out
+        for item in data.get("data", []):
+            idx_sym = item.get("indexSymbol", "")
+            label   = _INDIA_INDICES.get(idx_sym)
+            if label is None:
+                continue
+            last  = float(item.get("last", 0) or 0)
+            prev  = float(item.get("previousClose", 0) or 0)
+            chg   = round((last - prev) / prev * 100, 2) if prev > 0 else 0.0
+            out[idx_sym] = {
+                "ticker":     idx_sym,
+                "last":       round(last, 2),
+                "prev":       round(prev, 2),
+                "change_pct": chg,
+            }
+    except Exception as exc:
+        logger.debug("[pre_market] NSE indices fetch failed: {}", exc)
     return out
 
 
@@ -150,14 +159,14 @@ async def _fetch_fiidii() -> Optional[dict]:
 
 
 def _fetch_sector_change(ticker: str) -> Optional[dict]:
-    """Synchronous sector ETF yesterday-vs-day-before change."""
+    """Synchronous sector ETF yesterday-vs-day-before change via yf_client (Kite-first)."""
     try:
-        df = yf.download(ticker, period="5d", interval="1d", progress=False, auto_adjust=True)
+        # Strip .NS suffix — yf_client expects bare NSE symbol
+        sym = ticker.removesuffix(".NS").upper()
+        df  = yf_client.historical(sym, "NSE", "1d", "5d")
         if df.empty or len(df) < 2:
             return None
-        if hasattr(df.columns, "get_level_values"):
-            df.columns = df.columns.get_level_values(0)
-        closes = df["Close"].dropna()
+        closes     = df["close"].dropna()
         if len(closes) < 2:
             return None
         yesterday  = float(closes.iloc[-1])

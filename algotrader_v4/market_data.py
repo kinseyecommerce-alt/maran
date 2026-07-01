@@ -1,15 +1,17 @@
 """
 market_data.py
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-Market data engine — NO Kite dependency for quotes or candles.
+Market data engine.
 
-Data sources:
+Data sources (priority order for OHLCV history):
+  1. Kite Connect historical API (when access token is set)
+  2. NSE Bhavcopy (daily bars only — survivorship-bias-free)
+  3. TrueData (when credentials are configured)
+  4. yfinance (fallback only — unreliable for NSE .NS symbols)
+
   Live quotes   → NSE India official website API (free, real-time, no auth)
-  OHLCV history → yfinance (Yahoo Finance, .NS / .BO suffix, free)
   Option chain  → NSE India option-chain API (free)
   Market status → NSE India market-status API (free)
-
-Kite is used ONLY for order placement — never for market data.
 
 Public NSE endpoints used:
   /api/quote-equity?symbol={SYMBOL}        — equity quote
@@ -351,8 +353,14 @@ class YFinanceClient:
                     logger.debug("TrueData historical: {} {} {} ({} bars)", symbol, interval, period, len(df))
                     return df
             except Exception as exc:
-                logger.debug("TrueData historical fallback to yfinance for {}: {}", symbol, exc)
+                logger.debug("TrueData historical — falling back to Kite for {}: {}", symbol, exc)
 
+        # ── Kite Connect (primary for live/paper-with-token mode) ─────────────
+        df_kite = self._kite_historical(symbol, exchange, interval, period)
+        if not df_kite.empty:
+            return df_kite
+
+        # ── yfinance (last resort — often fails for NSE .NS symbols) ─────────
         ticker = self._ticker(symbol, exchange)
         try:
             df = yf.download(ticker, period=period, interval=interval,
@@ -369,7 +377,54 @@ class YFinanceClient:
             df = df[["date", "open", "high", "low", "close", "volume"]].dropna()
             return df.sort_values("date").reset_index(drop=True)
         except Exception as exc:
-            logger.warning("yfinance error {}: {}", ticker, exc)
+            logger.debug("yfinance fallback also failed {}: {}", ticker, exc)
+            return pd.DataFrame()
+
+    def _kite_historical(self, symbol: str, exchange: str,
+                         interval: str, period: str) -> pd.DataFrame:
+        """
+        Fetch OHLCV from Kite Connect historical API.
+        Returns empty DataFrame when Kite is not connected / PAPER mode without token.
+        Kite returns [] in PAPER mode automatically — falls through to yfinance.
+        """
+        try:
+            from kite_client import kite_client as _kc
+            from ist_clock import now_ist as _ni
+            # Kite interval name mapping
+            _iv = {
+                "1m":  "minute",   "2m":  "2minute",  "3m":  "3minute",
+                "5m":  "5minute",  "10m": "10minute",  "15m": "15minute",
+                "30m": "30minute", "60m": "60minute",  "1h":  "60minute",
+                "1d":  "day",      "daily": "day",
+            }
+            kite_iv = _iv.get(interval)
+            if not kite_iv:
+                return pd.DataFrame()
+            # Period → calendar days
+            _days = {
+                "1d": 1, "2d": 2, "5d": 5, "10d": 10, "15d": 15,
+                "30d": 30, "60d": 60, "90d": 90, "1mo": 31, "2mo": 62,
+                "3mo": 93, "6mo": 186, "1y": 366, "2y": 732, "5y": 1830,
+            }
+            days = _days.get(period, 5)
+            to_dt   = _ni()
+            from_dt = to_dt - timedelta(days=days)
+            tokens  = _kc.get_instrument_tokens([symbol], exchange)
+            token   = tokens.get(symbol)
+            if not token:
+                return pd.DataFrame()
+            records = _kc.historical_data(token, from_dt, to_dt, kite_iv)
+            if not records:
+                return pd.DataFrame()
+            df = pd.DataFrame(records)
+            df["date"] = pd.to_datetime(df["date"])
+            cols = [c for c in ["date", "open", "high", "low", "close", "volume"]
+                    if c in df.columns]
+            df = df[cols].dropna().sort_values("date").reset_index(drop=True)
+            logger.debug("Kite historical: {} {} {} ({} bars)", symbol, interval, period, len(df))
+            return df
+        except Exception as exc:
+            logger.debug("Kite historical {}/{} {}: {}", symbol, interval, period, exc)
             return pd.DataFrame()
 
     def current_price(self, symbol: str, exchange: str = "NSE") -> float:

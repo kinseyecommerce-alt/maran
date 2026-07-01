@@ -1112,7 +1112,7 @@ class TickEngine:
         if not syms:
             return
 
-        logger.info("TickEngine: backfilling {} symbols from yfinance 1-min history", len(syms))
+        logger.info("TickEngine: backfilling {} symbols from Kite/yf_client 1-min history", len(syms))
 
         seeded = 0
         for sym in syms:

@@ -6,3 +6,4 @@
 - [Ops Panel Layout](ops-panel-layout.md) — Tabs now live in a LEFT SIDEBAR (w-44); each is a full-page view. Dashboard is the default page. No more bottom collapsible panel.
 - [Paper Trading Signal Pipeline](paper-trading-signal-pipeline.md) — 4 root causes kept signals_fired=0; candle sort, MTF window, GBM sigma, _approved set.
 - [.env overrides pydantic defaults](env-overrides-pydantic.md) — algotrader_v4/.env has hardcoded values that override config.py defaults; always update BOTH files when changing settings.
+- [Kite as primary OHLCV source](kite-ohlcv-primary.md) — All Indian equity OHLCV routes through yf_client.historical() which tries Kite first; global symbols (USDINR, crude, ES=F) keep yfinance.

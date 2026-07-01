@@ -9,7 +9,6 @@ import asyncio
 import threading
 from typing import Optional
 
-import yfinance as yf
 from loguru import logger
 
 
@@ -38,28 +37,24 @@ async def refresh_daily(symbols: list[str]) -> None:
 
 
 async def _refresh_symbol(symbol: str) -> None:
-    """Download and compute all daily-bar levels for a single symbol."""
-    ticker = symbol + ".NS"
+    """Download and compute all daily-bar levels for a single symbol via Kite / yf_client."""
+    from market_data import yf_client
     try:
         df = await asyncio.to_thread(
-            yf.download, ticker, period="10d", interval="1d", progress=False, auto_adjust=True
+            yf_client.historical, symbol, "NSE", "1d", "10d"
         )
     except Exception as exc:
-        logger.warning("[levels] yfinance download error {}: {}", symbol, exc)
+        logger.warning("[levels] data fetch error {}: {}", symbol, exc)
         raise
 
     if df is None or df.empty:
         logger.warning("[levels] empty data for {}", symbol)
         return
 
-    # Flatten MultiIndex columns that yfinance sometimes produces
     import pandas as pd
-    if isinstance(df.columns, pd.MultiIndex):
-        df.columns = df.columns.get_level_values(0)
-
-    df = df.rename(columns={"Open": "open", "High": "high", "Low": "low",
-                             "Close": "close", "Volume": "volume"})
-    df = df.dropna(subset=["high", "low", "close"]).sort_index()
+    df = df.dropna(subset=["high", "low", "close"])
+    if "date" in df.columns:
+        df = df.sort_values("date").reset_index(drop=True)
 
     if len(df) < 2:
         logger.debug("[levels] insufficient rows for {}", symbol)

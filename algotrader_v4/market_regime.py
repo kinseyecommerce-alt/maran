@@ -236,16 +236,16 @@ class MarketRegimeDetector:
     VIX_HIGH     = 20.0
     VIX_EXTREME  = 25.0
 
-    # Sector ETF proxies (yfinance tickers)
+    # Sector index NSE symbols (used with Kite / yf_client)
     SECTOR_TICKERS = {
-        "IT":       "^CNXIT",
-        "Bank":     "^NSEBANK",
-        "Auto":     "^CNXAUTO",
-        "Pharma":   "^CNXPHARMA",
-        "FMCG":     "^CNXFMCG",
-        "Metal":    "^CNXMETAL",
-        "Energy":   "^CNXENERGY",
-        "Realty":   "^CNXREALTY",
+        "IT":     "NIFTYIT",
+        "Bank":   "BANKNIFTY",
+        "Auto":   "NIFTYAUTO",
+        "Pharma": "NIFTYPHARMA",
+        "FMCG":   "NIFTYFMCG",
+        "Metal":  "NIFTYMETAL",
+        "Energy": "NIFTYENERGY",
+        "Realty": "NIFTYREALTY",
     }
 
     def __init__(self) -> None:
@@ -341,26 +341,19 @@ class MarketRegimeDetector:
     # ── Signal collectors ──────────────────────────────────────────────
 
     async def _collect_nifty(self, s: RegimeSignals) -> None:
-        """NIFTY 50 trend from yfinance."""
+        """NIFTY 50 trend from Kite / Bhavcopy."""
         try:
             loop = asyncio.get_running_loop()
 
-            # Daily data for trend
+            # Daily data for trend — Kite primary, Bhavcopy fallback
             df_d = await loop.run_in_executor(
-                None, lambda: yf_client.historical("NIFTY50", "NSE", "1d", "3mo")
+                None, lambda: yf_client.historical("NIFTY", "NSE", "1d", "3mo")
             )
             if df_d.empty:
-                # Try ^NSEI (Yahoo Finance index ticker)
-                import yfinance as yf
-                df_raw = yf.download("^NSEI", period="3mo", interval="1d",
-                                     progress=False, auto_adjust=True)
-                if not df_raw.empty:
-                    if isinstance(df_raw.columns, pd.MultiIndex):
-                        df_raw.columns = df_raw.columns.get_level_values(0)
-                    df_d = df_raw.rename(columns={
-                        "Open":"open","High":"high","Low":"low",
-                        "Close":"close","Volume":"volume"
-                    }).reset_index().rename(columns={"Date":"date"})
+                # Try alternate NIFTY50 symbol name
+                df_d = await loop.run_in_executor(
+                    None, lambda: yf_client.historical("NIFTY50", "NSE", "1d", "3mo")
+                )
 
             if df_d.empty or len(df_d) < 20:
                 return
@@ -383,7 +376,7 @@ class MarketRegimeDetector:
 
             # 30-min slope from intraday data
             df_5m = await loop.run_in_executor(
-                None, lambda: yf_client.historical("NIFTY50","NSE","5m","1d")
+                None, lambda: yf_client.historical("NIFTY","NSE","5m","1d")
             )
             if not df_5m.empty and len(df_5m) >= 6:
                 recent = df_5m["close"].tail(6)
@@ -408,22 +401,12 @@ class MarketRegimeDetector:
                             s.vix_chg_pct = (s.india_vix - s.vix_prev_close) / s.vix_prev_close * 100
                         break
 
-            # Fallback to yfinance if NSE fails
-            if s.india_vix == 0:
-                import yfinance as yf
-                vix = yf.download("^INDIAVIX", period="2d", interval="1d",
-                                  progress=False, auto_adjust=True)
-                if not vix.empty:
-                    cols = vix.columns.get_level_values(0) if isinstance(vix.columns, pd.MultiIndex) else vix.columns
-                    close_col = "Close" if "Close" in cols else "close"
-                    s.india_vix = float(vix[close_col].iloc[-1])
-
         except Exception as exc:
             logger.debug("VIX collect error: {}", exc)
         if s.india_vix == 0:
-            # Both feeds down. 0.0 means "unavailable", NOT "calm market" —
+            # NSE feed down. 0.0 means "unavailable", NOT "calm market" —
             # _classify() must skip all VIX-based flags rather than read it as low vol.
-            logger.warning("[regime] India VIX unavailable (NSE + yfinance both failed) — "
+            logger.warning("[regime] India VIX unavailable (NSE API failed) — "
                            "VIX-based regime flags disabled this cycle")
 
     async def _collect_breadth(self, s: RegimeSignals) -> None:
@@ -470,19 +453,17 @@ class MarketRegimeDetector:
             loop = asyncio.get_running_loop()
             sector_chg: dict[str, float] = {}
 
-            async def fetch_sector(name, ticker):
+            async def fetch_sector(name, nse_sym):
                 try:
-                    import yfinance as yf
-                    df = yf.download(ticker, period="2d", interval="1d",
-                                     progress=False, auto_adjust=True)
+                    df = await loop.run_in_executor(
+                        None, lambda s=nse_sym: yf_client.historical(s, "NSE", "1d", "5d")
+                    )
                     if df.empty or len(df) < 2:
                         return
-                    cols = df.columns.get_level_values(0) if isinstance(df.columns, pd.MultiIndex) else df.columns
-                    cc = "Close" if "Close" in cols else "close"
-                    prev = float(df[cc].iloc[-2])
+                    prev = float(df["close"].iloc[-2])
                     if prev == 0:
                         return
-                    pct = float((df[cc].iloc[-1] - prev) / prev * 100)
+                    pct = float((df["close"].iloc[-1] - prev) / prev * 100)
                     sector_chg[name] = round(pct, 2)
                 except Exception:
                     pass

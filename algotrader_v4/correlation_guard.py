@@ -19,7 +19,6 @@ from typing import Optional
 
 import numpy as np
 import pandas as pd
-import yfinance as yf
 from loguru import logger
 
 
@@ -34,55 +33,35 @@ _matrix_ready: bool = False
 
 # ── Internal helpers ───────────────────────────────────────────────────────────
 
-def _to_yf_ticker(symbol: str) -> str:
-    """Append NSE suffix expected by yfinance."""
-    sym = symbol.upper()
-    return sym if sym.endswith(".NS") else sym + ".NS"
-
-
 def _strip_ns(symbol: str) -> str:
     """Normalise a symbol to bare NSE name (no suffix, uppercase)."""
     return symbol.upper().removesuffix(".NS")
 
 
-def _download_prices(tickers: list[str], period: str, interval: str) -> pd.DataFrame:
+def _download_prices(symbols: list[str], period: str, interval: str) -> pd.DataFrame:
     """
-    Blocking yfinance download — intended to be called inside asyncio.to_thread.
-    Returns a DataFrame of adjusted close prices indexed by date.
+    Fetch close prices for NSE symbols via yf_client (Kite-first, yfinance fallback).
+    Returns a DataFrame of close prices indexed by date, one column per symbol.
     """
-    if not tickers:
+    from market_data import yf_client
+    if not symbols:
         return pd.DataFrame()
 
-    raw = yf.download(
-        tickers,
-        period=period,
-        interval=interval,
-        progress=False,
-        auto_adjust=True,
-    )
+    frames: dict[str, pd.Series] = {}
+    for sym in symbols:
+        bare = _strip_ns(sym)
+        try:
+            df = yf_client.historical(bare, "NSE", interval, period)
+            if not df.empty and "close" in df.columns and "date" in df.columns:
+                s = df.set_index("date")["close"].rename(bare)
+                s.index = pd.to_datetime(s.index)
+                frames[bare] = s
+        except Exception as exc:
+            logger.debug("correlation_guard: {} fetch failed: {}", bare, exc)
 
-    if raw is None or raw.empty:
+    if not frames:
         return pd.DataFrame()
-
-    # yfinance returns MultiIndex columns when multiple tickers are requested:
-    #   (field, ticker) — we want the "Close" level.
-    # When only one ticker is requested it returns a flat DataFrame.
-    if isinstance(raw.columns, pd.MultiIndex):
-        if "Close" in raw.columns.get_level_values(0):
-            closes = raw["Close"]
-        else:
-            # Fallback — take the last field level (Close is always last)
-            closes = raw.xs(raw.columns.get_level_values(0)[-1], axis=1, level=0)
-    else:
-        # Single ticker
-        if "Close" in raw.columns:
-            closes = raw[["Close"]]
-        else:
-            closes = raw.iloc[:, [0]]
-
-    # Rename columns to bare NSE symbols (strip .NS)
-    closes.columns = [_strip_ns(str(c)) for c in closes.columns]
-    return closes
+    return pd.DataFrame(frames)
 
 
 # ── Public: matrix refresh ─────────────────────────────────────────────────────
@@ -103,20 +82,19 @@ async def refresh_matrix(symbols: list[str]) -> None:
         logger.warning("correlation_guard: refresh_matrix called with empty symbol list")
         return
 
-    yf_tickers = [_to_yf_ticker(s) for s in symbols]
     logger.info(
-        "correlation_guard: downloading 30d prices for {} symbols", len(yf_tickers)
+        "correlation_guard: downloading 30d prices for {} symbols", len(symbols)
     )
 
     try:
         closes: pd.DataFrame = await asyncio.to_thread(
             _download_prices,
-            yf_tickers,
+            symbols,
             "30d",   # period
             "1d",    # interval
         )
     except Exception as exc:
-        logger.warning("correlation_guard: yfinance download failed: {}", exc)
+        logger.warning("correlation_guard: price download failed: {}", exc)
         return
 
     if closes is None or closes.empty:
