@@ -719,10 +719,13 @@ class TickEngine:
         if self._symbols:
             asyncio.create_task(self._backfill_bufs())
 
-        # Start tick WebSocket when using the real feed (LIVE, or PAPER with
-        # paper_use_live_data) — TrueData preferred, Kite as fallback.
+        # Start tick WebSocket when using the real feed.
+        # Priority: TrueData WebSocket → Kite WebSocket (auto-fallback) → REST polling.
         if self._live_data_enabled():
-            if settings.use_truedata_websocket and settings.truedata_username:
+            _ws_started = False
+
+            # 1) TrueData WebSocket — primary source
+            if settings.truedata_username and settings.truedata_password:
                 try:
                     from truedata_client import truedata_ticker
                     self._kite_ticker = truedata_ticker  # reuse slot; same interface
@@ -733,13 +736,15 @@ class TickEngine:
                     )
                     self._use_ws = True
                     self._is_truedata_ws = True
+                    _ws_started = True
                     logger.info("TickEngine: TrueData WebSocket started for {} symbols",
                                 len(self._symbols))
                 except Exception as exc:
-                    logger.error("TickEngine: TrueData WebSocket failed: {} — "
-                                 "falling back to Kite REST", exc)
-                    self._use_ws = False
-            elif settings.use_kite_websocket and settings.kite_access_token:
+                    logger.warning("TickEngine: TrueData WebSocket unavailable ({}) — "
+                                   "falling back to Kite WebSocket", exc)
+
+            # 2) Kite WebSocket — automatic fallback when TrueData is absent or fails
+            if not _ws_started and settings.kite_access_token:
                 try:
                     from kite_ticker import KiteTicker
                     self._kite_ticker = KiteTicker()
@@ -749,12 +754,18 @@ class TickEngine:
                         self._loop,
                     )
                     self._use_ws = True
-                    logger.info("TickEngine: KiteConnect WebSocket started for {} symbols",
-                                len(self._symbols))
+                    self._is_truedata_ws = False
+                    _ws_started = True
+                    logger.info("TickEngine: KiteConnect WebSocket started for {} symbols "
+                                "(TrueData fallback)", len(self._symbols))
                 except Exception as exc:
-                    logger.error("TickEngine: KiteConnect WebSocket failed to start: {} — "
-                                 "falling back to Kite REST", exc)
+                    logger.error("TickEngine: KiteConnect WebSocket also failed: {} — "
+                                 "using REST polling", exc)
                     self._use_ws = False
+
+            if not _ws_started:
+                logger.warning("TickEngine: no WebSocket source available — "
+                               "using REST polling only")
 
         logger.info("TickEngine poll loop started (ws={})", self._use_ws)
 
