@@ -406,6 +406,11 @@ def t_order_guard_claim_released_on_exit():
     # confirm then release (simulates exit)
     order_guard.confirm_claim("RELIANCE","intraday","BUY","ORD-123")
     order_guard.release_order("RELIANCE","intraday","BUY", pnl=500)
+    # release_order also applies a post-exit cooldown (anti-whipsaw) — a SEPARATE
+    # mechanism from the claim. Clear it so we verify the claim itself is released
+    # (re-entry becomes possible once the short cooldown elapses).
+    order_guard._symbol_cooldown.clear()
+    order_guard._cooldown_until.clear()
     c2, _ = order_guard.try_claim("RELIANCE","intraday","BUY")
     order_guard._active.clear()
     order_guard._symbol_owner.clear()
