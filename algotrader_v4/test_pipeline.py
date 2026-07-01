@@ -288,6 +288,28 @@ def t_tick_engine_live_data_enabled():
     finally:
         _s.trading_mode, _s.paper_use_live_data, _s.kite_access_token = _saved
 
+def t_paper_market_untracked_contract_uses_price_hint():
+    """A PAPER MARKET order for a contract with no tick feed (options/futures)
+    must fill at the passed price hint, NOT the ₹100 _paper_place fallback."""
+    kc = KiteClient()
+    oid = kc.place_order("INFY26JUL1650CE", "NFO", "BUY", 1,
+                         order_type="MARKET", price=22.46, tag="t")
+    o = kc._paper_orders[oid]
+    assert abs(o["average_price"] - 22.46) < 0.01, \
+        f"expected fill at premium 22.46, got {o['average_price']} (₹100 fallback?)"
+
+def t_options_entry_passes_premium_price():
+    """OptionsAgent must pass the contract premium (opt_price/pe_price) as the
+    order price so PAPER fills at the premium, not the ₹100 fallback — the entry
+    price must be consistent with the SL/target computed from opt_price."""
+    import inspect
+    from agents.strategy_agents import OptionsAgent
+    src = inspect.getsource(OptionsAgent._try_enter)
+    assert "price=opt_price" in src, (
+        "OptionsAgent._try_enter must pass price=opt_price on the MARKET entry — "
+        "else PAPER fills the option at the ₹100 _paper_place fallback"
+    )
+
 run("_TokenBucket.acquire() no raise",          t_bucket_acquire)
 run("_TokenBucket throttle within 2s for 5",    t_bucket_throttle)
 run("_with_retry returns value on success",      t_retry_success)
@@ -309,6 +331,8 @@ run("paper_use_live_data flag defaults off",     t_paper_live_data_flag_default_
 run("paper data stub gates on flag + connection", t_paper_data_stub_gates_on_flag)
 run("paper-live keeps orders simulated",         t_paper_live_orders_still_simulated)
 run("tick_engine _live_data_enabled logic",      t_tick_engine_live_data_enabled)
+run("paper MARKET untracked contract uses price hint (not ₹100)", t_paper_market_untracked_contract_uses_price_hint)
+run("options entry passes premium as price (no ₹100 fallback)",   t_options_entry_passes_premium_price)
 run("order_history() finds by order_id",         t_order_history)
 run("cancel_order() sets CANCELLED",             t_cancel_order)
 run("cancel on COMPLETE order raises",           t_cancel_complete_raises)

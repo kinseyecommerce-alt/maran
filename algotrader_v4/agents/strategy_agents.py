@@ -1605,6 +1605,11 @@ class OptionsAgent(BaseAgent):
                 tradingsymbol=opt_sym, exchange=exch,
                 transaction_type=action, quantity=qty,
                 order_type="MARKET", product=self.product,
+                # Pass the contract premium as the price hint. LIVE ignores it for
+                # MARKET orders; in PAPER it is the fill price — without it the
+                # option contract has no tick feed, so _paper_place falls back to
+                # a bogus ₹100 default, corrupting entry vs SL/target and P&L.
+                price=opt_price,
                 tag="Agent-options",
             ))
         except Exception as exc:
@@ -1648,6 +1653,7 @@ class OptionsAgent(BaseAgent):
                     tradingsymbol=opt_sym, exchange=exch,
                     transaction_type=sl_side, quantity=qty,
                     order_type="MARKET", product=self.product,
+                    price=opt_price,   # PAPER fill hint (see entry note above)
                     tag="Agent-options-EXIT",
                 ))
             except Exception as exit_exc:
@@ -1760,6 +1766,7 @@ class OptionsAgent(BaseAgent):
                 tradingsymbol=pe_sym, exchange=exch,
                 transaction_type="BUY", quantity=qty,
                 order_type="MARKET", product=self.product,
+                price=pe_price,   # PAPER fill hint — avoids the ₹100 fallback
                 tag="Agent-options-straddle-pe",
             ))
         except Exception as pe_exc:
@@ -1784,6 +1791,7 @@ class OptionsAgent(BaseAgent):
                     tradingsymbol=pe_sym, exchange=exch,
                     transaction_type="SELL", quantity=qty,
                     order_type="MARKET", product=self.product,
+                    price=pe_price,   # PAPER fill hint — avoids the ₹100 fallback
                     tag="Agent-options-EXIT",
                 ))
             except Exception as pe_exit_exc:
