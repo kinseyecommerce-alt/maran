@@ -1,8 +1,9 @@
 """
 kite_client.py  (v5 — Kite API limit-aware)
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-Zerodha Kite used EXCLUSIVELY for orders + portfolio.
-Market data comes from NSE India API + yfinance (market_data.py).
+Zerodha Kite used for orders + portfolio, and as the sole market-data source
+(WebSocket ticks + historical). Live quotes/option-chain also use the free
+NSE India API (market_data.py). Yahoo Finance has been removed.
 
 Kite Connect API limits enforced here
 ──────────────────────────────────────

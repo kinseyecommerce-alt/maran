@@ -40,7 +40,7 @@ def _strip_ns(symbol: str) -> str:
 
 def _download_prices(symbols: list[str], period: str, interval: str) -> pd.DataFrame:
     """
-    Fetch close prices for NSE symbols via yf_client (Kite-first, yfinance fallback).
+    Fetch close prices for NSE symbols via yf_client (Kite historical / bhavcopy).
     Returns a DataFrame of close prices indexed by date, one column per symbol.
     """
     from market_data import yf_client
@@ -72,7 +72,7 @@ async def refresh_matrix(symbols: list[str]) -> None:
     20 trading-day window), then compute the pairwise return correlation matrix
     and store it in `_corr_matrix`.
 
-    Uses asyncio.to_thread so the blocking yfinance I/O doesn't stall the event
+    Uses asyncio.to_thread so the blocking Kite historical I/O doesn't stall the event
     loop.  Handles all download / parse errors gracefully — the existing matrix
     is preserved if the refresh fails.
     """

@@ -236,7 +236,7 @@ class MarketRegimeDetector:
     VIX_HIGH     = 20.0
     VIX_EXTREME  = 25.0
 
-    # Sector index NSE symbols (used with Kite / yf_client)
+    # Sector index NSE symbols (used with Kite historical via yf_client)
     SECTOR_TICKERS = {
         "IT":     "NIFTYIT",
         "Bank":   "BANKNIFTY",

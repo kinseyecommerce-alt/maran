@@ -22,7 +22,7 @@ _levels_cache_lock = threading.Lock()
 
 async def refresh_daily(symbols: list[str]) -> None:
     """
-    Download the last 10 trading days of daily OHLCV from yfinance for each symbol
+    Download the last 10 trading days of daily OHLCV from Kite for each symbol
     and populate _levels_cache with prior-day H/L/C, weekly H/L, and classic pivot points.
 
     Designed to be called once per day at ~9:05 AM IST, before the market opens.
@@ -37,7 +37,7 @@ async def refresh_daily(symbols: list[str]) -> None:
 
 
 async def _refresh_symbol(symbol: str) -> None:
-    """Download and compute all daily-bar levels for a single symbol via Kite / yf_client."""
+    """Download and compute all daily-bar levels for a single symbol via Kite historical."""
     from market_data import yf_client
     try:
         df = await asyncio.to_thread(

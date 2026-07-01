@@ -8,7 +8,7 @@ Tests ALL 8 strategies x ALL symbols in the universe.
 Only symbols + strategies that PASS are activated for live trading.
 
 Pipeline:
-  1. Fetch fresh OHLCV from yfinance for every symbol
+  1. Fetch fresh OHLCV from Kite historical for every symbol
   2. Run walk-forward simulation for each strategy
   3. Apply pass/fail gate (win rate, Sharpe, drawdown, profit factor)
   4. Generate ranked leaderboard per strategy

@@ -2797,7 +2797,7 @@ def macro_signals_summary():
 
 @app.post("/macro/refresh", tags=["Alt Data"])
 def macro_signals_refresh():
-    """Trigger immediate macro data refresh from yfinance in background."""
+    """Trigger immediate macro data refresh (NSE India VIX) in background."""
     from macro_signals import macro_signals
     threading.Thread(target=macro_signals.refresh, daemon=True).start()
     return {"status": "refresh_started", "current_score": macro_signals.get_macro_score()}

@@ -9737,30 +9737,11 @@ def t_greeks_ist_constant_defined():
     expected_offset = timedelta(hours=5, minutes=30)
     assert _ge._IST.utcoffset(None) == expected_offset, "_IST must be UTC+5:30"
 
-def t_macro_signals_multiindex_column_handling():
-    """_fetch_ticker_last_two must flatten MultiIndex columns before accessing 'Close'."""
-    import inspect
-    import macro_signals as _ms
-    src = inspect.getsource(_ms._fetch_ticker_last_two)
-    assert "MultiIndex" in src, (
-        "_fetch_ticker_last_two must handle pd.MultiIndex columns from yfinance"
-    )
-    assert "get_level_values" in src, (
-        "_fetch_ticker_last_two must call get_level_values(0) to flatten MultiIndex"
-    )
-
-def t_market_data_fast_info_attribute_access():
-    """current_price must use info.last_price (attribute access) not info.get('last_price')."""
-    import inspect
-    import market_data as _md
-    src = inspect.getsource(_md.YFinanceClient.current_price)
-    assert "info.last_price" in src, (
-        "current_price must access fast_info.last_price as attribute, "
-        "not info.get('last_price') which returns None (wrong key format)"
-    )
-    assert "info.get(\"last_price\")" not in src, (
-        "current_price must NOT use info.get('last_price') — wrong key, always returns None"
-    )
+# NOTE: t_macro_signals_multiindex_column_handling and
+# t_market_data_fast_info_attribute_access were removed when Yahoo Finance was
+# dropped — both asserted yfinance-specific behavior (_fetch_ticker_last_two
+# MultiIndex flattening; yf.Ticker.fast_info attribute access) that no longer
+# exists. Kite is now the sole market-data source.
 
 def t_strategy_futures_fii_scope_init():
     """FuturesAgent._ctx_bonus must receive fii_sentiment as a parameter (not fetch internally)."""
@@ -9918,8 +9899,6 @@ run("greeks_engine: calculate_greeks raises ValueError when spot=0 (prevents Zer
 run("greeks_engine: calculate_greeks raises ValueError when strike=0",                           t_greeks_strike_zero_raises)
 run("greeks_engine: implied_volatility returns NaN on loop exhaustion (not bad sigma)",          t_greeks_iv_solver_returns_nan_on_exhaustion)
 run("greeks_engine: _IST timezone constant defined for UTC vs IST fix",                          t_greeks_ist_constant_defined)
-run("macro_signals: _fetch_ticker_last_two handles pd.MultiIndex columns from yfinance",         t_macro_signals_multiindex_column_handling)
-run("market_data: current_price uses info.last_price attribute (not wrong dict key)",            t_market_data_fast_info_attribute_access)
 run("strategy_agents: FuturesAgent._ctx_bonus initializes fii=None before try block",           t_strategy_futures_fii_scope_init)
 run("strategy_agents: FuturesAgent._ctx_bonus item 13 uses if-fii-is-not-None guard",          t_strategy_futures_fii_item13_no_try_except)
 run("strategy_agents: OptionsAgent._ctx_bonus theta efficiency uses options_intelligence IV",    t_options_agent_theta_uses_options_intelligence)

@@ -343,14 +343,14 @@ if __name__ == "__main__":
     loguru.logger.remove()
     loguru.logger.add(lambda m: None)  # suppress all log noise during simulation
 
-    # Patch macro_signals to skip yfinance network calls (blocked in this environment).
-    # Both refresh() and _auto_refresh_if_stale() are stubbed so no background
-    # threads fire during the simulation.
+    # Patch macro_signals to skip the NSE India VIX network call (blocked in
+    # this environment). Both refresh() and _auto_refresh_if_stale() are stubbed
+    # so no background threads fire during the simulation.
     import macro_signals as _ms
     _ms.macro_signals.refresh = lambda: _ms.macro_signals._data          # type: ignore
     _ms.macro_signals._auto_refresh_if_stale = lambda: None              # type: ignore
 
-    # Suppress yfinance stdout noise (403 / "possibly delisted" lines).
+    # Suppress any stray stdout noise from data fetchers during simulation.
     import sys as _sys, io as _io
     _real_stdout = _sys.stdout
     _sys.stdout  = _io.StringIO()

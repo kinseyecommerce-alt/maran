@@ -456,7 +456,7 @@ class BacktestEngine:
 
     def _fetch_data(self, symbol: str, exchange: str, interval: str, days: int):
         yf_interval = self._YF_INTERVAL.get(interval, "15m")
-        # Default to "2y" (the max available via yfinance) so that if `days`
+        # Default to "2y" (the max history window requested) so that if `days`
         # exceeds 730 the fetch still requests the maximum rather than silently
         # falling back to the loop's starting value of "6mo".
         period = "2y"

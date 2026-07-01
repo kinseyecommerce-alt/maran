@@ -417,9 +417,9 @@ class SymbolScanner:
             # 5 days 15-min for intraday / scalping indicators
             df_15 = truedata_historical.historical(symbol, "NSE", "15m", lookback_days=5)
 
-            # Fallback: local CSV cache only (no yfinance network call — avoids hanging when
-            # network is blocked). Production callers that need yfinance should call
-            # yf_client.historical() directly.
+            # Fallback: local CSV cache only (no live network call — avoids hanging when
+            # network is blocked). Production callers that need fresh data should call
+            # yf_client.historical() directly (Kite historical).
             if df_d.empty:
                 _csv = Path(f"logs/historical_data/{symbol}/1d.csv")
                 if _csv.exists():

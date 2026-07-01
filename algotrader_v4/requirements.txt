@@ -3,7 +3,7 @@ kiteconnect==5.0.1
 # upstox-python>=2.12.0  # optional; broker adapter uses httpx directly
 
 # ── Market data ───────────────────────────────────────────────────
-yfinance==1.4.0
+# Yahoo Finance (yfinance) removed — Kite Connect is the sole market-data source.
 # TrueData WebSocket feed (live ticks, OHLCV history, options chain)
 truedata-ws
 websocket-client>=0.58.0
