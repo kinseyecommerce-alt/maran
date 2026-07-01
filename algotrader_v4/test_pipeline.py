@@ -2460,6 +2460,25 @@ def t_futures_10_pattern_methods_exist():
     methods = [m for m in dir(FuturesAgent) if m.startswith("_pat_")]
     assert len(methods) >= 10, f"Expected ≥10 _pat_ methods, found {len(methods)}: {methods}"
 
+def t_futures_filter_watchlist_approves_indices():
+    """FuturesAgent must approve its tradeable index underlyings (incl.
+    NIFTY/BANKNIFTY) regardless of the equity scanner watchlist, so _run_loop
+    processes their ticks (subscribed via nifty100.INDEX_SYMBOLS) instead of
+    dropping them as unapproved."""
+    agent = FuturesAgent()
+    # Equity-scanner watchlist with only stocks — none of which futures trades.
+    approved = agent.filter_watchlist([
+        {"symbol": "RELIANCE", "exchange": "NSE"},
+        {"symbol": "SBIN", "exchange": "NSE"},
+    ])
+    syms = {i["symbol"] for i in approved}
+    assert "NIFTY" in syms and "BANKNIFTY" in syms, \
+        f"futures watchlist must include NIFTY & BANKNIFTY, got {syms}"
+    # Only index underlyings it can actually trade (LOT_SIZES), no stocks.
+    assert syms == set(FuturesAgent.LOT_SIZES), \
+        f"futures watchlist must be exactly the LOT_SIZES indices, got {syms}"
+    assert "RELIANCE" not in syms and "SBIN" not in syms
+
 run("futures TSL config present in TRAIL_CONFIGS",        t_futures_tsl_config_present)
 run("futures TSL register uses futures initial SL",       t_futures_tsl_register_uses_futures_config)
 run("FuturesAgent.evaluate_tick returns valid action",    t_futures_valid_action)
@@ -2468,6 +2487,7 @@ run("futures exits long when price hits SL",              t_futures_exit_sl_long
 run("futures exits long when price hits target",          t_futures_exit_target_long)
 run("futures no exit when price between SL and target",   t_futures_no_exit_before_sl)
 run("FuturesAgent has ≥10 pattern methods",               t_futures_10_pattern_methods_exist)
+run("FuturesAgent.filter_watchlist approves NIFTY/BANKNIFTY indices", t_futures_filter_watchlist_approves_indices)
 
 
 # ══════════════════════════════════════════════════════════════════════════

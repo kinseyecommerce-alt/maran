@@ -2949,6 +2949,22 @@ class FuturesAgent(BaseAgent):
     MIN_SCORE = 4
     COOL_S    = 180
 
+    def filter_watchlist(self, watchlist: list[dict]) -> list[dict]:
+        """FuturesAgent trades ONLY index futures, so its approved set is the
+        index underlyings it can trade (LOT_SIZES keys) — NOT the equity scanner
+        output, which is stock-oriented and filters indices out on (near-zero)
+        spot volume. The index underlyings (NIFTY, BANKNIFTY, …) are subscribed
+        for ticks via nifty100.INDEX_SYMBOLS; approving them here lets _run_loop
+        process those ticks instead of dropping them as unapproved. Exchanges are
+        preserved from the incoming watchlist when present, else default to NSE.
+        (Bypasses the per-symbol backtest gate: index futures are always liquid
+        and are the only instruments this agent can trade.)
+        """
+        existing = {i.get("symbol"): i.get("exchange", "NSE")
+                    for i in (watchlist or [])}
+        return [{"symbol": s, "exchange": existing.get(s, "NSE")}
+                for s in self.LOT_SIZES]
+
     def __init__(self) -> None:
         super().__init__()
         # Per-symbol rolling state (instance-level — class-level dicts would be
