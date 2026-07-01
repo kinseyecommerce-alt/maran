@@ -136,7 +136,12 @@ _STRATEGY_DISCLOSURES: dict[str, dict] = {
 
 # Reg 4: SEBI guideline hard cap — ₹10 lakh per order. A config value must
 # never be able to RAISE this limit (it may only tighten via max_position_size).
+# Applies to CASH-EQUITY orders only; F&O/derivative exchanges are exempt (a
+# single index-futures lot exceeds this notional but posts only margin).
 _SEBI_MAX_ORDER_VALUE = 1_000_000.0
+
+# Derivative exchanges exempt from the equity per-order value cap.
+_DERIVATIVE_EXCHANGES = frozenset({"NFO", "BFO", "MCX", "CDS", "BCD", "NCO"})
 
 
 class KillSwitchState(Enum):
@@ -414,9 +419,15 @@ class SEBICompliance:
                                    signal_source, regime, "REJECTED", reason, algo_id)
                 return False, algo_id, reason
 
-            # Reg 4: max order value — BOTH limits enforced independently:
-            #   • SEBI guideline hard cap: ₹10 lakh per order (NOT raisable via config)
+            # Reg 4: max order VALUE — cash-equity guard only.
+            #   • SEBI guideline hard cap: ₹10 lakh per order
             #   • configured max_position_size, when smaller
+            # F&O / derivative exchanges (NFO/BFO/MCX/CDS) are EXEMPT: a single
+            # index-futures lot exceeds ₹1M in notional but posts only ~20% as
+            # margin, so a notional value cap would block every futures order.
+            # F&O order size is bounded instead by margin-based lot sizing and
+            # max_futures_lots_per_order. The equity guard is unchanged.
+            # The invalid-price check below applies to ALL orders.
             if not price_at_signal or math.isnan(price_at_signal) or price_at_signal <= 0:
                 reason = f"Invalid price_at_signal: {price_at_signal}"
                 self._record_audit(strategy, symbol, exchange, transaction_type,
@@ -424,23 +435,25 @@ class SEBICompliance:
                                    signal_source, regime, "REJECTED", reason, algo_id)
                 return False, algo_id, reason
             order_value = quantity * max(price_at_signal, 1.0)
-            if order_value > _SEBI_MAX_ORDER_VALUE:
-                reason = (f"Order value ₹{order_value:,.0f} exceeds SEBI per-order limit "
-                          f"₹{_SEBI_MAX_ORDER_VALUE:,.0f}")
-                self._record_audit(strategy, symbol, exchange, transaction_type,
-                                   quantity, order_type, price_at_signal,
-                                   signal_source, regime, "REJECTED", reason, algo_id)
-                return False, algo_id, reason
-            config_cap = settings.max_position_size
-            # 0 means "no cap configured" — skip the check; max(cap, 1.0) would
-            # accidentally set a ₹1 limit and reject every order.
-            if config_cap > 0 and order_value > config_cap:
-                reason = (f"Order value ₹{order_value:,.0f} exceeds configured "
-                          f"max_position_size ₹{config_cap:,.0f}")
-                self._record_audit(strategy, symbol, exchange, transaction_type,
-                                   quantity, order_type, price_at_signal,
-                                   signal_source, regime, "REJECTED", reason, algo_id)
-                return False, algo_id, reason
+            _is_derivative = (exchange or "NSE").upper() in _DERIVATIVE_EXCHANGES
+            if not _is_derivative:
+                if order_value > _SEBI_MAX_ORDER_VALUE:
+                    reason = (f"Order value ₹{order_value:,.0f} exceeds SEBI per-order limit "
+                              f"₹{_SEBI_MAX_ORDER_VALUE:,.0f}")
+                    self._record_audit(strategy, symbol, exchange, transaction_type,
+                                       quantity, order_type, price_at_signal,
+                                       signal_source, regime, "REJECTED", reason, algo_id)
+                    return False, algo_id, reason
+                config_cap = settings.max_position_size
+                # 0 means "no cap configured" — skip the check; max(cap, 1.0) would
+                # accidentally set a ₹1 limit and reject every order.
+                if config_cap > 0 and order_value > config_cap:
+                    reason = (f"Order value ₹{order_value:,.0f} exceeds configured "
+                              f"max_position_size ₹{config_cap:,.0f}")
+                    self._record_audit(strategy, symbol, exchange, transaction_type,
+                                       quantity, order_type, price_at_signal,
+                                       signal_source, regime, "REJECTED", reason, algo_id)
+                    return False, algo_id, reason
 
             # Reg 3: order-to-trade ratio — reject if > 10:1 (SEBI requirement)
             self._orders_placed += 1

@@ -154,18 +154,16 @@ def recipes():
                ema9=1624, ema21=1618, ema50=1612, ema200=1500, n_candles=30),
         ]),
         # FuturesAgent only trades INDEX futures (in LOT_SIZES); stock futures like
-        # SBIN are rejected at evaluate_tick's index-only guard. The index also has
-        # to satisfy two sizing constraints in PAPER at default capital:
-        #   • ltp < the ₹50k futures bucket, else calculate_quantity floors to 0
-        #     (BANKNIFTY ~52k would silently skip);
-        #   • 1-lot notional < the ₹1M SEBI per-order cap (NIFTY 75×24k=1.8M blocks).
-        # FINNIFTY (lot 40 @ ~23k = ~920k) satisfies both. Same EMA9>EMA21>EMA50
-        # crossover shape as the other agents to fire _pat_ema_trend (LONG, score 5).
-        "futures": (FuturesAgent(), "FINNIFTY", [
-            mk("FINNIFTY", 23000, rsi=55, vwap=22850, macd_hist=0.3, volume_ratio=1.6,
-               ema9=22960, ema21=23000, ema50=22880, n_candles=30),
-            mk("FINNIFTY", 23150, rsi=60, vwap=22850, macd_hist=1.5, volume_ratio=2.0,
-               ema9=23200, ema21=23090, ema50=22980, n_candles=30),
+        # SBIN are rejected at evaluate_tick's index-only guard. NIFTY now trades on
+        # margin-based sizing (75 × ~24k × 20% ≈ ₹360k margin/lot, funded above) and
+        # F&O is exempt from the equity ₹1M per-order value cap, so the 1-lot ₹1.8M
+        # notional no longer blocks. Same EMA9>EMA21>EMA50 crossover shape as the
+        # other agents to fire _pat_ema_trend (LONG, score 5).
+        "futures": (FuturesAgent(), "NIFTY", [
+            mk("NIFTY", 24000, rsi=55, vwap=23850, macd_hist=0.3, volume_ratio=1.6,
+               ema9=23960, ema21=24000, ema50=23880, n_candles=30),
+            mk("NIFTY", 24150, rsi=60, vwap=23850, macd_hist=1.5, volume_ratio=2.0,
+               ema9=24200, ema21=24080, ema50=23950, n_candles=30),
         ]),
     }
 
@@ -317,12 +315,18 @@ async def run_paper():
         "maxsize":   settings.max_position_size,
         "kelly":     settings.use_kelly_sizing,
         "maxloss":   settings.max_daily_loss,
+        "capital":   settings.total_capital,
     }
     settings.use_multi_timeframe = False          # MTF needs aligned 5m set
     settings.use_claude_trade_gate = True         # exercise gate stage (stubbed)
     settings.use_kelly_sizing = False             # deterministic qty
     settings.max_open_positions = 50
     settings.max_position_size = 10_000_000.0
+    # Index futures are margin products: fund the futures bucket so the agent can
+    # afford ≥1 NIFTY lot's NRML margin (75 × ~24k × 20% ≈ ₹360k). At the default
+    # ₹500k account the ₹50k bucket can't margin a lot; a realistic index-futures
+    # account is ₹millions. bucket = total_capital × futures_capital_pct(10%).
+    settings.total_capital = 5_000_000.0
     # The forced -10% exits accumulate losses across agents; raise limit so the
     # daily-loss guard doesn't block later agents (the guard logic still executes).
     settings.max_daily_loss = 10_000_000.0
@@ -356,6 +360,7 @@ async def run_paper():
         settings.max_open_positions    = saved["maxpos"]
         settings.max_position_size     = saved["maxsize"]
         settings.max_daily_loss        = saved["maxloss"]
+        settings.total_capital         = saved["capital"]
 
     return summary()
 

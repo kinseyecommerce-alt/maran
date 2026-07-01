@@ -883,7 +883,13 @@ class BaseAgent(ABC):
         """Compute final order quantity applying all sizing factors."""
         ltp    = snap.tick.ltp
         atr_14 = getattr(snap.indicators, "atr_14", 0)
-        if getattr(settings, "use_atr_sizing", False) and atr_14 > 0:
+        # Index futures are margin products — size on posted margin, not full
+        # notional (which would demand ~₹1.8M cash for one NIFTY lot). A lot-based
+        # futures signal carries a futures_symbol + lot_size.
+        _lot_size = signal.get("lot_size", 1)
+        if _lot_size > 1 and signal.get("futures_symbol"):
+            qty = risk_manager.calculate_futures_qty(ltp, _lot_size, agent=self.name)
+        elif getattr(settings, "use_atr_sizing", False) and atr_14 > 0:
             qty = risk_manager.calculate_quantity_atr(ltp, atr_14, agent=self.name)
         else:
             qty = risk_manager.calculate_quantity(ltp, agent=self.name)
@@ -1132,7 +1138,7 @@ class BaseAgent(ABC):
         except Exception:
             pass
 
-        allowed, _ = risk_manager.check_before_order(sym, qty, ltp, action)
+        allowed, _ = risk_manager.check_before_order(sym, qty, ltp, action, exchange=exch)
         if not allowed:
             order_guard.release_claim(sym, self.name, action)
             raise RuntimeError("risk_denied")

@@ -238,6 +238,7 @@ class RiskManager:
         quantity: int,
         price: float,
         transaction_type: str,
+        exchange: str = "NSE",
     ) -> tuple[bool, str]:
         # Entire check sequence under lock: prevents two concurrent agents both
         # reading stale daily_pnl / position_count and racing past the limits.
@@ -271,7 +272,7 @@ class RiskManager:
                 if not ok:
                     return False, msg
 
-            ok, msg = self._check_position_size(quantity, price)
+            ok, msg = self._check_position_size(quantity, price, exchange)
             if not ok:
                 return False, msg
 
@@ -313,7 +314,19 @@ class RiskManager:
             return False, f"Max open positions reached ({settings.max_open_positions})"
         return True, "OK"
 
-    def _check_position_size(self, quantity: int, price: float) -> tuple[bool, str]:
+    # F&O / derivative exchanges — these trade on margin and are exempt from the
+    # equity notional position-size cap (bounded instead by margin-based lot
+    # sizing + max_futures_lots_per_order).
+    _DERIVATIVE_EXCHANGES = frozenset({"NFO", "BFO", "MCX", "CDS", "BCD", "NCO"})
+
+    def _check_position_size(
+        self, quantity: int, price: float, exchange: str = "NSE",
+    ) -> tuple[bool, str]:
+        # Derivatives (index/stock futures, options) carry large notionals per lot
+        # but only post a fraction as margin; the ₹max_position_size cap is a
+        # cash-equity guard and would spuriously block every futures lot.
+        if (exchange or "NSE").upper() in self._DERIVATIVE_EXCHANGES:
+            return True, "OK"
         value = quantity * price
         if value > settings.max_position_size:
             return False, (
@@ -406,6 +419,47 @@ class RiskManager:
         # Do NOT force qty=1 when max_affordable==0: a single share would exceed
         # max_position_size. Return qty as-is (0 means skip the trade).
         return qty
+
+    def calculate_futures_qty(
+        self, price: float, lot_size: int, agent: str = "futures",
+    ) -> int:
+        """Margin-based lot sizing for index futures (NRML).
+
+        Index futures are margin products — the account posts only ~a fifth of
+        contract notional, not the full value. Sizing therefore divides the
+        allocated futures capital by the *margin* per lot
+        (price × lot_size × futures_margin_pct%), NOT by full notional, then
+        floors to whole lots.
+
+        Returns the total quantity (lots × lot_size), or 0 when the futures
+        bucket cannot cover even a single lot's margin (skip the trade — never
+        over-leverage the allocation). Capped by max_futures_lots_per_order.
+        """
+        if not price or price <= 0 or not lot_size or lot_size <= 0:
+            return 0
+        cap = self.max_capital_for_agent(agent)
+        # Honour half-Kelly capital scaling for parity with calculate_quantity().
+        if settings.use_kelly_capital_sizing and agent:
+            kf = get_kelly_fraction(agent)
+            if kf <= 0:
+                kf = 0.02
+            cap = cap * min(kf * 2, 1.0)
+        margin_pct     = getattr(settings, "futures_margin_pct", 20.0)
+        margin_per_lot = price * lot_size * (margin_pct / 100.0)
+        if margin_per_lot <= 0:
+            return 0
+        lots = int(cap // margin_per_lot)
+        if lots < 1:
+            logger.warning(
+                "[RiskManager] futures margin ₹{:.0f}/lot exceeds allocated bucket "
+                "₹{:.0f} ({}) — qty=0 (fund the futures bucket to trade this index)",
+                margin_per_lot, cap, agent,
+            )
+            return 0
+        max_lots = getattr(settings, "max_futures_lots_per_order", 0)
+        if max_lots and max_lots > 0:
+            lots = min(lots, max_lots)
+        return lots * lot_size
 
     def sl_price(self, entry: float, side: str) -> float:
         pct = settings.stop_loss_pct / 100
