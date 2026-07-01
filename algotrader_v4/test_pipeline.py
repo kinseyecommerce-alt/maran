@@ -310,6 +310,25 @@ def t_options_entry_passes_premium_price():
         "else PAPER fills the option at the ₹100 _paper_place fallback"
     )
 
+def t_paper_option_bs_mark_to_market():
+    """PAPER option positions re-mark against underlying ticks via the delta
+    approximation (contract has no tick feed of its own)."""
+    kc = KiteClient()
+    kc._paper_positions.clear()
+    kc._paper_option_meta.clear()
+    kc.place_order("INFY26JUL1650CE", "NFO", "BUY", 1,
+                   order_type="MARKET", price=22.0, tag="t")
+    kc.register_paper_option("INFY26JUL1650CE", "INFY", entry_spot=1600.0, delta=0.5)
+    pos = next(p for p in kc._paper_positions if p["tradingsymbol"] == "INFY26JUL1650CE")
+    # At entry spot → premium == entry fill → P&L ~0 (no jump)
+    kc.reprice_paper_options("INFY", 1600.0)
+    assert abs(pos["pnl"]) < 0.01, f"P&L at entry spot must be ~0, got {pos['pnl']}"
+    # Spot +20 → premium + 0.5×20 = +10 → long CE gains ₹10
+    kc.reprice_paper_options("INFY", 1620.0)
+    assert abs(pos["last_price"] - 32.0) < 0.01, f"premium should be 32, got {pos['last_price']}"
+    assert abs(pos["pnl"] - 10.0) < 0.01, f"P&L should be +10, got {pos['pnl']}"
+    assert abs(kc._paper_ltp["INFY26JUL1650CE"] - 32.0) < 0.01, "contract _paper_ltp must update"
+
 run("_TokenBucket.acquire() no raise",          t_bucket_acquire)
 run("_TokenBucket throttle within 2s for 5",    t_bucket_throttle)
 run("_with_retry returns value on success",      t_retry_success)
@@ -333,6 +352,7 @@ run("paper-live keeps orders simulated",         t_paper_live_orders_still_simul
 run("tick_engine _live_data_enabled logic",      t_tick_engine_live_data_enabled)
 run("paper MARKET untracked contract uses price hint (not ₹100)", t_paper_market_untracked_contract_uses_price_hint)
 run("options entry passes premium as price (no ₹100 fallback)",   t_options_entry_passes_premium_price)
+run("paper option BS delta mark-to-market tracks underlying",     t_paper_option_bs_mark_to_market)
 run("order_history() finds by order_id",         t_order_history)
 run("cancel_order() sets CANCELLED",             t_cancel_order)
 run("cancel on COMPLETE order raises",           t_cancel_complete_raises)

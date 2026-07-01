@@ -874,6 +874,10 @@ class TickEngine:
         # Paper-mode: update P&L and check SL/SL-M triggers on each tick
         if settings.trading_mode == "PAPER":
             kite_client.update_paper_pnl(symbol, tick.ltp)
+            # Re-mark open option positions on this underlying via Black-Scholes
+            # (delta approx) — option contracts have no tick feed, so without this
+            # their paper P&L would never move with the underlying.
+            kite_client.reprice_paper_options(symbol, tick.ltp)
             kite_client.check_paper_triggers(symbol, tick.ltp)
 
         snap = MarketSnapshot(

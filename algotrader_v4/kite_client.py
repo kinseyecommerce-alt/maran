@@ -151,6 +151,9 @@ class KiteClient:
         self._pos_cache_ttl: float = 0.5   # 0.5s TTL — keeps sector/count checks fresh for scalping agents
         self._pos_cache_lock: Lock = Lock()
         self._paper_ltp: dict[str, float] = {}        # sym → last known LTP for MARKET fill price
+        # Option contract → {underlying, entry_spot, delta} for PAPER Black-Scholes
+        # mark-to-market (option contracts have no tick feed of their own).
+        self._paper_option_meta: dict[str, dict] = {}
 
     # ── Auth ───────────────────────────────────────────────────────────────
 
@@ -954,6 +957,45 @@ class KiteClient:
                 if pos["tradingsymbol"] == symbol:
                     pos["last_price"] = ltp
                     pos["pnl"] = round((ltp - pos["average_price"]) * pos["quantity"], 2)
+
+    def register_paper_option(
+        self, contract: str, underlying: str, entry_spot: float, delta: float,
+    ) -> None:
+        """Register an option paper position for Black-Scholes mark-to-market
+        against underlying ticks. Called by OptionsAgent at entry (PAPER only) —
+        option contracts have no tick feed, so their premium is re-derived from
+        the underlying via reprice_paper_options()."""
+        if entry_spot > 0:
+            self._paper_option_meta[contract] = {
+                "underlying": underlying, "entry_spot": entry_spot, "delta": delta,
+            }
+
+    def reprice_paper_options(self, underlying: str, spot: float) -> None:
+        """Re-mark open option paper positions on *underlying* from the current
+        spot using a first-order (delta) approximation:
+            premium = entry_premium + delta × (spot − entry_spot)
+        anchored to the entry fill (average_price), so it is exact at entry and
+        moves realistically with the underlying. Keeps _paper_ltp[contract] and
+        each option position's P&L current even though the contract is never
+        ticked. Stale meta (closed positions) is pruned."""
+        if spot <= 0 or not self._paper_option_meta:
+            return
+        with self._paper_positions_lock:
+            for pos in self._paper_positions:
+                contract = pos.get("tradingsymbol", "")
+                meta = self._paper_option_meta.get(contract)
+                if not meta or meta["underlying"] != underlying:
+                    continue
+                if pos.get("quantity", 0) == 0:
+                    self._paper_option_meta.pop(contract, None)
+                    continue
+                premium = round(max(
+                    pos["average_price"] + meta["delta"] * (spot - meta["entry_spot"]),
+                    0.05,
+                ), 2)
+                pos["last_price"] = premium
+                pos["pnl"] = round((premium - pos["average_price"]) * pos["quantity"], 2)
+                self._paper_ltp[contract] = premium
 
 
 kite_client = KiteClient()
