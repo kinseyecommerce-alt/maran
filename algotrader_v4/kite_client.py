@@ -190,11 +190,22 @@ class KiteClient:
 
     # ── Instrument lookup ──────────────────────────────────────────────────
 
+    def _paper_data_stub(self) -> bool:
+        """True when MARKET-DATA calls should return empty instead of hitting
+        Kite. In PAPER mode data is stubbed UNLESS paper_use_live_data is set and
+        a Kite connection exists — then PAPER sources real market data from Kite
+        (orders/portfolio stay simulated). Always False in LIVE mode.
+        """
+        if settings.trading_mode != "PAPER":
+            return False
+        return not (getattr(settings, "paper_use_live_data", False)
+                    and self._kite is not None)
+
     def get_instruments(self, exchange: str = "NSE") -> list[dict]:
         """Fetch and cache all instruments for the given exchange."""
         if exchange in self._instruments_cache:
             return self._instruments_cache[exchange]
-        if settings.trading_mode == "PAPER":
+        if self._paper_data_stub():
             return []
         try:
             instruments = _with_retry(lambda: self.kite.instruments(exchange),
@@ -341,8 +352,9 @@ class KiteClient:
 
     def quote_kite(self, instruments: list[str]) -> dict[str, dict]:
         """Batch live quotes from Kite. instruments = ['NSE:RELIANCE', 'NFO:NIFTY...'].
-        Returns Kite's quote dict keyed by 'EXCHANGE:SYMBOL'. Empty dict in PAPER mode."""
-        if settings.trading_mode == "PAPER" or not instruments:
+        Returns Kite's quote dict keyed by 'EXCHANGE:SYMBOL'. Empty dict when paper
+        data is stubbed (PAPER without paper_use_live_data)."""
+        if self._paper_data_stub() or not instruments:
             return {}
         return _with_retry(lambda: self.kite.quote(instruments), label="quote")
 
@@ -606,7 +618,7 @@ class KiteClient:
           day data    → 2 000-day chunks
         Chunks are merged and returned as a single list.
         """
-        if settings.trading_mode == "PAPER":
+        if self._paper_data_stub():
             return []
 
         is_minute = "minute" in interval

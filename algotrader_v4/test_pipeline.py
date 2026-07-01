@@ -229,6 +229,65 @@ def t_modify_order():
     o = kc._paper_orders.get(oid)
     assert o and o["price"] == 910.0
 
+def t_paper_live_data_flag_default_off():
+    from config import settings as _s
+    assert hasattr(_s, "paper_use_live_data")
+    assert _s.paper_use_live_data is False   # GBM simulator is the default
+
+def t_paper_data_stub_gates_on_flag():
+    """kite_client market-data is stubbed in PAPER by default, but real when
+    paper_use_live_data is set AND a Kite connection exists."""
+    from config import settings as _s
+    from unittest.mock import MagicMock
+    kc = KiteClient()
+    _saved = _s.paper_use_live_data
+    try:
+        _s.paper_use_live_data = False           # default → stubbed
+        assert kc._paper_data_stub() is True
+        assert kc.quote_kite(["NSE:RELIANCE"]) == {}
+        _s.paper_use_live_data = True
+        kc._kite = None                          # flag on, no connection → still stubbed
+        assert kc._paper_data_stub() is True
+        kc._kite = MagicMock()                   # flag on + connection → real data path
+        assert kc._paper_data_stub() is False
+    finally:
+        _s.paper_use_live_data = _saved
+        kc._kite = None
+
+def t_paper_live_orders_still_simulated():
+    """Even with paper_use_live_data on, orders remain simulated in PAPER —
+    only the market-data feed is real."""
+    from config import settings as _s
+    from unittest.mock import MagicMock
+    kc = KiteClient()
+    _saved = _s.paper_use_live_data
+    try:
+        _s.paper_use_live_data = True
+        kc._kite = MagicMock()
+        oid = kc.place_order("RELIANCE", "NSE", "BUY", 1, tag="Test")
+        assert oid.startswith("PAPER-"), f"orders must stay simulated, got {oid}"
+    finally:
+        _s.paper_use_live_data = _saved
+        kc._kite = None
+
+def t_tick_engine_live_data_enabled():
+    from config import settings as _s
+    from tick_engine import TickEngine
+    _saved = (_s.trading_mode, _s.paper_use_live_data, _s.kite_access_token)
+    try:
+        _s.trading_mode = "LIVE"
+        assert TickEngine._live_data_enabled() is True
+        _s.trading_mode = "PAPER"
+        _s.paper_use_live_data = False
+        assert TickEngine._live_data_enabled() is False          # GBM simulator
+        _s.paper_use_live_data = True
+        _s.kite_access_token = ""
+        assert TickEngine._live_data_enabled() is False          # no token → GBM
+        _s.kite_access_token = "tok-abc"
+        assert TickEngine._live_data_enabled() is True           # paper on live data
+    finally:
+        _s.trading_mode, _s.paper_use_live_data, _s.kite_access_token = _saved
+
 run("_TokenBucket.acquire() no raise",          t_bucket_acquire)
 run("_TokenBucket throttle within 2s for 5",    t_bucket_throttle)
 run("_with_retry returns value on success",      t_retry_success)
@@ -246,6 +305,10 @@ run("valid MIS qty unchanged",                   t_valid_qty_unchanged)
 run("squareoff_all zeros all positions",         t_squareoff_all)
 run("paper margins() has 'equity' key",          t_margins_equity)
 run("paper historical_data returns []",          t_hist_paper_empty)
+run("paper_use_live_data flag defaults off",     t_paper_live_data_flag_default_off)
+run("paper data stub gates on flag + connection", t_paper_data_stub_gates_on_flag)
+run("paper-live keeps orders simulated",         t_paper_live_orders_still_simulated)
+run("tick_engine _live_data_enabled logic",      t_tick_engine_live_data_enabled)
 run("order_history() finds by order_id",         t_order_history)
 run("cancel_order() sets CANCELLED",             t_cancel_order)
 run("cancel on COMPLETE order raises",           t_cancel_complete_raises)

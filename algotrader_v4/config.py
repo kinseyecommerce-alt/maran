@@ -272,6 +272,12 @@ class Settings(BaseSettings):
 
     # Real-time tick feed
     use_kite_websocket: bool = True   # use KiteConnect WebSocket for ticks in LIVE mode
+    # Paper trading on REAL market data: when True (and a Kite access token is
+    # available), PAPER mode sources ticks from the live Kite WebSocket / quotes
+    # instead of the GBM simulator. Orders remain fully simulated (_paper_orders)
+    # — only the market-data feed is real. Default False keeps the offline GBM
+    # simulator so paper trading works without a broker connection / off-hours.
+    paper_use_live_data: bool = False
 
     # Daily capital allocation by trading type
     total_capital:          float = Field(default=500000.0, gt=0)  # total account capital (₹)

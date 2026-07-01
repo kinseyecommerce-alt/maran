@@ -605,7 +605,9 @@ class TickEngine:
     """
     In LIVE mode: KiteConnect WebSocket (true real-time sub-second ticks) with
     NSE India API fallback for symbols not yet received via WebSocket.
-    In PAPER mode: GBM simulator seeded from Kite last price.
+    In PAPER mode: GBM simulator seeded from Kite last price — unless
+    settings.paper_use_live_data is set (with a Kite token), in which case PAPER
+    also consumes the real Kite WebSocket feed while orders stay simulated.
     """
 
     def __init__(self) -> None:
@@ -655,6 +657,16 @@ class TickEngine:
 
     # ── Setup ─────────────────────────────────────────────────────────
 
+    @staticmethod
+    def _live_data_enabled() -> bool:
+        """True when ticks should come from the REAL Kite feed rather than the
+        GBM simulator: always in LIVE, and in PAPER when paper_use_live_data is
+        set and a Kite access token is available (paper trading on live data)."""
+        if settings.trading_mode == "LIVE":
+            return True
+        return bool(getattr(settings, "paper_use_live_data", False)
+                    and settings.kite_access_token)
+
     def subscribe(self, watchlist: list[dict]) -> None:
         for item in watchlist:
             sym  = item["symbol"]
@@ -669,13 +681,15 @@ class TickEngine:
             self._bufs_1min[sym] = TickBuffer(60,  maxlen=400)
             self._bufs_5min[sym] = TickBuffer(300, maxlen=200)
 
-        if settings.trading_mode == "PAPER":
+        # Seed the GBM simulator only when NOT using the live Kite feed. In
+        # paper-live mode ticks come from Kite, so the simulator is unused.
+        if settings.trading_mode == "PAPER" and not self._live_data_enabled():
             exchanges = {s: self._exchange[s] for s in self._symbols}
             paper_sim.seed(self._symbols, exchanges)
 
         logger.info("TickEngine: subscribed {} symbols via {}",
                     len(self._symbols),
-                    "KiteConnect REST+WS" if settings.trading_mode == "LIVE" else "Paper simulator")
+                    "KiteConnect REST+WS" if self._live_data_enabled() else "Paper simulator")
 
     def start_loop(self) -> None:
         """Called once FastAPI is running — starts the async polling loop and WebSocket."""
@@ -686,8 +700,9 @@ class TickEngine:
         if self._symbols:
             asyncio.create_task(self._backfill_bufs())
 
-        # Start tick WebSocket in LIVE mode — TrueData preferred, Kite as fallback
-        if settings.trading_mode == "LIVE":
+        # Start tick WebSocket when using the real feed (LIVE, or PAPER with
+        # paper_use_live_data) — TrueData preferred, Kite as fallback.
+        if self._live_data_enabled():
             if settings.use_truedata_websocket and settings.truedata_username:
                 try:
                     from truedata_client import truedata_ticker
@@ -930,7 +945,9 @@ class TickEngine:
                 kite_client.expire_stale_paper_limit_orders()
                 _last_order_expiry = t_start
 
-            if not is_market_open() and settings.trading_mode == "LIVE":
+            # Real-feed modes (LIVE, or paper-live) only have data during market
+            # hours; the GBM simulator runs any time for offline paper testing.
+            if not is_market_open() and self._live_data_enabled():
                 await asyncio.sleep(30)
                 continue
 
@@ -965,11 +982,13 @@ class TickEngine:
                     logger.info("TickEngine: WebSocket reconnected — re-enabling WS ticks")
                     self._use_ws = True
 
-            if settings.trading_mode == "PAPER":
+            if self._live_data_enabled():
+                # Real Kite feed: WS ticks + REST batch fallback for uncovered
+                # symbols (orders remain simulated in PAPER via kite_client).
+                await self._fetch_kite_batch()
+            else:
                 tasks = [self._fetch_and_process(sym) for sym in self._symbols]
                 await asyncio.gather(*tasks, return_exceptions=True)
-            else:
-                await self._fetch_kite_batch()
 
             # Sleep the remainder of the configured tick interval
             elapsed = time.monotonic() - t_start
