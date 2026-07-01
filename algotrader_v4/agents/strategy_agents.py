@@ -1523,6 +1523,34 @@ class OptionsAgent(BaseAgent):
                            key, exc)
         return bs_estimate, "bs_estimate"
 
+    def _register_paper_mtm(self, opt_sym: str, underlying: str,
+                            spot: float, iv: float) -> None:
+        """Register the option contract for PAPER Black-Scholes mark-to-market.
+        Computes the BS delta at entry (from strike/expiry parsed off the symbol)
+        so the paper engine can re-mark the premium against underlying ticks —
+        the contract itself is never ticked. No-op outside PAPER."""
+        from config import settings
+        if settings.trading_mode != "PAPER" or spot <= 0:
+            return
+        try:
+            from kite_client import kite_client
+            from greeks_engine import bs_price, parse_nfo_symbol, RISK_FREE_RATE
+            p = parse_nfo_symbol(opt_sym)
+            if not p:
+                return
+            dte  = max((p["expiry"] - now_ist().date()).days, 0)
+            T    = max(dte / 365.0, 0.5 / 365.0)
+            sig  = max(iv, 0.05)
+            K    = float(p["strike"])
+            opt  = p["opt_type"]
+            dS   = max(spot * 0.001, 0.5)
+            delta = (bs_price(spot + dS, K, T, RISK_FREE_RATE, sig, opt)
+                     - bs_price(spot - dS, K, T, RISK_FREE_RATE, sig, opt)) / (2 * dS)
+            kite_client.register_paper_option(opt_sym, underlying, spot, delta)
+        except Exception as exc:
+            from loguru import logger
+            logger.debug("[options] paper MTM register failed for {}: {}", opt_sym, exc)
+
     async def _try_enter(self, snap: MarketSnapshot, action: str, signal: dict) -> None:
         import math
         from loguru import logger
@@ -1619,6 +1647,8 @@ class OptionsAgent(BaseAgent):
         order_guard.confirm_claim(underlying, self.name, action, str(order_id))
         sebi_compliance.record_order_id(self.name, opt_sym, order_id)
         risk_manager.position_opened()
+        # PAPER: register for Black-Scholes mark-to-market against underlying ticks.
+        self._register_paper_mtm(opt_sym, underlying, S, iv)
         self.state.trades_today  += 1
         self.state.signals_fired += 1
         self.state.last_signal    = signal
@@ -1803,6 +1833,10 @@ class OptionsAgent(BaseAgent):
             return
 
         sebi_compliance.record_order_id(self.name, pe_sym, pe_order)
+        # PAPER: register PE leg for Black-Scholes mark-to-market.
+        _pe_atm_iv = signal.get("atm_iv", 25.0)
+        _pe_iv = max((_pe_atm_iv / 100.0) if _pe_atm_iv > 1.0 else _pe_atm_iv, 0.10)
+        self._register_paper_mtm(pe_sym, underlying, S, _pe_iv)
         _setup_tsl_callbacks()
         with _tsl_sl_orders_lock:
             _tsl_sl_orders[pe_order] = {
