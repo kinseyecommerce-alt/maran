@@ -153,11 +153,19 @@ def recipes():
             mk("INFY", 1626, rsi=58, vwap=1612, macd_hist=1.4, volume_ratio=1.9,
                ema9=1624, ema21=1618, ema50=1612, ema200=1500, n_candles=30),
         ]),
-        "futures": (FuturesAgent(), "SBIN", [
-            mk("SBIN", 790, rsi=55, vwap=785, macd_hist=0.3, volume_ratio=1.6,
-               ema9=788, ema21=790, ema50=786, n_candles=30),
-            mk("SBIN", 795, rsi=60, vwap=785, macd_hist=1.5, volume_ratio=2.0,
-               ema9=798, ema21=792, ema50=787, n_candles=30),
+        # FuturesAgent only trades INDEX futures (in LOT_SIZES); stock futures like
+        # SBIN are rejected at evaluate_tick's index-only guard. The index also has
+        # to satisfy two sizing constraints in PAPER at default capital:
+        #   • ltp < the ₹50k futures bucket, else calculate_quantity floors to 0
+        #     (BANKNIFTY ~52k would silently skip);
+        #   • 1-lot notional < the ₹1M SEBI per-order cap (NIFTY 75×24k=1.8M blocks).
+        # FINNIFTY (lot 40 @ ~23k = ~920k) satisfies both. Same EMA9>EMA21>EMA50
+        # crossover shape as the other agents to fire _pat_ema_trend (LONG, score 5).
+        "futures": (FuturesAgent(), "FINNIFTY", [
+            mk("FINNIFTY", 23000, rsi=55, vwap=22850, macd_hist=0.3, volume_ratio=1.6,
+               ema9=22960, ema21=23000, ema50=22880, n_candles=30),
+            mk("FINNIFTY", 23150, rsi=60, vwap=22850, macd_hist=1.5, volume_ratio=2.0,
+               ema9=23200, ema21=23090, ema50=22980, n_candles=30),
         ]),
     }
 
