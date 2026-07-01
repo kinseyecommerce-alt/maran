@@ -3212,6 +3212,17 @@ async def on_startup():
     from platform_scheduler import platform_scheduler
     platform_scheduler.start()
 
+    # Immediate auto-start on server restart when strategies are configured.
+    # The scheduled job fires at 09:16 IST only; this covers restarts at any time.
+    if settings.auto_start_strategies:
+        async def _startup_auto_start() -> None:
+            await asyncio.sleep(5)   # let tick engine + GBM settle first
+            try:
+                await platform_scheduler._auto_start_bot()
+            except Exception as _sas_exc:
+                logger.warning("[startup] auto-start failed: {}", _sas_exc)
+        asyncio.create_task(_startup_auto_start(), name="startup_auto_start").add_done_callback(_log_task_exc)
+
     # Schedule daily FII/DII refresh at 19:30 IST (market-close + 30 min)
     try:
         from apscheduler.triggers.cron import CronTrigger

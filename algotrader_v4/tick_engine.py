@@ -659,15 +659,20 @@ class TickEngine:
 
     @staticmethod
     def _live_data_enabled() -> bool:
-        """True when ticks should come from the REAL Kite feed rather than the
-        GBM simulator: always in LIVE, and in PAPER when paper_use_live_data is
-        set and a Kite access token is available (paper trading on live data)."""
+        """True when ticks should come from TrueData or Kite rather than GBM.
+        Priority order: TrueData WebSocket → Kite WebSocket.
+        In PAPER mode this fires when TrueData credentials are present, or when
+        paper_use_live_data=True with a Kite access token."""
         if settings.trading_mode == "LIVE":
+            return True
+        # TrueData configured → use real market feed even in PAPER mode
+        if settings.truedata_username and settings.truedata_password:
             return True
         return bool(getattr(settings, "paper_use_live_data", False)
                     and settings.kite_access_token)
 
     def subscribe(self, watchlist: list[dict]) -> None:
+        _new_syms: list[str] = []
         for item in watchlist:
             sym  = item["symbol"]
             exch = item.get("exchange", "NSE")
@@ -680,12 +685,26 @@ class TickEngine:
             self._exchange[sym]  = exch
             self._bufs_1min[sym] = TickBuffer(60,  maxlen=400)
             self._bufs_5min[sym] = TickBuffer(300, maxlen=200)
+            _new_syms.append(sym)
 
-        # Seed the GBM simulator only when NOT using the live Kite feed. In
-        # paper-live mode ticks come from Kite, so the simulator is unused.
+        # Seed the GBM simulator only when NOT using the live feed.
+        # TrueData → Kite WebSocket are used when credentials are present.
         if settings.trading_mode == "PAPER" and not self._live_data_enabled():
             exchanges = {s: self._exchange[s] for s in self._symbols}
             paper_sim.seed(self._symbols, exchanges)
+
+        # Backfill candle buffers for newly added symbols so agents have
+        # enough history to score patterns immediately (TrueData → Kite).
+        # start_loop() handles the initial backfill; this covers symbols added
+        # later (e.g. via auto-start after startup).
+        if _new_syms and self._running and self._loop is not None:
+            try:
+                asyncio.create_task(self._backfill_bufs())
+            except RuntimeError:
+                # Called from a non-async context — schedule via the stored loop.
+                self._loop.call_soon_threadsafe(
+                    lambda: asyncio.ensure_future(self._backfill_bufs(), loop=self._loop)
+                )
 
         logger.info("TickEngine: subscribed {} symbols via {}",
                     len(self._symbols),

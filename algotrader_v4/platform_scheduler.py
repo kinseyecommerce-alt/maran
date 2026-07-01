@@ -153,7 +153,10 @@ class PlatformScheduler:
 
     async def _auto_start_bot(self) -> None:
         from ist_clock import is_nse_holiday, now_ist
-        if is_nse_holiday(now_ist().date()):
+        _is_paper = settings.trading_mode == "PAPER"
+
+        # NSE holiday check — skip in PAPER mode (GBM simulator runs 24/7)
+        if not _is_paper and is_nse_holiday(now_ist().date()):
             logger.info("[platform] NSE holiday — auto-start skipped")
             return
 
@@ -161,21 +164,24 @@ class PlatformScheduler:
             logger.info("[platform] AUTO_START_STRATEGIES not set — skipping auto-start")
             return
 
-        from master_agent_v5 import master
+        from master_agent_v5 import master_agent as master
         if master.running:
             logger.info("[platform] Bot already running — auto-start skipped")
             return
 
-        # Verify Kite is authenticated (profile() is a blocking HTTP call)
-        try:
-            await asyncio.get_running_loop().run_in_executor(None, kite_client.profile)
-        except Exception as exc:
-            logger.error("[platform] Kite not authenticated — auto-start aborted: {}", exc)
-            await send_telegram(
-                "⚠️ <b>Auto-start aborted</b>\n"
-                "Kite session not valid. Please connect Kite and start the bot manually."
-            )
-            return
+        # Kite auth check — skip in PAPER mode (no live token required)
+        if not _is_paper:
+            try:
+                await asyncio.get_running_loop().run_in_executor(None, kite_client.profile)
+            except Exception as exc:
+                logger.error("[platform] Kite not authenticated — auto-start aborted: {}", exc)
+                await send_telegram(
+                    "⚠️ <b>Auto-start aborted</b>\n"
+                    "Kite session not valid. Please connect Kite and start the bot manually."
+                )
+                return
+        else:
+            logger.info("[platform] PAPER mode — skipping Kite auth check for auto-start")
 
         strategies = [s.strip() for s in settings.auto_start_strategies.split(",") if s.strip()]
 
@@ -202,7 +208,23 @@ class PlatformScheduler:
             return
 
         try:
-            report = await asyncio.to_thread(master.start, strategies, watchlist)
+            # Pre-compute per-agent approved lists in thread pool (blocking bhavcopy/backtest I/O).
+            # master.start() itself MUST run on the event-loop thread because agent.start()
+            # calls asyncio.create_task() internally — asyncio.to_thread would break that.
+            from agents.strategy_agents import ALL_AGENTS as _ALL
+            from bot_state import is_agent_enabled as _enabled
+            _loop = asyncio.get_running_loop()
+            prefiltered: dict = {}
+            for strat in strategies:
+                agent = _ALL.get(strat)
+                if agent and _enabled(strat):
+                    approved = await _loop.run_in_executor(None, agent.filter_watchlist, watchlist)
+                    prefiltered[strat] = approved
+                    logger.info("[platform] {} pre-filtered: {}/{} symbols approved",
+                                strat, len(approved), len(watchlist))
+
+            # Call master.start() directly on the event loop (no thread) so asyncio.create_task works.
+            report = master.start(strategies, watchlist, prefiltered=prefiltered)
             lines = [f"🚀 <b>Bot auto-started</b> | Mode: {settings.trading_mode}"]
             for strat, data in report.items():
                 lines.append(f"  {strat}: {data['approved']}/{data['total']} symbols approved")

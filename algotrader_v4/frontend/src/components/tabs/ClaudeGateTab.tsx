@@ -270,7 +270,3 @@ export default function ClaudeGateTab() {
     </div>
   )
 }
-
-    </div>
-  )
-}

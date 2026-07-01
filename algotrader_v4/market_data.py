@@ -360,9 +360,8 @@ class YFinanceClient:
         if not df_kite.empty:
             return df_kite
 
-        # No further fallback — Yahoo Finance has been removed. When Kite is
-        # unavailable (e.g. PAPER mode without a token) return an empty frame;
-        # callers already handle the empty-DataFrame case.
+        # No further fallback — data comes from TrueData or Kite Connect only.
+        # Yahoo Finance is not used anywhere in this pipeline.
         return pd.DataFrame()
 
     def _kite_historical(self, symbol: str, exchange: str,
