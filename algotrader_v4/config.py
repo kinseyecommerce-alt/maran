@@ -1,7 +1,7 @@
 import re
 import secrets
 from pydantic_settings import BaseSettings
-from pydantic import Field, field_validator, model_validator
+from pydantic import Field, field_validator, model_validator, AliasChoices
 from typing import Literal
 
 
@@ -16,8 +16,11 @@ class Settings(BaseSettings):
     kite_totp_secret: str = ""      # TOTP seed from Zerodha 2FA setup
     kite_redirect_url: str = ""     # e.g. https://yourdomain.com/auth/kite/callback
 
-    # Anthropic
-    anthropic_api_key: str = ""
+    # Anthropic — reads ANTHROPIC_API_KEY or ANTHROPIC_API_KEY1 (whichever is set)
+    anthropic_api_key: str = Field(
+        default="",
+        validation_alias=AliasChoices("anthropic_api_key", "ANTHROPIC_API_KEY", "ANTHROPIC_API_KEY1"),
+    )
 
     # TrueData
     truedata_username: str = ""

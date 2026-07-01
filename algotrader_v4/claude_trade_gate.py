@@ -151,10 +151,20 @@ _ALLOW_ON_ERROR = GateDecision(
 _client: Optional[anthropic.AsyncAnthropic] = None
 
 
+def _get_anthropic_key() -> str:
+    """Prefer ANTHROPIC_API_KEY1 (Replit secret) over the legacy env var."""
+    import os
+    return (
+        os.environ.get("ANTHROPIC_API_KEY1")
+        or settings.anthropic_api_key
+        or os.environ.get("ANTHROPIC_API_KEY", "")
+    )
+
+
 def _get_client() -> anthropic.AsyncAnthropic:
     global _client
     if _client is None:
-        _client = anthropic.AsyncAnthropic(api_key=settings.anthropic_api_key)
+        _client = anthropic.AsyncAnthropic(api_key=_get_anthropic_key())
     return _client
 
 
@@ -801,7 +811,7 @@ async def assess(snap, action: str, signal: dict, strategy: str) -> GateDecision
     preventing rate-limit exhaustion and circuit-breaker cascade.
     """
     global _consec_failures, _overflow_count
-    if not settings.anthropic_api_key or not settings.use_claude_trade_gate:
+    if not _get_anthropic_key() or not settings.use_claude_trade_gate:
         return GateDecision(confidence=70, enter=True, reason="Gate disabled — rule-based approval")
 
     import time as _t
