@@ -8608,14 +8608,19 @@ run("kite_client: PAPER MARKET order fills at _paper_ltp when available", t_pape
 def t_base_agent_passes_ltp_as_price_for_market_orders():
     """base_agent._place_orders passes ltp as price for MARKET entries so PAPER
     mode has a real fill price fallback instead of ₹0 → ₹100 default."""
-    import inspect
+    import inspect, re
     import agents.base_agent as _ba
     src = inspect.getsource(_ba.BaseAgent._place_orders)
-    # The MARKET branch must set entry_px to ltp, not 0.0
-    assert "entry_px   = limit_px if use_limit else ltp" in src or \
-           "entry_px = limit_px if use_limit else ltp" in src, (
-        "base_agent._place_orders must pass ltp as price for MARKET orders "
-        "(not 0.0) so PAPER mode can use it as fill price hint"
+    # The MARKET branch must set entry_px from ltp, not 0.0. Accept either the
+    # direct form (`entry_px = ltp`) or the conditional form
+    # (`entry_px = limit_px if use_limit else ltp`) — both pass ltp for MARKET.
+    assert re.search(r"entry_px\s*=\s*(?:limit_px\s+if\s+use_limit\s+else\s+)?ltp\b", src), (
+        "base_agent._place_orders must set entry_px from ltp (not 0.0) so PAPER "
+        "mode can use it as a fill price hint"
+    )
+    # …and entry_px must be what gets threaded through as the order price.
+    assert "price=entry_px" in src, (
+        "base_agent._place_orders must pass entry_px as the order price"
     )
 
 
