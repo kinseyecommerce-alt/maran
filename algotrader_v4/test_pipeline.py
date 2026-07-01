@@ -697,6 +697,61 @@ def t_sebi_otr_tracking():
     sc.pre_order_check("intraday","RELIANCE","NSE","BUY",1,"MARKET",100.0,"sig","RANGING")
     assert sc.status()["orders_placed_today"] == 1
 
+def t_sebi_exempts_fno_from_value_cap():
+    """F&O/derivative orders are exempt from the equity ₹1M per-order value cap;
+    the same notional on a cash-equity exchange stays blocked."""
+    sc = SEBICompliance()
+    # 75 × 24,000 = ₹1.8M > ₹1M SEBI equity cap, but NFO (index futures) is exempt.
+    ok_fno, _, _ = sc.pre_order_check(
+        "futures","NIFTY","NFO","BUY",75,"MARKET",24000.0,"sig","TRENDING")
+    assert ok_fno is True, "F&O order must be exempt from the equity per-order value cap"
+    ok_eq, _, reason = sc.pre_order_check(
+        "intraday","RELIANCE","NSE","BUY",75,"MARKET",24000.0,"sig","TRENDING")
+    assert ok_eq is False and "exceeds" in reason.lower(), \
+        "cash-equity order over the value cap must still be rejected"
+
+def t_rm_check_before_order_exempts_fno():
+    """check_before_order skips the equity notional position-size cap for F&O."""
+    rm = RiskManager()
+    # 1.8M notional exceeds default max_position_size on NSE equity → blocked...
+    ok_eq, _ = rm.check_before_order("NIFTY", 75, 24000.0, "BUY")
+    assert ok_eq is False
+    # ...but allowed on NFO (margin product, bounded by margin-based sizing).
+    ok_fno, _ = rm.check_before_order("NIFTY", 75, 24000.0, "BUY", exchange="NFO")
+    assert ok_fno is True
+
+def t_rm_futures_margin_sizing():
+    """calculate_futures_qty sizes index futures on MARGIN, not full notional."""
+    rm = RiskManager()
+    _s = {k: getattr(settings, k) for k in
+          ("total_capital","futures_capital_pct","futures_margin_pct",
+           "max_futures_lots_per_order","use_kelly_capital_sizing")}
+    try:
+        settings.use_kelly_capital_sizing = False
+        settings.futures_capital_pct      = 10.0
+        settings.futures_margin_pct       = 20.0
+        settings.max_futures_lots_per_order = 10
+        # bucket = 5,000,000 × 10% = ₹500k; NIFTY 1-lot margin = 24000×75×0.20 = ₹360k
+        settings.total_capital = 5_000_000.0
+        assert rm.calculate_futures_qty(24000.0, 75, agent="futures") == 75, \
+            "₹500k bucket should margin exactly 1 NIFTY lot (75)"
+        # Full-notional sizing would need ₹1.8M for 1 lot — margin sizing affords it
+        # here, proving it is margin-based, not notional.
+        # Too-small bucket can't margin even 1 lot → 0 (skip, never over-leverage).
+        settings.total_capital = 100_000.0    # bucket ₹10k << ₹360k margin
+        assert rm.calculate_futures_qty(24000.0, 75, agent="futures") == 0
+        # max_futures_lots_per_order caps the lot count.
+        settings.total_capital = 5_000_000_000.0
+        settings.max_futures_lots_per_order = 3
+        assert rm.calculate_futures_qty(24000.0, 75, agent="futures") == 3 * 75
+    finally:
+        for k, v in _s.items():
+            setattr(settings, k, v)
+
+def t_futures_margin_settings_exist():
+    assert hasattr(settings, "futures_margin_pct") and 0 < settings.futures_margin_pct <= 100
+    assert hasattr(settings, "max_futures_lots_per_order") and settings.max_futures_lots_per_order >= 0
+
 run("9 approved algo IDs registered",          t_sebi_5_algos)
 run("algo IDs have ALGO- prefix",              t_sebi_algo_id_format)
 run("pre_order_check approves valid order",    t_sebi_approves_valid)
@@ -715,6 +770,10 @@ run("full disclosure has 8 strategies",        t_sebi_full_disclosure)
 run("empty whitelist allows all IPs",          t_sebi_ip_empty_allows_all)
 run("whitelist blocks non-whitelisted IPs",    t_sebi_ip_whitelist)
 run("OTR counter increments per check",        t_sebi_otr_tracking)
+run("SEBI exempts F&O from equity per-order value cap",   t_sebi_exempts_fno_from_value_cap)
+run("check_before_order exempts F&O from notional cap",   t_rm_check_before_order_exempts_fno)
+run("futures qty sized on margin, not full notional",     t_rm_futures_margin_sizing)
+run("futures margin settings present",                    t_futures_margin_settings_exist)
 
 
 # ══════════════════════════════════════════════════════════════════════════

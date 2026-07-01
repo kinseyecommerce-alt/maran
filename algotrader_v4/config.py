@@ -279,6 +279,14 @@ class Settings(BaseSettings):
     swing_capital_pct:      float = Field(default=25.0, ge=0, le=100)  # % for equity delivery CNC (swing)
     options_capital_pct:    float = Field(default=25.0, ge=0, le=100)  # % for options premium NRML (fno)
     futures_capital_pct:    float = Field(default=10.0, ge=0, le=100)  # % for futures margin NRML (reserved)
+    # Index futures (NIFTY/BANKNIFTY/…) are MARGIN products: the agent posts only
+    # a fraction of contract notional. Sizing uses this margin % of notional (not
+    # full notional) so a realistically-funded futures bucket can afford lots.
+    # ~20% ≈ Zerodha NRML index-futures span+exposure margin (i.e. ~5× leverage).
+    futures_margin_pct:     float = Field(default=20.0, gt=0, le=100)
+    # Hard fat-finger guard for F&O orders (which are exempt from the equity ₹1M
+    # per-order value cap): cap the number of lots per single order. 0 = no cap.
+    max_futures_lots_per_order: int = Field(default=10, ge=0)
 
     # Max concurrent positions per agent (capital divided per-symbol to avoid overrun)
     max_intraday_positions: int = 5
