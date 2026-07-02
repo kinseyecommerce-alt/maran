@@ -356,6 +356,36 @@ class TrailingSLEngine:
         )
         return pos
 
+    def claim_exit(self, symbol: str, strategy: str) -> tuple[Optional[PositionSL], bool]:
+        """Atomically claim the ACTIVE position on *symbol*/*strategy* for an
+        external (strategy-driven) exit, using the same lock+status CAS that
+        guards TSL callbacks — so a strategy exit and a concurrent SL/T2 hit
+        can never both place exit orders for one position.
+
+        Returns (position, contested):
+          (pos, False)  — claimed; caller owns the exit and must deregister
+                          (or release_exit_claim on failure).
+          (None, True)  — a TSL callback already owns this position's exit;
+                          caller must NOT place an order.
+          (None, False) — no tracked position (e.g. pre-TSL recovery state);
+                          caller may exit independently.
+        """
+        with self._lock:
+            for pos in self._positions.values():
+                if pos.symbol == symbol and pos.strategy == strategy:
+                    if pos.status == SLStatus.ACTIVE:
+                        pos.status = SLStatus.HIT
+                        return pos, False
+                    return None, True
+        return None, False
+
+    def release_exit_claim(self, order_id: str) -> None:
+        """Undo claim_exit after a failed exit order so TSL protection resumes."""
+        with self._lock:
+            pos = self._positions.get(order_id)
+            if pos and pos.status == SLStatus.HIT:
+                pos.status = SLStatus.ACTIVE
+
     def deregister(self, order_id: str) -> None:
         with self._lock:
             pos = self._positions.pop(order_id, None)

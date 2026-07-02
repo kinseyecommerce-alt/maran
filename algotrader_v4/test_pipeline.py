@@ -2628,9 +2628,15 @@ def t_tc_total_sanity_reliance():
     assert 1.0 <= cost.total <= 5.0, f"Expected ₹1–₹5, got {cost.total}"
 
 def t_tc_round_trip_is_double():
-    single = compute_costs("RELIANCE", 10, 2800.0).total
+    # Round trip = BUY leg + SELL leg. STT is sell-only and stamp is buy-only,
+    # so the round trip is LESS than 2x the sideless single-leg estimate
+    # (which conservatively charges both) but more than either exact leg.
+    buy  = compute_costs("RELIANCE", 10, 2800.0, side="BUY").total
+    sell = compute_costs("RELIANCE", 10, 2800.0, side="SELL").total
     rt = compute_round_trip_cost("RELIANCE", 10, 2800.0)
-    assert abs(rt - single * 2) < 0.01, f"Expected 2×{single}={single*2}, got {rt}"
+    assert abs(rt - (buy + sell)) < 0.01, f"Expected {buy}+{sell}={buy+sell}, got {rt}"
+    both = compute_costs("RELIANCE", 10, 2800.0).total  # sideless: charges both
+    assert rt < both * 2, f"round trip {rt} must be < 2x sideless leg {both*2}"
 
 def t_tc_cnc_stamp_higher():
     mis = compute_costs("HDFCBANK", 10, 1700.0, product="MIS")
@@ -2652,7 +2658,7 @@ def t_tc_disabled_returns_zero():
 run("compute_costs returns TransactionCost with all fields > 0",  t_tc_returns_dataclass)
 run("brokerage capped at ₹20 for large orders",                   t_tc_brokerage_capped)
 run("total cost for 1 share RELIANCE@2800 is ₹1–₹5",             t_tc_total_sanity_reliance)
-run("round_trip_cost == 2× single-leg total",                     t_tc_round_trip_is_double)
+run("round_trip_cost == exact BUY leg + SELL leg",                 t_tc_round_trip_is_double)
 run("CNC stamp_duty > MIS stamp_duty",                            t_tc_cnc_stamp_higher)
 run("use_transaction_costs=False returns zero-cost object",        t_tc_disabled_returns_zero)
 
@@ -5124,7 +5130,9 @@ def t_bus_wired_into_base_agent():
     from agents import base_agent as _ba
     src = inspect.getsource(_ba)
     assert "signal_bus" in src and "_sbus.publish(" in src
-    assert "_bus_boost" in src
+    # Bus consensus is consumed via max() with the aggregator boost (the two
+    # channels measure the same event and must not stack multiplicatively)
+    assert "_sbus.consensus_boost(" in src
 
 def t_bus_settings_present():
     from config import settings as _s

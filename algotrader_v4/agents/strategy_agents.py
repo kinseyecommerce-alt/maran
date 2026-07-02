@@ -20,6 +20,23 @@ from config import settings
 # 1.  INTRADAY  —  MIS, 5-pattern never-miss architecture
 # ═══════════════════════════════════════════════════════════════════════════════
 
+
+def _opening_gap_pct(ind, ltp: float) -> float:
+    """True opening gap % = (day_open − prev_close)/prev_close. change_pct is
+    the net change vs prev close and includes all intraday drift — using it as
+    the "gap" made any stock up 0.5% by 10:00 a "gap up". prev_close is
+    recovered from ltp and change_pct."""
+    if not ind.day_open or ind.day_open <= 0 or not ltp or ltp <= 0:
+        return 0.0
+    denom = 1.0 + ind.change_pct / 100.0
+    if denom <= 0:
+        return 0.0
+    prev_close = ltp / denom
+    if prev_close <= 0:
+        return 0.0
+    return (ind.day_open - prev_close) / prev_close * 100.0
+
+
 class IntradayAgent(BaseAgent):
     """
     World-class NSE intraday agent — 18 patterns, 10-factor ctx bonus, enhanced exits.
@@ -80,6 +97,8 @@ class IntradayAgent(BaseAgent):
         self._orb_low:          dict = {}
         self._orb_fired:        dict = {}
         self._cool_ts:          dict = {}   # sym → {"BUY": datetime, "SELL": datetime}
+        self._u3_touch:         dict = {}   # sym → datetime of last 3σ-upper touch
+        self._l3_touch:         dict = {}   # sym → datetime of last 3σ-lower touch
 
     def evaluate_tick(self, snap: MarketSnapshot) -> tuple[str, Optional[dict]]:
         ind = snap.indicators
@@ -248,7 +267,9 @@ class IntradayAgent(BaseAgent):
     def _pat_ttm_squeeze(self, sym, snap, ind, ltp, t):
         if ind.squeeze_on:
             return "", 0, ""
-        prev_squeeze = self._prev_squeeze.get(sym, True)
+        # Default prev to the CURRENT state: a default of True made the very
+        # first evaluated tick per symbol read as a fresh squeeze "release".
+        prev_squeeze = self._prev_squeeze.get(sym, ind.squeeze_on)
         if not prev_squeeze:
             return "", 0, ""
         mom = ind.squeeze_momentum
@@ -259,17 +280,29 @@ class IntradayAgent(BaseAgent):
         return "", 0, ""
 
     def _pat_vwap_band_revert(self, sym, snap, ind, ltp, t):
-        """Mean-reversion from VWAP 3σ band extremes — top NSE 2026 pattern."""
+        """Mean-reversion from VWAP 3σ band extremes — top NSE 2026 pattern.
+
+        Latches the 3σ touch and fires when price pulls back through 2σ within
+        5 minutes. (The old prev-tick test required a full session-σ of travel
+        between two consecutive ticks — effectively never.)"""
         u3, l3 = ind.vwap_upper3, ind.vwap_lower3
         u2, l2 = ind.vwap_upper2, ind.vwap_lower2
         if not (u3 > 0 and l3 > 0):
             return "", 0, ""
-        prev_ltp = self._prev_ltp.get(sym, ltp)
-        # Price touched 3σ upper band last tick and now pulling back below 2σ
-        if prev_ltp >= u3 and ltp < u2 and ind.rsi_14 > 65 and ind.volume_ratio >= 1.0:
+        now = now_ist()
+        if ltp >= u3:
+            self._u3_touch[sym] = now
+        if ltp <= l3:
+            self._l3_touch[sym] = now
+        _win = timedelta(minutes=5)
+        _u_ts, _l_ts = self._u3_touch.get(sym), self._l3_touch.get(sym)
+        if (_u_ts and now - _u_ts <= _win and ltp < u2
+                and ind.rsi_14 > 65 and ind.volume_ratio >= 1.0):
+            self._u3_touch.pop(sym, None)   # one signal per touch
             return "SELL", 4, "VWAP_BAND_REVERT"
-        # Price touched 3σ lower band last tick and now bouncing above 2σ
-        if prev_ltp <= l3 and ltp > l2 and ind.rsi_14 < 35 and ind.volume_ratio >= 1.0:
+        if (_l_ts and now - _l_ts <= _win and ltp > l2
+                and ind.rsi_14 < 35 and ind.volume_ratio >= 1.0):
+            self._l3_touch.pop(sym, None)
             return "BUY", 4, "VWAP_BAND_REVERT"
         return "", 0, ""
 
@@ -329,10 +362,11 @@ class IntradayAgent(BaseAgent):
             return "", 0, ""
         if not ind.day_open or ind.day_open <= 0:
             return "", 0, ""
-        # Gap up ≥ 0.5%: day_open > prev_close by enough (use change_pct as proxy)
-        if ind.change_pct >= 0.5 and ltp > ind.day_open and ind.volume_ratio >= 1.4:
+        gap = _opening_gap_pct(ind, ltp)
+        # Gap up ≥ 0.5% (true open-vs-prev-close gap) holding above the open
+        if gap >= 0.5 and ltp > ind.day_open and ind.volume_ratio >= 1.4:
             return "BUY", 5, "GAP_PLAY"
-        if ind.change_pct <= -0.5 and ltp < ind.day_open and ind.volume_ratio >= 1.4:
+        if gap <= -0.5 and ltp < ind.day_open and ind.volume_ratio >= 1.4:
             return "SELL", 5, "GAP_PLAY"
         return "", 0, ""
 
@@ -695,6 +729,7 @@ class OptionsAgent(BaseAgent):
         self._prev_pcr:            dict = {}   # sym → float (PCR change detection)
         self._prev_atr_opt:        dict = {}   # sym → float (ATR expansion for straddle)
         self._prev_skew_vel:       dict = {}   # sym → float (skew velocity for SKEW_MOMENTUM)
+        self._prev_risk_rev:       dict = {}   # sym → float (prev risk reversal for SKEW_MOMENTUM CE)
         self._prev_gex_val:        dict = {}   # sym → float (GEX zero-cross for GAMMA_FLIP)
 
     def evaluate_tick(self, snap: MarketSnapshot) -> tuple[str, Optional[dict]]:
@@ -1184,11 +1219,17 @@ class OptionsAgent(BaseAgent):
             return "", 0, ""
         prev_sk  = self._prev_skew_vel.get(sym, surf.put_skew if surf else 0.0)
         cur_sk   = surf.put_skew if surf else 0.0
-        # Put skew spiking → institutions hedging downside → PE momentum
-        if cur_sk > prev_sk * 1.15 and cur_sk > 0.008 and ind.rsi_14 < 52:
+        prev_rr  = self._prev_risk_rev.get(sym, surf.risk_reversal if surf else 0.0)
+        # Put skew spiking → institutions hedging downside → PE momentum.
+        # Additive rise: the old multiplicative test (cur > prev × 1.15) was
+        # trivially true whenever prev ≤ 0 — a "spike" with no actual movement.
+        if cur_sk > prev_sk + 0.002 and cur_sk > 0.008 and ind.rsi_14 < 52:
             return "PE", 4, "SKEW_MOMENTUM"
-        # Risk reversal turning strongly positive = call skew dominates → CE momentum
-        if surf.risk_reversal > 0.004 and surf.risk_reversal > (prev_sk * -1.0) and ind.rsi_14 > 48:
+        # Rising risk reversal = call skew building → CE momentum. Compare the
+        # risk reversal against its OWN previous value — the old test compared
+        # it against the negated put skew (a different quantity), reducing the
+        # "rising" check to a static threshold.
+        if surf.risk_reversal > 0.004 and surf.risk_reversal > prev_rr + 0.002 and ind.rsi_14 > 48:
             return "CE", 4, "SKEW_MOMENTUM"
         return "", 0, ""
 
@@ -1315,8 +1356,9 @@ class OptionsAgent(BaseAgent):
         try:
             import math as _m
             from options_intelligence import get_cached as _get_oc
-            _oc  = _get_oc(snap.symbol)
-            iv_f = ((_oc.atm_iv / 100.0) if _oc and _oc.atm_iv and _oc.atm_iv > 1.0 else 0.20)
+            _oc  = _get_oc(snap.symbol)   # returns a dict, not an object
+            _iv  = float(_oc.get("atm_iv") or 0.0) if _oc else 0.0
+            iv_f = (_iv / 100.0) if _iv > 1.0 else 0.20
             iv_f = max(iv_f, 0.05)
             dte  = self._days_to_expiry(snap.symbol)
             if dte >= 1:
@@ -1370,11 +1412,26 @@ class OptionsAgent(BaseAgent):
             return 0.0
 
     def _days_to_expiry(self, underlying: str = "NIFTY") -> int:
-        """Days until next weekly expiry (Thu for NIFTY, Wed for BANKNIFTY).
+        """Days until the nearest tradeable expiry: weekly for indices (Thu for
+        NIFTY, Wed for BANKNIFTY), MONTHLY (last Thursday) for stock options —
+        stocks have no weekly contracts, and pricing a 20-DTE stock option as
+        ≤7 DTE skewed delta/theta and strike selection.
         Returns 0 ON the expiry day itself (0-DTE) — callers must floor
         time-to-expiry at a small epsilon in BS formulas, not fake the DTE."""
-        from datetime import date
-        today  = date.today()
+        from datetime import date, timedelta
+        today = date.today()
+        if underlying not in self._INDEX_UNDERLYINGS:
+            def _last_thursday(y: int, m: int) -> date:
+                last = (date(y, m + 1, 1) - timedelta(days=1) if m < 12
+                        else date(y + 1, 1, 1) - timedelta(days=1))
+                while last.weekday() != 3:
+                    last -= timedelta(days=1)
+                return last
+            expiry = _last_thursday(today.year, today.month)
+            if expiry < today:
+                ny, nm = (today.year + 1, 1) if today.month == 12 else (today.year, today.month + 1)
+                expiry = _last_thursday(ny, nm)
+            return (expiry - today).days
         target = 2 if underlying in ("BANKNIFTY", "MIDCPNIFTY") else 3
         return (target - today.weekday()) % 7
 
@@ -1440,6 +1497,7 @@ class OptionsAgent(BaseAgent):
             surf = _ivs.get_surface(sym)
             if surf:
                 self._prev_skew_vel[sym] = surf.put_skew
+                self._prev_risk_rev[sym] = surf.risk_reversal
         except Exception:
             pass
         try:
@@ -1500,7 +1558,11 @@ class OptionsAgent(BaseAgent):
             return f"{underlying}{expiry.strftime('%y')}{expiry.strftime('%b').upper()}{strike}{opt_type}"
 
         target = 2 if underlying in ("BANKNIFTY", "MIDCPNIFTY") else 3
-        expiry = today + timedelta(days=1)
+        # Start the search AT today: the expiring weekly trades until 15:30 on
+        # expiry day. Starting at today+1 sold NEXT week's contract on expiry
+        # day while _days_to_expiry priced it as 0-DTE — wrong strike, and the
+        # EXPIRY_SCALP pattern never actually traded the expiring contract.
+        expiry = today
         while expiry.weekday() != target:
             expiry += timedelta(days=1)
         if (expiry + timedelta(days=7)).month != expiry.month:
@@ -1697,7 +1759,7 @@ class OptionsAgent(BaseAgent):
                 sebi_compliance.trigger_kill_switch(
                     f"Unprotected option position {opt_sym} ({self.name}) — "
                     f"SL-M and market exit both failed")
-            order_guard.release_order(underlying, self.name, action, 0)
+            order_guard.release_failed_entry(underlying, self.name, action)
             risk_manager.position_closed()
             return
 
@@ -2026,6 +2088,7 @@ class SwingAgent(BaseAgent):
         self._prev_rsi:       dict[str, float] = {}
         self._prev_adx:       dict[str, float] = {}
         self._prev_hma_dir:   dict[str, str]   = {}
+        self._prev_ema50_above: dict[str, bool] = {}   # GOLDEN_CROSS event state
 
     def evaluate_tick(self, snap: MarketSnapshot) -> tuple[str, Optional[dict]]:
         import time as _time
@@ -2139,14 +2202,18 @@ class SwingAgent(BaseAgent):
     # ── Pattern 5 ─────────────────────────────────────────────────────────────
 
     def _pat_golden_cross(self, sym, snap, ind, ltp):
-        if not ind.ema200 or ind.ema200 <= 0:
+        """Fires on the actual EMA50/EMA200 cross EVENT. The old proximity test
+        (|ema50-ema200| < 0.5%) is a persistent STATE that can hold for hours
+        on 1-min bars — combined with SwingAgent's 60s evaluation cadence and
+        score 5 > MIN_SCORE it re-signalled every minute after each exit."""
+        if not ind.ema200 or ind.ema200 <= 0 or not ind.ema50 or ind.ema50 <= 0:
             return "", 0, ""
-        cross_near = abs(ind.ema50 - ind.ema200) / ind.ema200 < 0.005
-        if cross_near and ind.ema50 > ind.ema200:
-            return "BUY",  5, "GOLDEN_CROSS"
-        if cross_near and ind.ema50 < ind.ema200:
-            return "SELL", 5, "DEATH_CROSS"
-        return "", 0, ""
+        above      = ind.ema50 > ind.ema200
+        prev_above = self._prev_ema50_above.get(sym)
+        self._prev_ema50_above[sym] = above
+        if prev_above is None or prev_above == above:
+            return "", 0, ""
+        return ("BUY", 5, "GOLDEN_CROSS") if above else ("SELL", 5, "DEATH_CROSS")
 
     # ── Pattern 6 ─────────────────────────────────────────────────────────────
 
@@ -2418,6 +2485,11 @@ class ScalpingAgent(BaseAgent):
         self._prev_ema9[sym]          = ind.ema9
         self._prev_ema21[sym]         = ind.ema21 or ind.ema9
         self._prev_ltp[sym]           = ltp
+        # VWAP_BOUNCE state — updated here with all other prev-state (it used
+        # to be mutated inside _detect_pattern AFTER patterns 1-2, so any tick
+        # where EMA9X/EMA921X returned early left it stale).
+        if ind.vwap and ind.vwap > 0:
+            self._prev_near_vwap[sym] = abs(ltp - ind.vwap) / ind.vwap < 0.0008
         self._prev_st_dir[sym]        = ind.supertrend_dir
         self._prev_stochrsi_k[sym]    = ind.stoch_rsi_k
         self._prev_hma_dir_sc[sym]    = ind.hma_dir
@@ -2607,11 +2679,12 @@ class ScalpingAgent(BaseAgent):
             if prev_diff >= 0 > curr_diff:
                 return "SELL", "EMA921X"
 
-        # 3. VWAP bounce (was near VWAP, now moving away with volume)
+        # 3. VWAP bounce (was near VWAP, now moving away with volume).
+        # Read-only here — the prev-state update lives with the rest of the
+        # state block so early returns in patterns 1-2 can't leave it stale.
         if ind.vwap and ind.vwap > 0:
             was_near = self._prev_near_vwap.get(sym, False)
             near_now = abs(ltp - ind.vwap) / ind.vwap < 0.0008
-            self._prev_near_vwap[sym] = near_now
             if was_near and not near_now and ind.volume_ratio >= 1.3:
                 if ltp > ind.vwap:  return "BUY",  "VWAP_BOUNCE"
                 return "SELL", "VWAP_BOUNCE"
@@ -2765,9 +2838,11 @@ class ScalpingAgent(BaseAgent):
         elif not is_buy and 24 < rsi < 56:
             score += 1; reasons.append(f"RSI{rsi:.0f}")
 
-        # 3. Volume confirmation (≥1.2× for partial, ≥1.5× for full)
+        # 3. Volume confirmation (≥1.2× partial = +1, ≥1.5× full = +2 —
+        # both tiers used to award the same +1, so the "full" tier was
+        # indistinguishable from the partial one)
         if ind.volume_ratio >= 1.5:
-            score += 1; reasons.append(f"VOL{ind.volume_ratio:.1f}x")
+            score += 2; reasons.append(f"VOL{ind.volume_ratio:.1f}x")
         elif ind.volume_ratio >= 1.2:
             score += 1
 
@@ -2819,8 +2894,9 @@ class ScalpingAgent(BaseAgent):
         # 11. Session window premium — best scalp windows for NSE
         t = snap.tick.timestamp.time() if hasattr(snap.tick, 'timestamp') and snap.tick.timestamp else None
         if t is None:
-            from datetime import datetime as _dt
-            t = _dt.now().time()
+            # IST clock, not naive datetime.now() — a UTC server put the
+            # "morning momentum" window at 15:00-16:30 IST.
+            t = now_ist().time().replace(tzinfo=None)
         if time(9, 30) <= t < time(11, 0):    # morning momentum window
             score += 1; reasons.append("SESS_AM")
         elif time(14, 0) <= t < time(14, 30):  # afternoon reversal window
@@ -3089,6 +3165,7 @@ class FuturesAgent(BaseAgent):
         self._atr_streak_low:        dict = {}
         self._prev_williams_fut:     dict = {}
         self._prev_bb_width_fut:     dict = {}
+        self._last_state_bar:        dict = {}   # sym → bar ts (bar-scoped state gate)
 
     def evaluate_tick(self, snap: MarketSnapshot) -> tuple[str, Optional[dict]]:
         from macro_signals import macro_signals
@@ -3459,9 +3536,14 @@ class FuturesAgent(BaseAgent):
         if is_long  and fii >= 0.5:                             b += 1
         if not is_long and fii <= -0.5:                         b += 1
 
-        # 14. Wall clear in signal direction (no L2 wall blocking) (already gated, bonus) (0-1)
-        if is_long  and not ind.wall_above:                     b += 1
-        if not is_long and not ind.wall_below:                  b += 1
+        # 14. Wall clear in signal direction (0-1) — awarded only when L2
+        # depth data is actually present. Wall-blocked signals are vetoed
+        # upstream and wall_* default False without an L2 feed, so this was
+        # an unconditional +1 silently lowering the effective min-score by 1.
+        _has_depth = bool(getattr(snap.tick, "bid_depth", None)
+                          or getattr(snap.tick, "ask_depth", None))
+        if _has_depth and is_long and not ind.wall_above:       b += 1
+        if _has_depth and not is_long and not ind.wall_below:   b += 1
 
         return b
 
@@ -3570,10 +3652,17 @@ class FuturesAgent(BaseAgent):
     # ── Pattern 14: RANGE_COMPRESSION_BREAK — volatility squeeze → burst ─────
 
     def _pat_range_compression_break(self, sym, snap, ind, ltp, t):
-        """ATR compressing ≥3 bars then sudden expansion ≥1.5× with vol surge → directional burst."""
-        prev_atr = self._prev_atr_fut.get(sym, ind.atr_14)
-        streak   = self._atr_streak_low.get(sym, 0)
-        if streak < 3 or not (ind.atr_14 > prev_atr * 1.5 and ind.volume_ratio > 1.6):
+        """ATR compressing ≥3 bars, then a bar whose true range is ≥2× ATR with
+        a volume surge → directional burst. (Wilder ATR-14 itself moves ~1/14th
+        of one bar's TR per bar — requiring the smoothed ATR to jump 1.5× made
+        this pattern unreachable; the expansion test must use the raw bar range.)"""
+        streak = self._atr_streak_low.get(sym, 0)
+        if streak < 3 or ind.volume_ratio <= 1.6 or not ind.atr_14:
+            return "", 0, ""
+        if len(snap.candles_1min) < 2:
+            return "", 0, ""
+        _last = snap.candles_1min[-2]   # last COMPLETED bar
+        if (_last.high - _last.low) < ind.atr_14 * 2.0:
             return "", 0, ""
         if ind.ema9 > ind.ema21 > 0 and ind.macd_hist > 0:
             return "LONG",  5, "RANGE_COMPRESSION_BREAK"
@@ -3674,7 +3763,24 @@ class FuturesAgent(BaseAgent):
                                     and 50 <= ind.rsi_14 <= 72 and ind.macd_hist > 0)
         self._prev_ema_bear[sym] = (ind.ema9 < ind.ema21 < ind.ema50 > 0
                                     and 28 <= ind.rsi_14 <= 50 and ind.macd_hist < 0)
-        # MULTI_TF_ALIGN streak counters
+        # VWAP_BAND_BREAK cross-state
+        if ind.vwap_upper2 > 0:
+            self._prev_above_vwap_u2[sym] = ltp > ind.vwap_upper2
+        if ind.vwap_lower2 > 0:
+            self._prev_below_vwap_l2[sym] = ltp < ind.vwap_lower2
+
+        # ── Bar-scoped state below: streak counters advance once per NEW
+        # 1-min bar, not per tick. _update_state runs on every tick (~1/s),
+        # so tick-scoped streaks made "sustained 3 bars" mean "3 seconds" and
+        # required ATR-14 (Wilder-smoothed, moves ~1/14th of one bar's TR per
+        # bar) to jump 1.5× between consecutive ticks — impossible, so
+        # RANGE_COMPRESSION_BREAK was dead and MULTI_TF_ALIGN/MOMENTUM_CATCH
+        # fired on noise.
+        _bar = now_ist().replace(second=0, microsecond=0)
+        if self._last_state_bar.get(sym) == _bar:
+            return
+        self._last_state_bar[sym] = _bar
+        # MULTI_TF_ALIGN streak counters (bars)
         if ind.ema9 > ind.ema21 > ind.ema50 > 0 and 50 <= ind.rsi_14 <= 75:
             self._ema_bull_streak[sym] = self._ema_bull_streak.get(sym, 0) + 1
         else:
@@ -3683,12 +3789,7 @@ class FuturesAgent(BaseAgent):
             self._ema_bear_streak[sym] = self._ema_bear_streak.get(sym, 0) + 1
         else:
             self._ema_bear_streak[sym] = 0
-        # VWAP_BAND_BREAK cross-state
-        if ind.vwap_upper2 > 0:
-            self._prev_above_vwap_u2[sym] = ltp > ind.vwap_upper2
-        if ind.vwap_lower2 > 0:
-            self._prev_below_vwap_l2[sym] = ltp < ind.vwap_lower2
-        # MOMENTUM_CATCH streak counters
+        # MOMENTUM_CATCH streak counters (bars)
         if ind.momentum == "STRONG_UP":
             self._momentum_streak_up[sym] = self._momentum_streak_up.get(sym, 0) + 1
         else:
@@ -3697,14 +3798,14 @@ class FuturesAgent(BaseAgent):
             self._momentum_streak_dn[sym] = self._momentum_streak_dn.get(sym, 0) + 1
         else:
             self._momentum_streak_dn[sym] = 0
-        # RANGE_COMPRESSION_BREAK: ATR streak counter
+        # RANGE_COMPRESSION_BREAK: ATR streak counter (bars)
         prev_atr = self._prev_atr_fut.get(sym, ind.atr_14)
         if ind.atr_14 > 0 and prev_atr > 0 and ind.atr_14 <= prev_atr * 1.05:
             self._atr_streak_low[sym] = self._atr_streak_low.get(sym, 0) + 1
         else:
             self._atr_streak_low[sym] = 0
         self._prev_atr_fut[sym] = ind.atr_14
-        # BB width tracking
+        # BB width tracking (bars)
         if ind.bb_upper and ind.bb_lower and ind.bb_mid and ind.bb_mid > 0:
             self._prev_bb_width_fut[sym] = (ind.bb_upper - ind.bb_lower) / ind.bb_mid * 100
 
@@ -4052,11 +4153,14 @@ class MeanReversionAgent(BaseAgent):
     # ── Pattern 11: ATR_EXHAUSTION ────────────────────────────────────────────
 
     def _pat_atr_exhaustion(self, sym, snap, ind, ltp, t):
-        """ATR spikes >2× recent average + RSI extreme → volatility exhaustion fade."""
-        prev_atr = self._prev_atr_mr.get(sym, ind.atr_14 or 0)
-        if not prev_atr or prev_atr <= 0:
+        """A bar whose true range is >2.5× ATR + RSI extreme → volatility
+        exhaustion fade. (The old test wanted the Wilder-smoothed ATR itself
+        to double between two consecutive TICKS — that needs a single true
+        range ≈15× ATR and never happened.)"""
+        if not ind.atr_14 or ind.atr_14 <= 0 or len(snap.candles_1min) < 2:
             return "", 0, ""
-        if (ind.atr_14 or 0) < prev_atr * 2.0:
+        _last = snap.candles_1min[-2]   # last COMPLETED bar
+        if (_last.high - _last.low) < ind.atr_14 * 2.5:
             return "", 0, ""
         if ind.rsi_14 < 25 and ltp < ind.bb_lower:
             return "BUY",  4, "ATR_EXHAUSTION"
@@ -4332,7 +4436,8 @@ class MomentumAgent(BaseAgent):
         return "", 0, ""
 
     def _pat_squeeze_release(self, sym, snap, ind, ltp, t):
-        was_squeeze = self._prev_squeeze.get(sym, True)
+        # Default prev to the CURRENT state (see intraday TTM_SQUEEZE note).
+        was_squeeze = self._prev_squeeze.get(sym, ind.squeeze_on)
         if was_squeeze and not ind.squeeze_on:
             # Squeeze just released — trade in momentum direction
             if ind.squeeze_momentum > 0 and ind.macd_hist > 0:
@@ -4440,11 +4545,12 @@ class MomentumAgent(BaseAgent):
         adx = getattr(ind, "adx_14", 0)
         if not (ind.day_open and ind.day_open > 0):
             return "", 0, ""
-        if (ind.change_pct >= 0.8 and adx >= 25
+        gap = _opening_gap_pct(ind, ltp)
+        if (gap >= 0.8 and adx >= 25
                 and ltp > ind.day_open and ind.ema9 > ind.ema21 > 0
                 and ind.volume_ratio >= 1.5):
             return "BUY",  5, "GAP_MOMENTUM"
-        if (ind.change_pct <= -0.8 and adx >= 25
+        if (gap <= -0.8 and adx >= 25
                 and ltp < ind.day_open and ind.ema9 < ind.ema21 > 0
                 and ind.volume_ratio >= 1.5):
             return "SELL", 5, "GAP_MOMENTUM"
@@ -4627,6 +4733,7 @@ class PairsAgent(BaseAgent):
         from collections import deque
         self._prices:       dict = {}
         self._ratios:       dict = {p: deque(maxlen=self.RATIO_WINDOW) for p in self.PAIRS}
+        self._ratio_bar:    dict = {}   # pair → last bar ts sampled (bar-spaced ratios)
         self._zscores:      dict = {}
         self._cool_ts:      dict = {}
         self._entered_pair: dict = {}  # symbol → pair-tuple that triggered entry
@@ -4694,7 +4801,15 @@ class PairsAgent(BaseAgent):
                 continue
 
             ratio = pa / pb
-            self._ratios[pair].append(ratio)
+            # Sample the ratio once per 1-min bar, not per tick: appending on
+            # every tick of EITHER leg filled the 50-slot window with ~25
+            # seconds of autocorrelated near-duplicates, deflating the std and
+            # inflating |z| — "2σ" entries were mostly tick noise. Bar-spaced
+            # samples make the window a real ~50-minute statistic.
+            _bar = now_ist().replace(second=0, microsecond=0)
+            if self._ratio_bar.get(pair) != _bar:
+                self._ratio_bar[pair] = _bar
+                self._ratios[pair].append(ratio)
             if len(self._ratios[pair]) < 20:
                 continue
 
