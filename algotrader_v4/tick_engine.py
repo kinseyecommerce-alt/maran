@@ -501,7 +501,17 @@ class IndicatorCalc:
                 ind.bb_lower = float(bb.bollinger_lband().iloc[-1])
                 ind.bb_mid   = float(bb.bollinger_mavg().iloc[-1])
                 vol_avg = volume.rolling(20).mean().iloc[-1]
-                ind.volume_ratio = float(volume.iloc[-1] / vol_avg) if vol_avg > 0 else 1.0
+                if vol_avg and vol_avg > 0:
+                    # The last row is the PARTIAL forming bar — near zero in the
+                    # first seconds of every minute, which suppressed every
+                    # volume gate at bar open. Blend in the last COMPLETED
+                    # bar's ratio so "recent volume" carries across the bar
+                    # boundary instead of resetting to ~0.
+                    _cur  = float(volume.iloc[-1] / vol_avg)
+                    _prev = float(volume.iloc[-2] / vol_avg) if n >= 2 else 0.0
+                    ind.volume_ratio = max(_cur, _prev)
+                else:
+                    ind.volume_ratio = 1.0
                 # Remember the average so indicator-cache hits can refresh the
                 # ratio as the forming bar fills (see _process_tick).
                 ind._vol_avg_20 = float(vol_avg) if vol_avg and vol_avg > 0 else 0.0
@@ -931,7 +941,10 @@ class TickEngine:
             # gates aren't suppressed for the rest of the cache window.
             if ind._vol_avg_20 > 0 and len(df) > 0:
                 try:
-                    ind.volume_ratio = float(df["volume"].iloc[-1] / ind._vol_avg_20)
+                    _cur  = float(df["volume"].iloc[-1] / ind._vol_avg_20)
+                    _prev = (float(df["volume"].iloc[-2] / ind._vol_avg_20)
+                             if len(df) >= 2 else 0.0)
+                    ind.volume_ratio = max(_cur, _prev)
                 except Exception:
                     pass
             # L2 depth fields come from the live tick, not the cached compute

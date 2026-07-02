@@ -21,6 +21,23 @@ from config import settings
 # ═══════════════════════════════════════════════════════════════════════════════
 
 
+
+def _expiry_weekday(underlying: str) -> int:
+    """Weekly expiry weekday (Mon=0) for an index underlying. Reads the
+    settings override map first (NSE moves expiry days by circular — a config
+    edit, not a code change), then falls back to the legacy defaults."""
+    try:
+        raw = getattr(settings, "index_expiry_weekdays", "") or ""
+        for part in raw.split(","):
+            if ":" in part:
+                k, v = part.split(":", 1)
+                if k.strip().upper() == underlying.upper():
+                    return max(0, min(6, int(v)))
+    except Exception:
+        pass
+    return 2 if underlying in ("BANKNIFTY", "MIDCPNIFTY") else 3
+
+
 def _opening_gap_pct(ind, ltp: float) -> float:
     """True opening gap % = (day_open − prev_close)/prev_close. change_pct is
     the net change vs prev close and includes all intraday drift — using it as
@@ -1432,7 +1449,7 @@ class OptionsAgent(BaseAgent):
                 ny, nm = (today.year + 1, 1) if today.month == 12 else (today.year, today.month + 1)
                 expiry = _last_thursday(ny, nm)
             return (expiry - today).days
-        target = 2 if underlying in ("BANKNIFTY", "MIDCPNIFTY") else 3
+        target = _expiry_weekday(underlying)
         return (target - today.weekday()) % 7
 
     def _target_delta_strike(self, spot: float, opt_type: str, atm_iv: float,
@@ -1557,7 +1574,7 @@ class OptionsAgent(BaseAgent):
                 expiry = _last_thursday(ny, nm)
             return f"{underlying}{expiry.strftime('%y')}{expiry.strftime('%b').upper()}{strike}{opt_type}"
 
-        target = 2 if underlying in ("BANKNIFTY", "MIDCPNIFTY") else 3
+        target = _expiry_weekday(underlying)
         # Start the search AT today: the expiring weekly trades until 15:30 on
         # expiry day. Starting at today+1 sold NEXT week's contract on expiry
         # day while _days_to_expiry priced it as 0-DTE — wrong strike, and the

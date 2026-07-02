@@ -71,9 +71,14 @@ def _setup_tsl_callbacks() -> None:
         if not entry:
             return
         _loop = asyncio.get_running_loop()
+        # TSL levels are computed from UNDERLYING spot; the SL-M rests on the
+        # actual instrument. For futures that instrument trades at spot ± basis
+        # (captured at entry) — offset the trigger so "breakeven at spot" is
+        # breakeven on the CONTRACT, not a basis-sized locked-in loss.
+        _trig = round(pos.current_sl + float(entry.get("basis") or 0.0), 2)
         try:
             await _loop.run_in_executor(
-                None, lambda: kite_client.modify_order(order_id=sl_oid, trigger_price=pos.current_sl)
+                None, lambda: kite_client.modify_order(order_id=sl_oid, trigger_price=_trig)
             )
         except Exception as exc:
             logger.error("[{}] _on_sl_moved: modify_order failed for {}: {}", pos.strategy, pos.symbol, exc)
@@ -101,7 +106,7 @@ def _setup_tsl_callbacks() -> None:
                     transaction_type=pos.closing_side,
                     quantity=pos.quantity_remaining or pos.quantity, order_type="SL-M",
                     product=entry.get("product", "MIS"),
-                    trigger_price=pos.current_sl,
+                    trigger_price=_trig,
                     tag=_otag(f"TSL-{pos.strategy}"),
                 ))
                 with _tsl_sl_orders_lock:
@@ -1249,6 +1254,26 @@ class BaseAgent(ABC):
             qty = min(int(qty * 1.2), int(settings.max_position_size // ltp))
             logger.debug("[{}] {} positive catalyst {:.2f} → qty bumped to {}", self.name, sym, catalyst, qty)
 
+        # Re-align to the lot boundary AFTER the macro/catalyst adjustments:
+        # _try_enter lot-aligned before calling here, so a 0.75 haircut or 1.2
+        # bump desynced the qty — kite_client._validated_quantity then either
+        # silently snapped the broker order down (TSL/guard tracking a bigger
+        # position than real) or rejected a single-lot haircut outright,
+        # turning a sizing adjustment into a full trade block.
+        _lot_sz = signal.get("lot_size", 1)
+        if _lot_sz > 1:
+            _lots = int(qty // _lot_sz)
+            if _lots < 1:
+                if qty >= 0.5 * _lot_sz:   # mild haircut on an indivisible lot
+                    _lots = 1
+                else:
+                    logger.info("[{}] {} below half a lot ({}/{}) after macro/"
+                                "catalyst sizing — skipping entry",
+                                self.name, sym, qty, _lot_sz)
+                    order_guard.release_claim(sym, self.name, action)
+                    raise RuntimeError("sub_lot_after_adjustments")
+            qty = _lots * _lot_sz
+
         try:
             from portfolio_var import portfolio_var as _pvar
             notional = qty * ltp
@@ -1580,7 +1605,33 @@ class BaseAgent(ABC):
                 "pattern": signal.get("pattern", ""),
                 # Lot size for F&O — the T1 scale-out must stay lot-aligned.
                 "lot_size": signal.get("lot_size", 1),
+                # Futures basis (contract fill − spot at entry), filled in
+                # below: TSL levels are computed from UNDERLYING spot but the
+                # SL-M rests on the CONTRACT, which trades at spot ± basis —
+                # without the offset, breakeven re-pinned the contract stop at
+                # entry SPOT, locking in a loss equal to the basis.
+                "basis": 0.0,
             }
+        # Capture the futures basis (best-effort): contract fill vs spot.
+        if signal.get("futures_symbol"):
+            try:
+                _fill = 0.0
+                if hasattr(kite_client, "_paper_orders") and order_id in kite_client._paper_orders:
+                    _fill = float(kite_client._paper_orders[order_id].get("average_price") or 0.0)
+                else:
+                    _hist = await asyncio.get_running_loop().run_in_executor(
+                        None, lambda: kite_client.order_history(order_id))
+                    for _h in reversed(_hist or []):
+                        if _h.get("average_price"):
+                            _fill = float(_h["average_price"])
+                            break
+                if _fill > 0 and ltp > 0:
+                    with _tsl_sl_orders_lock:
+                        if order_id in _tsl_sl_orders:
+                            _tsl_sl_orders[order_id]["basis"] = round(_fill - ltp, 2)
+            except Exception:
+                pass
+
         trailing_sl_engine.register(
             symbol=sym, strategy=self.name, side=action,
             entry_price=ltp, quantity=qty, order_id=order_id,

@@ -164,6 +164,12 @@ class Settings(BaseSettings):
     min_score_scalping:       int = 3
     min_score_options:        int = 6
     min_score_futures:        int = 4
+    # Weekly expiry weekday per index underlying, "SYM:weekday" CSV
+    # (Mon=0…Sun=6). NSE/SEBI have moved expiry days repeatedly (2024-25
+    # circulars) — when they change again, update this setting instead of
+    # code. Empty entries fall back to the legacy defaults
+    # (Thu=3; Wed=2 for BANKNIFTY/MIDCPNIFTY).
+    index_expiry_weekdays:    str = ""
     min_score_swing:          int = 1
     min_score_mean_reversion: int = 3
     min_score_momentum:       int = 4
