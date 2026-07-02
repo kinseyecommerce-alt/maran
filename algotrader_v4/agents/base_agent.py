@@ -814,7 +814,13 @@ class BaseAgent(ABC):
                                     _gltp * (1 + gate.adjusted_target_pct / 100)
                                     if action == "BUY"
                                     else _gltp * (1 - gate.adjusted_target_pct / 100), 2)
-                            signal["_gate_size_factor"]  = gate.size_factor
+                            # COMPOUND with any agent-supplied factor (e.g.
+                            # FuturesAgent's black-swan 1.5×) instead of
+                            # overwriting it — the gate and the agent express
+                            # independent sizing opinions.
+                            signal["_gate_size_factor"] = round(
+                                float(signal.get("_gate_size_factor", 1.0))
+                                * float(gate.size_factor or 1.0), 3)
                             signal["_gate_confidence"]   = gate.confidence
 
                     # ── Compound size factors: event elevation + correlation ──
@@ -1017,15 +1023,32 @@ class BaseAgent(ABC):
             qty = max(1, int(qty * float(self._adaptive_min_score_override)))
 
         size_factor = signal.pop("_gate_size_factor", 1.0)
-        if size_factor < 1.0:
+        # Apply BOTH shrink and boost factors (boosts were silently dropped by
+        # the old `< 1.0` guard, killing e.g. the black-swan 1.5× short boost).
+        # Clamp to [0, 2] so a runaway compound can't double past intent.
+        size_factor = max(0.0, min(2.0, float(size_factor)))
+        if size_factor != 1.0:
             qty = max(1, int(qty * size_factor))
 
+        # Cross-agent consensus boost. signal_aggregator and signal_bus measure
+        # the SAME underlying event (2+ agents agreeing on symbol/direction
+        # within a minute) through two channels — applying both compounded the
+        # boost (1.5 × 1.5 = 2.25×). Take the stronger single boost instead.
+        boost = 0.0
         try:
             from signal_aggregator import signal_aggregator as _agg
             pre   = _agg.get_consensus_boost(snap.symbol, action)
             post  = _agg.register(self.name, snap.symbol, action, signal.get("score", 0))
             boost = pre if pre > 0 else post
-            if boost > 0:
+        except Exception:
+            pass
+        try:
+            from signal_bus import signal_bus as _sbus
+            boost = max(boost, _sbus.consensus_boost(snap.symbol, action, self.name))
+        except Exception:
+            pass
+        if boost > 0:
+            try:
                 # Cap against BOTH the global per-position notional and this
                 # agent's capital bucket — otherwise a consensus boost can
                 # overrun the per-agent allocation by ~25%.
@@ -1033,22 +1056,10 @@ class BaseAgent(ABC):
                                    risk_manager.max_capital_for_agent(self.name))
                 cap = int(cap_notional // max(ltp, 1))
                 qty = min(int(qty * (1 + boost)), cap)
-                logger.info("[{}] {} CONSENSUS boost {:.0%} → qty={}", self.name, snap.symbol, boost, qty)
-        except Exception:
-            pass
-
-        # Cross-agent signal bus boost — other agents signalling same direction
-        try:
-            from signal_bus import signal_bus as _sbus
-            _bus_boost = _sbus.consensus_boost(snap.symbol, action, self.name)
-            if _bus_boost > 0:
-                cap_notional = min(float(settings.max_position_size),
-                                   risk_manager.max_capital_for_agent(self.name))
-                cap = int(cap_notional // max(ltp, 1))
-                qty = min(int(qty * (1 + _bus_boost)), cap)
-                logger.info("[{}] {} BUS boost {:.0%} → qty={}", self.name, snap.symbol, _bus_boost, qty)
-        except Exception:
-            pass
+                logger.info("[{}] {} CONSENSUS boost {:.0%} → qty={}",
+                            self.name, snap.symbol, boost, qty)
+            except Exception:
+                pass
 
         return qty
 
@@ -1101,6 +1112,15 @@ class BaseAgent(ABC):
 
         pos_data = await loop.run_in_executor(None, kite_client.positions_cached)
         open_syms = [p["tradingsymbol"] for p in pos_data.get("net", []) if p.get("quantity", 0) != 0]
+        # Include symbols with in-flight CLAIMS (order placed, not yet in the
+        # broker book): three agents entering three same-sector symbols
+        # concurrently each saw a book without the others' pending orders and
+        # all passed the sector/beta gates.
+        try:
+            _claimed_syms = order_guard.claimed_symbols()
+            open_syms += [s for s in _claimed_syms if s not in open_syms and s != sym]
+        except Exception:
+            pass
 
         sector_ok, sector_reason = risk_manager.check_sector_limit(sym, open_syms)
         if not sector_ok:
@@ -1356,7 +1376,7 @@ class BaseAgent(ABC):
                             f"cancel failed for {sym} ({self.name})")
                     # Claim was confirmed above — release_order() fully unlocks the slot
                     # (release_claim() would be a no-op on a confirmed claim).
-                    order_guard.release_order(sym, self.name, action, 0)
+                    order_guard.release_failed_entry(sym, self.name, action)
                     raise RuntimeError("sl_placement_failed")
                 # H2: confirm actual fill; resize SL on partial; abort on zero fill.
                 try:
@@ -1364,7 +1384,7 @@ class BaseAgent(ABC):
                 except RuntimeError:
                     # Claim is already CONFIRMED (pending=False) so release_claim() is a
                     # no-op. Use release_order() to fully unlock the symbol slot.
-                    order_guard.release_order(sym, self.name, action, 0)
+                    order_guard.release_failed_entry(sym, self.name, action)
                     raise
             else:
                 # Paper mode: always MARKET — paper has no real order book and
@@ -1426,7 +1446,7 @@ class BaseAgent(ABC):
                             f"cancel failed for {sym} ({self.name})")
                     # Claim was already confirmed (pending=False) so release_claim()
                     # is a no-op here — use release_order() to fully unlock the slot.
-                    order_guard.release_order(sym, self.name, action, 0)
+                    order_guard.release_failed_entry(sym, self.name, action)
                     raise RuntimeError("sl_placement_failed")
                 # H2: both orders landed — confirm actual fill; resize SL on
                 # partial; abort on zero fill. (LIVE only; PAPER is a no-op.)
@@ -1434,7 +1454,7 @@ class BaseAgent(ABC):
                     qty = await self._reconcile_fill_and_resize_sl(order_id, sl_order_id, qty, loop)
                 except RuntimeError:
                     # Claim already CONFIRMED — release_order() to fully unlock the slot.
-                    order_guard.release_order(sym, self.name, action, 0)
+                    order_guard.release_failed_entry(sym, self.name, action)
                     raise
         except RuntimeError:
             raise
@@ -1449,7 +1469,7 @@ class BaseAgent(ABC):
             # If the claim was already confirmed (non-pending), release_claim() is a
             # no-op; use release_order() so the symbol lock and guard slot are freed.
             if _claim_confirmed:
-                order_guard.release_order(sym, self.name, action, 0)
+                order_guard.release_failed_entry(sym, self.name, action)
             else:
                 order_guard.release_claim(sym, self.name, action)
             raise RuntimeError(f"placement_error: {exc}")
@@ -1693,18 +1713,38 @@ class BaseAgent(ABC):
             entry_side = "BUY" if pos["quantity"] > 0 else "SELL"
             qty  = abs(pos["quantity"])
             pnl  = pos.get("pnl", 0)
+            # Claim the TSL position BEFORE placing the exit order. Every agent
+            # that approves this symbol drives trailing_sl_engine.on_tick from
+            # its own loop, so while our MARKET exit is in the executor a
+            # concurrent tick could fire _on_sl_hit and place a SECOND exit —
+            # a naked reverse position in LIVE. claim_exit shares the engine's
+            # status CAS, making the two paths mutually exclusive.
+            _claimed, _contested = trailing_sl_engine.claim_exit(sym, self.name)
+            if _contested:
+                logger.info("[{}] {} exit skipped — TSL callback already exiting",
+                            self.name, sym)
+                continue
             _exit_t0 = _time.monotonic()
             _exit_exch   = pos.get("exchange", "NSE")
             _exit_prod   = pos.get("product", self.product)
             _exit_tag    = _otag(f"Agent-{self.name}", "EXIT")
             _exit_sym = pos.get("tradingsymbol", sym)  # use contract symbol for F&O, not underlying
-            oid  = await asyncio.get_running_loop().run_in_executor(
-                None, lambda: kite_client.place_order(
-                    tradingsymbol=_exit_sym, exchange=_exit_exch,
-                    transaction_type=exit_side, quantity=qty, order_type="MARKET",
-                    product=_exit_prod, tag=_exit_tag,
+            try:
+                oid  = await asyncio.get_running_loop().run_in_executor(
+                    None, lambda: kite_client.place_order(
+                        tradingsymbol=_exit_sym, exchange=_exit_exch,
+                        transaction_type=exit_side, quantity=qty, order_type="MARKET",
+                        product=_exit_prod, tag=_exit_tag,
+                    )
                 )
-            )
+            except Exception as _exit_exc:
+                # Exit failed — release the claim so TSL protection resumes,
+                # otherwise the position would be permanently unmanaged.
+                if _claimed:
+                    trailing_sl_engine.release_exit_claim(_claimed.order_id)
+                logger.error("[{}] strategy exit order failed for {} — TSL claim "
+                             "released: {}", self.name, _exit_sym, _exit_exc)
+                continue
             logger.info("[{}] exit order latency: {:.0f}ms", self.name, (_time.monotonic() - _exit_t0) * 1000)
             order_guard.release_order(sym, self.name, entry_side, pnl)
             risk_manager.record_trade(pnl)
@@ -1714,14 +1754,10 @@ class BaseAgent(ABC):
             # Pop the SL-M mapping and CANCEL the live SL-M placed at entry:
             # the MARKET exit above just flattened the position, so an orphan
             # stop left working would later fill against a flat book and open
-            # an unwanted reverse position.
+            # an unwanted reverse position. The claimed position gives us the
+            # entry order_id directly (no unlocked engine iteration).
+            _entry_oid = _claimed.order_id if _claimed else None
             with _tsl_sl_orders_lock:
-                _entry_oid = next(
-                    (k for k, v in list(_tsl_sl_orders.items())
-                     if trailing_sl_engine._positions.get(k) is not None
-                     and trailing_sl_engine._positions[k].symbol == sym),
-                    None,
-                )
                 _sl_entry = _tsl_sl_orders.pop(_entry_oid, None) if _entry_oid else None
             if _sl_entry and _sl_entry.get("sl_order_id"):
                 _sl_oid = _sl_entry["sl_order_id"]

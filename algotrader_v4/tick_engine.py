@@ -158,6 +158,10 @@ class LiveIndicators:
     ichimoku_senkou_a:  float = 0.0
     ichimoku_senkou_b:  float = 0.0
     ichimoku_cloud_dir: str   = "NEUTRAL"
+    # 20-bar average volume at last full compute — lets indicator-cache hits
+    # refresh volume_ratio as the forming bar fills instead of serving the
+    # near-zero ratio cached at bar open.
+    _vol_avg_20: float = 0.0
     computed_at: float = 0.0
 
 
@@ -230,7 +234,13 @@ class TickBuffer:
         with self._lock:
             result = list(self._candles)
             if self._current:
-                result.append(self._current)
+                # Copy the forming candle: one snapshot object is fanned out to
+                # every agent queue and may be evaluated seconds later (Claude
+                # gate) — appending by reference let subsequent ticks mutate
+                # candles_1min[-1] after enqueue, making decision inputs
+                # inconsistent with snap.tick.
+                c = self._current
+                result.append(Candle(c.open, c.high, c.low, c.close, c.volume, c.ts))
             # Always return in chronological order. The backfill task may seed
             # historical bars AFTER a few live GBM ticks have already been
             # appended, leaving the deque non-monotonic in time.
@@ -476,7 +486,10 @@ class IndicatorCalc:
             if n >= 8:
                 ind.rsi_7 = float(ta.momentum.RSIIndicator(close,  7).rsi().iloc[-1])
 
-            if n >= 26:
+            # 34 = 26 (slow EMA) + 9-bar signal EMA - 1: below that the signal
+            # line is NaN and _sanitize_ind turned it into a fabricated 0.0,
+            # so macd>macd_signal crossovers compared against fake zero.
+            if n >= 34:
                 m = ta.trend.MACD(close)
                 ind.macd        = float(m.macd().iloc[-1])
                 ind.macd_signal = float(m.macd_signal().iloc[-1])
@@ -489,6 +502,9 @@ class IndicatorCalc:
                 ind.bb_mid   = float(bb.bollinger_mavg().iloc[-1])
                 vol_avg = volume.rolling(20).mean().iloc[-1]
                 ind.volume_ratio = float(volume.iloc[-1] / vol_avg) if vol_avg > 0 else 1.0
+                # Remember the average so indicator-cache hits can refresh the
+                # ratio as the forming bar fills (see _process_tick).
+                ind._vol_avg_20 = float(vol_avg) if vol_avg and vol_avg > 0 else 0.0
 
             if n >= 14:
                 ind.atr_14 = float(ta.volatility.AverageTrueRange(
@@ -670,6 +686,12 @@ class TickEngine:
         # Duplicate-tick deduplication — skip indicator recompute when same LTP within 100ms
         self._last_tick_ltp: dict[str, float] = {}
         self._last_tick_ts:  dict[str, float] = {}   # monotonic seconds
+        # Volume from deduped ticks: both WS clients advance their cumulative
+        # baseline BEFORE the callback, so a dropped tick's per-tick volume
+        # delta is gone unless we bank it and add it to the next accepted push.
+        # Without this, candle volume undercounts precisely at sticky prices
+        # (round numbers, option strikes) where activity is highest.
+        self._dedup_pending_vol: dict[str, int] = {}
 
         # Indicator cache — reuse computed indicators while candle count + LTP are stable.
         # Most indicators (EMA, RSI, MACD, BB, Supertrend…) only change on new candle close.
@@ -838,10 +860,15 @@ class TickEngine:
         if not ltp or ltp <= 0:
             return
 
-        # Skip indicator recompute for duplicate LTP within 100ms (WS fires rapidly)
+        # Skip indicator recompute for duplicate LTP within 100ms (WS fires rapidly).
+        # Bank the dropped tick's volume delta — it is added to the next
+        # accepted push so candle volume stays exact.
         now_mono = time.monotonic()
         if (self._last_tick_ltp.get(symbol) == tick.ltp
                 and now_mono - self._last_tick_ts.get(symbol, 0.0) < 0.1):
+            if tick.volume:
+                self._dedup_pending_vol[symbol] = (
+                    self._dedup_pending_vol.get(symbol, 0) + tick.volume)
             return
         self._last_tick_ltp[symbol] = tick.ltp
         self._last_tick_ts[symbol]  = now_mono
@@ -857,6 +884,7 @@ class TickEngine:
                 buf.reset()
             self._last_tick_ltp.clear()
             self._last_tick_ts.clear()
+            self._dedup_pending_vol.clear()
             self._ind_cache.clear()
             self._ind_cache_count.clear()
             self._ind_cache_ltp.clear()
@@ -864,8 +892,9 @@ class TickEngine:
                 _rest_last_cum_vol.clear()  # REST cumulative-volume baseline resets daily
             logger.info("TickEngine: daily buffer reset for IST session {}", tick_date)
 
-        self._bufs_1min[symbol].push(tick.ltp, tick.volume, tick.timestamp)
-        self._bufs_5min[symbol].push(tick.ltp, tick.volume, tick.timestamp)
+        _vol = tick.volume + self._dedup_pending_vol.pop(symbol, 0)
+        self._bufs_1min[symbol].push(tick.ltp, _vol, tick.timestamp)
+        self._bufs_5min[symbol].push(tick.ltp, _vol, tick.timestamp)
 
         df = self._bufs_1min[symbol].as_dataframe()
 
@@ -890,6 +919,21 @@ class TickEngine:
             ind.bid   = tick.bid
             ind.ask   = tick.ask
             ind.spread = round(tick.ask - tick.bid, 2)
+            # Day context also moves tick-to-tick — leaving it cached lets
+            # day_high/day_low/change_pct lag the actual tick until the next
+            # full recompute.
+            ind.day_high   = tick.high
+            ind.day_low    = tick.low
+            ind.day_open   = tick.open
+            ind.change_pct = tick.change_pct
+            # volume_ratio was cached the instant the bar opened (near-zero
+            # numerator) — refresh it from the live forming bar so volume
+            # gates aren't suppressed for the rest of the cache window.
+            if ind._vol_avg_20 > 0 and len(df) > 0:
+                try:
+                    ind.volume_ratio = float(df["volume"].iloc[-1] / ind._vol_avg_20)
+                except Exception:
+                    pass
             # L2 depth fields come from the live tick, not the cached compute
             ind.wall_above, ind.wall_below, ind.depth_imbalance = _detect_walls(
                 tick.ltp, tick.bid_depth, tick.ask_depth,
@@ -913,10 +957,14 @@ class TickEngine:
         # Paper-mode: update P&L and check SL/SL-M triggers on each tick
         if settings.trading_mode == "PAPER":
             kite_client.update_paper_pnl(symbol, tick.ltp)
-            # Re-mark open option positions on this underlying via Black-Scholes
-            # (delta approx) — option contracts have no tick feed, so without this
-            # their paper P&L would never move with the underlying.
-            kite_client.reprice_paper_options(symbol, tick.ltp)
+            # Re-mark open F&O positions on this underlying (contracts have no
+            # tick feed) and run trigger checks against the fresh marks:
+            # contract-keyed SL-M/LIMIT paper orders otherwise NEVER fire,
+            # leaving the broker-stop path structurally untested in PAPER.
+            for _contract, _px in (
+                    kite_client.reprice_paper_options(symbol, tick.ltp)
+                    + kite_client.reprice_paper_futures(symbol, tick.ltp)):
+                kite_client.check_paper_triggers(_contract, _px)
             kite_client.check_paper_triggers(symbol, tick.ltp)
 
         snap = MarketSnapshot(

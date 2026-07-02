@@ -253,34 +253,34 @@ class MasterAgent:
                 agent.start(q)
 
         sq_h, sq_m = [int(x) for x in settings.squareoff_time.split(":")]
-        self._scheduler.add_job(self._master_review,   "interval", seconds=60,  id="master_review",
+        self._scheduler.add_job(self._master_review,   "interval", seconds=60,  id="master_review", replace_existing=True,
                                  max_instances=1, coalesce=True, misfire_grace_time=120)
         self._scheduler.add_job(self._auto_squareoff,  "cron", hour=sq_h, minute=sq_m,
-                                 day_of_week="mon-fri", id="squareoff",
+                                 day_of_week="mon-fri", id="squareoff", replace_existing=True,
                                  misfire_grace_time=600)
         self._scheduler.add_job(self._daily_reset,     "cron", hour=9, minute=15,
-                                 day_of_week="mon-fri", id="daily_reset",
+                                 day_of_week="mon-fri", id="daily_reset", replace_existing=True,
                                  misfire_grace_time=600)
         self._scheduler.add_job(self._nightly_adaptive,"cron", hour=21, minute=0,
-                                 day_of_week="mon-fri", id="nightly_adaptive",
+                                 day_of_week="mon-fri", id="nightly_adaptive", replace_existing=True,
                                  misfire_grace_time=1800)
         self._scheduler.add_job(self._weekly_backtest, "cron", hour=20, minute=0,
-                                 day_of_week="sun", id="weekly_backtest",
+                                 day_of_week="sun", id="weekly_backtest", replace_existing=True,
                                  misfire_grace_time=3600)
         self._scheduler.add_job(self._weekly_memory_synthesis, "cron", hour=21, minute=0,
-                                 day_of_week="sun", id="weekly_memory",
+                                 day_of_week="sun", id="weekly_memory", replace_existing=True,
                                  misfire_grace_time=3600)
         self._scheduler.add_job(self._portfolio_optimize_job, "interval", minutes=15,
-                                 id="portfolio_optimize", max_instances=1, coalesce=True,
+                                 id="portfolio_optimize", replace_existing=True, max_instances=1, coalesce=True,
                                  misfire_grace_time=300)
         self._scheduler.add_job(self._weekly_db_cleanup, "cron", hour=22, minute=30,
-                                 day_of_week="sun", id="weekly_db_cleanup",
+                                 day_of_week="sun", id="weekly_db_cleanup", replace_existing=True,
                                  misfire_grace_time=3600)
         self._scheduler.add_job(self._refresh_fii_dii_job, "cron", hour=19, minute=30,
-                                 day_of_week="mon-fri", id="refresh_fii_dii",
+                                 day_of_week="mon-fri", id="refresh_fii_dii", replace_existing=True,
                                  misfire_grace_time=1800)
         self._scheduler.add_job(self._refresh_macro_job,   "interval", minutes=5,
-                                 id="refresh_macro", max_instances=1, coalesce=True,
+                                 id="refresh_macro", replace_existing=True, max_instances=1, coalesce=True,
                                  misfire_grace_time=120)
         self._scheduler.start()
         logger.info("[master_v5] started — tick-driven 1s")
@@ -768,10 +768,17 @@ class MasterAgent:
         _risk_override = d.get("risk_override", {})
         if _risk_override.get("halt_new_trades"):
             risk_manager.is_trading_halted = True
+            self._halt_set_by_master = True
             logger.warning("[master] Claude halted new trades: {}", _risk_override.get("reason", ""))
-        elif risk_manager.is_trading_halted and _risk_override.get("halt_new_trades") is False:
-            # Claude explicitly cleared the halt (halt_new_trades: false) — honour it.
+        elif (risk_manager.is_trading_halted
+              and _risk_override.get("halt_new_trades") is False
+              and getattr(self, "_halt_set_by_master", False)):
+            # Claude may clear ONLY halts it set itself. halt_new_trades:false
+            # is the schema DEFAULT in every routine review, so without this
+            # guard the next 60s cycle silently un-halted stops set elsewhere
+            # (Kite token expiry, manual halt) within a minute.
             risk_manager.is_trading_halted = False
+            self._halt_set_by_master = False
             logger.info("[master] Claude released trade halt (intraday recovery)")
 
         # Apply dynamic trade gate threshold from master — capped at 55 so Opus always gets the final say.

@@ -179,6 +179,13 @@ class OrderGuard:
         except Exception as exc:
             logger.warning("OrderGuard: trade count restore failed (counts reset to 0): {}", exc)
 
+    def claimed_symbols(self) -> list[str]:
+        """Symbols with an active claim or open tracked order — includes
+        orders in flight that kite.positions() doesn't reflect yet. Used to
+        close the portfolio-limit race between concurrent entries."""
+        with self._lock:
+            return list({sym for (sym, _s, _sd) in self._active.keys()})
+
     def owner_of(self, symbol: str) -> str | None:
         """Return the '{strategy}:{side}' owner of the symbol lock, or None."""
         with self._lock:
@@ -201,6 +208,23 @@ class OrderGuard:
             # Per-strategy loss cooldown
             if pnl < 0 and settings.cooldown_after_loss_sec > 0:
                 self._cooldown_until[strategy] = time.time() + settings.cooldown_after_loss_sec
+
+    def release_failed_entry(self, symbol: str, strategy: str, side: str) -> None:
+        """Release a claim whose entry NEVER became a position (order rejected,
+        SL-M placement failed and the entry was rolled back). Unlike
+        release_order() this refunds the daily trade slot consumed by
+        confirm_claim() and applies NO exit cooldowns — a trade that never
+        existed should neither count against the per-strategy limit nor block
+        the symbol for 5-30s."""
+        with self._lock:
+            key = (symbol, strategy, side)
+            existed = self._active.pop(key, None) is not None
+            if self._symbol_owner.get(symbol) == f"{strategy}:{side}":
+                self._symbol_owner.pop(symbol, None)
+            if existed and self._trade_count.get(strategy, 0) > 0:
+                self._trade_count[strategy] -= 1
+            snapshot = dict(self._trade_count)
+        self._persist_trade_count(snapshot)
 
     def is_symbol_active_anywhere(self, symbol: str) -> list[str]:
         """Returns list of strategy names holding an active position on this symbol."""

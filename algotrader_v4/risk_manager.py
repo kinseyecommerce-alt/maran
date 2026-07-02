@@ -22,8 +22,35 @@ _SECTOR_MAP_PATH = Path(__file__).parent / "sector_map.json"
 _SECTOR_MAP: dict[str, str] = {}
 try:
     _SECTOR_MAP = _json.loads(_SECTOR_MAP_PATH.read_text())
-except Exception:
-    pass
+except Exception as _exc:
+    # An empty map makes every symbol "OTHERS" — exempt from sector limits.
+    # That silent failure mode must at least be loud.
+    logger.error("[RiskManager] sector_map.json load FAILED — sector limits "
+                 "are effectively DISABLED: {}", _exc)
+
+def _fo_underlying(sym_up: str) -> str:
+    """Reduce an F&O contract tradingsymbol to its underlying for sector/beta
+    lookups (e.g. INFY2606041650CE → INFY, TCS26JULFUT → TCS). Contract
+    symbols never matched the sector map, so derivative exposure silently
+    bypassed sector limits."""
+    if sym_up.endswith(("CE", "PE", "FUT")):
+        try:
+            from greeks_engine import parse_nfo_symbol
+            parsed = parse_nfo_symbol(sym_up)
+            if parsed:
+                return parsed["underlying"]
+        except Exception:
+            pass
+        # Futures / unparsed weekly formats: strip from the first digit
+        for i, ch in enumerate(sym_up):
+            if ch.isdigit():
+                return sym_up[:i]
+    return sym_up
+
+
+def _sector_of(symbol: str) -> str:
+    return _SECTOR_MAP.get(_fo_underlying(symbol.upper()), "OTHERS")
+
 
 # ── Stock beta map (loaded once at module level) ─────────────────────────────
 _BETA_MAP_PATH = Path(__file__).parent / "data" / "stock_betas.json"
@@ -77,18 +104,27 @@ def compute_costs(
     price: float,
     order_type: str = "MARKET",
     product: str = "MIS",
+    side: str = "",
 ) -> TransactionCost:
-    """Single-leg Zerodha transaction cost for one order."""
+    """Single-leg Zerodha transaction cost for one order.
+
+    STT applies to the SELL leg only and stamp duty to the BUY leg only
+    (per the actual Zerodha/NSE fee structure and consistently with
+    compute_tx_costs below). Pass side="BUY"/"SELL" for an exact leg;
+    with no side both are charged (legacy conservative estimate).
+    """
     if not settings.use_transaction_costs:
         return TransactionCost(0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0)
 
     value        = qty * price
     brokerage    = min(value * 0.0003, 20.0)
-    stt          = value * 0.00025
+    _stt_rate    = 0.001 if product == "CNC" else 0.00025
+    stt          = value * _stt_rate if side in ("", "SELL") else 0.0
     exchange_txn = value * 0.0000345
     sebi_charges = value * 0.000001
     gst          = (brokerage + exchange_txn) * 0.18
-    stamp_duty   = value * (0.00015 if product == "CNC" else 0.00003)
+    _stamp_rate  = 0.00015 if product == "CNC" else 0.00003
+    stamp_duty   = value * _stamp_rate if side in ("", "BUY") else 0.0
     total        = brokerage + stt + exchange_txn + sebi_charges + gst + stamp_duty
     return TransactionCost(
         brokerage=round(brokerage, 4),
@@ -107,9 +143,13 @@ def compute_round_trip_cost(
     price: float,
     product: str = "MIS",
 ) -> float:
-    """Full entry+exit round-trip cost (2× single-leg total)."""
-    leg = compute_costs(symbol, qty, price, product=product)
-    return round(leg.total * 2, 4)
+    """Full entry+exit round-trip cost: BUY leg + SELL leg at the same price.
+    (Doubling the sideless single-leg total overstated the round trip by one
+    STT plus one stamp duty — ~0.028% of turnover — and disagreed with
+    compute_tx_costs, so bracket-path and TSL-path net PnL diverged.)"""
+    buy  = compute_costs(symbol, qty, price, product=product, side="BUY")
+    sell = compute_costs(symbol, qty, price, product=product, side="SELL")
+    return round(buy.total + sell.total, 4)
 
 
 def _compute_kelly(win_rate: float, avg_win: float, avg_loss: float) -> float:
@@ -568,14 +608,15 @@ class RiskManager:
         Correlation-aware: a highly correlated open position (r>0.75) counts as 1.5×.
         INDEX and OTHERS sectors are exempt from the limit.
         """
-        sector = _SECTOR_MAP.get(symbol.upper(), "OTHERS")
+        sector = _sector_of(symbol)
         if sector in ("INDEX", "OTHERS"):
             return True, "OK"
-        sym_up = symbol.upper()
+        sym_up = _fo_underlying(symbol.upper())
         count: float = 0.0
         for s in open_symbols:
-            if _SECTOR_MAP.get(s.upper(), "OTHERS") != sector:
+            if _sector_of(s) != sector:
                 continue
+            s = _fo_underlying(s.upper())
             # Correlated positions count as 1.5× against the limit
             if frozenset({sym_up, s.upper()}) in _HIGH_CORR_PAIRS:
                 count += 1.5

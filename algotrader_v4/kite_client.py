@@ -970,16 +970,22 @@ class KiteClient:
                 "underlying": underlying, "entry_spot": entry_spot, "delta": delta,
             }
 
-    def reprice_paper_options(self, underlying: str, spot: float) -> None:
+    def reprice_paper_options(self, underlying: str, spot: float) -> list:
         """Re-mark open option paper positions on *underlying* from the current
         spot using a first-order (delta) approximation:
             premium = entry_premium + delta × (spot − entry_spot)
         anchored to the entry fill (average_price), so it is exact at entry and
         moves realistically with the underlying. Keeps _paper_ltp[contract] and
         each option position's P&L current even though the contract is never
-        ticked. Stale meta (closed positions) is pruned."""
+        ticked. Stale meta (closed positions) is pruned.
+
+        Returns [(contract, premium)] so the caller can run SL-M/LIMIT trigger
+        checks against the fresh marks — contract-keyed paper orders otherwise
+        NEVER trigger, because check_paper_triggers only runs on symbols that
+        tick (underlyings)."""
+        repriced: list = []
         if spot <= 0 or not self._paper_option_meta:
-            return
+            return repriced
         with self._paper_positions_lock:
             for pos in self._paper_positions:
                 contract = pos.get("tradingsymbol", "")
@@ -996,6 +1002,30 @@ class KiteClient:
                 pos["last_price"] = premium
                 pos["pnl"] = round((premium - pos["average_price"]) * pos["quantity"], 2)
                 self._paper_ltp[contract] = premium
+                repriced.append((contract, premium))
+        return repriced
+
+    def reprice_paper_futures(self, underlying: str, spot: float) -> list:
+        """Mark open futures paper positions on *underlying* at the current
+        spot (paper model: basis ≈ 0). Futures contracts have no tick feed —
+        without this their paper P&L stayed 0 forever and a fallback MARKET
+        exit filled at the ₹100 placeholder. Returns [(contract, price)] for
+        trigger checks, mirroring reprice_paper_options."""
+        repriced: list = []
+        if spot <= 0:
+            return repriced
+        with self._paper_positions_lock:
+            for pos in self._paper_positions:
+                contract = pos.get("tradingsymbol", "")
+                if (not contract.endswith("FUT")
+                        or not contract.startswith(underlying)
+                        or pos.get("quantity", 0) == 0):
+                    continue
+                pos["last_price"] = spot
+                pos["pnl"] = round((spot - pos["average_price"]) * pos["quantity"], 2)
+                self._paper_ltp[contract] = spot
+                repriced.append((contract, spot))
+        return repriced
 
 
 kite_client = KiteClient()

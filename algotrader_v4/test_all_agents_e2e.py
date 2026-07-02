@@ -101,14 +101,21 @@ def build_momentum():
 
 def build_pairs():
     agent = PairsAgent()
+    from datetime import timedelta
+    # Prime INFY (leg b) price so the TCS/INFY ratio can be computed.
     with patch("agents.strategy_agents.now_ist", return_value=MKT):
-        # Prime INFY (leg b) price so the TCS/INFY ratio can be computed.
         agent.evaluate_tick(mk("INFY", 1600.0, n_candles=30))
-        # Warm up a tight ratio cluster (≥20 samples → stable mean/std).
-        for i in range(30):
-            px = 3500.0 + ((i % 3) - 1)        # 3499..3501 micro-wiggle
+    # Warm up a tight ratio cluster (≥20 samples → stable mean/std). Ratios
+    # are sampled once per 1-min BAR (tick-sampled windows deflated the std),
+    # so advance the mocked clock one minute per warm-up tick.
+    for i in range(30):
+        px = 3500.0 + ((i % 3) - 1)            # 3499..3501 micro-wiggle
+        with patch("agents.strategy_agents.now_ist",
+                   return_value=MKT + timedelta(minutes=i)):
             agent.evaluate_tick(mk("TCS", px, n_candles=30))
-        # Divergent tick: TCS cheap → ratio drops far below mean → z ≤ −2 → BUY TCS.
+    # Divergent tick: TCS cheap → ratio drops far below mean → z ≤ −2 → BUY TCS.
+    with patch("agents.strategy_agents.now_ist",
+               return_value=MKT + timedelta(minutes=30)):
         trig = mk("TCS", 3400.0, rsi=45, volume_ratio=1.6, macd_hist=0.4,
                   ema9=3405, ema21=3400, n_candles=30)
         action, signal = agent.evaluate_tick(trig)

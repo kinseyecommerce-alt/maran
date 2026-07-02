@@ -34,6 +34,17 @@ class SignalAggregator:
         key = (symbol, direction)
         score = int(score) if score is not None else 0
         with self._lock:
+            # A fresh signal INVALIDATES this agent's opposite-direction vote:
+            # otherwise a 60s whipsaw can hold BUY and SELL consensus on the
+            # same symbol simultaneously, boosting both sides by +50% and
+            # amplifying churn exactly when the market is choppiest.
+            opp_key = (symbol, "SELL" if direction == "BUY" else "BUY")
+            if opp_key in self._signals:
+                opp = [(a, s, ts) for a, s, ts in self._signals[opp_key] if a != agent]
+                if opp:
+                    self._signals[opp_key] = opp
+                else:
+                    del self._signals[opp_key]
             # Expire old entries — use .get() to avoid creating a defaultdict entry prematurely
             window = now - timedelta(seconds=CONSENSUS_WINDOW_SECS)
             active = [(a, s, ts) for a, s, ts in self._signals.get(key, []) if ts > window]
