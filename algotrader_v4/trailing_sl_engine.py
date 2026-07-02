@@ -93,12 +93,19 @@ TRAIL_CONFIGS: dict[str, TrailConfig] = {
         atr_multiplier  = 1.2,
     ),
     "options": TrailConfig(
-        initial_sl_pct  = 25.0,   # % of premium — professional standard (medium IV baseline)
-        trail_pct       = 12.5,
-        breakeven_pct   = 10.0,
-        activation_pct  = 20.0,
-        target1_pct     = 50.0,
-        target2_pct     = 80.0,
+        # Percentages are measured on the UNDERLYING (positions register with
+        # symbol=underlying, entry_price=spot — see OptionsAgent._try_enter),
+        # NOT on the premium. Converted from the premium-scale professional
+        # standards (SL −25%, T1 +50%, T2 +80%) via delta≈0.5 and ATM weekly
+        # premium ≈ 2% of spot: premium % ≈ 25 × underlying %. The old
+        # premium-scale values (25/10/20/50/80) required 10–80% intraday moves
+        # in the underlying, so breakeven/trail/T1/T2 could never fire.
+        initial_sl_pct  = 1.00,   # ≈ −25% premium
+        trail_pct       = 0.50,   # ≈ 12.5% premium behind best
+        breakeven_pct   = 0.40,   # ≈ +10% premium
+        activation_pct  = 0.80,   # ≈ +20% premium
+        target1_pct     = 2.00,   # ≈ +50% premium
+        target2_pct     = 3.20,   # ≈ +80% premium
         mode            = SLMode.TRAILING,
         atr_multiplier  = 2.0,
     ),
@@ -187,6 +194,23 @@ class PositionSL:
 
     # Partial exit tracking (T1 scale-out: close 50%, trail remainder)
     partial_exit_done: bool = False
+
+    # Order side that CLOSES the position on the actual instrument. For equities
+    # and futures this is simply the opposite of `side`. For options tracked
+    # against the UNDERLYING, `side` expresses directional exposure (a long PE
+    # trails as SELL) while the closing order on the contract is still a SELL —
+    # so the two must be independent. Empty string → derive from `side`.
+    exit_side:      str = ""
+
+    # Scales the underlying-move PnL estimate to instrument PnL. 1.0 for
+    # cash/futures; for options set to |delta| at entry so
+    # (underlying move) × qty × pnl_scale ≈ premium move × qty.
+    pnl_scale:      float = 1.0
+
+    @property
+    def closing_side(self) -> str:
+        """Transaction side that flattens this position on the instrument."""
+        return self.exit_side or ("SELL" if self.side == "BUY" else "BUY")
     quantity_remaining: int = 0   # set to quantity at registration; updated after T1 scale-out
 
     # Per-position callbacks (set via register(), used before module-level fallbacks)
@@ -285,6 +309,8 @@ class TrailingSLEngine:
         on_target_hit:  Optional[Callable] = None,
         on_sl_moved:    Optional[Callable] = None,
         on_partial_exit: Optional[Callable] = None,
+        exit_side:   str = "",
+        pnl_scale:   float = 1.0,
     ) -> PositionSL:
         """
         Register a new open position for trailing SL monitoring.
@@ -313,6 +339,7 @@ class TrailingSLEngine:
             order_id=order_id, current_sl=init_sl,
             best_price=entry_price, atr=atr, atr_at_entry=atr,
             quantity_remaining=quantity,
+            exit_side=exit_side, pnl_scale=pnl_scale,
             _on_sl_hit=on_sl_hit,
             _on_target_hit=on_target_hit,
             _on_sl_moved=on_sl_moved,
@@ -411,7 +438,12 @@ class TrailingSLEngine:
                 if pos.status != SLStatus.ACTIVE:
                     return  # another coroutine already claimed this hit
                 pos.status = SLStatus.HIT
-            pnl = (ltp - pos.entry_price) * pos.quantity * (1 if pos.side == "BUY" else -1)
+            # Use quantity_remaining (shrunk by the reconciler after partial
+            # external exits) and pnl_scale (≈|delta| for options tracked on
+            # the underlying) so the recorded PnL matches what the exit closes.
+            _qty = pos.quantity_remaining or pos.quantity
+            pnl = ((ltp - pos.entry_price) * _qty * pos.pnl_scale
+                   * (1 if pos.side == "BUY" else -1))
             logger.warning(
                 "🔴 SL HIT: {} {} @ ₹{:.2f} | SL was ₹{:.2f} | P&L ₹{:.0f}",
                 pos.symbol, pos.side, ltp, pos.current_sl, pnl

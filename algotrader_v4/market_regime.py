@@ -277,13 +277,17 @@ class MarketRegimeDetector:
             return_exceptions=True,
         )
 
-        # Phase 3B: Update rolling VIX history for Z-score computation
-        # 480 = 20 trading days × 24 readings/day at 60s interval
+        # Phase 3B: Update rolling VIX history for Z-score computation.
+        # The collector runs every 60s during a ~375-minute session, so 20
+        # trading days ≈ 20 × 375 = 7500 readings. (The previous cap of 480
+        # was derived from an assumed "24 readings/day" — actually ~1.3 days,
+        # which made the z-score a same-day comparison: sustained-high VIX
+        # normalised to z≈0 within hours, and calm-day noise produced z>3.)
         with self._state_lock:
             if signals.india_vix > 0:
                 self._vix_history.append(signals.india_vix)
-                if len(self._vix_history) > 480:
-                    self._vix_history = self._vix_history[-480:]
+                if len(self._vix_history) > 7500:
+                    self._vix_history = self._vix_history[-7500:]
             signals.vix_zscore = self._vix_zscore(signals.india_vix)
 
         # Populate 1-min NIFTY change % for flash crash detection
@@ -333,9 +337,10 @@ class MarketRegimeDetector:
         import numpy as np
         arr = np.array(self._vix_history)
         mean = arr.mean()
-        std = arr.std()
-        if std < 0.01:
-            return 0.0
+        # Floor the std at 0.25 VIX points: on a flat day (e.g. VIX 12.0–12.2,
+        # std≈0.05) an unfloored z-score turns a 0.3-point blip into z≈6,
+        # tripping the 3σ BLACK_SWAN gate on noise.
+        std = max(float(arr.std()), 0.25)
         return (vix - mean) / std
 
     # ── Signal collectors ──────────────────────────────────────────────
@@ -529,20 +534,28 @@ class MarketRegimeDetector:
         vix_unavailable = vix <= 0
         # Phase 3B: use VIX Z-score for adaptive thresholds when enough history
         vix_z = 0.0 if vix_unavailable else self._vix_zscore(vix)
-        # Override extreme/high flags with Z-score when 20+ readings available
+        # Z-score ADDS sensitivity on top of the absolute thresholds — it must
+        # never replace them. Replacement had two failure modes: sustained
+        # VIX 30 normalised to z≈0 (extreme market classified as trending at
+        # full size), and a calm-day z-spike at VIX 12 flagged "extreme".
+        # Absolute levels always count; z-based flags require an absolute
+        # floor so relative spikes only matter once VIX is meaningfully high.
         if vix_unavailable:
             extreme_vix = volatile_vix = False
-        elif len(self._vix_history) >= 20:
-            extreme_vix = vix_z > 2.0   # 2 std devs above recent mean
-            volatile_vix = vix_z > 1.0  # 1 std dev above recent mean
         else:
-            extreme_vix = vix > self.VIX_EXTREME
-            volatile_vix = vix > self.VIX_HIGH
+            extreme_vix  = (vix > self.VIX_EXTREME) or \
+                           (vix_z > 2.0 and vix > self.VIX_HIGH)
+            volatile_vix = (vix > self.VIX_HIGH) or \
+                           (vix_z > 1.0 and vix > self.VIX_HIGH * 0.75)
 
         # BLACK SWAN: 3-sigma VIX spike OR single-candle flash crash (> 3% drop)
-        # Must check BEFORE HIGH_VOLATILE — BLACK_SWAN is a superset of that regime
+        # Must check BEFORE HIGH_VOLATILE — BLACK_SWAN is a superset of that regime.
+        # The z-spike alone is not enough — require VIX above the absolute HIGH
+        # level so a statistical blip on a calm day can't mass-tighten stops
+        # (tighten_all 0.5%) and flap every 60s review cycle.
         from config import settings as _cfg
-        _bs_vix      = (not vix_unavailable) and vix_z > _cfg.black_swan_vix_zscore
+        _bs_vix      = (not vix_unavailable) and vix >= self.VIX_HIGH \
+                       and vix_z > _cfg.black_swan_vix_zscore
         _flash_crash = s.nifty_1min_chg_pct < -_cfg.black_swan_price_drop_pct
         if _bs_vix or _flash_crash:
             return Regime.BLACK_SWAN

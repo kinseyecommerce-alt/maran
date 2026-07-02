@@ -58,6 +58,11 @@ SYMBOLS: dict[str, dict] = {
     "TITAN":      {"ltp": 3485.0,  "vol_ann": 0.26, "atr_day": 60.0,  "trend": +1, "beta": 0.85},
     "WIPRO":      {"ltp": 265.0,   "vol_ann": 0.24, "atr_day": 5.0,   "trend": -1, "beta": 0.75},
     "AXISBANK":   {"ltp": 1145.0,  "vol_ann": 0.24, "atr_day": 22.0,  "trend": +1, "beta": 1.10},
+    # Index underlyings — FuturesAgent trades ONLY symbols in its LOT_SIZES
+    # (NIFTY, BANKNIFTY, …). Without them the sim silently exercised 4/5
+    # agents while reporting "Futures: no trades".
+    "NIFTY":      {"ltp": 24350.0, "vol_ann": 0.14, "atr_day": 180.0, "trend": +1, "beta": 1.00},
+    "BANKNIFTY":  {"ltp": 52100.0, "vol_ann": 0.18, "atr_day": 450.0, "trend": -1, "beta": 1.00},
 }
 
 MARKET_OPEN  = time(9, 15)

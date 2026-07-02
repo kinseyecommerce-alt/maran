@@ -206,6 +206,26 @@ class TickBuffer:
                 c.volume += volume
         return completed
 
+    def seed_candle(self, open_: float, high: float, low: float, close: float,
+                    volume: int, ts: datetime) -> None:
+        """Seed one COMPLETED historical bar with real OHLC.
+
+        push() collapses a historical row to open=high=low=close (it only sees
+        one price), which zeroes true range and guts ATR/Supertrend/Williams
+        for the whole warm-up window. Bars whose bucketed timestamp already
+        exists (live ticks racing the backfill fetch) are skipped so the
+        indicator dataframe never double-counts a minute."""
+        secs = (ts.hour * 3600 + ts.minute * 60 + ts.second) \
+               // self.resolution * self.resolution
+        bar_ts = datetime(ts.year, ts.month, ts.day, tzinfo=ts.tzinfo) \
+                 + timedelta(seconds=secs)
+        with self._lock:
+            if bar_ts == self._current_ts:
+                return
+            if any(c.ts == bar_ts for c in self._candles):
+                return
+            self._candles.append(Candle(open_, high, low, close, volume, bar_ts))
+
     def candles(self) -> list[Candle]:
         with self._lock:
             result = list(self._candles)
@@ -429,13 +449,26 @@ class IndicatorCalc:
 
             if n >= 5:
                 # Cumulative session VWAP — Σ(typical_price·volume)/Σ(volume) over
-                # the day's candles (buffers reset at 09:15 IST). The previous
-                # ta.volume.VolumeWeightedAveragePrice defaulted to a 14-bar
-                # rolling window, which is NOT session VWAP. Consistent with
-                # _vwap_bands() below.
-                _tp      = (high + low + close) / 3.0
-                _cum_vol = float(volume.sum())
-                ind.vwap = (float((_tp * volume).sum()) / _cum_vol
+                # TODAY'S candles only. The buffer may legitimately contain
+                # previous-day bars (historical backfill warms up EMA/RSI/etc.),
+                # but session VWAP must never include them: on a gap day a
+                # contaminated VWAP biases the primary ltp-vs-vwap entry filter
+                # for hours. Restrict to bars sharing the latest bar's date.
+                _ts_col = ("date" if "date" in df.columns
+                           else "datetime" if "datetime" in df.columns else None)
+                if _ts_col is not None:
+                    _last_day  = df[_ts_col].iloc[-1]
+                    _last_day  = (_last_day.date()
+                                  if hasattr(_last_day, "date") else _last_day)
+                    _sess_mask = df[_ts_col].map(
+                        lambda d: (d.date() if hasattr(d, "date") else d) == _last_day)
+                    _s_close, _s_high = close[_sess_mask], high[_sess_mask]
+                    _s_low, _s_vol    = low[_sess_mask], volume[_sess_mask]
+                else:   # no timestamp column — treat the whole frame as one session
+                    _s_close, _s_high, _s_low, _s_vol = close, high, low, volume
+                _tp      = (_s_high + _s_low + _s_close) / 3.0
+                _cum_vol = float(_s_vol.sum())
+                ind.vwap = (float((_tp * _s_vol).sum()) / _cum_vol
                             if _cum_vol > 0 else float(close.iloc[-1]))
 
             if n >= 15:
@@ -475,8 +508,14 @@ class IndicatorCalc:
                 ind.squeeze_on, ind.squeeze_momentum = _ttm_squeeze(close, high, low)
 
             if n >= 10:
-                ind.vwap_upper2, ind.vwap_lower2, ind.vwap_upper3, ind.vwap_lower3 = \
-                    _vwap_bands(close, high, low, volume)
+                # Session-scoped like ind.vwap above — bands anchored to
+                # yesterday's bars would put ±2σ/±3σ levels at stale prices.
+                if len(_s_close) >= 2:
+                    ind.vwap_upper2, ind.vwap_lower2, ind.vwap_upper3, ind.vwap_lower3 = \
+                        _vwap_bands(_s_close, _s_high, _s_low, _s_vol)
+                else:
+                    ind.vwap_upper2, ind.vwap_lower2, ind.vwap_upper3, ind.vwap_lower3 = \
+                        _vwap_bands(close, high, low, volume)
 
             if n >= 20:
                 ind.stoch_rsi_k, ind.stoch_rsi_d = _stoch_rsi(close)
@@ -1180,11 +1219,6 @@ class TickEngine:
             existing = buf1.candles()
             if len(existing) > 50:
                 continue
-            # Clear any GBM ticks that raced ahead so historical bars land
-            # at the chronologically-correct start of the deque.
-            buf1.reset()
-            if buf5:
-                buf5.reset()
             try:
                 exch = self._exchange.get(sym, "NSE")
                 df = await loop.run_in_executor(
@@ -1192,17 +1226,42 @@ class TickEngine:
                 )
                 if df is None or df.empty:
                     continue
-                # Keep the last 200 bars (enough for any strategy's min_candles)
+                # Keep the last 200 bars (enough for any strategy's min_candles).
+                # Seed COMPLETED bars with real OHLC via seed_candle() — it
+                # dedups against any live ticks that raced ahead of this fetch,
+                # so the buffers are no longer reset (resetting before the
+                # awaited fetch dropped live bars, then re-added the same
+                # minutes from history, double-counting volume).
                 df = df.tail(200)
+                _five: dict = {}   # 5-min bucket ts → [o, h, l, c, vol, first_ts]
                 for row in df.itertuples(index=False):
                     ts = row.date
                     if hasattr(ts, "to_pydatetime"):
                         ts = ts.to_pydatetime()
-                    close = float(row.close)
-                    vol   = int(getattr(row, "volume", 0))
-                    buf1.push(close, vol, ts)
+                    o = float(getattr(row, "open",  row.close))
+                    h = float(getattr(row, "high",  row.close))
+                    l = float(getattr(row, "low",   row.close))
+                    c = float(row.close)
+                    vol = int(getattr(row, "volume", 0))
+                    buf1.seed_candle(o, h, l, c, vol, ts)
                     if buf5:
-                        buf5.push(close, vol, ts)
+                        # Aggregate 1-min rows into 5-min bars first: seeding
+                        # them row-by-row would keep only the first minute of
+                        # each 5-min bucket (seed_candle skips duplicate ts).
+                        _secs = (ts.hour * 3600 + ts.minute * 60) // 300 * 300
+                        _b = datetime(ts.year, ts.month, ts.day,
+                                      tzinfo=ts.tzinfo) + timedelta(seconds=_secs)
+                        agg = _five.get(_b)
+                        if agg is None:
+                            _five[_b] = [o, h, l, c, vol, ts]
+                        else:
+                            agg[1] = max(agg[1], h)
+                            agg[2] = min(agg[2], l)
+                            agg[3] = c
+                            agg[4] += vol
+                if buf5:
+                    for _b, (o, h, l, c, vol, ts) in _five.items():
+                        buf5.seed_candle(o, h, l, c, vol, ts)
                 seeded += 1
             except Exception as exc:
                 logger.debug("TickEngine: backfill failed for {}: {}", sym, exc)
