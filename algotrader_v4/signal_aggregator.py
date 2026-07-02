@@ -62,8 +62,14 @@ class SignalAggregator:
         """
         Return the current consensus boost for this symbol/direction without registering.
         Returns CONSENSUS_BOOST if ≥CONSENSUS_MIN_AGENTS different agents have active signals,
-        0.0 otherwise. Used so all agents on a consensus trade (including the first entrant)
-        can apply the boost at entry time.
+        0.0 otherwise.
+
+        Note: the FIRST agent to signal is sized unboosted — at its entry no
+        other agent has registered yet, so both this read and its own
+        register() return 0. Only agents joining an already-formed consensus
+        (or an agent re-entering while two OTHERS agree) get the boost;
+        retroactively resizing the first leg would require an amend after
+        fill, which is deliberately not done.
         """
         now = datetime.now(timezone.utc)  # BUG A-1 fix: timezone-aware UTC
         key = (symbol, direction)
