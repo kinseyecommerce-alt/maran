@@ -98,8 +98,8 @@ def _setup_tsl_callbacks() -> None:
                 new_sl_oid = await _loop.run_in_executor(None, lambda: kite_client.place_order(
                     tradingsymbol=entry.get("tradingsymbol", pos.symbol),
                     exchange=entry.get("exchange", "NSE"),
-                    transaction_type="SELL" if pos.side == "BUY" else "BUY",
-                    quantity=pos.quantity, order_type="SL-M",
+                    transaction_type=pos.closing_side,
+                    quantity=pos.quantity_remaining or pos.quantity, order_type="SL-M",
                     product=entry.get("product", "MIS"),
                     trigger_price=pos.current_sl,
                     tag=_otag(f"TSL-{pos.strategy}"),
@@ -161,8 +161,8 @@ def _setup_tsl_callbacks() -> None:
                 await _loop.run_in_executor(None, lambda: kite_client.place_order(
                     tradingsymbol=exit_sym,
                     exchange=exit_exch,
-                    transaction_type="SELL" if pos.side == "BUY" else "BUY",
-                    quantity=pos.quantity, order_type="MARKET",
+                    transaction_type=pos.closing_side,
+                    quantity=pos.quantity_remaining or pos.quantity, order_type="MARKET",
                     product=exit_prod,
                     tag=_otag(f"TSL-HIT-{pos.strategy}"),
                 ))
@@ -232,7 +232,10 @@ def _setup_tsl_callbacks() -> None:
             pass
 
     async def _on_target_hit(pos, ltp: float, level: int) -> None:
-        pnl_est = (ltp - pos.entry_price) * pos.quantity * (1 if pos.side == "BUY" else -1)
+        _qty_rem = pos.quantity_remaining or pos.quantity
+        pnl_est = ((ltp - pos.entry_price) * _qty_rem
+                   * getattr(pos, "pnl_scale", 1.0)
+                   * (1 if pos.side == "BUY" else -1))
         _activity(
             agent=pos.strategy, event="TARGET_HIT",
             symbol=pos.symbol, side=pos.side,
@@ -263,8 +266,8 @@ def _setup_tsl_callbacks() -> None:
                 await _loop.run_in_executor(None, lambda: kite_client.place_order(
                     tradingsymbol=exit_sym,
                     exchange=exit_exch,
-                    transaction_type="SELL" if pos.side == "BUY" else "BUY",
-                    quantity=pos.quantity, order_type="MARKET",
+                    transaction_type=pos.closing_side,
+                    quantity=_qty_rem, order_type="MARKET",
                     product=exit_prod,
                     tag=_otag(f"TSL-T{level}-{pos.strategy}"),
                 ))
@@ -1382,6 +1385,11 @@ class BaseAgent(ABC):
         exch    = signal.get("exchange", "NSE")
         product = signal.get("product", self.product)
         sl      = signal.get("stop_loss", risk_manager.sl_price(ltp, action))
+        # Actual instrument symbol (contract for F&O, underlying for equities) —
+        # same resolution as the _tsl_sl_orders entry below.
+        trade_sym = signal.get("tradingsymbol",
+                     signal.get("futures_symbol",
+                     signal.get("option_symbol", sym)))
 
         sebi_compliance.record_order_id(self.name, sym, order_id)
         risk_manager.position_opened()
@@ -1423,9 +1431,7 @@ class BaseAgent(ABC):
                 "exchange": exch,
                 # Store the actual instrument symbol (contract for F&O, underlying for equities)
                 # so TSL exit callbacks place the order on the correct tradingsymbol.
-                "tradingsymbol": signal.get("tradingsymbol",
-                                  signal.get("futures_symbol",
-                                  signal.get("option_symbol", sym))),
+                "tradingsymbol": trade_sym,
                 # Pattern that triggered this entry — used to attribute the
                 # realised outcome back to the pattern decay monitor on exit.
                 "pattern": signal.get("pattern", ""),

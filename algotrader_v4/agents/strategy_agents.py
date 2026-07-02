@@ -1710,10 +1710,25 @@ class OptionsAgent(BaseAgent):
         # Keyed by the UNDERLYING with the underlying entry price (snap.ltp), so
         # profit/SL percentages track underlying moves consistently. Registering
         # the option premium against underlying ticks fired instant +10,000% T1/T2.
+        #
+        # `side` must express DIRECTIONAL EXPOSURE on the underlying, not the
+        # order action: a long PE profits when the underlying FALLS, so it trails
+        # as SELL — registering it as BUY inverts the trail (stops out the put at
+        # its most profitable moment). The closing order on the contract is
+        # independent (exit_side): a long option is always closed by SELLing it.
+        _opt_type  = str(signal.get("option_type", "CE")).upper()
+        _bullish   = (_opt_type == "CE") == (action == "BUY")   # CE-buy / PE-sell
+        try:
+            _delta_est = abs(float(signal.get("entry_delta", 0.5) or 0.5))
+        except (TypeError, ValueError):
+            _delta_est = 0.5
         trailing_sl_engine.register(
-            symbol=underlying, strategy=self.name, side=action,
+            symbol=underlying, strategy=self.name,
+            side="BUY" if _bullish else "SELL",
             entry_price=S, quantity=qty, order_id=order_id,
             atr=snap.indicators.atr_14,
+            exit_side="SELL" if action == "BUY" else "BUY",
+            pnl_scale=max(min(_delta_est, 1.0), 0.05),
             on_sl_hit=trailing_sl_engine.on_sl_hit,
             on_target_hit=trailing_sl_engine.on_target_hit,
             on_sl_moved=trailing_sl_engine.on_sl_moved,
@@ -1845,10 +1860,13 @@ class OptionsAgent(BaseAgent):
                 "exchange":      exch,
                 "tradingsymbol": pe_sym,
             }
+        # Long PE = bearish exposure → trails as SELL on the underlying; the
+        # contract itself is still closed by SELLing it (exit_side).
         trailing_sl_engine.register(
-            symbol=underlying, strategy=self.name, side="BUY",
+            symbol=underlying, strategy=self.name, side="SELL",
             entry_price=S, quantity=qty, order_id=pe_order,
             atr=snap.indicators.atr_14,
+            exit_side="SELL", pnl_scale=0.5,
             on_sl_hit=trailing_sl_engine.on_sl_hit,
             on_target_hit=trailing_sl_engine.on_target_hit,
             on_sl_moved=trailing_sl_engine.on_sl_moved,
@@ -1865,21 +1883,45 @@ class OptionsAgent(BaseAgent):
 
     def should_exit_position(self, pos: dict, ind: LiveIndicators) -> tuple[bool, str]:
         from datetime import datetime, time as _t
-        entry    = pos.get("average_price", 0.0)
-        ltp      = ind.ltp
+        entry    = pos.get("average_price", 0.0)   # contract PREMIUM at entry
+        spot     = ind.ltp                          # UNDERLYING spot (ind is the underlying's)
         if not entry or entry <= 0:
             return False, ""
 
-        chg = (ltp - entry) / entry * 100
+        # Premium mark of the CONTRACT: broker positions carry the contract's
+        # last_price in LIVE; PAPER delta-marks it on every underlying tick via
+        # kite_client.reprice_paper_options(). ind.ltp is the UNDERLYING — using
+        # it here (premium vs spot) made chg read +15,000% and exit instantly.
+        prem = pos.get("last_price", 0.0) or 0.0
+        if prem <= 0:
+            return False, ""
+
         qty = pos.get("quantity", 0)
+        # Signed premium change: long options profit when premium rises,
+        # short (premium-selling) positions profit when it falls.
+        chg = (prem - entry) / entry * 100
+        if qty < 0:
+            chg = -chg
 
-        # 1. Near-zero protection (option almost worthless)
-        if ltp < entry * 0.10:
-            return True, f"Option near-zero ₹{ltp:.1f} ({chg:.0f}%)"
+        # Contract metadata parsed from the tradingsymbol — position dicts carry
+        # no "option_type"/"strike" keys.
+        opt_type, strike = "CE", 0.0
+        try:
+            from greeks_engine import parse_nfo_symbol as _parse
+            _parsed = _parse(pos.get("tradingsymbol", ""))
+            if _parsed:
+                opt_type = _parsed["opt_type"]
+                strike   = float(_parsed["strike"])
+        except Exception:
+            _parsed = None
 
-        # 2. Hard stop at -30%
+        # 1. Near-zero protection (option almost worthless) — long options only
+        if qty > 0 and prem < entry * 0.10:
+            return True, f"Option near-zero ₹{prem:.1f} ({chg:.0f}%)"
+
+        # 2. Hard stop at -30% premium (adverse move for shorts = premium +30%)
         if chg <= -30:
-            return True, f"Option SL -30% ₹{ltp:.1f}"
+            return True, f"Option SL -30% ₹{prem:.1f}"
 
         # 3. Expiry-day forced exit by 13:30 (theta acceleration + gap risk)
         try:
@@ -1892,44 +1934,41 @@ class OptionsAgent(BaseAgent):
         except Exception:
             pass
 
-        # 4. Delta-based exit: option gone too OTM to recover
-        try:
-            opt_type = pos.get("option_type", "CE")
-            strike   = float(pos.get("strike", ltp))
-            _ts      = pos.get("tradingsymbol", "")
+        # 4. Delta-based exit: option gone too OTM to recover (long options).
+        #    Delta computed from underlying spot vs the parsed contract strike.
+        if qty > 0 and strike > 0:
             try:
-                from greeks_engine import parse_nfo_symbol as _parse
-                _parsed  = _parse(_ts)
                 _undl    = _parsed["underlying"] if _parsed else "NIFTY"
+                dte      = self._days_to_expiry(_undl)
+                iv_rank  = float(pos.get("iv_rank", 30.0))
+                iv_f     = max((iv_rank / 100.0) if iv_rank > 1 else iv_rank, 0.10)
+                T_val    = max(dte, 0.5) / 365.0
+                delta    = abs(self._bs_delta(spot, strike, T_val, 0.065, iv_f, opt_type))
+                if delta < 0.12:
+                    return True, f"Delta {delta:.2f} < 0.12 — option OTM, exit to preserve capital"
             except Exception:
-                _undl    = "NIFTY"
-            dte      = self._days_to_expiry(_undl)
-            iv_rank  = float(pos.get("iv_rank", 30.0))
-            iv_f     = max((iv_rank / 100.0) if iv_rank > 1 else iv_rank, 0.10)
-            T_val    = max(dte, 0.5) / 365.0
-            delta    = abs(self._bs_delta(ltp, strike, T_val, 0.065, iv_f, opt_type))
-            if delta < 0.12:
-                return True, f"Delta {delta:.2f} < 0.12 — option OTM, exit to preserve capital"
-        except Exception:
-            pass
+                pass
 
-        # 5. Progressive profit exits
+        # 5. Progressive profit exits (premium %)
         if chg >= 100:
-            return True, f"Option +100% ₹{ltp:.1f}"
+            return True, f"Option +100% ₹{prem:.1f}"
         if chg >= 60 and ind.rsi_14 > 73:
             return True, f"Option +60% + overbought RSI={ind.rsi_14:.0f}"
         if chg >= 50 and ind.momentum in ("WEAK_UP", "NEUTRAL", "WEAK_DOWN"):
             return True, "Option +50% momentum fading"
 
-        # 6. Theta decay protection: direction lost + RSI neutral
-        if 44 < ind.rsi_14 < 56 and ind.momentum == "NEUTRAL":
+        # 6. Theta decay protection: direction lost + RSI neutral (long only —
+        #    theta decay is the SHORT's friend)
+        if qty > 0 and 44 < ind.rsi_14 < 56 and ind.momentum == "NEUTRAL":
             return True, "RSI+momentum neutral — exit before theta decay"
 
-        # 7. Trend reversal while not deeply profitable
-        if qty > 0 and ind.trend == "DOWN" and ind.ema9 < ind.ema21 and chg < 30:
-            return True, "Trend reversed DOWN — exit call"
-        if qty < 0 and ind.trend == "UP" and ind.ema9 > ind.ema21 and chg < 30:
-            return True, "Trend reversed UP — exit put"
+        # 7. Underlying trend reversal against directional exposure while not
+        #    deeply profitable. Exposure: long CE / short PE = bullish.
+        bullish = (opt_type == "CE") == (qty > 0)
+        if bullish and ind.trend == "DOWN" and ind.ema9 < ind.ema21 and chg < 30:
+            return True, f"Trend reversed DOWN — exit {'call' if opt_type == 'CE' else 'short put'}"
+        if not bullish and ind.trend == "UP" and ind.ema9 > ind.ema21 and chg < 30:
+            return True, f"Trend reversed UP — exit {'put' if opt_type == 'PE' else 'short call'}"
 
         return False, ""
 
@@ -2239,7 +2278,9 @@ class SwingAgent(BaseAgent):
         ltp   = ind.ltp
         if not entry:
             return False, ""
-        side = "BUY" if pos.get("quantity", 0) > 0 else pos.get("side", "BUY")
+        # Broker/paper position dicts carry no "side" key — direction is the
+        # sign of quantity (negative = short).
+        side = "BUY" if pos.get("quantity", 0) > 0 else "SELL"
 
         atr      = ind.atr_14 or entry * 0.008
         sl_dist  = max(atr * self.SL_ATR,  entry * settings.sl_pct_swing  / 100)
@@ -3690,7 +3731,9 @@ class FuturesAgent(BaseAgent):
         ltp   = ind.ltp
         if not entry or entry <= 0:
             return False, ""
-        side = pos.get("side", "LONG")
+        # Broker/paper position dicts carry no "side" key — direction is the
+        # sign of quantity (negative = short).
+        side = "LONG" if pos.get("quantity", 0) > 0 else "SHORT"
         chg  = ((ltp - entry) / entry * 100) if side == "LONG" else ((entry - ltp) / entry * 100)
 
         # 1. ATR-based SL (dynamic — adapts to current volatility)
@@ -4065,8 +4108,8 @@ class MeanReversionAgent(BaseAgent):
         ltp   = ind.ltp
         if not entry or entry <= 0:
             return False, ""
-        side = "BUY" if pos.get("quantity", 0) > 0 else pos.get("side", "LONG")
-        is_long = side in ("BUY", "LONG")
+        # Direction is the sign of quantity — position dicts carry no "side" key.
+        is_long = pos.get("quantity", 0) > 0
 
         atr      = ind.atr_14 or entry * 0.005
         sl_dist  = max(atr * self.SL_ATR,  entry * settings.sl_pct_mean_reversion / 100)
@@ -4474,8 +4517,8 @@ class MomentumAgent(BaseAgent):
         ltp   = ind.ltp
         if not entry or entry <= 0:
             return False, ""
-        side    = "BUY" if pos.get("quantity", 0) > 0 else pos.get("side", "LONG")
-        is_long = side in ("BUY", "LONG")
+        # Direction is the sign of quantity — position dicts carry no "side" key.
+        is_long = pos.get("quantity", 0) > 0
         atr     = ind.atr_14 or entry * 0.005
         sl_dist = max(atr * self.SL_ATR,  entry * settings.sl_pct_momentum / 100)
         tgt_dist= max(atr * self.TGT_ATR, entry * settings.tgt_pct_momentum / 100)
@@ -4723,8 +4766,11 @@ class PairsAgent(BaseAgent):
         ltp    = ind.ltp
         if not entry or entry <= 0:
             return False, ""
-        side   = pos.get("side", "LONG")
-        symbol = pos.get("symbol", "")
+        # Position dicts carry "tradingsymbol" (not "symbol") and no "side" key —
+        # direction is the sign of quantity. Pairs trades cash equities, so the
+        # tradingsymbol IS the underlying symbol used to key _entered_pair.
+        side   = "LONG" if pos.get("quantity", 0) > 0 else "SHORT"
+        symbol = pos.get("tradingsymbol", "")
         chg    = ((ltp - entry) / entry * 100) if side == "LONG" else ((entry - ltp) / entry * 100)
 
         atr     = getattr(ind, "atr_14", ltp * 0.01)

@@ -86,18 +86,28 @@ def test_login_page_renders():
 
 
 def test_dashboard_page_renders():
-    """/dashboard is not in _SENSITIVE_GETS — serves HTML without auth."""
+    """/dashboard serves the React SPA shell (vite build) without auth.
+
+    The SPA shell is a small HTML document whose content lives in the bundled
+    JS — assert the shell structure and that its referenced assets resolve,
+    rather than a server-rendered page size."""
     r = requests.get(f"{BASE}/dashboard", timeout=5)
     assert r.status_code == 200
     assert "text/html" in r.headers.get("content-type", "")
     html = r.text
     assert "AlgoTrader" in html
-    # Must be a non-trivial page.
-    assert len(html) > 1000
+    assert 'id="root"' in html          # React mount point
+    # Every /assets/… script or stylesheet the shell references must resolve —
+    # a stale hash means a blank dashboard in production.
+    import re
+    for asset in re.findall(r'(?:src|href)="(/assets/[^"]+)"', html):
+        ar = requests.get(f"{BASE}{asset}", timeout=5)
+        assert ar.status_code == 200, f"SPA asset {asset} → {ar.status_code}"
 
 
-def test_root_redirects_to_dashboard():
-    """GET / redirects to /dashboard (no auth cookie → /login flow in browser)."""
+def test_root_serves_spa():
+    """GET / serves the same React SPA shell (no redirect since the SPA
+    handles routing client-side)."""
     r = requests.get(f"{BASE}/", timeout=5, allow_redirects=False)
-    assert r.status_code in (301, 302, 303, 307, 308)
-    assert "/dashboard" in r.headers.get("location", "")
+    assert r.status_code == 200
+    assert 'id="root"' in r.text
