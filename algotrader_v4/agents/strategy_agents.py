@@ -872,6 +872,19 @@ class OptionsAgent(BaseAgent):
                 self._update_state(sym, ind, ltp)
                 return "HOLD", None
 
+        # Intraday-drift veto (BUY direction): don't buy premium against a
+        # clear day trend. 3-seed diagnosis showed nearly every options
+        # stop-out was a CE bought in a name trading below its open with
+        # negative day change (BAJFINANCE/INFY cluster) — the EMA200 filter
+        # passes in those names whenever price is above a 3.3-hour EMA, which
+        # says nothing about today's drift.
+        if not is_sell_signal and ind.day_open and ind.day_open > 0:
+            _day_down = ltp < ind.day_open and ind.change_pct <= -0.3
+            _day_up   = ltp > ind.day_open and ind.change_pct >= 0.3
+            if (best_opt == "CE" and _day_down) or (best_opt == "PE" and _day_up):
+                self._update_state(sym, ind, ltp)
+                return "HOLD", None
+
         # Per-direction cooldown
         cools = self._cool_ts.setdefault(sym, {})
         last  = cools.get(best_opt)
@@ -1087,10 +1100,14 @@ class OptionsAgent(BaseAgent):
         if iv_rank > 55:
             return "", 0, ""
         prev_k = self._prev_stochrsi_k_opt.get(sym, ind.stoch_rsi_k)
-        # Require MACD direction alignment — oversold bounce into an uptrend only
-        if prev_k < 15 and ind.stoch_rsi_k > ind.stoch_rsi_d and ind.macd_hist > 0:
+        # Require MACD direction alignment AND volume confirmation — the
+        # weakest options pattern in the 3-seed diagnosis (43% win) fired
+        # oversold bounces with no participation behind them.
+        if (prev_k < 15 and ind.stoch_rsi_k > ind.stoch_rsi_d
+                and ind.macd_hist > 0 and ind.volume_ratio >= 1.2):
             return "CE", 4, "STOCHRSI_OPTIONS"
-        if prev_k > 85 and ind.stoch_rsi_k < ind.stoch_rsi_d and ind.macd_hist < 0:
+        if (prev_k > 85 and ind.stoch_rsi_k < ind.stoch_rsi_d
+                and ind.macd_hist < 0 and ind.volume_ratio >= 1.2):
             return "PE", 4, "STOCHRSI_OPTIONS"
         return "", 0, ""
 
@@ -2187,9 +2204,17 @@ class SwingAgent(BaseAgent):
     # ── Pattern 2 ─────────────────────────────────────────────────────────────
 
     def _pat_ema50_short(self, sym, snap, ind, ltp):
+        # Short the rally INTO EMA50 resistance — but only with rejection
+        # evidence. Proximity alone (the old test) shorted rallies that kept
+        # rising: 0/2 in the 3-seed diagnosis, the only net-negative swing
+        # pattern. Require bearish momentum (MACD histogram). A Supertrend!=UP
+        # clause was tried and killed ALL entries in A/B — a rally into
+        # resistance has recent upward movement by definition, so Supertrend
+        # is nearly always UP at exactly that moment.
         if (ltp < ind.ema200 and ind.ema50 > 0
                 and abs(ltp - ind.ema50) / ind.ema50 < 0.015
                 and ind.ema21 < ind.ema50 and 40 < ind.rsi_14 < 60
+                and ind.macd_hist < 0
                 and ind.volatility != "HIGH"):
             return "SELL", 4, "EMA50_SHORT"
         return "", 0, ""
