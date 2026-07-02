@@ -476,11 +476,15 @@ class RiskManager:
         agent: str = "",
         risk_per_trade_pct: float | None = None,
         capital: float | None = None,
+        sl_dist: float | None = None,
     ) -> int:
         """
         ATR-based volatility position sizing.
         Risk amount = capital × risk_per_trade_pct%
-        SL distance  = max(ATR-implied SL, 0.3% of price)
+        SL distance  = sl_dist when the caller knows the actual stop being
+                       placed (keeps rupee risk == risk_amount), else the
+                       ATR-implied stop (atr × strategy atr_multiplier),
+                       floored at 0.3% of price; pct fallback when atr<=0.
         Quantity     = risk_amount / sl_distance, capped at max_qty.
         """
         if not price or price <= 0:
@@ -500,15 +504,25 @@ class RiskManager:
         rpt        = risk_per_trade_pct or getattr(settings, "risk_per_trade_pct", 0.5)
         risk_amount = cap * (rpt / 100)
 
-        # Get per-agent initial SL % from trailing SL config
+        # Get per-agent trail config (ATR multiplier + initial SL % fallback)
         try:
             from trailing_sl_engine import TRAIL_CONFIGS
             cfg = TRAIL_CONFIGS.get(agent, TRAIL_CONFIGS.get("intraday"))
-            sl_pct = cfg.initial_sl_pct / 100 if cfg else settings.stop_loss_pct / 100
+            sl_pct   = cfg.initial_sl_pct / 100 if cfg else settings.stop_loss_pct / 100
+            atr_mult = cfg.atr_multiplier if cfg else 1.5
         except Exception:
-            sl_pct = settings.stop_loss_pct / 100
+            sl_pct   = settings.stop_loss_pct / 100
+            atr_mult = 1.5
 
-        sl_dist = max(price * sl_pct, price * 0.003)
+        if sl_dist is None or sl_dist <= 0:
+            # ATR-implied stop distance — a symbol trading at 3× its normal
+            # range gets ~1/3 the quantity for the same rupee risk. (The
+            # previous body ignored the atr argument entirely, silently
+            # degrading "ATR sizing" to fixed-% sizing.)
+            if atr and atr > 0:
+                sl_dist = max(atr * atr_mult, price * 0.003)
+            else:
+                sl_dist = max(price * sl_pct, price * 0.003)
         qty = int(risk_amount / sl_dist) if sl_dist > 0 else 0
         if qty == 0:
             return 0  # risk budget too small for even 1 share at this SL distance
@@ -522,7 +536,10 @@ class RiskManager:
     def kelly_fraction(self, strategy: str, symbol: str = "") -> float:
         """
         Compute half-Kelly fraction based on adaptive engine win stats.
-        Returns a multiplier in [0.25, 1.5]. Falls back to 1.0 when insufficient data.
+        Returns a multiplier in [0, 1.5]. Falls back to 1.0 when insufficient
+        data. A PROVEN negative edge (10+ trades, negative Kelly) returns 0.0
+        so callers skip the trade — the old 0.25 floor kept funding losing
+        strategy/symbol combinations at quarter size indefinitely.
         """
         try:
             from adaptive_engine import adaptive_engine
@@ -534,6 +551,8 @@ class RiskManager:
             avg_loss = abs(getattr(params, "avg_loss_pct", 1.0))   # stored as negative, need magnitude
             R       = avg_win / max(avg_loss, 0.01)
             kelly   = W - (1 - W) / max(R, 0.1)
+            if kelly <= 0:
+                return 0.0
             return max(0.25, min(1.5, kelly / 2.0))
         except Exception:
             return 1.0

@@ -292,6 +292,7 @@ class TrailingSLEngine:
         self.on_sl_hit:      Optional[Callable] = None   # async (pos: PositionSL)
         self.on_target_hit:  Optional[Callable] = None   # async (pos: PositionSL, level: int)
         self.on_sl_moved:    Optional[Callable] = None   # async (pos: PositionSL, old_sl: float)
+        self.on_partial_exit: Optional[Callable] = None  # async (pos, ltp, qty, reason) -> int exited
 
     # ── Registration ──────────────────────────────────────────────────
 
@@ -488,18 +489,30 @@ class TrailingSLEngine:
             if (pos.side == "BUY" and ltp >= t1_price) or \
                (pos.side == "SELL" and ltp <= t1_price):
                 pos.target1_hit = True
-                # Partial scale-out: close 50% of remaining quantity
+                # Partial scale-out: close 50% of remaining quantity. The
+                # callback returns the quantity it ACTUALLY exited (it may
+                # lot-align downward, or 0 when a single lot can't be split) —
+                # tracked state is mutated only after a successful exit, so a
+                # raising callback can't leave quantity shrunk with no order.
                 cb_partial = pos._on_partial_exit
                 if cb_partial and not pos.partial_exit_done and pos.quantity_remaining > 1:
                     exit_qty = pos.quantity_remaining // 2
                     if exit_qty > 0:
-                        pos.partial_exit_done = True
-                        pos.quantity_remaining -= exit_qty
-                        logger.info(
-                            "🎯 T1 scale-out: {} closing {} of {} @ ₹{:.2f}",
-                            pos.symbol, exit_qty, pos.quantity, ltp
-                        )
-                        await cb_partial(pos, ltp, exit_qty, "T1_SCALE_OUT")
+                        done_qty = 0
+                        try:
+                            done_qty = int(await cb_partial(pos, ltp, exit_qty,
+                                                            "T1_SCALE_OUT") or 0)
+                        except Exception as exc:
+                            logger.error(
+                                "[TSL] T1 scale-out callback failed for {} — "
+                                "keeping full quantity: {}", pos.symbol, exc)
+                        if done_qty > 0:
+                            pos.partial_exit_done = True
+                            pos.quantity_remaining -= done_qty
+                            logger.info(
+                                "🎯 T1 scale-out: {} closed {} of {} @ ₹{:.2f}",
+                                pos.symbol, done_qty, pos.quantity, ltp
+                            )
                 # Tighten trail to half the normal trail
                 if pos.side == "BUY":
                     tighter_sl = round(ltp * (1 - cfg.trail_pct / 200), 2)
