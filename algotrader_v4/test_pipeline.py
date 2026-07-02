@@ -2533,7 +2533,10 @@ def t_futures_exit_sl_long():
     ltp_sl = entry * (1 - _s.sl_pct_futures / 100) - 1
     ind = _make_snap(ltp=ltp_sl).indicators
     ind.ltp = ltp_sl
-    pos = {"average_price": entry, "side": "LONG"}
+    # Realistic broker position dict: direction is the sign of quantity
+    # (should_exit_position derives side from it; "side" never exists on
+    # real kite/paper position dicts)
+    pos = {"average_price": entry, "quantity": 50, "tradingsymbol": "NIFTY"}
     should_exit, reason = agent.should_exit_position(pos, ind)
     assert should_exit is True and "Futures SL" in reason
 
@@ -2544,7 +2547,10 @@ def t_futures_exit_target_long():
     ltp_tgt = entry * (1 + _s.tgt_pct_futures / 100) + 1
     ind = _make_snap(ltp=ltp_tgt).indicators
     ind.ltp = ltp_tgt
-    pos = {"average_price": entry, "side": "LONG"}
+    # Realistic broker position dict: direction is the sign of quantity
+    # (should_exit_position derives side from it; "side" never exists on
+    # real kite/paper position dicts)
+    pos = {"average_price": entry, "quantity": 50, "tradingsymbol": "NIFTY"}
     should_exit, reason = agent.should_exit_position(pos, ind)
     assert should_exit is True and "Futures TGT" in reason
 
@@ -2556,7 +2562,10 @@ def t_futures_no_exit_before_sl():
     ltp_safe = entry * (1 - (_s.sl_pct_futures / 100) * 0.5)
     ind = _make_snap(ltp=ltp_safe).indicators
     ind.ltp = ltp_safe
-    pos = {"average_price": entry, "side": "LONG"}
+    # Realistic broker position dict: direction is the sign of quantity
+    # (should_exit_position derives side from it; "side" never exists on
+    # real kite/paper position dicts)
+    pos = {"average_price": entry, "quantity": 50, "tradingsymbol": "NIFTY"}
     _safe_time = datetime(2026, 1, 15, 11, 0, 0)
     with patch("agents.strategy_agents.now_ist", return_value=_safe_time):
         should_exit, reason = agent.should_exit_position(pos, ind)
