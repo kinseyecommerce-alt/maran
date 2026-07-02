@@ -74,6 +74,7 @@ N_BARS_1MIN  = 375   # 9:15 to 15:30 inclusive
 import ist_clock as _ist
 
 _sim_bar_time: datetime = datetime.now().replace(hour=10, minute=30)
+_last_close_px: dict[str, float] = {}   # 1m session closes of the last run_simulation
 
 def _fake_now_ist() -> datetime:
     return _sim_bar_time
@@ -101,12 +102,17 @@ def _intraday_volume_shape(bar_idx: int, n: int = N_BARS_1MIN) -> float:
 
 PRE_HISTORY = 250   # extra bars before market open for EMA200 warm-up
 
-def build_1min_session(sym: str, meta: dict, seed: int = 0) -> pd.DataFrame:
-    """Build a full session: 250 pre-history bars + 375-bar intraday session."""
+def build_1min_session(sym: str, meta: dict, seed: int = 0,
+                       start_price: float | None = None) -> pd.DataFrame:
+    """Build a full session: 250 pre-history bars + 375-bar intraday session.
+
+    start_price chains consecutive days: day N+1 starts from day N's close so
+    multi-day positions (Swing CNC) see a continuous price path instead of
+    every day re-seeding from the static SYMBOLS table."""
     rng = random.Random(seed ^ hash(sym))
     np.random.seed((seed + hash(sym)) % 2**31)
 
-    base      = meta["ltp"]
+    base      = start_price if start_price and start_price > 0 else meta["ltp"]
     ann_vol   = meta["vol_ann"]
     trend     = meta["trend"]      # +1 bullish, -1 bearish
 
@@ -381,11 +387,18 @@ class AgentTracker:
                 self._last_exit_ts[sym] = ts
                 del self._open[sym]
 
-    def squareoff_all(self, prices: dict[str, float], ts: datetime):
+    def squareoff_all(self, prices: dict[str, float], ts: datetime,
+                      keep: bool = False):
+        """Close all open positions at *prices*. keep=True carries them
+        instead (CNC/delivery agents hold overnight in chained multi-day
+        runs) — returns the still-open dict either way."""
+        if keep:
+            return dict(self._open)
         for sym, tr in list(self._open.items()):
             tr.close(prices.get(sym, tr.entry_px), ts, "SQUAREOFF")
             self._last_exit_ts[sym] = ts
         self._open.clear()
+        return {}
 
     def metrics(self) -> dict:
         closed  = [t for t in self.trades if t.closed]
@@ -446,8 +459,17 @@ AGENT_CLASSES = [
 ]
 
 
-def run_simulation(seed: int = 2026, verbose: bool = True) -> tuple[dict, list]:
-    """Returns (trackers, signals_log) where trackers = {tf: {agent_name: AgentTracker}}"""
+def run_simulation(seed: int = 2026, verbose: bool = True,
+                   start_prices: dict | None = None,
+                   swing_carry: dict | None = None,
+                   carry_swing: bool = False) -> tuple[dict, list]:
+    """Returns (trackers, signals_log) where trackers = {tf: {agent_name: AgentTracker}}.
+
+    Chained multi-day support: start_prices seeds each symbol's GBM from the
+    previous day's close; swing_carry injects still-open Swing positions into
+    the 1m tracker (exit checks resume against today's path); carry_swing=True
+    makes the 15:25 squareoff HOLD Swing positions (CNC) instead of closing
+    them — read them back from trackers["1m"]["Swing"]._open."""
     global _sim_bar_time
 
     if verbose:
@@ -461,7 +483,8 @@ def run_simulation(seed: int = 2026, verbose: bool = True) -> tuple[dict, list]:
         print(f"  {D}Building intraday candle history …{X}", end="", flush=True)
     sessions: dict[str, dict[str, pd.DataFrame]] = {}
     for sym, meta in SYMBOLS.items():
-        df_1m = build_1min_session(sym, meta, seed=seed)
+        df_1m = build_1min_session(sym, meta, seed=seed,
+                                   start_price=(start_prices or {}).get(sym))
         sessions[sym] = {
             "1m":   df_1m,
             "5m":   resample_ohlcv(df_1m, "5min"),
@@ -475,6 +498,12 @@ def run_simulation(seed: int = 2026, verbose: bool = True) -> tuple[dict, list]:
     for tf_label, _, _bsec in TIMEFRAMES:
         trackers[tf_label] = {name: AgentTracker(name, tf_label)
                                for name, _ in AGENT_CLASSES}
+
+    # Chained multi-day: resume yesterday's still-open Swing positions on the
+    # 1m tracker. Injected into _open only (not .trades) — the driver owns the
+    # master ledger; TradeRecord objects mutate in place when they close.
+    if swing_carry:
+        trackers["1m"]["Swing"]._open.update(swing_carry)
 
     all_signals_log: list[dict] = []
 
@@ -542,9 +571,15 @@ def run_simulation(seed: int = 2026, verbose: bool = True) -> tuple[dict, list]:
         # Squareoff all open positions at 15:25 (after ALL symbols are processed)
         final_px = {sym: float(sessions[sym][tf_label]["close"].iloc[-1])
                     for sym in SYMBOLS}
+        if tf_label == "1m":
+            # Chained multi-day driver reads these to seed the next day's GBM
+            # and to mark carried positions.
+            global _last_close_px
+            _last_close_px = dict(final_px)
         sq_ts = datetime.combine(date.today(), time(15, 25))
         for agent_name, _ in AGENT_CLASSES:
-            tracker_set[agent_name].squareoff_all(final_px, sq_ts)
+            _keep = carry_swing and agent_name == "Swing" and tf_label == "1m"
+            tracker_set[agent_name].squareoff_all(final_px, sq_ts, keep=_keep)
 
         # Print per-TF signal count
         if verbose:
@@ -692,6 +727,110 @@ def print_report(trackers: dict, all_signals_log: list):
     print(f"{B}{'═'*72}{X}\n")
 
 
+def run_multi_day_chained(n_days: int, base_seed: int = 2026,
+                          max_hold_days: int = 5) -> None:
+    """N CONSECUTIVE trading days: each day's GBM starts from the previous
+    day's close, and Swing (CNC/delivery) positions carry overnight instead of
+    being squared off — the only way to observe its multi-day SL/target
+    geometry (3% stop / 8% target), which a single-session sim can never hit.
+    Intraday agents square off daily as in production."""
+    import contextlib, io
+    AGENTS = [name for name, _ in AGENT_CLASSES]
+    daily_pnl: dict[str, list[float]] = {a: [] for a in AGENTS}
+
+    start_prices: dict | None = None
+    swing_carry: dict = {}
+    swing_ledger: list = []          # (day_opened, TradeRecord)
+    open_day:  dict[int, int] = {}   # id(tr) → day opened
+    close_day: dict[int, int] = {}   # id(tr) → day closed
+    realized:  set[int] = set()
+
+    print(f"\n{B}{'═'*76}{X}")
+    print(f"{B}  NSE Chained Multi-Day Simulation — {n_days} consecutive days "
+          f"(Swing holds overnight, max {max_hold_days}d){X}")
+    print(f"{'═'*76}{X}")
+    header = f"  {'Day':>4}  " + "".join(f"{a[:10]:>12}" for a in AGENTS) + f"{'SwingOpen':>11}"
+    print(f"\n{D}{header}{X}\n  {D}{'─'*76}{X}")
+
+    for day in range(1, n_days + 1):
+        seed = base_seed + day - 1
+        with contextlib.redirect_stderr(io.StringIO()):
+            trackers, _ = run_simulation(seed=seed, verbose=False,
+                                         start_prices=start_prices,
+                                         swing_carry=swing_carry,
+                                         carry_swing=True)
+        # Ledger today's NEW swing trades (injected carries are not in .trades)
+        for tr in trackers["1m"]["Swing"].trades:
+            swing_ledger.append((day, tr))
+            open_day[id(tr)] = day
+        # Collect still-open swing positions (kept by squareoff)
+        swing_carry = dict(trackers["1m"]["Swing"]._open)
+        # Enforce max holding period at today's close
+        sq_ts = datetime.combine(date.today(), time(15, 25))
+        for sym, tr in list(swing_carry.items()):
+            if day - open_day.get(id(tr), day) >= max_hold_days:
+                tr.close(_last_close_px.get(sym, tr.entry_px), sq_ts, "MAX_HOLD")
+                del swing_carry[sym]
+        # Realized-today bookkeeping (carried trades close inside LATER days)
+        for d0, tr in swing_ledger:
+            if tr.closed and id(tr) not in realized:
+                realized.add(id(tr))
+                close_day[id(tr)] = day
+        # Per-day P&L: intraday agents from their trackers; Swing = realized today
+        print(f"  Day {day:>3}  ", end="")
+        for a in AGENTS:
+            if a == "Swing":
+                pnl = sum(tr.pnl_rs for d0, tr in swing_ledger
+                          if tr.closed and close_day.get(id(tr)) == day)
+            else:
+                pnl = sum(trackers[tf][a].metrics()["total_pnl_rs"]
+                          for tf, _, _ in TIMEFRAMES)
+            daily_pnl[a].append(pnl)
+            col = G if pnl >= 0 else R
+            print(f"{col}{pnl:>+12,.0f}{X}", end="")
+        print(f"{len(swing_carry):>11d}")
+        # Chain: next day opens from today's closes
+        start_prices = dict(_last_close_px)
+
+    # Force-close whatever is still open at the horizon
+    sq_ts = datetime.combine(date.today(), time(15, 25))
+    for sym, tr in swing_carry.items():
+        tr.close(_last_close_px.get(sym, tr.entry_px), sq_ts, "EOSIM")
+        close_day[id(tr)] = n_days
+
+    # ── Summary ───────────────────────────────────────────────────────────────
+    print(f"\n{B}  {'Agent':12s} {'TotP&L':>12} {'AvgDay':>10} {'WinDays':>8}{X}")
+    print(f"  {D}{'─'*46}{X}")
+    for a in AGENTS:
+        tot = sum(daily_pnl[a]);  wd = sum(1 for p in daily_pnl[a] if p > 0)
+        # Swing: add trades realized only at EOSIM force-close
+        if a == "Swing":
+            tot = sum(tr.pnl_rs for _d, tr in swing_ledger if tr.closed)
+        col = G if tot >= 0 else R
+        print(f"  {a:12s} {col}{tot:>+12,.0f}{X} {tot/n_days:>+10,.0f} {wd:>5d}/{n_days}")
+
+    closed = [(d0, tr) for d0, tr in swing_ledger if tr.closed]
+    print(f"\n{B}  SWING MULTI-DAY HOLD ANALYSIS — {len(closed)} trades{X}")
+    print(f"  {'sym':10s} {'act':4s} {'pattern':22s} {'open':>4} {'close':>5} "
+          f"{'hold':>4} {'entry':>9} {'exit':>9} {'P&L%':>7}  reason")
+    print(f"  {D}{'─'*90}{X}")
+    for d0, tr in sorted(closed, key=lambda x: x[0]):
+        dc = close_day.get(id(tr), d0)
+        col = G if tr.pnl_pct > 0 else R
+        print(f"  {tr.sym:10s} {tr.action:4s} {tr.pattern:22s} {d0:>4d} {dc:>5d} "
+              f"{dc-d0:>4d} {tr.entry_px:>9.1f} {tr.exit_px:>9.1f} "
+              f"{col}{tr.pnl_pct:>+6.2f}%{X}  {tr.exit_reason}")
+    if closed:
+        wins    = sum(1 for _d, tr in closed if tr.won)
+        targets = sum(1 for _d, tr in closed if tr.exit_reason == "TARGET")
+        stops   = sum(1 for _d, tr in closed if tr.exit_reason == "SL_HIT")
+        holds   = [close_day.get(id(tr), d0) - d0 for d0, tr in closed]
+        tot_pct = sum(tr.pnl_pct for _d, tr in closed)
+        print(f"\n  win {wins}/{len(closed)} ({wins/len(closed)*100:.0f}%)  "
+              f"targets {targets}  stops {stops}  "
+              f"avg hold {sum(holds)/len(holds):.1f}d  total {tot_pct:+.1f}%")
+
+
 def run_multi_day(n_days: int, base_seed: int = 2026) -> None:
     """Run N independent simulated trading days and print a consolidated report."""
     import contextlib, io
@@ -795,12 +934,17 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="NSE Intraday Simulation")
     parser.add_argument("--days",  type=int, default=1,    help="Number of simulated trading days (default: 1)")
     parser.add_argument("--seed",  type=int, default=2026, help="Base random seed (default: 2026)")
+    parser.add_argument("--chained", action="store_true",
+                        help="Chain days (day N+1 opens at day N close) and let Swing hold overnight")
     args = parser.parse_args()
 
+    parser2_chained = None  # (argparse already parsed)
     t0 = _time.time()
     if args.days == 1:
         trackers, signals_log = run_simulation(seed=args.seed, verbose=True)
         print_report(trackers, signals_log)
+    elif args.chained:
+        run_multi_day_chained(n_days=args.days, base_seed=args.seed)
     else:
         run_multi_day(n_days=args.days, base_seed=args.seed)
     print(f"  {D}Elapsed: {_time.time()-t0:.1f}s{X}\n")
