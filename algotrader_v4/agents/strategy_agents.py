@@ -215,9 +215,12 @@ class IntradayAgent(BaseAgent):
 
     def _pat_breakout(self, sym, snap, ind, ltp, t):
         n = 15
-        if len(snap.candles_1min) < n or ind.volume_ratio < 1.5:
+        if len(snap.candles_1min) < n + 1 or ind.volume_ratio < 1.5:
             return "", 0, ""
-        last_n = snap.candles_1min[-n:]
+        # Exclude the live forming candle: its high/low already include the
+        # current tick, so ltp > n_high could never be true (dead pattern).
+        # Same fix as FuturesAgent._update_day_range.
+        last_n = snap.candles_1min[-(n + 1):-1]
         n_high = max(c.high for c in last_n)
         n_low  = min(c.low  for c in last_n)
         prev   = self._prev_ltp.get(sym, ltp)
@@ -338,9 +341,11 @@ class IntradayAgent(BaseAgent):
         import bot_state
         if not bot_state.is_pattern_enabled("intraday", "PREV_DAY_LEVEL"):
             return "", 0, ""
-        if len(snap.candles_1min) < 15:
+        if len(snap.candles_1min) < 16:
             return "", 0, ""
-        last15    = snap.candles_1min[-15:]
+        # Exclude the live forming candle (contains the current tick) — see
+        # _pat_breakout.
+        last15    = snap.candles_1min[-16:-1]
         h15       = max(c.high for c in last15)
         l15       = min(c.low  for c in last15)
         prev_ltp  = self._prev_ltp.get(sym, ltp)
@@ -1706,6 +1711,7 @@ class OptionsAgent(BaseAgent):
                 "product":       self.product,
                 "exchange":      exch,
                 "tradingsymbol": opt_sym,
+                "lot_size":      lot_size,
             }
         # Keyed by the UNDERLYING with the underlying entry price (snap.ltp), so
         # profit/SL percentages track underlying moves consistently. Registering
@@ -1732,6 +1738,7 @@ class OptionsAgent(BaseAgent):
             on_sl_hit=trailing_sl_engine.on_sl_hit,
             on_target_hit=trailing_sl_engine.on_target_hit,
             on_sl_moved=trailing_sl_engine.on_sl_moved,
+            on_partial_exit=trailing_sl_engine.on_partial_exit,
         )
 
         # For ATM_STRADDLE: also place PE leg (same strike, ATM, opposite direction)
@@ -1859,6 +1866,7 @@ class OptionsAgent(BaseAgent):
                 "product":       self.product,
                 "exchange":      exch,
                 "tradingsymbol": pe_sym,
+                "lot_size":      signal.get("lot_size", 1),
             }
         # Long PE = bearish exposure → trails as SELL on the underlying; the
         # contract itself is still closed by SELLing it (exit_side).
@@ -1870,6 +1878,7 @@ class OptionsAgent(BaseAgent):
             on_sl_hit=trailing_sl_engine.on_sl_hit,
             on_target_hit=trailing_sl_engine.on_target_hit,
             on_sl_moved=trailing_sl_engine.on_sl_moved,
+            on_partial_exit=trailing_sl_engine.on_partial_exit,
         )
         risk_manager.position_opened()
 
@@ -2208,9 +2217,11 @@ class SwingAgent(BaseAgent):
 
     def _pat_weekly_structure_break(self, sym, snap, ind, ltp):
         n = 50
-        if len(snap.candles_1min) < n:
+        if len(snap.candles_1min) < n + 1:
             return "", 0, ""
-        last_n   = snap.candles_1min[-n:]
+        # Exclude the live forming candle (contains the current tick) — with it
+        # included, ltp > n_high was impossible and the pattern never fired.
+        last_n   = snap.candles_1min[-(n + 1):-1]
         n_high   = max(c.high for c in last_n)
         n_low    = min(c.low  for c in last_n)
         prev_ltp = self._prev_ltp.get(sym, ltp)
@@ -4277,7 +4288,11 @@ class MomentumAgent(BaseAgent):
         }
 
     def _rolling_high_low(self, snap: MarketSnapshot) -> tuple[float, float]:
-        candles = snap.candles_1min[-self.LOOKBACK:]
+        # Exclude the live forming candle: its high/low already include the
+        # current tick, so ltp > roll_high was impossible — HL_BREAKOUT and
+        # LL_BREAKDOWN (this agent's namesake patterns) never fired, and
+        # BREAKOUT_RETEST only matched at exact equality.
+        candles = snap.candles_1min[-(self.LOOKBACK + 1):-1]
         if not candles:
             return 0.0, 0.0
         highs = [c.high for c in candles]

@@ -178,8 +178,18 @@ def _setup_tsl_callbacks() -> None:
         else:
             logger.info("SL-M {} already COMPLETE — skipping MARKET exit to avoid double-exit",
                         entry.get("sl_order_id") if entry else "?")
-        order_guard.release_order(pos.symbol, pos.strategy, pos.side, pnl)
-        risk_manager.record_trade(pnl)
+        # Daily-loss ledger tracks NET PnL: on a heavy scalping day the gross
+        # figure understates the real drawdown by thousands of rupees in fees,
+        # so the ₹-loss halt fired late. (atomic_bracket already records net.)
+        from risk_manager import compute_tx_costs
+        _exit_qty = pos.quantity_remaining or pos.quantity
+        try:
+            _cost = compute_tx_costs(_exit_qty, pos.entry_price, ltp,
+                                     (entry or {}).get("product", "MIS"))
+        except Exception:
+            _cost = 0.0
+        order_guard.release_order(pos.symbol, pos.strategy, pos.side, pnl - _cost)
+        risk_manager.record_trade(pnl - _cost)
         risk_manager.position_closed()
         trailing_sl_engine.deregister(pos.order_id)
 
@@ -207,9 +217,8 @@ def _setup_tsl_callbacks() -> None:
         # Persist to SQLite (Phase 3) — non-blocking async variants
         try:
             from state_store import close_position_async, record_trade_async
-            from risk_manager import compute_tx_costs
             close_position_async(pos.order_id)
-            cost = compute_tx_costs(pos.quantity, pos.entry_price, ltp, "MIS")
+            cost = _cost
             record_trade_async(
                 symbol=pos.symbol, strategy=pos.strategy,
                 side=pos.side, entry_price=pos.entry_price,
@@ -287,6 +296,14 @@ def _setup_tsl_callbacks() -> None:
             # Exit confirmed placed — now it is safe to drop the SL-M mapping.
             with _tsl_sl_orders_lock:
                 _tsl_sl_orders.pop(pos.order_id, None)
+            # Net of transaction costs — same ledger semantics as _on_sl_hit.
+            from risk_manager import compute_tx_costs
+            try:
+                _t_cost = compute_tx_costs(_qty_rem, pos.entry_price, ltp,
+                                           (entry or {}).get("product", "MIS"))
+            except Exception:
+                _t_cost = 0.0
+            pnl_est -= _t_cost
             order_guard.release_order(pos.symbol, pos.strategy, pos.side, pnl_est)
             risk_manager.record_trade(pnl_est)
             risk_manager.position_closed()
@@ -313,11 +330,67 @@ def _setup_tsl_callbacks() -> None:
                 except Exception:
                     pass
 
+    async def _on_partial_exit(pos, ltp: float, exit_qty: int, reason: str) -> int:
+        """T1 scale-out: market-exit *exit_qty* of the position and resize the
+        SL-M to the remainder. Returns the quantity actually exited (0 when a
+        single F&O lot can't be split) — the engine mutates quantity_remaining
+        only from this return value."""
+        with _tsl_sl_orders_lock:
+            entry = _tsl_sl_orders.get(pos.order_id)   # do NOT pop — position stays open
+        # F&O: partial quantity must stay lot-aligned; a single lot can't split.
+        _lot = int((entry or {}).get("lot_size", 1) or 1)
+        if _lot > 1:
+            exit_qty = (exit_qty // _lot) * _lot
+        if exit_qty <= 0:
+            return 0
+        exit_sym  = entry.get("tradingsymbol", pos.symbol) if entry else pos.symbol
+        exit_exch = entry.get("exchange", "NSE") if entry else "NSE"
+        exit_prod = entry.get("product", "MIS") if entry else "MIS"
+        _loop = asyncio.get_running_loop()
+        await _loop.run_in_executor(None, lambda: kite_client.place_order(
+            tradingsymbol=exit_sym,
+            exchange=exit_exch,
+            transaction_type=pos.closing_side,
+            quantity=exit_qty, order_type="MARKET",
+            product=exit_prod,
+            tag=_otag(f"TSL-{pos.strategy}", "T1"),
+        ))
+        # Shrink the protective SL-M to the remaining quantity — leaving it at
+        # full size would over-hedge and open a reverse position when it fires.
+        _remaining = max((pos.quantity_remaining or pos.quantity) - exit_qty, 0)
+        if entry and entry.get("sl_order_id") and _remaining > 0:
+            try:
+                await _loop.run_in_executor(None, lambda: kite_client.modify_order(
+                    str(entry["sl_order_id"]), quantity=_remaining))
+            except Exception as exc:
+                logger.error("[{}] T1 scale-out: failed to resize SL-M {} to {} — "
+                             "over-hedge risk remains: {}",
+                             pos.strategy, entry["sl_order_id"], _remaining, exc)
+        # Realized part of the position goes to the daily ledger (net of costs).
+        from risk_manager import compute_tx_costs
+        _pnl = ((ltp - pos.entry_price) * exit_qty
+                * getattr(pos, "pnl_scale", 1.0)
+                * (1 if pos.side == "BUY" else -1))
+        try:
+            _pnl -= compute_tx_costs(exit_qty, pos.entry_price, ltp, exit_prod)
+        except Exception:
+            pass
+        risk_manager.record_trade(_pnl)
+        _activity(
+            agent=pos.strategy, event="T1_SCALE_OUT",
+            symbol=pos.symbol, side=pos.side,
+            price=ltp, qty=exit_qty, pnl=_pnl,
+            order_id=str(pos.order_id),
+            detail=f"{reason}: closed {exit_qty}, remaining {_remaining}",
+        )
+        return exit_qty
+
     # Callbacks are now passed per-position via register() — keep module-level
     # as fallbacks for any code that still registers without per-position callbacks.
-    trailing_sl_engine.on_sl_moved   = _on_sl_moved
-    trailing_sl_engine.on_sl_hit     = _on_sl_hit
-    trailing_sl_engine.on_target_hit = _on_target_hit
+    trailing_sl_engine.on_sl_moved    = _on_sl_moved
+    trailing_sl_engine.on_sl_hit      = _on_sl_hit
+    trailing_sl_engine.on_target_hit  = _on_target_hit
+    trailing_sl_engine.on_partial_exit = _on_partial_exit
 
 
 @dataclass
@@ -722,11 +795,25 @@ class BaseAgent(ABC):
                                 gate_conf=gate.confidence,
                                 gate_reason=gate.reason,
                             )
-                            # Apply Claude's SL/target/size adjustments
+                            # Apply Claude's SL/target/size adjustments. The base
+                            # entry path places orders from the ABSOLUTE keys
+                            # (signal["stop_loss"] / ["target"]), so the pct
+                            # adjustments must be materialised into them here —
+                            # writing only the pct keys made the gate's risk
+                            # adjustments a silent no-op for 7 of 8 agents.
+                            _gltp = snap.tick.ltp
                             if gate.adjusted_sl_pct:
                                 signal["stop_loss_pct"]  = gate.adjusted_sl_pct
+                                signal["stop_loss"] = round(
+                                    _gltp * (1 - gate.adjusted_sl_pct / 100)
+                                    if action == "BUY"
+                                    else _gltp * (1 + gate.adjusted_sl_pct / 100), 2)
                             if gate.adjusted_target_pct:
                                 signal["target_pct"]     = gate.adjusted_target_pct
+                                signal["target"] = round(
+                                    _gltp * (1 + gate.adjusted_target_pct / 100)
+                                    if action == "BUY"
+                                    else _gltp * (1 - gate.adjusted_target_pct / 100), 2)
                             signal["_gate_size_factor"]  = gate.size_factor
                             signal["_gate_confidence"]   = gate.confidence
 
@@ -893,7 +980,14 @@ class BaseAgent(ABC):
         if _lot_size > 1 and signal.get("futures_symbol"):
             qty = risk_manager.calculate_futures_qty(ltp, _lot_size, agent=self.name)
         elif getattr(settings, "use_atr_sizing", False) and atr_14 > 0:
-            qty = risk_manager.calculate_quantity_atr(ltp, atr_14, agent=self.name)
+            # When the signal carries the stop that will actually be placed,
+            # size against it — rupee risk then equals the risk budget exactly.
+            _sl_abs = signal.get("stop_loss")
+            _slp    = signal.get("stop_loss_pct")
+            _dist   = (abs(ltp - _sl_abs) if _sl_abs and _sl_abs > 0
+                       else ltp * _slp / 100 if _slp and _slp > 0 else None)
+            qty = risk_manager.calculate_quantity_atr(
+                ltp, atr_14, agent=self.name, sl_dist=_dist)
         else:
             qty = risk_manager.calculate_quantity(ltp, agent=self.name)
 
@@ -903,7 +997,14 @@ class BaseAgent(ABC):
             return 0
 
         if settings.use_kelly_sizing:
-            qty = max(1, int(qty * risk_manager.kelly_fraction(self.name, snap.symbol)))
+            _kf = risk_manager.kelly_fraction(self.name, snap.symbol)
+            if _kf <= 0:
+                # Proven negative edge for this strategy/symbol — skip rather
+                # than let max(1, …) resurrect a 1-share losing trade.
+                logger.info("[{}] {} Kelly edge ≤ 0 after 10+ trades — skipping entry",
+                            self.name, snap.symbol)
+                return 0
+            qty = max(1, int(qty * _kf))
 
         if settings.use_conviction_sizing:
             score = signal.get("score", 0)
@@ -1158,7 +1259,17 @@ class BaseAgent(ABC):
             order_guard.release_claim(sym, self.name, action)
             raise RuntimeError("sebi_denied")
 
-        sl          = signal.get("stop_loss", risk_manager.sl_price(ltp, action))
+        # SL resolution order: absolute price → agent/gate pct (e.g. FuturesAgent
+        # carries only its ATR-derived stop_loss_pct — the previous direct
+        # fallback to the global default discarded it) → global default.
+        sl = signal.get("stop_loss")
+        if not sl or sl <= 0:
+            _slp = signal.get("stop_loss_pct")
+            if _slp and _slp > 0:
+                sl = round(ltp * (1 - _slp / 100) if action == "BUY"
+                           else ltp * (1 + _slp / 100), 2)
+            else:
+                sl = risk_manager.sl_price(ltp, action)
         if not sl or sl <= 0:
             order_guard.release_claim(sym, self.name, action)
             raise RuntimeError("invalid_sl")
@@ -1384,7 +1495,19 @@ class BaseAgent(ABC):
         ltp     = snap.tick.ltp
         exch    = signal.get("exchange", "NSE")
         product = signal.get("product", self.product)
-        sl      = signal.get("stop_loss", risk_manager.sl_price(ltp, action))
+        # Same SL/target resolution as _place_orders: absolute → pct → default.
+        sl = signal.get("stop_loss")
+        if not sl or sl <= 0:
+            _slp = signal.get("stop_loss_pct")
+            sl = (round(ltp * (1 - _slp / 100) if action == "BUY"
+                        else ltp * (1 + _slp / 100), 2)
+                  if _slp and _slp > 0 else risk_manager.sl_price(ltp, action))
+        tgt = signal.get("target")
+        if not tgt or tgt <= 0:
+            _tgp = signal.get("target_pct")
+            tgt = (round(ltp * (1 + _tgp / 100) if action == "BUY"
+                         else ltp * (1 - _tgp / 100), 2)
+                   if _tgp and _tgp > 0 else risk_manager.target_price(ltp, action))
         # Actual instrument symbol (contract for F&O, underlying for equities) —
         # same resolution as the _tsl_sl_orders entry below.
         trade_sym = signal.get("tradingsymbol",
@@ -1403,7 +1526,7 @@ class BaseAgent(ABC):
                 order_id=order_id, symbol=sym, strategy=self.name, side=action,
                 entry_price=ltp, quantity=qty,
                 sl_price=sl,
-                target=signal.get("target", risk_manager.target_price(ltp, action)),
+                target=tgt,
                 product=product, pattern=signal.get("pattern", ""),
                 tradingsymbol=trade_sym,
             )
@@ -1415,7 +1538,7 @@ class BaseAgent(ABC):
             symbol=sym, side=action, price=ltp, qty=qty,
             pattern=signal.get("pattern", ""),
             gate_conf=int(signal.get("_gate_confidence", 0)),
-            sl=sl, target=signal.get("target", 0.0),
+            sl=sl, target=tgt,
             order_id=str(order_id),
             detail=f"product={product} size_factor={size_factor} latency={latency_ms:.0f}ms",
         )
@@ -1435,6 +1558,8 @@ class BaseAgent(ABC):
                 # Pattern that triggered this entry — used to attribute the
                 # realised outcome back to the pattern decay monitor on exit.
                 "pattern": signal.get("pattern", ""),
+                # Lot size for F&O — the T1 scale-out must stay lot-aligned.
+                "lot_size": signal.get("lot_size", 1),
             }
         trailing_sl_engine.register(
             symbol=sym, strategy=self.name, side=action,
@@ -1443,19 +1568,20 @@ class BaseAgent(ABC):
             on_sl_hit=trailing_sl_engine.on_sl_hit,
             on_target_hit=trailing_sl_engine.on_target_hit,
             on_sl_moved=trailing_sl_engine.on_sl_moved,
+            on_partial_exit=trailing_sl_engine.on_partial_exit,
         )
 
         ind = snap.indicators
         await send_telegram(
             f"<b>[{self.name.upper()}]</b> {action} {sym} @ ₹{ltp:.2f}\n"
-            f"Qty: {qty} | SL: ₹{sl:.2f} | Target: ₹{signal.get('target', 0):.2f}\n"
+            f"Qty: {qty} | SL: ₹{sl:.2f} | Target: ₹{tgt:.2f}\n"
             f"RSI: {ind.rsi_14:.1f} | Trend: {ind.trend} | Vol: {ind.volume_ratio:.1f}x\n"
             f"Order: {order_id}"
         )
         from n8n_bridge import notify as _n8n
         asyncio.create_task(_n8n("trade_entry", {
             "agent": self.name, "symbol": sym, "action": action, "price": ltp,
-            "quantity": qty, "stop_loss": sl, "target": signal.get("target", 0),
+            "quantity": qty, "stop_loss": sl, "target": tgt,
             "order_id": order_id, "pattern": signal.get("trigger", ""),
             "rsi": ind.rsi_14, "trend": ind.trend, "vol_ratio": ind.volume_ratio,
         }))
@@ -1484,11 +1610,28 @@ class BaseAgent(ABC):
 
         # F&O lot-size boundary: futures/options agents embed their lot size in
         # the signal. Raw qty from _compute_qty is based on capital/price and is
-        # NOT rounded — snap it to the nearest valid lot boundary (minimum 1 lot).
+        # NOT rounded — snap it DOWN to a valid lot boundary. Never round up or
+        # force a minimum lot: _compute_qty's haircuts (Kelly, gate size_factor,
+        # adaptive) are risk decisions, and max(1, round(...)) resurrected a
+        # 0.25×-shrunk single-lot position back to full size. If the shrunk qty
+        # can't fill one lot, the risk-correct action is to skip the trade
+        # (matching kite_client._validated_quantity, which snaps down and
+        # rejects sub-lot quantities rather than inflating them).
         _lot_sz = signal.get("lot_size", 1)
         if _lot_sz > 1:
-            _lots = max(1, round(qty / _lot_sz))
-            qty   = _lots * _lot_sz
+            _lots = int(qty // _lot_sz)
+            if _lots < 1:
+                # A single lot is indivisible: tolerate mild haircuts (≥0.5 lot
+                # still trades 1 lot) but honor strong ones — a 0.25× risk
+                # shrink must NOT come back as a full-size position.
+                if qty >= 0.5 * _lot_sz:
+                    _lots = 1
+                else:
+                    logger.info("[{}] {} sized below half a lot ({}/{}) after "
+                                "risk haircuts — skipping entry", self.name,
+                                snap.symbol, qty, _lot_sz)
+                    return
+            qty = _lots * _lot_sz
 
         # L2 fill-quality gate: a thin book turns a MARKET order into real
         # slippage. Shrink to what the visible book can absorb, or skip.
@@ -1660,10 +1803,24 @@ class BaseAgent(ABC):
 
     # ── Utils ───────────────────────────────────────────────────────────
 
+    # Per-symbol dicts that are DAY-scoped. Subclasses populate whichever they
+    # use (ORB ranges, day high/low). Cleared by reset_daily(): in a multi-day
+    # process these previously persisted forever — day-2 ORB merged yesterday's
+    # extremes, _orb_fired latched True so ORB patterns fired at most once per
+    # process lifetime, and _day_high/_day_low grew into an all-time range.
+    _DAILY_STATE_ATTRS: tuple = (
+        "_orb_high", "_orb_low", "_orb_fired",
+        "_day_high", "_day_low", "_prev_day_high", "_prev_day_low",
+    )
+
     def reset_daily(self) -> None:
         self.state.trades_today = self.state.pnl_today = 0
         self.state.ticks_processed = self.state.signals_fired = 0
         self.state.errors.clear()
+        for _attr in self._DAILY_STATE_ATTRS:
+            _d = getattr(self, _attr, None)
+            if isinstance(_d, dict):
+                _d.clear()
 
     def get_status(self) -> dict:
         return {
