@@ -344,7 +344,11 @@ class MasterAgent:
             # Step 3: broadcast to dashboard WebSocket
             try:
                 if tick_engine.ws_broadcast:
-                    import asyncio
+                    # NOTE: no local "import asyncio" here — a local import
+                    # makes asyncio a function-local name for the WHOLE scope,
+                    # so the create_task calls further down (line ~492) raised
+                    # UnboundLocalError on every review cycle that did not take
+                    # this branch — i.e. every 60s in production.
                     _bcast = asyncio.create_task(tick_engine.ws_broadcast({
                         "event":      "black_swan_detected",
                         "phase":      "FALLING",

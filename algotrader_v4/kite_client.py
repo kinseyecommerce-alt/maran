@@ -220,14 +220,31 @@ class KiteClient:
             logger.warning("[kite] instruments fetch failed: {}", exc)
             return []
 
+    # Kite names index instruments differently from our internal symbols
+    # ("NIFTY 50", "NIFTY BANK" — with spaces). Without this mapping, index
+    # quote/token lookups silently return nothing: the PAPER live-data feed
+    # never seeded NIFTY/BANKNIFTY and regime detection ran on NIFTY=0.
+    _INDEX_KITE_NAMES: dict = {
+        "NIFTY": "NIFTY 50", "NIFTY50": "NIFTY 50",
+        "BANKNIFTY": "NIFTY BANK", "FINNIFTY": "NIFTY FIN SERVICE",
+        "MIDCPNIFTY": "NIFTY MID SELECT", "SENSEX": "SENSEX", "BANKEX": "BANKEX",
+    }
+
+    @classmethod
+    def kite_name(cls, symbol: str) -> str:
+        """Map an internal symbol to Kite's instrument/tradingsymbol name."""
+        return cls._INDEX_KITE_NAMES.get(symbol.upper(), symbol.upper())
+
     def get_instrument_tokens(self, symbols: list[str], exchange: str = "NSE") -> dict[str, int]:
         """Return {symbol: instrument_token} for the given symbols."""
         instruments = self.get_instruments(exchange)
+        # Look up by Kite's name but key results by OUR symbol
+        want = {self.kite_name(s): s for s in symbols}
         token_map: dict[str, int] = {}
         for inst in instruments:
             sym = inst.get("tradingsymbol", "")
-            if sym in symbols:
-                token_map[sym] = int(inst["instrument_token"])
+            if sym in want:
+                token_map[want[sym]] = int(inst["instrument_token"])
         missing = set(symbols) - set(token_map)
         if missing:
             logger.warning("[kite] No instrument tokens found for: {}", missing)
@@ -702,7 +719,7 @@ class KiteClient:
                     ref_price = self._paper_ltp.get(symbol, 0.0)
                 else:
                     try:
-                        key   = f"{exchange}:{symbol}"
+                        key   = f"{exchange}:{self.kite_name(symbol)}"
                         quote = self.kite.ltp([key])
                         ref_price = float(quote.get(key, {}).get("last_price", 0.0))
                     except Exception as exc:
