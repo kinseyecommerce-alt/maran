@@ -54,9 +54,14 @@ class PlatformScheduler:
             hour=16, minute=0, day_of_week="mon-fri", id="history_download",
             max_instances=1, coalesce=True,
         )
+        self._sched.add_job(
+            self._nightly_learn, "cron",
+            hour=16, minute=45, day_of_week="mon-fri", id="nightly_learn",
+            max_instances=1, coalesce=True,
+        )
         self._sched.start()
         logger.info("[platform] scheduler started (Kite@08:50, Report@09:00, Data@09:10, "
-                    "Start@09:16, History@16:00 IST)")
+                    "Start@09:16, History@16:00, Learn@16:45 IST)")
 
     async def stop(self) -> None:
         try:
@@ -154,6 +159,29 @@ class PlatformScheduler:
                         result.get("bars"), len(result.get("failed", [])))
         except Exception as exc:
             logger.error("[platform] Daily history download failed: {}", exc)
+
+    async def _nightly_learn(self) -> None:
+        """Re-run historical learning after the 16:00 data refresh so the
+        agents' adaptive params + approved-symbols gate absorb each new
+        trading day. Backtests read the CSV cache — no Kite calls needed."""
+        from ist_clock import is_nse_holiday, now_ist
+        if is_nse_holiday(now_ist().date()):
+            return
+        try:
+            from historical_learner import learn, ALL_STRATEGIES
+            from nifty100 import NIFTY_100
+            # Clear the in-process result cache — otherwise a long-running
+            # container re-serves yesterday's backtests instead of re-running
+            # on the candles the 16:00 refresh just appended.
+            from backtest_engine import backtest_engine
+            with backtest_engine._cache_lock:
+                backtest_engine._cache.clear()
+            # resume=False: full re-learn on fresh data (results overwrite)
+            await learn(list(NIFTY_100), list(ALL_STRATEGIES),
+                        resume=False, concurrency=4)
+            logger.info("[platform] Nightly learning complete")
+        except Exception as exc:
+            logger.error("[platform] Nightly learning failed: {}", exc)
 
     async def _kite_token_refresh(self) -> None:
         logger.info("[platform] Kite token refresh starting…")

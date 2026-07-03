@@ -216,6 +216,9 @@ class Settings(BaseSettings):
     # Download N months of multi-timeframe Kite history into the CSV cache at
     # startup (containers are ephemeral). 0 = disabled.
     auto_download_history_months: int = 0
+    # Symbol universe for history downloads: "watchlist" (tick-engine symbols)
+    # or "nifty100" (full Nifty 100 — needed for historical_learner backtests).
+    history_universe: str = "watchlist"
 
     # Upstox
     upstox_api_key: str = ""
