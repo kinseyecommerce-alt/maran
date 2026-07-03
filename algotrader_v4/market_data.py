@@ -300,6 +300,33 @@ class YFinanceClient:
     _csv_cache_lock: _threading.Lock = _threading.Lock()
     _CSV_CACHE_TTL: float = 3600.0  # 1 hour — intraday data stales within a session
 
+    # period string → calendar days (shared by the cache trim and Kite fetch)
+    _PERIOD_DAYS = {
+        "1d": 1, "2d": 2, "5d": 5, "10d": 10, "15d": 15,
+        "30d": 30, "60d": 60, "90d": 90, "180d": 180, "1mo": 31, "2mo": 62,
+        "3mo": 93, "6mo": 186, "1y": 366, "2y": 732, "5y": 1830,
+    }
+
+    def _trim_period(self, df: pd.DataFrame, period: str) -> pd.DataFrame:
+        """Trim a cached frame to the requested lookback window. The CSV cache
+        may hold far more history than asked for (e.g. 24 months of daily) —
+        returning it whole silently ignored every caller's lookback_days, so a
+        '30-day' backtest actually ran on the full cached window."""
+        days = self._PERIOD_DAYS.get(period)
+        if not days or df.empty or "date" not in df.columns:
+            return df
+        from ist_clock import now_ist as _ni
+        import pandas as _pd
+        cutoff = _pd.Timestamp(_ni()) - _pd.Timedelta(days=days)
+        dates = df["date"]
+        # Cached frames may be tz-aware or naive depending on source — align.
+        if getattr(dates.dt, "tz", None) is None:
+            cutoff = cutoff.tz_localize(None)
+        else:
+            cutoff = cutoff.tz_convert(dates.dt.tz) if cutoff.tzinfo else cutoff.tz_localize(dates.dt.tz)
+        out = df[dates >= cutoff]
+        return out.reset_index(drop=True) if len(out) < len(df) else df
+
     def historical(self, symbol, exchange="NSE", interval="1m", period="5d") -> pd.DataFrame:
         _CACHE_ALIASES = {"60m": "1h", "60min": "1h", "1hour": "1h"}
         _cache_tf = _CACHE_ALIASES.get(interval, interval)
@@ -310,7 +337,7 @@ class YFinanceClient:
         if entry is not None:
             df_cached, ts = entry
             if now - ts < self._CSV_CACHE_TTL:
-                return df_cached.copy()
+                return self._trim_period(df_cached, period).copy()
         _cache = Path(f"logs/historical_data/{symbol}/{_cache_tf}.csv")
         if _cache.exists():
             df = pd.read_csv(_cache, parse_dates=["date"])
@@ -318,7 +345,7 @@ class YFinanceClient:
             df = df[cols].dropna().sort_values("date").reset_index(drop=True)
             with self._csv_cache_lock:
                 self._csv_cache[mem_key] = (df, time.time())
-            return df.copy()
+            return self._trim_period(df, period).copy()
 
         from config import settings as _s
 
