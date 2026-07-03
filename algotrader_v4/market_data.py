@@ -428,7 +428,7 @@ class YFinanceClient:
         # default seed price.
         try:
             from kite_client import kite_client as _kc
-            key = f"{exchange.upper()}:{symbol.upper()}"
+            key = f"{exchange.upper()}:{_kc.kite_name(symbol)}"
             raw = _kc.quote_kite([key])
             data = raw.get(key) if raw else None
             if data:
