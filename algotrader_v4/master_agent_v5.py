@@ -734,7 +734,17 @@ class MasterAgent:
     # ── Helpers ────────────────────────────────────────────────────────────────
 
     def _apply_regime_plan(self, regime: Regime, plan) -> None:
-        for strat in plan.paused:
+        # FORCE_ALL_AGENTS: never pause — treat every strategy as active so
+        # each agent trades in all regimes (per-agent performance evaluation).
+        # Regime size_factor still applies, so risk stays regime-aware.
+        if settings.force_all_agents:
+            paused_list: list = []
+            active_list = list(ALL_AGENTS.keys())
+        else:
+            paused_list = plan.paused
+            active_list = plan.active
+
+        for strat in paused_list:
             agent = ALL_AGENTS.get(strat)
             if agent and agent.state.running:
                 agent.stop()
@@ -743,7 +753,7 @@ class MasterAgent:
                 tick_engine.remove_subscriber(f"agent_{strat}")
                 logger.info("[master] Regime {} → paused {}", regime.value, strat)
 
-        for strat in plan.active:
+        for strat in active_list:
             agent = ALL_AGENTS.get(strat)
             if agent and not agent.state.running:
                 if not is_agent_enabled(strat):
@@ -759,6 +769,8 @@ class MasterAgent:
             if not agent:
                 continue
             action = directive.get("action", "run")
+            if action == "pause" and settings.force_all_agents:
+                action = "reduce_size"   # honour caution via sizing, never stop the agent
             if action == "pause" and agent.state.running:
                 agent.stop()
                 tick_engine.remove_subscriber(f"agent_{strat}")
