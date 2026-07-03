@@ -1065,6 +1065,17 @@ def learn_status():
             pass
     return out
 
+@app.get("/performance/backtest-history", tags=["Portfolio"])
+def backtest_history():
+    """Rolling history of the nightly per-agent portfolio backtests (17:15 IST)
+    — the trend of each agent's simulated edge over time."""
+    import json as _json
+    from state_store import get_kv
+    try:
+        return {"history": _json.loads(get_kv("agent_backtest_history", "") or "[]")}
+    except Exception:
+        return {"history": []}
+
 @app.get("/performance/agents", tags=["Portfolio"])
 def agent_performance(days: int = 1):
     """Per-agent performance scorecard: trades, win rate, gross/net P&L,

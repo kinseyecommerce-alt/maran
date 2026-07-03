@@ -59,9 +59,14 @@ class PlatformScheduler:
             hour=16, minute=45, day_of_week="mon-fri", id="nightly_learn",
             max_instances=1, coalesce=True,
         )
+        self._sched.add_job(
+            self._nightly_agent_backtests, "cron",
+            hour=17, minute=15, day_of_week="mon-fri", id="agent_backtests",
+            max_instances=1, coalesce=True,
+        )
         self._sched.start()
         logger.info("[platform] scheduler started (Kite@08:50, Report@09:00, Data@09:10, "
-                    "Start@09:16, History@16:00, Learn@16:45 IST)")
+                    "Start@09:16, History@16:00, Learn@16:45, AgentBT@17:15 IST)")
 
     async def stop(self) -> None:
         try:
@@ -182,6 +187,77 @@ class PlatformScheduler:
             logger.info("[platform] Nightly learning complete")
         except Exception as exc:
             logger.error("[platform] Nightly learning failed: {}", exc)
+
+    async def _nightly_agent_backtests(self) -> None:
+        """Run one portfolio backtest per strategy on its approved book and
+        append the results to a rolling history (kv store, Postgres-backed).
+        The trend of each agent's simulated edge over time is what tells the
+        user when a strategy has earned promotion or deserves the axe —
+        one-off snapshots can't."""
+        from ist_clock import is_nse_holiday, now_ist
+        if is_nse_holiday(now_ist().date()):
+            return
+        import json as _json
+        from pathlib import Path as _P
+        try:
+            from portfolio_backtest import portfolio_backtest
+            from backtest_engine import backtest_engine
+            from state_store import get_kv, set_kv
+
+            approved: dict = {}
+            _appr = _P("logs/approved_symbols.json")
+            if _appr.exists():
+                try:
+                    approved = _json.loads(_appr.read_text())
+                except Exception:
+                    pass
+            watch = [s.strip().upper() for s in
+                     (settings.auto_start_watchlist or "").split(",") if s.strip()]
+
+            plans = {
+                "intraday": (5, 30), "scalping": (5, 30),
+                "options":  (3, 30), "swing":   (10, 365),
+            }
+            row: dict = {"date": now_ist().date().isoformat()}
+            for strat, (maxpos, days) in plans.items():
+                book = approved.get(strat) or watch
+                if len(book) < 5:
+                    book = list(dict.fromkeys(list(book) + watch))
+                if not book:
+                    continue
+                with backtest_engine._cache_lock:
+                    backtest_engine._cache.clear()
+                symbols = [{"symbol": s, "exchange": "NSE"} for s in book]
+                r = await asyncio.to_thread(
+                    portfolio_backtest.run, symbols, strat,
+                    1_000_000.0, maxpos, days,
+                )
+                d = r.to_dict()
+                by_sym = sorted((d.get("per_symbol") or {}).items(),
+                                key=lambda kv: -float(kv[1].get("net_pnl", 0)))
+                row[strat] = {
+                    "book":       len(book),
+                    "window_days": days,
+                    "trades":     d.get("total_trades", 0),
+                    "win_rate":   d.get("win_rate", 0.0),
+                    "net_pnl":    d.get("total_net_pnl", 0.0),
+                    "max_drawdown_pct": d.get("max_drawdown_pct", 0.0),
+                    "top3":    [{"symbol": s, "pnl": round(float(v.get("net_pnl", 0)), 0)} for s, v in by_sym[:3]],
+                    "bottom3": [{"symbol": s, "pnl": round(float(v.get("net_pnl", 0)), 0)} for s, v in by_sym[-3:]],
+                }
+                logger.info("[platform] Agent backtest {}: {} trades, ₹{:+,.0f} ({}d window)",
+                            strat, row[strat]["trades"], row[strat]["net_pnl"], days)
+
+            try:
+                history = _json.loads(get_kv("agent_backtest_history", "") or "[]")
+            except Exception:
+                history = []
+            history = [h for h in history if h.get("date") != row["date"]]
+            history.append(row)
+            set_kv("agent_backtest_history", _json.dumps(history[-90:], default=str))
+            logger.info("[platform] Agent backtest history updated ({} rows)", len(history[-90:]))
+        except Exception as exc:
+            logger.error("[platform] Nightly agent backtests failed: {}", exc)
 
     async def _kite_token_refresh(self) -> None:
         logger.info("[platform] Kite token refresh starting…")

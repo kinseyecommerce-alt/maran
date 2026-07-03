@@ -509,6 +509,15 @@ class BaseAgent(ABC):
                         # strict behaviour: empty list = don't trade.
                         approved = list(watchlist)
                         label = "PAPER: approved list empty — trading full watchlist (cautious size)"
+                    elif 0 < len(approved) < 5 and settings.trading_mode == "PAPER":
+                        # PAPER thin-book top-up: a 1-2 symbol book gives the
+                        # agent almost no opportunities to prove itself (options
+                        # approved only SBIN). Top up with the remaining
+                        # watchlist; live evidence then re-ranks the book.
+                        _have = {i["symbol"] for i in approved}
+                        approved += [i for i in watchlist if i["symbol"] not in _have]
+                        label = (f"PAPER: thin approved book ({len(_have)}) — "
+                                 f"topped up with watchlist to {len(approved)}")
                 else:
                     # Agent not in seed file (new agent added after historical_learner ran).
                     # Approve all watchlist symbols so the agent can start immediately.
