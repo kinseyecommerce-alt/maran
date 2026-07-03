@@ -84,7 +84,7 @@ SEED_PRICES: dict[str, float] = {
     "SBIN":        790.0,
     "KOTAKBANK":  1890.0,
     "AXISBANK":   1150.0,
-    "LTIM":       5800.0,
+    "ETERNAL":     300.0,
     "WIPRO":       310.0,
     "HCLTECH":    1560.0,
     "MARUTI":    11800.0,
@@ -93,7 +93,7 @@ SEED_PRICES: dict[str, float] = {
     "TITAN":      3400.0,
     "NESTLEIND":  2350.0,
     "ULTRACEMCO":11200.0,
-    "TATAMOTORS":  740.0,
+    "TMPV":        400.0,
     "TATASTEEL":   160.0,
 }
 

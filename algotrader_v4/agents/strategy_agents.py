@@ -4753,10 +4753,10 @@ class PairsAgent(BaseAgent):
         ("HDFCBANK",   "ICICIBANK"),
         ("TCS",        "INFY"),
         ("SBIN",       "BANKBARODA"),
-        ("TATAMOTORS", "M&M"),
+        ("TMPV", "M&M"),
         ("HDFCBANK",   "AXISBANK"),
         ("WIPRO",      "HCLTECH"),
-        ("MARUTI",     "TATAMOTORS"),
+        ("MARUTI",     "TMPV"),
         ("COALINDIA",  "NTPC"),
     ]
     PAIR_SYMBOLS: set[str] = {s for p in PAIRS for s in p}

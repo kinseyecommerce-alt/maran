@@ -119,10 +119,20 @@ async def _run_one(symbol: str, strategy: str, sem: asyncio.Semaphore,
                 with adaptive_engine._lock:
                     adaptive_engine._params[params_key] = new_params
 
-            if result.passed:
+            # Hard pass = the full LIVE gate (win≥55%, sharpe≥1, dd≤15%, OOS).
+            # Soft pass = positive-expectancy edge — approved for trading with
+            # CAUTIOUS adaptive status (conviction sizing halves position size).
+            # Without the soft tier the strict gate can approve ZERO symbols
+            # market-wide, and filter_watchlist would then leave every agent
+            # with nothing to trade.
+            soft_pass = (not result.passed
+                         and result.total_trades >= 5
+                         and result.total_pnl > 0
+                         and result.profit_factor >= 1.0)
+            if result.passed or soft_pass:
                 if symbol not in approved[strategy]:
                     approved[strategy].append(symbol)
-                status = "✅ PASS"
+                status = "✅ PASS" if result.passed else "☑  SOFT-PASS (edge, cautious size)"
             else:
                 status = f"⚠  FAIL ({', '.join(result.fail_reasons[:1])})"
 
