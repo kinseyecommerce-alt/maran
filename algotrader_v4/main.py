@@ -3106,12 +3106,19 @@ async def on_startup():
     # (a restart must never silently clear an emergency halt). Also re-halts
     # risk_manager when KILLED was restored.
     sebi_compliance.restore_state_from_db()
-    # Restore Kite access token from SQLite if .env has none (crash-restart recovery)
-    if not settings.kite_access_token:
-        saved_token = get_kv("kite_access_token", "")
-        if saved_token:
-            settings.kite_access_token = saved_token
+    # Restore Kite access token from state_store if .env has none (crash-restart
+    # recovery). Must go through kite_client.set_access_token() — merely setting
+    # settings.kite_access_token leaves kite_client._kite = None, so the tick
+    # engine, ticker and PAPER live-data feed all stay dead despite the token
+    # being "restored". A stale token (Kite expires them daily) fails harmlessly
+    # on first API use; the daily login replaces it.
+    saved_token = settings.kite_access_token or get_kv("kite_access_token", "")
+    if saved_token and kite_client._kite is None:
+        try:
+            kite_client.set_access_token(access_token=saved_token)
             logger.info("[startup] Kite access token restored from state_store")
+        except Exception as _tok_exc:
+            logger.warning("[startup] Kite token restore failed (fresh login needed): {}", _tok_exc)
     # Restore TrueData credentials entered via UI (not in .env)
     if not settings.truedata_username:
         _td_user = get_kv("truedata_username", "")
