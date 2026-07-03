@@ -15,8 +15,10 @@ NIFTY_50 = [
     "INFY", "JSWSTEEL", "KOTAKBANK", "LT", "M&M",
     "MARUTI", "NESTLEIND", "NTPC", "ONGC", "POWERGRID",
     "RELIANCE", "SBILIFE", "SBIN", "SHRIRAMFIN", "SUNPHARMA",
-    "TATACONSUM", "TATAMOTORS", "TATASTEEL", "TCS", "TECHM",
-    "TITAN", "TRENT", "ULTRACEMCO", "WIPRO", "ZOMATO",
+    # TATAMOTORS demerged (Oct 2025) into TMPV (passenger) + TMCV (commercial);
+    # ZOMATO renamed to ETERNAL — verified against the live Kite instrument dump.
+    "TATACONSUM", "TMPV", "TATASTEEL", "TCS", "TECHM",
+    "TITAN", "TRENT", "ULTRACEMCO", "WIPRO", "ETERNAL",
 ]
 
 # ── Nifty Next 50 ─────────────────────────────────────────────────────────────
@@ -26,8 +28,10 @@ NIFTY_NEXT_50 = [
     "COLPAL", "DABUR", "DMART", "DIVISLAB", "DLF",
     "GAIL", "GODREJCP", "HAL", "HAVELLS", "HINDPETRO",
     "ICICIGI", "ICICIPRULI", "INDHOTEL", "IOC", "IRCTC",
-    "JIOFIN", "JUBLFOOD", "LODHA", "LTIM", "LUPIN",
-    "MCDOWELL-N", "MOTHERSON", "MPHASIS", "NAUKRI", "NHPC",
+    # LTIM has no NSE listing in the Kite dump any more (dropped); TMCV is the
+    # Tata Motors commercial-vehicles entity; MCDOWELL-N renamed to UNITDSPR.
+    "JIOFIN", "JUBLFOOD", "LODHA", "TMCV", "LUPIN",
+    "UNITDSPR", "MOTHERSON", "MPHASIS", "NAUKRI", "NHPC",
     "NMDC", "OFSS", "PAGEIND", "PAYTM", "PETRONET",
     "PIDILITIND", "PIIND", "RECLTD", "SIEMENS", "TATAPOWER",
     "TORNTPHARM", "TVSMOTOR", "VBL", "VEDL", "ZYDUSLIFE",
@@ -41,7 +45,7 @@ NIFTY_100 = NIFTY_50 + NIFTY_NEXT_50
 SCALPING_UNIVERSE = [
     "RELIANCE", "TCS", "HDFCBANK", "INFY", "ICICIBANK", "AXISBANK",
     "KOTAKBANK", "SBIN", "BHARTIARTL", "LT", "WIPRO", "HCLTECH",
-    "ITC", "BAJFINANCE", "TATAMOTORS", "MARUTI", "ONGC", "NTPC",
+    "ITC", "BAJFINANCE", "TMPV", "MARUTI", "ONGC", "NTPC",
     "POWERGRID", "HINDALCO", "TATASTEEL", "JSWSTEEL", "COALINDIA",
     "BAJAJ-AUTO", "HEROMOTOCO", "EICHERMOT", "TECHM", "M&M",
     "INDUSINDBK", "ADANIPORTS",

@@ -496,10 +496,17 @@ class BaseAgent(ABC):
                 pre_data = json.loads(approved_path.read_text())
                 if self.name in pre_data:
                     # Agent has been pre-learned — use exactly what passed backtest.
-                    # An empty list is intentional (all symbols failed backtest).
                     pre_set = set(pre_data[self.name])
                     approved = [i for i in watchlist if i["symbol"] in pre_set]
                     label = f"pre-learned ({len(pre_set)} approved symbols on file)"
+                    if not approved and settings.trading_mode == "PAPER":
+                        # PAPER safety net: an all-empty approved list (strict
+                        # gate approved nothing market-wide) must not silently
+                        # leave the agent with zero tradeable symbols — paper
+                        # evaluation needs trades to learn from. LIVE keeps the
+                        # strict behaviour: empty list = don't trade.
+                        approved = list(watchlist)
+                        label = "PAPER: approved list empty — trading full watchlist (cautious size)"
                 else:
                     # Agent not in seed file (new agent added after historical_learner ran).
                     # Approve all watchlist symbols so the agent can start immediately.

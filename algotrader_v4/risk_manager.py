@@ -74,7 +74,7 @@ _HIGH_CORR_PAIRS: set[frozenset] = {
     frozenset({"TCS", "HCLTECH"}),
     frozenset({"TATASTEEL", "JSWSTEEL"}),
     frozenset({"TATASTEEL", "HINDALCO"}),
-    frozenset({"TATAMOTORS", "M&M"}),
+    frozenset({"TMPV", "M&M"}),
     frozenset({"SBIN", "BANKBARODA"}),
     frozenset({"SBIN", "AXISBANK"}),
     frozenset({"BAJFINANCE", "BAJAJFINSV"}),
