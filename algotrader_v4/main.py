@@ -3106,12 +3106,19 @@ async def on_startup():
     # (a restart must never silently clear an emergency halt). Also re-halts
     # risk_manager when KILLED was restored.
     sebi_compliance.restore_state_from_db()
-    # Restore Kite access token from SQLite if .env has none (crash-restart recovery)
-    if not settings.kite_access_token:
-        saved_token = get_kv("kite_access_token", "")
-        if saved_token:
-            settings.kite_access_token = saved_token
+    # Restore Kite access token from state_store if .env has none (crash-restart
+    # recovery). Must go through kite_client.set_access_token() — merely setting
+    # settings.kite_access_token leaves kite_client._kite = None, so the tick
+    # engine, ticker and PAPER live-data feed all stay dead despite the token
+    # being "restored". A stale token (Kite expires them daily) fails harmlessly
+    # on first API use; the daily login replaces it.
+    saved_token = settings.kite_access_token or get_kv("kite_access_token", "")
+    if saved_token and kite_client._kite is None:
+        try:
+            kite_client.set_access_token(access_token=saved_token)
             logger.info("[startup] Kite access token restored from state_store")
+        except Exception as _tok_exc:
+            logger.warning("[startup] Kite token restore failed (fresh login needed): {}", _tok_exc)
     # Restore TrueData credentials entered via UI (not in .env)
     if not settings.truedata_username:
         _td_user = get_kv("truedata_username", "")
@@ -3221,21 +3228,6 @@ async def on_startup():
     asyncio.create_task(_prewarm_gate(), name="prewarm_gate").add_done_callback(_log_task_exc)
     from platform_scheduler import platform_scheduler
     platform_scheduler.start()
-
-    # Restore the Kite access token persisted by set_access_token() —
-    # App Platform containers are ephemeral, so without this every deploy
-    # or restart silently logged the user out (token lives in Postgres via
-    # state_store when DATABASE_URL is set). A stale token (Kite expires
-    # them daily) fails harmlessly on first use; the daily login replaces it.
-    if not settings.kite_access_token:
-        try:
-            from state_store import get_kv
-            _saved_tok = get_kv("kite_access_token")
-            if _saved_tok:
-                kite_client.set_access_token(access_token=_saved_tok)
-                logger.info("[startup] Kite access token restored from state_store")
-        except Exception as _tok_exc:
-            logger.warning("[startup] Kite token restore failed (fresh login needed): {}", _tok_exc)
 
     # Immediate auto-start on server restart when strategies are configured.
     # The scheduled job fires at 09:16 IST only; this covers restarts at any time.
