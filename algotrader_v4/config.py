@@ -209,6 +209,13 @@ class Settings(BaseSettings):
     auto_start_strategies: str = ""
     # Comma-separated symbols e.g. "RELIANCE,TCS" — empty = use symbol scanner
     auto_start_watchlist: str = ""
+    # Keep every enabled agent trading regardless of the master regime plan —
+    # the regime review can still resize (size_factor) but never pauses agents.
+    # For per-agent performance evaluation where all strategies must stay live.
+    force_all_agents: bool = False
+    # Download N months of multi-timeframe Kite history into the CSV cache at
+    # startup (containers are ephemeral). 0 = disabled.
+    auto_download_history_months: int = 0
 
     # Upstox
     upstox_api_key: str = ""

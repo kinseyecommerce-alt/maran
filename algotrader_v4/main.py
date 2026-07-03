@@ -14,7 +14,7 @@ from collections import defaultdict
 from datetime import datetime
 from ist_clock import now_ist
 from pathlib import Path
-from typing import Literal
+from typing import Literal, Optional
 
 from fastapi import BackgroundTasks, FastAPI, HTTPException, WebSocket, WebSocketDisconnect, Request, Query, Depends, Body
 from fastapi.responses import StreamingResponse, HTMLResponse, JSONResponse, RedirectResponse
@@ -979,6 +979,34 @@ def directives(): return master_agent.last_directives
 # ── Market data ──────────────────────────────────────────────────────────────
 @app.get("/market/live", tags=["Market"])
 def live_market(): return tick_engine.all_latest()
+
+@app.post("/market/history/download", tags=["Market"])
+async def download_history(months: int = 3, symbols: Optional[str] = None):
+    """Bulk-download multi-timeframe Kite OHLCV into the CSV cache
+    (logs/historical_data/) that agents and the backtester read. Runs in a
+    background thread; poll GET /market/history/status for progress."""
+    import historical_downloader as hd
+    if hd.is_running():
+        raise HTTPException(409, "History download already running")
+    from kite_client import kite_client as _kc
+    if _kc._kite is None:
+        raise HTTPException(400, "Kite not connected — login first")
+    sym_list = [s.strip().upper() for s in symbols.split(",") if s.strip()] if symbols else None
+    months = max(1, min(int(months), 12))
+    def _dl_done(t: asyncio.Task) -> None:
+        if not t.cancelled() and t.exception():
+            logger.error("[history] download task crashed: {}", t.exception())
+    asyncio.create_task(
+        asyncio.to_thread(hd.download, sym_list, months),
+        name="history_download",
+    ).add_done_callback(_dl_done)
+    return {"status": "started", "months": months,
+            "symbols": sym_list or "watchlist+indices"}
+
+@app.get("/market/history/status", tags=["Market"])
+def history_status():
+    import historical_downloader as hd
+    return hd.status()
 
 @app.get("/market/live/{symbol}", tags=["Market"])
 def live_symbol(symbol: str):
@@ -3119,6 +3147,21 @@ async def on_startup():
             logger.info("[startup] Kite access token restored from state_store")
         except Exception as _tok_exc:
             logger.warning("[startup] Kite token restore failed (fresh login needed): {}", _tok_exc)
+
+    # Re-hydrate months of multi-timeframe OHLCV into the CSV cache — the
+    # container filesystem is ephemeral, so higher-timeframe context (swing
+    # EMA50/200, day context, backtests) is empty on every boot without this.
+    if settings.auto_download_history_months > 0 and kite_client._kite is not None:
+        import historical_downloader as _hd
+
+        async def _startup_history() -> None:
+            await asyncio.sleep(20)   # let backfill + auto-start claim rate budget first
+            try:
+                await asyncio.to_thread(_hd.download, None,
+                                        settings.auto_download_history_months)
+            except Exception as _h_exc:
+                logger.warning("[startup] history download failed: {}", _h_exc)
+        asyncio.create_task(_startup_history(), name="startup_history_download")
     # Restore TrueData credentials entered via UI (not in .env)
     if not settings.truedata_username:
         _td_user = get_kv("truedata_username", "")
