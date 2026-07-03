@@ -1144,7 +1144,12 @@ class TickEngine:
                            and now_mono - self._ws_last_tick.get(s, -1e9) < 30.0)]
         if not pending:
             return
-        instruments = [f"{self._exchange.get(s, 'NSE')}:{s}" for s in pending]
+        # kite_name(): indices need Kite's instrument names ("NIFTY 50") in
+        # quote keys — the fourth and final key-construction site (the other
+        # three were fixed earlier; this poll loop was missed, so equities got
+        # real REST quotes while indices silently got nothing).
+        instruments = [f"{self._exchange.get(s, 'NSE')}:{kite_client.kite_name(s)}"
+                       for s in pending]
         try:
             raw = await asyncio.get_running_loop().run_in_executor(
                 None, lambda: kite_client.quote_kite(instruments)
@@ -1154,7 +1159,7 @@ class TickEngine:
             return
         for sym in pending:
             exch = self._exchange.get(sym, "NSE")
-            key  = f"{exch}:{sym}"
+            key  = f"{exch}:{kite_client.kite_name(sym)}"
             data = raw.get(key)
             if not data:
                 continue
