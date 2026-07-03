@@ -72,6 +72,13 @@ def _save_approved(approved: dict) -> None:
     except Exception as exc:
         logger.warning("_save_approved failed: {}", exc)
         tmp.unlink(missing_ok=True)
+    # Mirror to state_store — approved_symbols.json gates filter_watchlist()
+    # (SKIP_STARTUP_BACKTEST) and the container filesystem is ephemeral.
+    try:
+        from state_store import set_kv
+        set_kv("approved_symbols", json.dumps(approved, default=str))
+    except Exception as exc:
+        logger.debug("_save_approved kv mirror failed (non-critical): {}", exc)
 
 
 async def _run_one(symbol: str, strategy: str, sem: asyncio.Semaphore,

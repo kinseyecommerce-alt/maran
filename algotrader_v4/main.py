@@ -981,10 +981,12 @@ def directives(): return master_agent.last_directives
 def live_market(): return tick_engine.all_latest()
 
 @app.post("/market/history/download", tags=["Market"])
-async def download_history(months: int = 3, symbols: Optional[str] = None):
+async def download_history(months: int = 3, symbols: Optional[str] = None,
+                           universe: Optional[str] = None):
     """Bulk-download multi-timeframe Kite OHLCV into the CSV cache
     (logs/historical_data/) that agents and the backtester read. Runs in a
-    background thread; poll GET /market/history/status for progress."""
+    background thread; poll GET /market/history/status for progress.
+    universe="nifty100" downloads the full Nifty 100 (for historical_learner)."""
     import historical_downloader as hd
     if hd.is_running():
         raise HTTPException(409, "History download already running")
@@ -997,16 +999,70 @@ async def download_history(months: int = 3, symbols: Optional[str] = None):
         if not t.cancelled() and t.exception():
             logger.error("[history] download task crashed: {}", t.exception())
     asyncio.create_task(
-        asyncio.to_thread(hd.download, sym_list, months),
+        asyncio.to_thread(hd.download, sym_list, months, None, universe),
         name="history_download",
     ).add_done_callback(_dl_done)
     return {"status": "started", "months": months,
-            "symbols": sym_list or "watchlist+indices"}
+            "symbols": sym_list or universe or "watchlist+indices"}
 
 @app.get("/market/history/status", tags=["Market"])
 def history_status():
     import historical_downloader as hd
     return hd.status()
+
+# ── Historical learning (backtest → agent brain) ─────────────────────────────
+_learn_task: Optional[asyncio.Task] = None
+
+@app.post("/learn/run", tags=["Market"])
+async def learn_run(strategies: Optional[str] = None, symbols: Optional[str] = None):
+    """Backtest the Nifty 100 (or given symbols) across strategies and seed the
+    agents' brain: adaptive params (SL/target/RSI bands, status) + the
+    approved-symbols gate used by filter_watchlist. Both persist to Postgres.
+    Runs in the background; poll GET /learn/status."""
+    global _learn_task
+    if _learn_task and not _learn_task.done():
+        raise HTTPException(409, "Learning run already in progress")
+    from historical_learner import learn, ALL_STRATEGIES
+    strat_list = ([s.strip() for s in strategies.split(",") if s.strip()]
+                  if strategies else list(ALL_STRATEGIES))
+    if symbols:
+        sym_list = [s.strip().upper() for s in symbols.split(",") if s.strip()]
+    else:
+        from nifty100 import NIFTY_100
+        sym_list = list(NIFTY_100)
+    _learn_task = asyncio.create_task(
+        learn(sym_list, strat_list, resume=True, concurrency=4),
+        name="historical_learn",
+    )
+    def _learn_done(t: asyncio.Task) -> None:
+        if not t.cancelled() and t.exception():
+            logger.error("[learn] learning task crashed: {}", t.exception())
+    _learn_task.add_done_callback(_learn_done)
+    return {"status": "started", "symbols": len(sym_list), "strategies": strat_list}
+
+@app.get("/learn/status", tags=["Market"])
+def learn_status():
+    import json as _json
+    from pathlib import Path as _P
+    running = bool(_learn_task and not _learn_task.done())
+    out: dict = {"running": running}
+    prog = _P("logs/learning_progress.json")
+    if prog.exists():
+        try:
+            entries = _json.loads(prog.read_text())
+            done_ok = [k for k, v in entries.items() if v.get("done")]
+            out["completed"] = len(done_ok)
+            out["passed"] = sum(1 for v in entries.values() if v.get("passed"))
+        except Exception:
+            pass
+    appr = _P("logs/approved_symbols.json")
+    if appr.exists():
+        try:
+            data = _json.loads(appr.read_text())
+            out["approved_per_strategy"] = {k: len(v) for k, v in data.items()}
+        except Exception:
+            pass
+    return out
 
 @app.get("/market/live/{symbol}", tags=["Market"])
 def live_symbol(symbol: str):
@@ -3147,6 +3203,22 @@ async def on_startup():
             logger.info("[startup] Kite access token restored from state_store")
         except Exception as _tok_exc:
             logger.warning("[startup] Kite token restore failed (fresh login needed): {}", _tok_exc)
+
+    # Restore the pre-learned approved-symbols file from state_store — it
+    # gates filter_watchlist() when SKIP_STARTUP_BACKTEST=true, and the
+    # container filesystem is ephemeral. (Adaptive params self-restore inside
+    # adaptive_engine._load_state.)
+    try:
+        from pathlib import Path as _P
+        _appr = _P("logs/approved_symbols.json")
+        if not _appr.exists():
+            _saved_appr = get_kv("approved_symbols", "")
+            if _saved_appr:
+                _appr.parent.mkdir(exist_ok=True)
+                _appr.write_text(_saved_appr)
+                logger.info("[startup] Approved symbols restored from state_store")
+    except Exception as _appr_exc:
+        logger.warning("[startup] approved-symbols restore failed: {}", _appr_exc)
 
     # Re-hydrate months of multi-timeframe OHLCV into the CSV cache — the
     # container filesystem is ephemeral, so higher-timeframe context (swing

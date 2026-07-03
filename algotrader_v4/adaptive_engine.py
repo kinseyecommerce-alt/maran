@@ -370,13 +370,37 @@ class AdaptiveLearningEngine:
         except Exception as exc:
             logger.error("adaptive_engine: state save failed: {}", exc)
             tmp.unlink(missing_ok=True)
+        # Mirror to state_store (Postgres on App Platform) — the container
+        # filesystem is ephemeral, so file-only persistence loses everything
+        # historical_learner taught the agents on every deploy.
+        try:
+            from state_store import set_kv
+            set_kv("adaptive_params", json.dumps(state, default=str))
+        except Exception as exc:
+            logger.debug("adaptive_engine: kv mirror failed (non-critical): {}", exc)
 
     def _load_state(self) -> None:
         path = self._store / "adaptive_params.json"
-        if not path.exists(): return
+        data = None
+        if path.exists():
+            try:
+                with open(path) as f:
+                    data = json.load(f)
+            except Exception as exc:
+                logger.warning("Could not read adaptive state file: {}", exc)
+        if data is None:
+            # Fresh container: fall back to the state_store mirror
+            try:
+                from state_store import get_kv
+                raw = get_kv("adaptive_params", "")
+                if raw:
+                    data = json.loads(raw)
+                    logger.info("Adaptive params restored from state_store ({} sets)", len(data))
+            except Exception as exc:
+                logger.debug("adaptive_engine: kv restore failed: {}", exc)
+        if not data:
+            return
         try:
-            with open(path) as f:
-                data = json.load(f)
             _valid = {f.name for f in dc_fields(AdaptiveParams)} - {"strategy", "symbol"}
             for key, d in data.items():
                 strategy, symbol = key.split("::", maxsplit=1)

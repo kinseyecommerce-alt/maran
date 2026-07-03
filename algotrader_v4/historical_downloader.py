@@ -54,18 +54,25 @@ def status() -> dict:
         return dict(_progress)
 
 
-def _default_symbols() -> list[str]:
-    """Current tick-engine subscriptions, else the configured watchlist —
-    always including the index symbols agents use for regime/trend context."""
+def _default_symbols(universe: str | None = None) -> list[str]:
+    """Symbols to download. universe="nifty100" → the full Nifty 100 (what
+    historical_learner backtests); default → current tick-engine subscriptions,
+    else the configured watchlist. Index symbols are always included for
+    regime/trend context."""
     from config import settings
+    universe = (universe or settings.history_universe or "watchlist").lower()
     syms: list[str] = []
-    try:
-        from tick_engine import tick_engine
-        syms = list(tick_engine.symbols())
-    except Exception:
-        pass
-    if not syms and settings.auto_start_watchlist:
-        syms = [s.strip().upper() for s in settings.auto_start_watchlist.split(",") if s.strip()]
+    if universe == "nifty100":
+        from nifty100 import NIFTY_100
+        syms = list(NIFTY_100)
+    else:
+        try:
+            from tick_engine import tick_engine
+            syms = list(tick_engine.symbols())
+        except Exception:
+            pass
+        if not syms and settings.auto_start_watchlist:
+            syms = [s.strip().upper() for s in settings.auto_start_watchlist.split(",") if s.strip()]
     for idx in ("NIFTY", "BANKNIFTY"):
         if idx not in syms:
             syms.append(idx)
@@ -73,7 +80,8 @@ def _default_symbols() -> list[str]:
 
 
 def download(symbols: list[str] | None = None, months: int = 3,
-             timeframes: list[str] | None = None) -> dict:
+             timeframes: list[str] | None = None,
+             universe: str | None = None) -> dict:
     """
     Blocking download — run via asyncio.to_thread / executor.
     Writes logs/historical_data/{symbol}/{tf}.csv (date,open,high,low,close,volume)
@@ -84,7 +92,7 @@ def download(symbols: list[str] | None = None, months: int = 3,
     if kite_client._kite is None:
         return {"state": "error", "error": "Kite not connected — login first"}
 
-    symbols = [s.upper() for s in (symbols or _default_symbols())]
+    symbols = [s.upper() for s in (symbols or _default_symbols(universe))]
     tfs = {k: v for k, v in TIMEFRAMES.items()
            if timeframes is None or v in timeframes or k in timeframes}
     to_dt = now_ist()
