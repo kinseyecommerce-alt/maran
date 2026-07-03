@@ -760,6 +760,45 @@ def get_trade_history(days: int = 30) -> list[dict]:
         return _fetchall(c, f"SELECT * FROM trades WHERE trade_date >= {_ph()} ORDER BY id DESC", (cutoff,))
 
 
+def get_agent_day_stats(days: int = 1) -> dict:
+    """Per-agent (strategy) performance breakdown over the last N days.
+    Returns {strategy: {trades, wins, win_rate, gross_pnl, net_pnl, total_cost,
+    avg_win, avg_loss, best_symbol, worst_symbol}} — the daily scorecard for
+    evaluating each agent separately."""
+    from ist_clock import now_ist as _now_ist
+    import datetime as _dt
+    from collections import defaultdict
+    cutoff = (_now_ist().date() - _dt.timedelta(days=days)).isoformat()
+    with _conn() as c:
+        p = _ph()
+        rows = _fetchall(c, f"SELECT * FROM trades WHERE trade_date >= {p}", (cutoff,))
+    by_agent: dict = defaultdict(list)
+    for r in rows:
+        by_agent[r.get("strategy") or "unknown"].append(r)
+    out: dict = {}
+    for strat, ts in sorted(by_agent.items()):
+        wins   = [t for t in ts if t.get("net_pnl", 0) > 0]
+        losses = [t for t in ts if t.get("net_pnl", 0) <= 0]
+        by_sym: dict = defaultdict(float)
+        for t in ts:
+            by_sym[t.get("symbol", "?")] += t.get("net_pnl", 0)
+        best  = max(by_sym.items(), key=lambda kv: kv[1]) if by_sym else ("", 0)
+        worst = min(by_sym.items(), key=lambda kv: kv[1]) if by_sym else ("", 0)
+        out[strat] = {
+            "trades":     len(ts),
+            "wins":       len(wins),
+            "win_rate":   round(len(wins) / len(ts) * 100, 1) if ts else 0.0,
+            "gross_pnl":  round(sum(t.get("gross_pnl", 0) for t in ts), 2),
+            "net_pnl":    round(sum(t.get("net_pnl", 0) for t in ts), 2),
+            "total_cost": round(sum(t.get("cost", 0) for t in ts), 2),
+            "avg_win":    round(sum(t.get("net_pnl", 0) for t in wins) / len(wins), 2) if wins else 0.0,
+            "avg_loss":   round(sum(t.get("net_pnl", 0) for t in losses) / len(losses), 2) if losses else 0.0,
+            "best_symbol":  {"symbol": best[0],  "pnl": round(best[1], 2)},
+            "worst_symbol": {"symbol": worst[0], "pnl": round(worst[1], 2)},
+        }
+    return out
+
+
 def get_trade_stats(
     strategy: Optional[str] = None,
     days: int = 30,

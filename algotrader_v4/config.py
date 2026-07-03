@@ -257,6 +257,12 @@ class Settings(BaseSettings):
     bt_require_mc_pass: bool = False
     bt_mc_permutations: int = 1000
 
+    # Cost-floor entry gate: expected profit at target must be at least this
+    # multiple of the round-trip transaction cost, else the entry is skipped.
+    # Backtests showed scalping's small-target churn is cost-negative (PF~0.3);
+    # this blocks trades whose edge can't clear their own costs. 0 = disabled.
+    min_edge_cost_ratio: float = 2.0
+
     # Phase 2/3: Position sizing
     use_atr_sizing: bool = True
     risk_per_trade_pct: float = Field(default=0.5, gt=0, le=50)

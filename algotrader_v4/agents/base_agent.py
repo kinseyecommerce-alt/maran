@@ -468,6 +468,8 @@ class BaseAgent(ABC):
         # order placement (stale-price protection); last measured latency (ms).
         self._latency_cooldown_until: float = 0.0
         self._last_order_latency_ms: float = 0.0
+        # Entries skipped by the cost-floor gate (edge < N× round-trip cost)
+        self._cost_gate_skips: int = 0
 
     @abstractmethod
     def evaluate_tick(self, snap: MarketSnapshot) -> tuple[str, Optional[dict]]:
@@ -1718,6 +1720,33 @@ class BaseAgent(ABC):
             if qty <= 0:
                 return
 
+        # Cost-floor gate: the expected profit at target must clear N× the
+        # round-trip transaction cost. Frequent small-target entries (scalping)
+        # otherwise lose money to brokerage/STT/slippage even at decent win
+        # rates — backtests showed PF ~0.3 across the board for scalping.
+        _edge_ratio = float(getattr(settings, "min_edge_cost_ratio", 0.0) or 0.0)
+        if _edge_ratio > 0:
+            _ltp = snap.tick.ltp
+            _tgt_abs = signal.get("target")
+            _tgt_pct = signal.get("target_pct")
+            _tgt_dist = (abs(_tgt_abs - _ltp) if _tgt_abs and _tgt_abs > 0
+                         else _ltp * _tgt_pct / 100 if _tgt_pct and _tgt_pct > 0
+                         else 0.0)
+            if _tgt_dist > 0 and _ltp > 0:
+                from risk_manager import compute_round_trip_cost
+                _product = ("NRML" if signal.get("lot_size", 1) > 1
+                            else "CNC" if self.name == "swing" else "MIS")
+                _cost = compute_round_trip_cost(snap.symbol, qty, _ltp, product=_product)
+                _edge = qty * _tgt_dist
+                if _cost > 0 and _edge < _edge_ratio * _cost:
+                    self._cost_gate_skips += 1
+                    logger.info("[{}] {} cost-gate skip #{}: edge ₹{:.0f} < {}× cost ₹{:.0f}"
+                                " (qty={} target_dist={:.2f})",
+                                self.name, snap.symbol, self._cost_gate_skips,
+                                _edge, _edge_ratio, _cost, qty, _tgt_dist)
+                    order_guard.release_claim(snap.symbol, self.name, action)
+                    return
+
         _order_t0 = _time.monotonic()
         try:
             order_id, sl_order_id, qty = await self._place_orders(snap, action, signal, qty, loop)
@@ -1926,5 +1955,6 @@ class BaseAgent(ABC):
             "signals_fired":    self.state.signals_fired,
             "approved_symbols": self.state.approved_symbols,
             "last_signal":      self.state.last_signal,
+            "cost_gate_skips":  self._cost_gate_skips,
             "errors":           self.state.errors[-5:],
         }
