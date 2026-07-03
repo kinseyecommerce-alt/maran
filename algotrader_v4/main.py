@@ -1060,9 +1060,20 @@ def learn_status():
         try:
             data = _json.loads(appr.read_text())
             out["approved_per_strategy"] = {k: len(v) for k, v in data.items()}
+            out["approved_symbols"] = data
         except Exception:
             pass
     return out
+
+@app.get("/performance/agents", tags=["Portfolio"])
+def agent_performance(days: int = 1):
+    """Per-agent performance scorecard: trades, win rate, gross/net P&L,
+    avg win/loss, best/worst symbol over the last N days — plus live
+    cost-gate skip counters. The daily answer to 'how is each agent doing?'."""
+    from state_store import get_agent_day_stats
+    stats = get_agent_day_stats(days=max(1, min(int(days), 365)))
+    skips = {n: a._cost_gate_skips for n, a in ALL_AGENTS.items()}
+    return {"days": days, "per_agent": stats, "cost_gate_skips": skips}
 
 @app.get("/market/live/{symbol}", tags=["Market"])
 def live_symbol(symbol: str):

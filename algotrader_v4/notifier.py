@@ -121,8 +121,10 @@ class Notifier:
         trades: int,
         win_rate: float,
         drawdown_pct: float = 0.0,
+        per_agent: dict | None = None,
     ) -> None:
-        """Format and send daily P&L summary."""
+        """Format and send daily P&L summary, with a per-agent breakdown when
+        provided (shape of state_store.get_agent_day_stats)."""
         sign = "+" if pnl >= 0 else ""
         body = (
             f"Daily Summary\n"
@@ -132,6 +134,12 @@ class Notifier:
             f"Max DD:    {drawdown_pct:.1f}%\n"
             f"Mode:      {settings.trading_mode}"
         )
+        if per_agent:
+            body += "\n\nPer-agent:\n"
+            for strat, s in per_agent.items():
+                body += (f"  {strat:15s} {s['trades']:3d} trades "
+                         f"{s['win_rate']:5.1f}% win  net ₹{s['net_pnl']:+,.0f}"
+                         f"  (best {s['best_symbol']['symbol']} ₹{s['best_symbol']['pnl']:+,.0f})\n")
         level = "INFO" if pnl >= 0 else "WARNING"
         self.send(subject="Daily P&L Summary", body=body, level=level)
 
