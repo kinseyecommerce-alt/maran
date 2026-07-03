@@ -38,6 +38,13 @@ TIMEFRAMES: dict[str, str] = {
 
 CACHE_ROOT = Path("logs/historical_data")
 
+# Higher timeframes need a longer window than the intraday default: swing's
+# EMA200 needs 200 daily bars (~10 months) and weekly trend needs more — with
+# only 3 months of "1d" the swing strategy generates zero signals/backtest
+# trades. Values are minimum months per cache timeframe; the requested
+# `months` still applies when it is larger.
+MIN_MONTHS: dict[str, int] = {"1d": 24, "1h": 6, "30m": 6}
+
 _lock = threading.Lock()
 _progress: dict = {"state": "idle"}
 
@@ -81,7 +88,6 @@ def download(symbols: list[str] | None = None, months: int = 3,
     tfs = {k: v for k, v in TIMEFRAMES.items()
            if timeframes is None or v in timeframes or k in timeframes}
     to_dt = now_ist()
-    from_dt = to_dt - timedelta(days=months * 31)
 
     total = len(symbols) * len(tfs)
     with _lock:
@@ -105,6 +111,8 @@ def download(symbols: list[str] | None = None, months: int = 3,
         out_dir.mkdir(parents=True, exist_ok=True)
         for kite_iv, tf in tfs.items():
             try:
+                tf_months = max(months, MIN_MONTHS.get(tf, 0))
+                from_dt = to_dt - timedelta(days=tf_months * 31)
                 records = kite_client.historical_data(token, from_dt, to_dt, kite_iv)
                 if records:
                     df = pd.DataFrame(records)
