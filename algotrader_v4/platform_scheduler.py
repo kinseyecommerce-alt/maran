@@ -49,8 +49,14 @@ class PlatformScheduler:
             self._options_cache_refresh, "interval",
             minutes=5, id="options_cache", max_instances=1, coalesce=True,
         )
+        self._sched.add_job(
+            self._daily_history_download, "cron",
+            hour=16, minute=0, day_of_week="mon-fri", id="history_download",
+            max_instances=1, coalesce=True,
+        )
         self._sched.start()
-        logger.info("[platform] scheduler started (Kite@08:50, Report@09:00, Data@09:10, Start@09:16 IST)")
+        logger.info("[platform] scheduler started (Kite@08:50, Report@09:00, Data@09:10, "
+                    "Start@09:16, History@16:00 IST)")
 
     async def stop(self) -> None:
         try:
@@ -124,6 +130,30 @@ class PlatformScheduler:
             logger.warning("[platform] Options cache refresh failed: {}", exc)
         finally:
             self._options_refresh_running = False
+
+    async def _daily_history_download(self) -> None:
+        """Refresh the multi-timeframe OHLCV CSV cache after market close so
+        each day's candles are appended and backtests always run on data that
+        ends yesterday-or-today. Boot re-hydration handles fresh containers;
+        this keeps a long-running container current."""
+        if kite_client._kite is None:
+            logger.info("[platform] History download skipped — Kite not connected")
+            return
+        from ist_clock import is_nse_holiday, now_ist
+        if is_nse_holiday(now_ist().date()):
+            logger.info("[platform] NSE holiday — history download skipped")
+            return
+        try:
+            import historical_downloader as hd
+            if hd.is_running():
+                logger.info("[platform] History download already running — skipped")
+                return
+            months = settings.auto_download_history_months or 3
+            result = await asyncio.to_thread(hd.download, None, months)
+            logger.info("[platform] Daily history download: {} bars, {} failures",
+                        result.get("bars"), len(result.get("failed", [])))
+        except Exception as exc:
+            logger.error("[platform] Daily history download failed: {}", exc)
 
     async def _kite_token_refresh(self) -> None:
         logger.info("[platform] Kite token refresh starting…")
