@@ -3229,21 +3229,6 @@ async def on_startup():
     from platform_scheduler import platform_scheduler
     platform_scheduler.start()
 
-    # Restore the Kite access token persisted by set_access_token() —
-    # App Platform containers are ephemeral, so without this every deploy
-    # or restart silently logged the user out (token lives in Postgres via
-    # state_store when DATABASE_URL is set). A stale token (Kite expires
-    # them daily) fails harmlessly on first use; the daily login replaces it.
-    if not settings.kite_access_token:
-        try:
-            from state_store import get_kv
-            _saved_tok = get_kv("kite_access_token")
-            if _saved_tok:
-                kite_client.set_access_token(access_token=_saved_tok)
-                logger.info("[startup] Kite access token restored from state_store")
-        except Exception as _tok_exc:
-            logger.warning("[startup] Kite token restore failed (fresh login needed): {}", _tok_exc)
-
     # Immediate auto-start on server restart when strategies are configured.
     # The scheduled job fires at 09:16 IST only; this covers restarts at any time.
     if settings.auto_start_strategies:
