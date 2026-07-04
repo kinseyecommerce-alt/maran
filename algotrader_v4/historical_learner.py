@@ -62,9 +62,19 @@ def _save_progress(progress: dict) -> None:
 
 
 def _load_approved() -> dict:
+    """Load the approved-symbols file, guaranteeing a key for every strategy.
+    A file written before a strategy existed (e.g. pre-momentum/futures) would
+    otherwise KeyError in _run_one on the first approval for that strategy —
+    silently losing every new-strategy approval in a resumed run."""
+    approved = {}
     if APPROVED_FILE.exists():
-        return json.loads(APPROVED_FILE.read_text())
-    return {s: [] for s in ALL_STRATEGIES}
+        try:
+            approved = json.loads(APPROVED_FILE.read_text())
+        except Exception:
+            approved = {}
+    for s in ALL_STRATEGIES:
+        approved.setdefault(s, [])
+    return approved
 
 
 def _save_approved(approved: dict) -> None:
@@ -134,7 +144,7 @@ async def _run_one(symbol: str, strategy: str, sem: asyncio.Semaphore,
                          and result.total_pnl > 0
                          and result.profit_factor >= 1.0)
             if result.passed or soft_pass:
-                if symbol not in approved[strategy]:
+                if symbol not in approved.setdefault(strategy, []):
                     approved[strategy].append(symbol)
                 status = "✅ PASS" if result.passed else "☑  SOFT-PASS (edge, cautious size)"
             else:
