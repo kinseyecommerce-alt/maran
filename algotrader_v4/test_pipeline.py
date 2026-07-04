@@ -122,33 +122,37 @@ run("kill-list: runtime settings mutation applies", t_kill_list_runtime_mutation
 # ── Regime entry gate (settings.regime_blocked_agents → bot_state) ──────────
 
 def t_regime_gate_matrix():
-    """Evidence matrix: each agent blocked exactly in its losing regimes."""
+    """Matrix v2 (gated-vs-baseline validated): losers blocked, intraday free."""
     import bot_state
     try:
         bot_state.set_current_regime("RANGING")
-        for blocked in ("intraday", "options", "futures", "momentum"):
+        for blocked in ("options", "futures", "momentum", "mean_reversion"):
             assert not bot_state.is_agent_allowed_in_regime(blocked), f"{blocked} in RANGING"
-        for allowed in ("mean_reversion", "pairs", "scalping", "swing"):
+        for allowed in ("intraday", "pairs", "scalping", "swing"):
             assert bot_state.is_agent_allowed_in_regime(allowed), f"{allowed} in RANGING"
         bot_state.set_current_regime("HIGH_VOLATILE")
-        assert not bot_state.is_agent_allowed_in_regime("mean_reversion")
-        assert not bot_state.is_agent_allowed_in_regime("pairs")
-        assert bot_state.is_agent_allowed_in_regime("intraday")   # +33% on volatile days
+        for blocked in ("mean_reversion", "pairs", "momentum"):
+            assert not bot_state.is_agent_allowed_in_regime(blocked)
+        assert bot_state.is_agent_allowed_in_regime("intraday")
         bot_state.set_current_regime("BEAR_TREND")
         assert not bot_state.is_agent_allowed_in_regime("options")  # -38.6% on down-trends
         assert bot_state.is_agent_allowed_in_regime("scalping")
-        assert bot_state.is_agent_allowed_in_regime("momentum")
+        assert bot_state.is_agent_allowed_in_regime("intraday")     # kill-list fixed it
     finally:
         bot_state.set_current_regime("UNKNOWN")
 
 def t_regime_gate_unknown_and_toggle():
-    """UNKNOWN regime blocks nobody; the gating flag disables the gate."""
+    """UNKNOWN blocks only the always-off agents; gating flag disables all."""
     import bot_state
     old = settings.regime_agent_gating
     try:
         bot_state.set_current_regime("UNKNOWN")
         assert all(bot_state.is_agent_allowed_in_regime(a)
-                   for a in ("intraday", "momentum", "mean_reversion", "pairs"))
+                   for a in ("intraday", "scalping", "options", "futures", "pairs", "swing"))
+        # momentum/mean_reversion: net -85 to -109% in every tested config —
+        # blocked even in UNKNOWN until fresh evidence clears them
+        assert not bot_state.is_agent_allowed_in_regime("momentum")
+        assert not bot_state.is_agent_allowed_in_regime("mean_reversion")
         bot_state.set_current_regime("RANGING")
         settings.regime_agent_gating = False
         assert bot_state.is_agent_allowed_in_regime("momentum")   # gate off → allowed

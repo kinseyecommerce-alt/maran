@@ -82,8 +82,8 @@ REGIME_PLANS: dict[Regime, StrategyPlan] = {
     # the numbers). mean_reversion/pairs earn ONLY on range days; momentum
     # bleeds -61% on range days; options -39% on down-trend days.
     Regime.BULL_TREND: StrategyPlan(
-        active     = ["swing", "intraday", "scalping", "options", "futures", "momentum"],
-        paused     = ["mean_reversion", "pairs"],
+        active     = ["swing", "intraday", "scalping", "options", "futures"],
+        paused     = ["momentum", "mean_reversion", "pairs"],
         allocation = {"swing":40, "intraday":35, "scalping":15, "options":10},
         size_factor= 1.0,
         reasoning  = "Strong uptrend confirmed — favour trend-following. Swing positions hold well. "
@@ -92,8 +92,8 @@ REGIME_PLANS: dict[Regime, StrategyPlan] = {
         regime     = Regime.BULL_TREND,
     ),
     Regime.BEAR_TREND: StrategyPlan(
-        active     = ["scalping", "momentum"],
-        paused     = ["swing", "intraday", "options", "futures", "mean_reversion", "pairs"],
+        active     = ["scalping", "intraday"],
+        paused     = ["swing", "options", "futures", "momentum", "mean_reversion", "pairs"],
         allocation = {"scalping":40, "options":30, "intraday":30, "swing":0},
         size_factor= 0.75,
         reasoning  = "Downtrend — replay evidence: only scalping (+6.3%) and momentum (+4.2%) "
@@ -101,8 +101,8 @@ REGIME_PLANS: dict[Regime, StrategyPlan] = {
         regime     = Regime.BEAR_TREND,
     ),
     Regime.BULL_VOLATILE: StrategyPlan(
-        active     = ["intraday", "scalping", "options", "futures", "momentum"],
-        paused     = ["swing", "mean_reversion", "pairs"],
+        active     = ["intraday", "scalping", "options", "futures"],
+        paused     = ["swing", "momentum", "mean_reversion", "pairs"],
         allocation = {"intraday":40, "scalping":35, "options":25, "swing":0},
         size_factor= 0.75,
         reasoning  = "Uptrend but VIX elevated — avoid overnight swing risk. "
@@ -111,8 +111,8 @@ REGIME_PLANS: dict[Regime, StrategyPlan] = {
         regime     = Regime.BULL_VOLATILE,
     ),
     Regime.BEAR_VOLATILE: StrategyPlan(
-        active     = ["scalping", "momentum"],
-        paused     = ["swing", "intraday", "options", "futures", "mean_reversion", "pairs"],
+        active     = ["scalping", "intraday"],
+        paused     = ["swing", "options", "futures", "momentum", "mean_reversion", "pairs"],
         allocation = {"scalping":50, "options":50, "swing":0, "intraday":0},
         size_factor= 0.5,
         reasoning  = "Falling market + high VIX — most dangerous regime. "
@@ -121,8 +121,8 @@ REGIME_PLANS: dict[Regime, StrategyPlan] = {
         regime     = Regime.BEAR_VOLATILE,
     ),
     Regime.RANGING: StrategyPlan(
-        active     = ["scalping", "mean_reversion", "pairs"],
-        paused     = ["swing", "intraday", "options", "futures", "momentum"],
+        active     = ["scalping", "intraday", "pairs"],
+        paused     = ["swing", "options", "futures", "momentum", "mean_reversion"],
         allocation = {"scalping":45, "options":35, "intraday":20, "swing":0},
         size_factor= 0.75,
         reasoning  = "Market consolidating — the mean-reversion habitat. Replay: "
@@ -131,8 +131,8 @@ REGIME_PLANS: dict[Regime, StrategyPlan] = {
         regime     = Regime.RANGING,
     ),
     Regime.HIGH_VOLATILE: StrategyPlan(
-        active     = ["options", "scalping", "intraday", "futures", "momentum"],
-        paused     = ["swing", "mean_reversion", "pairs"],
+        active     = ["options", "scalping", "intraday", "futures"],
+        paused     = ["swing", "momentum", "mean_reversion", "pairs"],
         allocation = {"options":50, "scalping":30, "intraday":20, "swing":0},
         size_factor= 0.25,
         reasoning  = "EXTREME VOLATILITY (VIX > 25). Replay: volatile days are the BEST "
