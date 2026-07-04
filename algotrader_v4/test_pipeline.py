@@ -90,6 +90,39 @@ run("bt_min_win_rate in (0,1)",            t_cfg_bt_win_rate)
 run("bt_min_sharpe is float",              t_cfg_bt_sharpe)
 run("max_open_positions >= 1",             t_cfg_max_positions)
 
+# ── Pattern kill-list (settings.disabled_patterns → bot_state gate) ─────────
+
+def t_kill_list_defaults():
+    """Replay-evidenced bleeders are muted by default; survivors stay on."""
+    import bot_state
+    for agent, pat in [("intraday", "VWAP_TREND"), ("intraday", "EMA_PULLBACK"),
+                       ("intraday", "VWAP_RECLAIM"), ("scalping", "EMA9X"),
+                       ("scalping", "STOCHRSI_EXTREME"), ("scalping", "MACD_MICRO")]:
+        assert not bot_state.is_pattern_enabled(agent, pat), f"{agent}:{pat} should be killed"
+    assert bot_state.is_pattern_enabled("intraday", "ORB_BREAK")
+    assert bot_state.is_pattern_enabled("scalping", "VWAP_BOUNCE")
+    assert bot_state.is_pattern_enabled("options", "VWAP_RECLAIM")  # per-agent scoping
+
+def t_kill_list_runtime_mutation():
+    """Mutating settings.disabled_patterns takes effect immediately (cache refresh)."""
+    import bot_state
+    old = settings.disabled_patterns
+    try:
+        settings.disabled_patterns = "scalping:EMA921X"
+        assert not bot_state.is_pattern_enabled("scalping", "EMA921X")
+        assert bot_state.is_pattern_enabled("intraday", "VWAP_TREND")
+        settings.disabled_patterns = ""
+        assert bot_state.is_pattern_enabled("scalping", "EMA921X")
+    finally:
+        settings.disabled_patterns = old
+
+run("kill-list: replay bleeders muted by default",  t_kill_list_defaults)
+run("kill-list: runtime settings mutation applies", t_kill_list_runtime_mutation)
+
+# The rest of the suite unit-tests pattern LOGIC (must be able to fire), so
+# clear the kill-list for the remainder of the run.
+settings.disabled_patterns = ""
+
 
 # ══════════════════════════════════════════════════════════════════════════
 # 2. KITE CLIENT
