@@ -147,6 +147,25 @@ async def _run_one(symbol: str, strategy: str, sem: asyncio.Semaphore,
                 if symbol not in approved.setdefault(strategy, []):
                     approved[strategy].append(symbol)
                 status = "✅ PASS" if result.passed else "☑  SOFT-PASS (edge, cautious size)"
+                # Recency check: an edge measured over the full window can be
+                # DEAD in the current regime (intraday's book was 3-month
+                # positive but −₹46k on the latest 30 days). Approve the symbol
+                # so the agent still fires, but force CAUTIOUS (half size)
+                # whenever the recent window is negative — live evidence then
+                # promotes or the nightly prune removes.
+                try:
+                    recent = await asyncio.to_thread(
+                        backtest_engine.run, symbol, "NSE", strategy,
+                        30, True, False,   # lookback_days=30, force=True, walk_forward=False
+                    )
+                    if recent.total_trades >= 3 and recent.total_pnl <= 0:
+                        with adaptive_engine._lock:
+                            p = adaptive_engine._params.get(params_key)
+                            if p is not None:
+                                p.status = "CAUTIOUS"
+                        status += " [recent-30d negative → CAUTIOUS]"
+                except Exception:
+                    pass
             else:
                 status = f"⚠  FAIL ({', '.join(result.fail_reasons[:1])})"
 

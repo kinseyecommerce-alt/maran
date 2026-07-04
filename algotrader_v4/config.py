@@ -160,7 +160,7 @@ class Settings(BaseSettings):
     tgt_pct_pairs:          float = 1.5
 
     # Per-agent minimum pattern score to fire
-    min_score_intraday:       int = 4
+    min_score_intraday:       int = 5      # was 4 — recent-window audit: fewer, higher-conviction entries
     min_score_scalping:       int = 5      # was 3 — higher-conviction entries only
     min_score_options:        int = 6
     min_score_futures:        int = 4
