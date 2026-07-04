@@ -562,6 +562,28 @@ def kite_balance():
     except Exception as e:
         return {"available": 0, "cash": 0, "opening_balance": 0, "used": 0, "error": str(e)}
 
+def _kick_history_download_if_empty() -> None:
+    """After a successful Kite login, re-hydrate the OHLCV cache if it's empty.
+    Boot downloads fail harmlessly when the container starts with an expired
+    token (weekend deploys) — without this, backtests/learning would have no
+    data until the 16:00 refresh even though a valid session exists all day."""
+    try:
+        import historical_downloader as hd
+        from pathlib import Path as _P
+        if hd.is_running():
+            return
+        have = len(list(_P("logs/historical_data").glob("*/1d.csv"))) if _P("logs/historical_data").exists() else 0
+        if have >= 50:
+            return
+        logger.info("[auth] OHLCV cache thin ({} symbols) — starting history download post-login", have)
+        threading.Thread(
+            target=hd.download, kwargs={"months": settings.auto_download_history_months or 3},
+            daemon=True, name="post_login_history",
+        ).start()
+    except Exception as _exc:
+        logger.warning("[auth] post-login history kick failed: {}", _exc)
+
+
 @app.get("/auth/kite/callback", tags=["Auth"], include_in_schema=False)
 def kite_callback(request_token: str = "", action: str = "", status: str = ""):
     """Zerodha redirects here after OAuth. Auto-captures the request_token."""
@@ -582,6 +604,7 @@ def kite_callback(request_token: str = "", action: str = "", status: str = ""):
         if active:
             kite_accounts.update_access_token(active["name"], token)
         settings.kite_access_token = token
+        _kick_history_download_if_empty()
         return HTMLResponse("""
         <html><head><title>Kite Connected</title>
         <meta http-equiv='refresh' content='2;url=/dashboard'>
@@ -654,6 +677,7 @@ def kite_login_redirect():
 @app.post("/auth/token", tags=["Auth"])
 def set_token(req: TokenRequest):
     t = kite_client.set_access_token(req.request_token, req.access_token)
+    _kick_history_download_if_empty()
     return {"status": "ok", "token_set": bool(t)}
 
 @app.get("/auth/kite/token", tags=["Auth"])
