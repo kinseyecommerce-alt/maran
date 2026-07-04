@@ -29,7 +29,7 @@ from market_regime import regime_detector, Regime, REGIME_PLANS
 from adaptive_engine import adaptive_engine
 from agents.base_agent import send_telegram
 from agents.strategy_agents import ALL_AGENTS
-from bot_state import is_agent_enabled
+from bot_state import is_agent_enabled, set_current_regime
 from portfolio_optimizer import portfolio_optimizer
 
 # Fire-and-forget helper: keeps a strong ref to the task so the GC doesn't
@@ -736,6 +736,10 @@ class MasterAgent:
     # ── Helpers ────────────────────────────────────────────────────────────────
 
     def _apply_regime_plan(self, regime: Regime, plan) -> None:
+        # Publish the confirmed regime for the entry gate in base_agent —
+        # this bites even under FORCE_ALL_AGENTS (agents stay running and
+        # manage exits, but blocked agents place no new entries).
+        set_current_regime(regime.value)
         # FORCE_ALL_AGENTS: never pause — treat every strategy as active so
         # each agent trades in all regimes (per-agent performance evaluation).
         # Regime size_factor still applies, so risk stays regime-aware.

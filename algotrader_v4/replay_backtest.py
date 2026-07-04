@@ -48,6 +48,58 @@ WATCHLIST = ["RELIANCE", "TCS", "HDFCBANK", "INFY", "ICICIBANK", "SBIN",
 DATA_DIR = Path("logs/historical_data")
 PRE_HISTORY_BARS = 120        # prev-day bars prepended for indicator warm-up
 
+# Tracker name → ALL_AGENTS key (for the regime entry gate)
+AGENT_KEY = {"Intraday": "intraday", "Scalping": "scalping", "Options": "options",
+             "Futures": "futures", "Swing": "swing", "Momentum": "momentum",
+             "MeanRev": "mean_reversion", "Pairs": "pairs"}
+
+
+def build_regime_timeline(nifty_df: pd.DataFrame | None) -> dict:
+    """CAUSAL intraday day-type detector — classifies the day at each NIFTY bar
+    using only bars seen so far (no hindsight), so gated results are honest.
+      HIGH_VOLATILE  session range so far >= 1.26% (62-day top quartile)
+      BULL_TREND     net move since open >= +0.25%
+      BEAR_TREND     net move since open <= -0.25%
+      RANGING        otherwise
+    UNKNOWN before 10:15 (too early to call — gate stays open). 2-eval
+    hysteresis at 15-min cadence, mirroring master_agent's regime buffer."""
+    if nifty_df is None or not len(nifty_df):
+        return {}
+    sess = nifty_df[nifty_df["is_session"]] if "is_session" in nifty_df.columns else nifty_df
+    if not len(sess):
+        return {}
+    day_open = float(sess["open"].iloc[0])
+    timeline: dict = {}
+    hi = lo = day_open
+    confirmed = "UNKNOWN"
+    buf: list[str] = []
+    last_slot = None
+    for ts, row in sess.iterrows():
+        hi = max(hi, float(row["high"]))
+        lo = min(lo, float(row["low"]))
+        t = ts.time()
+        if t < time(10, 15):
+            timeline[ts] = "UNKNOWN"
+            continue
+        slot = (t.hour, t.minute // 15)          # evaluate once per 15-min slot
+        if slot != last_slot:
+            last_slot = slot
+            ret = (float(row["close"]) - day_open) / day_open * 100
+            rng = (hi - lo) / day_open * 100
+            if rng >= 1.26:
+                raw = "HIGH_VOLATILE"
+            elif ret >= 0.25:
+                raw = "BULL_TREND"
+            elif ret <= -0.25:
+                raw = "BEAR_TREND"
+            else:
+                raw = "RANGING"
+            buf = (buf + [raw])[-2:]
+            if confirmed == "UNKNOWN" or (len(buf) == 2 and buf[0] == buf[1]):
+                confirmed = raw
+        timeline[ts] = confirmed
+    return timeline
+
 
 def load_days(symbols: list[str]) -> tuple[list, dict]:
     """Return (sorted trading dates, {sym: {date: day_df}}) from the 1m CSVs."""
@@ -86,9 +138,20 @@ def build_session_df(day_df: pd.DataFrame, prev_df: pd.DataFrame | None) -> pd.D
     return out
 
 
+_ENTRY_ACTIONS = {"BUY", "SELL", "LONG", "SHORT", "CE", "PE"}
+
+
+def _regime_at(sorted_keys: list, timeline: dict, ts) -> str:
+    """Floor lookup: regime at the latest NIFTY bar <= ts."""
+    import bisect
+    i = bisect.bisect_right(sorted_keys, ts) - 1
+    return timeline[sorted_keys[i]] if i >= 0 else "UNKNOWN"
+
+
 def replay(symbols: list[str], max_days: int | None = None,
            start: str | None = None, end: str | None = None,
-           tag: str = "") -> dict:
+           tag: str = "", gating: bool = False) -> dict:
+    import bot_state as _bs
     dates, per_sym = load_days(symbols)
     if start:
         dates = [d for d in dates if str(d) >= start]
@@ -124,6 +187,9 @@ def replay(symbols: list[str], max_days: int | None = None,
         closed_before = {n: len([t for t in trackers[n].trades if t.closed]) for n, _ in AGENT_CLASSES}
         pnl_before    = {n: sum(t.pnl_pct for t in trackers[n].trades if t.closed) for n, _ in AGENT_CLASSES}
 
+        regime_tl = build_regime_timeline(sessions.get("NIFTY")) if gating else {}
+        regime_keys = sorted(regime_tl) if regime_tl else []
+
         for sym, df in sessions.items():
             n_bars = len(df)
             for bar_idx in range(n_bars):
@@ -144,10 +210,19 @@ def replay(symbols: list[str], max_days: int | None = None,
 
                 ind  = compute_indicators_at(sym, df, bar_idx, ltp)
                 snap = make_snapshot(sym, ind, df, bar_idx, ltp, bar_seconds=60)
+                if regime_keys:
+                    _bs.set_current_regime(_regime_at(regime_keys, regime_tl, row.name))
                 for name, agent in agents:
                     try:
                         action, signal = agent.evaluate_tick(snap)
                         if action and action not in ("HOLD", None, ""):
+                            # Same entry gate production uses in _try_enter:
+                            # blocked agents book no NEW trades in this regime
+                            # (exits still run via the tracker's price path).
+                            if (regime_keys
+                                    and str(action).upper() in _ENTRY_ACTIONS
+                                    and not _bs.is_agent_allowed_in_regime(AGENT_KEY[name])):
+                                continue
                             trackers[name].on_signal(sym, action, signal or {}, ts, ltp)
                     except Exception:
                         pass
@@ -214,6 +289,8 @@ if __name__ == "__main__":
     ap.add_argument("--start", default=None)
     ap.add_argument("--end", default=None)
     ap.add_argument("--tag", default="")
+    ap.add_argument("--regime-gating", action="store_true",
+                    help="apply the evidence-based regime entry gate (causal NIFTY detector)")
     args = ap.parse_args()
     replay([s.strip().upper() for s in args.symbols.split(",") if s.strip()],
-           args.days, args.start, args.end, args.tag)
+           args.days, args.start, args.end, args.tag, gating=args.regime_gating)

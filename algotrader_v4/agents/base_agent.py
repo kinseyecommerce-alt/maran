@@ -470,6 +470,8 @@ class BaseAgent(ABC):
         self._last_order_latency_ms: float = 0.0
         # Entries skipped by the cost-floor gate (edge < N× round-trip cost)
         self._cost_gate_skips: int = 0
+        # Entries skipped by the regime gate (agent blocked in current regime)
+        self._regime_gate_skips: int = 0
 
     @abstractmethod
     def evaluate_tick(self, snap: MarketSnapshot) -> tuple[str, Optional[dict]]:
@@ -1690,6 +1692,19 @@ class BaseAgent(ABC):
                              self.name, snap.symbol, self._last_order_latency_ms)
                 return
 
+        # Regime entry gate — evidence-based: the 62-day replay showed each
+        # agent loses in specific regimes (momentum on range days, mean-rev on
+        # volatile days, …). Blocks only NEW entries; exits/TSL keep managing
+        # open positions.
+        import bot_state as _bs
+        if not _bs.is_agent_allowed_in_regime(self.name):
+            self._regime_gate_skips += 1
+            if self._regime_gate_skips % 25 == 1:
+                logger.info("[{}] {} regime gate: {} blocks entries (skip #{})",
+                            self.name, snap.symbol, _bs.get_current_regime(),
+                            self._regime_gate_skips)
+            return
+
         if not await self._pre_claim_checks(snap, action, loop, signal):
             return
 
@@ -1967,5 +1982,6 @@ class BaseAgent(ABC):
             "approved_symbols": self.state.approved_symbols,
             "last_signal":      self.state.last_signal,
             "cost_gate_skips":  self._cost_gate_skips,
+            "regime_gate_skips": self._regime_gate_skips,
             "errors":           self.state.errors[-5:],
         }

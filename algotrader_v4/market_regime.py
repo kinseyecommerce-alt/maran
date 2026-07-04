@@ -77,60 +77,67 @@ class StrategyPlan:
 
 
 REGIME_PLANS: dict[Regime, StrategyPlan] = {
+    # Paused lists below are seeded from the 62-day real-agent replay
+    # (gross P&L by NIFTY day-type; see settings.regime_blocked_agents for
+    # the numbers). mean_reversion/pairs earn ONLY on range days; momentum
+    # bleeds -61% on range days; options -39% on down-trend days.
     Regime.BULL_TREND: StrategyPlan(
-        active     = ["swing", "intraday", "scalping", "options"],
-        paused     = [],
+        active     = ["swing", "intraday", "scalping", "options", "futures", "momentum"],
+        paused     = ["mean_reversion", "pairs"],
         allocation = {"swing":40, "intraday":35, "scalping":15, "options":10},
         size_factor= 1.0,
         reasoning  = "Strong uptrend confirmed — favour trend-following. Swing positions hold well. "
-                     "Intraday on dips. Scalping for quick BUY entries on pullbacks.",
+                     "Intraday on dips. Scalping for quick BUY entries on pullbacks. "
+                     "Mean-reversion/pairs paused (lose in trends per replay).",
         regime     = Regime.BULL_TREND,
     ),
     Regime.BEAR_TREND: StrategyPlan(
-        active     = ["scalping", "options", "intraday"],
-        paused     = ["swing"],
+        active     = ["scalping", "momentum"],
+        paused     = ["swing", "intraday", "options", "futures", "mean_reversion", "pairs"],
         allocation = {"scalping":40, "options":30, "intraday":30, "swing":0},
         size_factor= 0.75,
-        reasoning  = "Downtrend — swing trades stopped to avoid catching falling knives. "
-                     "Scalping short setups. F&O PUT buying on bounces. Intraday SELL side only.",
+        reasoning  = "Downtrend — replay evidence: only scalping (+6.3%) and momentum (+4.2%) "
+                     "earn on down-trend days; options -38.6%, intraday -7.5% paused.",
         regime     = Regime.BEAR_TREND,
     ),
     Regime.BULL_VOLATILE: StrategyPlan(
-        active     = ["intraday", "scalping", "options"],
-        paused     = ["swing"],
+        active     = ["intraday", "scalping", "options", "futures", "momentum"],
+        paused     = ["swing", "mean_reversion", "pairs"],
         allocation = {"intraday":40, "scalping":35, "options":25, "swing":0},
         size_factor= 0.75,
         reasoning  = "Uptrend but VIX elevated — avoid overnight swing risk. "
-                     "Intraday and scalping are ideal. F&O straddles for volatility play.",
+                     "Intraday and scalping are ideal. F&O straddles for volatility play. "
+                     "Mean-reversion/pairs paused (-41%/-7.7% on volatile days per replay).",
         regime     = Regime.BULL_VOLATILE,
     ),
     Regime.BEAR_VOLATILE: StrategyPlan(
-        active     = ["scalping", "options"],
-        paused     = ["swing", "intraday"],
+        active     = ["scalping", "momentum"],
+        paused     = ["swing", "intraday", "options", "futures", "mean_reversion", "pairs"],
         allocation = {"scalping":50, "options":50, "swing":0, "intraday":0},
         size_factor= 0.5,
         reasoning  = "Falling market + high VIX — most dangerous regime. "
-                     "Only scalping short setups and protective F&O PUT buying allowed. "
-                     "Position sizes halved.",
+                     "Only scalping and momentum shorts allowed (the two agents that "
+                     "earned on down-trend days in the replay). Position sizes halved.",
         regime     = Regime.BEAR_VOLATILE,
     ),
     Regime.RANGING: StrategyPlan(
-        active     = ["scalping", "options", "intraday"],
-        paused     = ["swing"],
+        active     = ["scalping", "mean_reversion", "pairs"],
+        paused     = ["swing", "intraday", "options", "futures", "momentum"],
         allocation = {"scalping":45, "options":35, "intraday":20, "swing":0},
         size_factor= 0.75,
-        reasoning  = "Market consolidating — no clear directional trend. "
-                     "Scalping mean-reversion edges. F&O iron condor / strangles for premium. "
-                     "Intraday range-bound setups only.",
+        reasoning  = "Market consolidating — the mean-reversion habitat. Replay: "
+                     "mean_reversion +9.8%, pairs +14.0% on range days while "
+                     "momentum -61.5%, options -46.7%, intraday -20.4% paused.",
         regime     = Regime.RANGING,
     ),
     Regime.HIGH_VOLATILE: StrategyPlan(
-        active     = ["options", "scalping"],
-        paused     = ["swing", "intraday"],
+        active     = ["options", "scalping", "intraday", "futures", "momentum"],
+        paused     = ["swing", "mean_reversion", "pairs"],
         allocation = {"options":50, "scalping":30, "intraday":20, "swing":0},
         size_factor= 0.25,
-        reasoning  = "EXTREME VOLATILITY (VIX > 25). Only experienced F&O hedging and "
-                     "very tight scalping. Position sizes at 25%. Intraday only if clear signal.",
+        reasoning  = "EXTREME VOLATILITY (VIX > 25). Replay: volatile days are the BEST "
+                     "days for scalping (+73.7%), intraday (+33.0%), options (+47.2%) — "
+                     "but at 25% size. Mean-reversion/pairs paused (-41%/-7.7%).",
         regime     = Regime.HIGH_VOLATILE,
     ),
     Regime.BLACK_SWAN: StrategyPlan(

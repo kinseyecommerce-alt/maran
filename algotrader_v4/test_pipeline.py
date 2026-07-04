@@ -119,6 +119,48 @@ def t_kill_list_runtime_mutation():
 run("kill-list: replay bleeders muted by default",  t_kill_list_defaults)
 run("kill-list: runtime settings mutation applies", t_kill_list_runtime_mutation)
 
+# ── Regime entry gate (settings.regime_blocked_agents → bot_state) ──────────
+
+def t_regime_gate_matrix():
+    """Evidence matrix: each agent blocked exactly in its losing regimes."""
+    import bot_state
+    try:
+        bot_state.set_current_regime("RANGING")
+        for blocked in ("intraday", "options", "futures", "momentum"):
+            assert not bot_state.is_agent_allowed_in_regime(blocked), f"{blocked} in RANGING"
+        for allowed in ("mean_reversion", "pairs", "scalping", "swing"):
+            assert bot_state.is_agent_allowed_in_regime(allowed), f"{allowed} in RANGING"
+        bot_state.set_current_regime("HIGH_VOLATILE")
+        assert not bot_state.is_agent_allowed_in_regime("mean_reversion")
+        assert not bot_state.is_agent_allowed_in_regime("pairs")
+        assert bot_state.is_agent_allowed_in_regime("intraday")   # +33% on volatile days
+        bot_state.set_current_regime("BEAR_TREND")
+        assert not bot_state.is_agent_allowed_in_regime("options")  # -38.6% on down-trends
+        assert bot_state.is_agent_allowed_in_regime("scalping")
+        assert bot_state.is_agent_allowed_in_regime("momentum")
+    finally:
+        bot_state.set_current_regime("UNKNOWN")
+
+def t_regime_gate_unknown_and_toggle():
+    """UNKNOWN regime blocks nobody; the gating flag disables the gate."""
+    import bot_state
+    old = settings.regime_agent_gating
+    try:
+        bot_state.set_current_regime("UNKNOWN")
+        assert all(bot_state.is_agent_allowed_in_regime(a)
+                   for a in ("intraday", "momentum", "mean_reversion", "pairs"))
+        bot_state.set_current_regime("RANGING")
+        settings.regime_agent_gating = False
+        assert bot_state.is_agent_allowed_in_regime("momentum")   # gate off → allowed
+        settings.regime_agent_gating = True
+        assert not bot_state.is_agent_allowed_in_regime("momentum")
+    finally:
+        settings.regime_agent_gating = old
+        bot_state.set_current_regime("UNKNOWN")
+
+run("regime gate: evidence matrix blocks losers per regime", t_regime_gate_matrix)
+run("regime gate: UNKNOWN open + flag toggles",              t_regime_gate_unknown_and_toggle)
+
 # The rest of the suite unit-tests pattern LOGIC (must be able to fire), so
 # clear the kill-list for the remainder of the run.
 settings.disabled_patterns = ""

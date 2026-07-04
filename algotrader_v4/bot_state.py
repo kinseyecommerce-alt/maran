@@ -74,6 +74,51 @@ def set_agent_enabled(name: str, val: bool) -> None:
         _agent_enabled[name] = val
 
 
+# ── Regime entry gate ────────────────────────────────────────────────────────
+# master_agent publishes the confirmed regime here; base_agent consults the
+# settings-driven block matrix before every new entry. Same lazy-parse/cache
+# pattern as the kill-list so runtime settings mutations apply immediately.
+_current_regime: str = "UNKNOWN"
+_regime_block_src: str | None = None
+_regime_block_map: dict[str, set[str]] = {}
+
+
+def set_current_regime(regime: str) -> None:
+    global _current_regime
+    _current_regime = (regime or "UNKNOWN").upper()
+
+
+def get_current_regime() -> str:
+    return _current_regime
+
+
+def _regime_blocks() -> dict[str, set[str]]:
+    global _regime_block_src, _regime_block_map
+    try:
+        from config import settings
+        raw = getattr(settings, "regime_blocked_agents", "") or ""
+        if not getattr(settings, "regime_agent_gating", True):
+            raw = ""
+    except Exception:
+        raw = ""
+    if raw != _regime_block_src:
+        _regime_block_src = raw
+        m: dict[str, set[str]] = {}
+        for part in raw.split(";"):
+            if ":" not in part:
+                continue
+            reg, agents = part.split(":", 1)
+            m[reg.strip().upper()] = {a.strip().lower() for a in agents.split(",") if a.strip()}
+        _regime_block_map = m
+    return _regime_block_map
+
+
+def is_agent_allowed_in_regime(agent: str) -> bool:
+    """Entry gate: False when the current confirmed regime is one where the
+    62-day replay evidence says this agent loses. Open positions unaffected."""
+    return agent.lower() not in _regime_blocks().get(_current_regime, set())
+
+
 def is_pattern_enabled(agent: str, pattern: str) -> bool:
     if f"{agent.upper()}:{pattern.upper()}" in _settings_disabled():
         return False

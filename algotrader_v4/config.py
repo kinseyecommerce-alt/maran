@@ -277,6 +277,28 @@ class Settings(BaseSettings):
         "scalping:EMA9X,scalping:STOCHRSI_EXTREME,scalping:MACD_MICRO"
     )
 
+    # Regime entry gate: block NEW entries for agents in regimes where the
+    # 62-day replay proved they lose. Format "REGIME:agent,agent;REGIME:...".
+    # Evidence (gross P&L by NIFTY day-type, 62 real days × 12 symbols):
+    #   RANGE (25d):      momentum -61.5%, options -46.7%, intraday -20.4%,
+    #                     futures -8.4% | mean_reversion +9.8%, pairs +14.0%
+    #   TREND_DOWN (9d):  options -38.6%, mean_reversion -15.3%, intraday -7.5%,
+    #                     pairs -4.5%, futures -2.8% | scalping +6.3%, momentum +4.2%
+    #   VOLATILE (16d):   mean_reversion -41.0%, pairs -7.7% | intraday +33.0%,
+    #                     scalping +73.7%, options +47.2%, momentum +21.3%
+    #   TREND_UP (12d):   mean_reversion -6.8%, pairs -1.8% | options +65.4%
+    # Open positions are unaffected — exits/TSL keep managing them.
+    regime_agent_gating: bool = True
+    regime_blocked_agents: str = (
+        "BULL_TREND:mean_reversion,pairs;"
+        "BULL_VOLATILE:mean_reversion,pairs;"
+        "BEAR_TREND:intraday,options,futures,mean_reversion,pairs;"
+        "BEAR_VOLATILE:intraday,options,futures,mean_reversion,pairs;"
+        "RANGING:intraday,options,futures,momentum;"
+        "HIGH_VOLATILE:mean_reversion,pairs;"
+        "BLACK_SWAN:swing,intraday,momentum,pairs"
+    )
+
     # Phase 2/3: Position sizing
     use_atr_sizing: bool = True
     risk_per_trade_pct: float = Field(default=0.5, gt=0, le=50)
