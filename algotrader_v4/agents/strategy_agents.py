@@ -202,6 +202,9 @@ class IntradayAgent(BaseAgent):
     # ── Pattern 1: VWAP_TREND ─────────────────────────────────────────────────
 
     def _pat_vwap_trend(self, sym, snap, ind, ltp, t):
+        import bot_state
+        if not bot_state.is_pattern_enabled("intraday", "VWAP_TREND"):
+            return "", 0, ""
         if not ind.vwap or ind.vwap <= 0:
             return "", 0, ""
         if (ltp > ind.vwap and ind.ema9 > ind.ema21 > 0
@@ -217,6 +220,9 @@ class IntradayAgent(BaseAgent):
     # ── Pattern 2: EMA_PULLBACK ────────────────────────────────────────────────
 
     def _pat_ema_pullback(self, sym, snap, ind, ltp, t):
+        import bot_state
+        if not bot_state.is_pattern_enabled("intraday", "EMA_PULLBACK"):
+            return "", 0, ""
         prev_rsi = self._prev_rsi.get(sym, ind.rsi_14)
         ema_bull = ind.ema9 > ind.ema21 > 0 and ind.ema21 > ind.ema50 > 0
         ema_bear = ind.ema9 < ind.ema21 > 0 and ind.ema21 < ind.ema50 > 0
@@ -270,6 +276,9 @@ class IntradayAgent(BaseAgent):
     # ── Pattern 5: VWAP_RECLAIM ────────────────────────────────────────────────
 
     def _pat_vwap_reclaim(self, sym, snap, ind, ltp, t):
+        import bot_state
+        if not bot_state.is_pattern_enabled("intraday", "VWAP_RECLAIM"):
+            return "", 0, ""
         if not ind.vwap or ind.vwap <= 0:
             return "", 0, ""
         was_above = self._prev_above_vwap.get(sym, ltp >= ind.vwap)
@@ -2762,29 +2771,32 @@ class ScalpingAgent(BaseAgent):
         import bot_state as _bs
 
         # 1. EMA9 micro-cross (fastest — tick resolution)
-        if prev_ltp < prev_ema9 and ltp > ind.ema9:
-            return "BUY",  "EMA9X"
-        if prev_ltp > prev_ema9 and ltp < ind.ema9:
-            return "SELL", "EMA9X"
+        if _bs.is_pattern_enabled("scalping", "EMA9X"):
+            if prev_ltp < prev_ema9 and ltp > ind.ema9:
+                return "BUY",  "EMA9X"
+            if prev_ltp > prev_ema9 and ltp < ind.ema9:
+                return "SELL", "EMA9X"
 
         # 2. EMA9/EMA21 cross (higher conviction)
-        if ind.ema21 and ind.ema21 > 0:
-            prev_diff = prev_ema9  - prev_ema21
-            curr_diff = ind.ema9   - ind.ema21
-            if prev_diff <= 0 < curr_diff:
-                return "BUY",  "EMA921X"
-            if prev_diff >= 0 > curr_diff:
-                return "SELL", "EMA921X"
+        if _bs.is_pattern_enabled("scalping", "EMA921X"):
+            if ind.ema21 and ind.ema21 > 0:
+                prev_diff = prev_ema9  - prev_ema21
+                curr_diff = ind.ema9   - ind.ema21
+                if prev_diff <= 0 < curr_diff:
+                    return "BUY",  "EMA921X"
+                if prev_diff >= 0 > curr_diff:
+                    return "SELL", "EMA921X"
 
         # 3. VWAP bounce (was near VWAP, now moving away with volume).
         # Read-only here — the prev-state update lives with the rest of the
         # state block so early returns in patterns 1-2 can't leave it stale.
-        if ind.vwap and ind.vwap > 0:
-            was_near = self._prev_near_vwap.get(sym, False)
-            near_now = abs(ltp - ind.vwap) / ind.vwap < 0.0008
-            if was_near and not near_now and ind.volume_ratio >= 1.3:
-                if ltp > ind.vwap:  return "BUY",  "VWAP_BOUNCE"
-                return "SELL", "VWAP_BOUNCE"
+        if _bs.is_pattern_enabled("scalping", "VWAP_BOUNCE"):
+            if ind.vwap and ind.vwap > 0:
+                was_near = self._prev_near_vwap.get(sym, False)
+                near_now = abs(ltp - ind.vwap) / ind.vwap < 0.0008
+                if was_near and not near_now and ind.volume_ratio >= 1.3:
+                    if ltp > ind.vwap:  return "BUY",  "VWAP_BOUNCE"
+                    return "SELL", "VWAP_BOUNCE"
 
         # 4. Momentum surge (explosive candle + volume — deduplicated by candle ts)
         if len(snap.candles_1min) >= 2:
@@ -2871,10 +2883,11 @@ class ScalpingAgent(BaseAgent):
                     return "SELL", "MICROTREND"
 
         # 14. MACD micro-cross (NEW — clean zero-cross on 1-min, strongest momentum signal)
-        if prev_macd_hist <= 0 < ind.macd_hist and ind.volume_ratio >= 1.3 and ind.ema9 > ind.ema21 > 0:
-            return "BUY",  "MACD_MICRO"
-        if prev_macd_hist >= 0 > ind.macd_hist and ind.volume_ratio >= 1.3 and ind.ema9 < ind.ema21 > 0:
-            return "SELL", "MACD_MICRO"
+        if _bs.is_pattern_enabled("scalping", "MACD_MICRO"):
+            if prev_macd_hist <= 0 < ind.macd_hist and ind.volume_ratio >= 1.3 and ind.ema9 > ind.ema21 > 0:
+                return "BUY",  "MACD_MICRO"
+            if prev_macd_hist >= 0 > ind.macd_hist and ind.volume_ratio >= 1.3 and ind.ema9 < ind.ema21 > 0:
+                return "SELL", "MACD_MICRO"
 
         # 15. DEPTH_PULSE (NEW — bid/ask imbalance spike with price momentum)
         if (ind.depth_imbalance > 0.72 and ltp > prev_ltp

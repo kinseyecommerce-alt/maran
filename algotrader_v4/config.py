@@ -266,6 +266,17 @@ class Settings(BaseSettings):
     # Scalping gets a stricter floor — its edge is thinnest relative to costs.
     min_edge_cost_ratio_scalping: float = 3.0
 
+    # Pattern kill-list: "agent:PATTERN,agent:PATTERN" muted at the source
+    # (bot_state.is_pattern_enabled checks this before the runtime toggles).
+    # Seeded from the 62-day real-agent replay over recorded 1m candles —
+    # every entry here lost money gross, before costs:
+    #   intraday VWAP_TREND -54.96%, EMA_PULLBACK -11.03%, VWAP_RECLAIM -5.64%
+    #   scalping EMA9X -7.13%, STOCHRSI_EXTREME -8.20%, MACD_MICRO -5.37%
+    disabled_patterns: str = (
+        "intraday:VWAP_TREND,intraday:EMA_PULLBACK,intraday:VWAP_RECLAIM,"
+        "scalping:EMA9X,scalping:STOCHRSI_EXTREME,scalping:MACD_MICRO"
+    )
+
     # Phase 2/3: Position sizing
     use_atr_sizing: bool = True
     risk_per_trade_pct: float = Field(default=0.5, gt=0, le=50)

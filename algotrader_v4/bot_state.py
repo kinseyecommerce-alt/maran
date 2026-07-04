@@ -17,12 +17,13 @@ _pattern_enabled: dict[str, dict[str, bool]] = {
         "VWAP_TREND", "EMA_PULLBACK", "ORB_BREAK", "BREAKOUT", "VWAP_RECLAIM",
         "TTM_SQUEEZE", "VWAP_BAND_REVERT",
         "STOCHRSI_CROSS", "HMA_FLIP", "WILLIAMS_REVERSAL", "GAP_PLAY",
-        "PREV_DAY_LEVEL", "MOMENTUM_SURGE",
+        "PREV_DAY_LEVEL", "MOMENTUM_SURGE", "GAP_FADE", "TREND_DAY_RIDE",
     ]},
     "scalping": {p: True for p in [
-        "EMA9_CROSS", "EMA921_CROSS", "VWAP_BOUNCE", "SURGE", "ORB",
+        "EMA9X", "EMA921X", "VWAP_BOUNCE", "SURGE", "ORB",
         "SUPERTREND_FLIP", "STOCHRSI_EXTREME", "WILLIAMS_SCALP", "HMA_MICRO",
         "VWAP_SCALP", "EMA9_MOMENTUM", "SQUEEZE_RELEASE", "MICROTREND",
+        "MACD_MICRO", "DEPTH_PULSE",
     ]},
     "options": {p: True for p in [
         "EMA_CROSS", "TREND_PULL", "ORB", "VWAP_RECLAIM", "BB_SQUEEZE",
@@ -37,7 +38,31 @@ _pattern_enabled: dict[str, dict[str, bool]] = {
     "swing": {p: True for p in [
         "EMA50_BOUNCE", "EMA50_SHORT", "MACD_SWING",
     ]},
+    "momentum": {p: True for p in [
+        "RELATIVE_STRENGTH",
+    ]},
+    "mean_reversion": {p: True for p in [
+        "EOD_REVERSION",
+    ]},
 }
+
+# settings.disabled_patterns kill-list ("agent:PATTERN,agent:PATTERN") parsed
+# lazily and cached against the raw string, since settings mutate at runtime.
+_disabled_src: str | None = None
+_disabled_set: set[str] = set()
+
+
+def _settings_disabled() -> set[str]:
+    global _disabled_src, _disabled_set
+    try:
+        from config import settings
+        raw = getattr(settings, "disabled_patterns", "") or ""
+    except Exception:
+        raw = ""
+    if raw != _disabled_src:
+        _disabled_src = raw
+        _disabled_set = {p.strip().upper() for p in raw.split(",") if p.strip()}
+    return _disabled_set
 
 
 def is_agent_enabled(name: str) -> bool:
@@ -50,6 +75,8 @@ def set_agent_enabled(name: str, val: bool) -> None:
 
 
 def is_pattern_enabled(agent: str, pattern: str) -> bool:
+    if f"{agent.upper()}:{pattern.upper()}" in _settings_disabled():
+        return False
     return _pattern_enabled.get(agent, {}).get(pattern, True)
 
 
