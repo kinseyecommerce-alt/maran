@@ -194,6 +194,28 @@ STRATEGY_PARAMS = {
         "target_pct": 0.6,
         "max_hold_bars": 12,
     },
+    # Remaining live agents — mirrors their tick-strategy scale so learner
+    # approvals and the nightly backtest history cover 7 of the 8 agents.
+    # Pairs is deliberately absent: it trades a two-symbol spread that a
+    # single-symbol simulation cannot represent honestly.
+    "momentum": {
+        "interval": "15minute",
+        "sl_pct": 1.2,
+        "target_pct": 2.5,
+        "max_hold_bars": 16,
+    },
+    "mean_reversion": {
+        "interval": "15minute",
+        "sl_pct": 1.0,
+        "target_pct": 2.0,
+        "max_hold_bars": 12,
+    },
+    "futures": {
+        "interval": "15minute",
+        "sl_pct": 1.0,
+        "target_pct": 2.2,
+        "max_hold_bars": 20,
+    },
 }
 
 ALL_STRATEGIES = list(STRATEGY_PARAMS.keys())
@@ -452,6 +474,9 @@ class BacktestEngine:
         "scalping":  5,
         "swing":     3,
         "options":  15,
+        "momentum": 10,
+        "mean_reversion": 10,
+        "futures":   8,
     }
 
     def _fetch_data(self, symbol: str, exchange: str, interval: str, days: int):
@@ -528,6 +553,46 @@ class BacktestEngine:
                 if cross and spike and mom:
                     signals.iloc[i + 1] = 1
 
+        elif strategy == "momentum":
+            # Momentum burst: price above trend, RSI crossing into strength,
+            # confirmed by a volume expansion (mirrors MomentumAgent's tick logic).
+            ema20  = ta.trend.EMAIndicator(close, 20).ema_indicator()
+            rsi    = ta.momentum.RSIIndicator(close, 14).rsi()
+            vol_ma = volume.rolling(20).mean()
+            for i in range(20, n - 1):
+                trend_up  = close.iloc[i] > ema20.iloc[i]
+                rsi_cross = rsi.iloc[i-1] <= 60 < rsi.iloc[i]
+                vol_ok    = volume.iloc[i] > vol_ma.iloc[i] * 1.5
+                if trend_up and rsi_cross and vol_ok:
+                    signals.iloc[i + 1] = 1
+
+        elif strategy == "mean_reversion":
+            # Oversold snap-back: lower Bollinger touch with RSI < 30 turning up.
+            bb  = ta.volatility.BollingerBands(close, 20, 2)
+            lo  = bb.bollinger_lband()
+            rsi = ta.momentum.RSIIndicator(close, 14).rsi()
+            for i in range(20, n - 1):
+                touched  = low.iloc[i] <= lo.iloc[i]
+                oversold = rsi.iloc[i] < 30
+                turning  = rsi.iloc[i] > rsi.iloc[i-1]
+                if touched and oversold and turning:
+                    signals.iloc[i + 1] = 1
+
+        elif strategy == "futures":
+            # Trend + accelerating MACD histogram (mirrors FuturesAgent's
+            # EMA-trend + MACD-acceleration core; underlying prices proxy
+            # the contract).
+            ema9  = ta.trend.EMAIndicator(close, 9).ema_indicator()
+            ema21 = ta.trend.EMAIndicator(close, 21).ema_indicator()
+            macd  = ta.trend.MACD(close)
+            hist  = macd.macd_diff()
+            for i in range(34, n - 1):
+                trend_up = ema9.iloc[i] > ema21.iloc[i]
+                accel    = hist.iloc[i] > hist.iloc[i-1] > hist.iloc[i-2]
+                positive = hist.iloc[i] > 0
+                if trend_up and accel and positive:
+                    signals.iloc[i + 1] = 1
+
         return signals
 
     # ── Trade simulation ───────────────────────────────────────────────────────
@@ -553,7 +618,8 @@ class BacktestEngine:
         slip = slippage_bps / 10000
 
         # Infer product from strategy for tx cost calculation
-        _product_map = {"swing": "CNC", "intraday": "MIS", "scalping": "MIS", "options": "NRML"}
+        _product_map = {"swing": "CNC", "intraday": "MIS", "scalping": "MIS", "options": "NRML",
+                        "momentum": "MIS", "mean_reversion": "MIS", "futures": "NRML"}
         product = _product_map.get(strategy_name, "MIS")
 
         trades: list[dict] = []

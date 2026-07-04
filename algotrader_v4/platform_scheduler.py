@@ -217,6 +217,8 @@ class PlatformScheduler:
             plans = {
                 "intraday": (5, 30), "scalping": (5, 30),
                 "options":  (3, 30), "swing":   (10, 365),
+                "momentum": (5, 30), "mean_reversion": (5, 30),
+                "futures":  (3, 30),
             }
             row: dict = {"date": now_ist().date().isoformat()}
             for strat, (maxpos, days) in plans.items():

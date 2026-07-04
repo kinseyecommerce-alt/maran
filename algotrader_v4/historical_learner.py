@@ -37,7 +37,11 @@ PROGRESS_FILE = Path("logs/learning_progress.json")
 APPROVED_FILE = Path("logs/approved_symbols.json")
 Path("logs").mkdir(exist_ok=True)
 
-ALL_STRATEGIES = ["intraday", "scalping", "options", "swing"]
+# Keys must match live agent names (ALL_AGENTS) — filter_watchlist and the
+# adaptive engine key off them. Pairs is excluded: its two-symbol spread has
+# no single-symbol backtest representation (evaluated in live paper only).
+ALL_STRATEGIES = ["intraday", "scalping", "options", "swing",
+                  "momentum", "mean_reversion", "futures"]
 
 
 def _load_progress() -> dict:
