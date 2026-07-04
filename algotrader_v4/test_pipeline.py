@@ -97,11 +97,22 @@ def t_kill_list_defaults():
     import bot_state
     for agent, pat in [("intraday", "VWAP_TREND"), ("intraday", "EMA_PULLBACK"),
                        ("intraday", "VWAP_RECLAIM"), ("scalping", "EMA9X"),
-                       ("scalping", "STOCHRSI_EXTREME"), ("scalping", "MACD_MICRO")]:
+                       ("scalping", "STOCHRSI_EXTREME"), ("scalping", "MACD_MICRO"),
+                       # v2 tail kills (gross-negative over 62d)
+                       ("scalping", "HMA_MICRO"), ("scalping", "SURGE"),
+                       ("intraday", "ADX_BREAKOUT"), ("intraday", "BREAKOUT"),
+                       ("options", "EMA_CROSS"), ("options", "VWAP_RECLAIM"),
+                       ("futures", "EMA_TREND")]:
         assert not bot_state.is_pattern_enabled(agent, pat), f"{agent}:{pat} should be killed"
+    # proven earners stay enabled — per-agent scoping intact
     assert bot_state.is_pattern_enabled("intraday", "ORB_BREAK")
+    assert bot_state.is_pattern_enabled("scalping", "BB_BAND_WALK")     # +156.8%
+    assert bot_state.is_pattern_enabled("scalping", "SUPERTREND_FLIP")  # +25.4%
     assert bot_state.is_pattern_enabled("scalping", "VWAP_BOUNCE")
-    assert bot_state.is_pattern_enabled("options", "VWAP_RECLAIM")  # per-agent scoping
+    assert bot_state.is_pattern_enabled("intraday", "BB_SQUEEZE_WALK")  # +106.1%
+    assert bot_state.is_pattern_enabled("options", "TREND_PULL")        # +16.8%
+    assert bot_state.is_pattern_enabled("futures", "EMA200_BOUNCE")     # +4.8%
+    assert bot_state.is_pattern_enabled("intraday", "VWAP_BAND_REVERT") # scoping: intraday keeps it
 
 def t_kill_list_runtime_mutation():
     """Mutating settings.disabled_patterns takes effect immediately (cache refresh)."""

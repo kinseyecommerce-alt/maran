@@ -1705,6 +1705,15 @@ class BaseAgent(ABC):
                             self._regime_gate_skips)
             return
 
+        # Pattern kill-list chokepoint — catches every pattern regardless of
+        # whether its detection site has an is_pattern_enabled gate. A killed
+        # pattern's signal dies here even if the agent still emitted it.
+        _pat = (signal or {}).get("pattern", "")
+        if _pat and not _bs.is_pattern_enabled(self.name, _pat):
+            logger.debug("[{}] {} pattern {} is killed — entry skipped",
+                         self.name, snap.symbol, _pat)
+            return
+
         if not await self._pre_claim_checks(snap, action, loop, signal):
             return
 

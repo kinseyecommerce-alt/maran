@@ -42,6 +42,10 @@ from unittest.mock import patch
 os.environ.setdefault("TRADING_MODE", "PAPER")
 
 from config import settings
+# This suite verifies pipeline MECHANICS (ingestion → order → exit), not
+# pattern selection policy — run with the evidence kill-list cleared so
+# crafted scenarios can use any pattern (e.g. futures EMA_TREND).
+settings.disabled_patterns = ""
 from tick_engine import (
     tick_engine, MarketSnapshot, Tick, LiveIndicators, Candle, TickBuffer,
 )

@@ -216,13 +216,15 @@ def replay(symbols: list[str], max_days: int | None = None,
                     try:
                         action, signal = agent.evaluate_tick(snap)
                         if action and action not in ("HOLD", None, ""):
-                            # Same entry gate production uses in _try_enter:
-                            # blocked agents book no NEW trades in this regime
-                            # (exits still run via the tracker's price path).
-                            if (regime_keys
-                                    and str(action).upper() in _ENTRY_ACTIONS
-                                    and not _bs.is_agent_allowed_in_regime(AGENT_KEY[name])):
-                                continue
+                            # Same entry gates production uses in _try_enter:
+                            # regime block + pattern kill-list chokepoint.
+                            if str(action).upper() in _ENTRY_ACTIONS:
+                                if (regime_keys
+                                        and not _bs.is_agent_allowed_in_regime(AGENT_KEY[name])):
+                                    continue
+                                patn = (signal or {}).get("pattern", "")
+                                if patn and not _bs.is_pattern_enabled(AGENT_KEY[name], patn):
+                                    continue
                             trackers[name].on_signal(sym, action, signal or {}, ts, ltp)
                     except Exception:
                         pass
@@ -263,10 +265,11 @@ def replay(symbols: list[str], max_days: int | None = None,
         wins = sum(1 for t in ts_ if t.won)
         gross = sum(t.pnl_pct for t in ts_)
         net = gross - COST_PCT * len(ts_)
-        by_pat = defaultdict(float)
+        by_pat: dict = defaultdict(lambda: [0.0, 0])
         by_sym: dict = defaultdict(lambda: [0.0, 0])
         for t in ts_:
-            by_pat[t.pattern] += t.pnl_pct
+            by_pat[t.pattern][0] += t.pnl_pct
+            by_pat[t.pattern][1] += 1
             s = getattr(t, "sym", "?")
             by_sym[s][0] += t.pnl_pct
             by_sym[s][1] += 1
@@ -277,7 +280,8 @@ def replay(symbols: list[str], max_days: int | None = None,
         summary[name] = {"trades": len(ts_), "win_rate": round(wins/len(ts_)*100, 1),
                          "gross_pct": round(gross, 2), "net_pct": round(net, 2),
                          "net_inr_1L": round(net/100*CAP, 0),
-                         "by_pattern": {k: round(v, 2) for k, v in sorted(by_pat.items(), key=lambda kv: -kv[1])},
+                         "by_pattern": {k: {"pnl_pct": round(v[0], 2), "trades": v[1]}
+                                        for k, v in sorted(by_pat.items(), key=lambda kv: -kv[1][0])},
                          "by_symbol": {k: {"pnl_pct": round(v[0], 2), "trades": v[1]}
                                        for k, v in sorted(by_sym.items(), key=lambda kv: -kv[1][0])},
                          "daily": daily_pnl[name]}
