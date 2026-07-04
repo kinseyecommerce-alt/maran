@@ -288,15 +288,24 @@ class Settings(BaseSettings):
     #                     scalping +73.7%, options +47.2%, momentum +21.3%
     #   TREND_UP (12d):   mean_reversion -6.8%, pairs -1.8% | options +65.4%
     # Open positions are unaffected — exits/TSL keep managing them.
+    # Matrix v2 — refined by the gated-vs-baseline 62-day comparison:
+    #  * intraday UNBLOCKED everywhere (its range/bear-day losses came from
+    #    patterns the kill-list already removed; gating it cost -7.5 pts net,
+    #    kill-list-only intraday = +76.0% net over 62d)
+    #  * momentum & mean_reversion blocked in ALL regimes incl. UNKNOWN
+    #    (net -85 to -109% in every configuration tested — gate cannot save
+    #    them; re-enable only on fresh evidence)
+    #  * pairs RANGING-only (gate turned it net-positive: -15.5 → +0.1)
     regime_agent_gating: bool = True
     regime_blocked_agents: str = (
-        "BULL_TREND:mean_reversion,pairs;"
-        "BULL_VOLATILE:mean_reversion,pairs;"
-        "BEAR_TREND:intraday,options,futures,mean_reversion,pairs;"
-        "BEAR_VOLATILE:intraday,options,futures,mean_reversion,pairs;"
-        "RANGING:intraday,options,futures,momentum;"
-        "HIGH_VOLATILE:mean_reversion,pairs;"
-        "BLACK_SWAN:swing,intraday,momentum,pairs"
+        "UNKNOWN:momentum,mean_reversion;"
+        "BULL_TREND:momentum,mean_reversion,pairs;"
+        "BULL_VOLATILE:momentum,mean_reversion,pairs;"
+        "BEAR_TREND:options,futures,momentum,mean_reversion,pairs;"
+        "BEAR_VOLATILE:options,futures,momentum,mean_reversion,pairs;"
+        "RANGING:options,futures,momentum,mean_reversion;"
+        "HIGH_VOLATILE:momentum,mean_reversion,pairs;"
+        "BLACK_SWAN:swing,intraday,momentum,pairs,mean_reversion"
     )
 
     # Phase 2/3: Position sizing
