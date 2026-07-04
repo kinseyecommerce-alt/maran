@@ -250,6 +250,39 @@ class PlatformScheduler:
                 logger.info("[platform] Agent backtest {}: {} trades, ₹{:+,.0f} ({}d window)",
                             strat, row[strat]["trades"], row[strat]["net_pnl"], days)
 
+                # ── Portfolio-veto pruning ────────────────────────────────
+                # Symbols that bled ≥ 0.5% of the test capital in this window
+                # come OFF the approved book (worst first, floor-protected).
+                # Reversible: tomorrow's 16:45 learn re-approves any symbol
+                # whose expectancy recovers; this job then re-evaluates it.
+                PRUNE_PNL = -5_000.0            # −0.5% of the ₹10L test capital
+                FLOOR = 8 if strat == "swing" else 5
+                cur_book = approved.get(strat) or []
+                if len(cur_book) > FLOOR:
+                    bleeders = sorted(
+                        ((s, float(v.get("net_pnl", 0))) for s, v in by_sym
+                         if s in cur_book and float(v.get("net_pnl", 0)) <= PRUNE_PNL),
+                        key=lambda kv: kv[1])
+                    pruned = []
+                    for s, pnl in bleeders:
+                        if len(cur_book) - len(pruned) <= FLOOR:
+                            break
+                        pruned.append((s, pnl))
+                    if pruned:
+                        approved[strat] = [s for s in cur_book
+                                           if s not in {p[0] for p in pruned}]
+                        row[strat]["pruned"] = [
+                            {"symbol": s, "pnl": round(p, 0)} for s, p in pruned]
+                        for s, pnl in pruned:
+                            logger.info("[platform] {} pruned {} (₹{:+,.0f} in {}d window)",
+                                        strat, s, pnl, days)
+
+            # Persist pruned books (file + Postgres mirror) so the next bot
+            # start trades the cleaned lists.
+            if any("pruned" in v for v in row.values() if isinstance(v, dict)):
+                from historical_learner import _save_approved
+                _save_approved(approved)
+
             try:
                 history = _json.loads(get_kv("agent_backtest_history", "") or "[]")
             except Exception:

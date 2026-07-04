@@ -191,7 +191,7 @@ STRATEGY_PARAMS = {
     "scalping": {
         "interval": "5minute",
         "sl_pct": 0.3,
-        "target_pct": 0.6,
+        "target_pct": 0.9,   # 3:1 RR — mirrors tgt_pct_scalping (cost-negative at 2:1)
         "max_hold_bars": 12,
     },
     # Remaining live agents — mirrors their tick-strategy scale so learner

@@ -128,7 +128,7 @@ class Settings(BaseSettings):
     # Overtrade prevention — calibrated to Kite's 2,000 orders/day hard limit.
     # Each trade = 2 orders (entry + SL-M); 500 orders reserved for TSL modifications.
     # Effective budget: 1,500 new orders → ~750 trades total across all agents.
-    max_trades_scalping:       int = 250   # highest frequency — ~1 trade/min
+    max_trades_scalping:       int = 60    # was 250 — backtests: churn is cost-negative
     max_trades_intraday:       int = 150
     max_trades_momentum:       int = 100
     max_trades_mean_reversion: int = 100
@@ -151,7 +151,7 @@ class Settings(BaseSettings):
 
     # Per-agent target %
     tgt_pct_intraday:       float = 3.0
-    tgt_pct_scalping:       float = 0.70
+    tgt_pct_scalping:       float = 0.90   # 3:1 RR at 0.3 SL — 24% win rate needs >=3.2:1 to clear costs
     tgt_pct_options:        float = 65.0
     tgt_pct_futures:        float = 2.0
     tgt_pct_swing:          float = 8.0
@@ -161,7 +161,7 @@ class Settings(BaseSettings):
 
     # Per-agent minimum pattern score to fire
     min_score_intraday:       int = 4
-    min_score_scalping:       int = 3
+    min_score_scalping:       int = 5      # was 3 — higher-conviction entries only
     min_score_options:        int = 6
     min_score_futures:        int = 4
     # Weekly expiry weekday per index underlying, "SYM:weekday" CSV
@@ -177,7 +177,7 @@ class Settings(BaseSettings):
 
     # Per-agent entry cooldown (seconds between trades on same symbol)
     cooldown_intraday:       int = 180
-    cooldown_scalping:       int = 90
+    cooldown_scalping:       int = 180     # was 90 — fewer re-entries on the same symbol
     cooldown_options:        int = 120
     cooldown_futures:        int = 180
     cooldown_mean_reversion: int = 180
@@ -262,6 +262,9 @@ class Settings(BaseSettings):
     # Backtests showed scalping's small-target churn is cost-negative (PF~0.3);
     # this blocks trades whose edge can't clear their own costs. 0 = disabled.
     min_edge_cost_ratio: float = 2.0
+    # Per-agent override (min_edge_cost_ratio_<agent_name>); 0 = use the global.
+    # Scalping gets a stricter floor — its edge is thinnest relative to costs.
+    min_edge_cost_ratio_scalping: float = 3.0
 
     # Phase 2/3: Position sizing
     use_atr_sizing: bool = True
