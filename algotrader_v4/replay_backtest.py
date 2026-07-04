@@ -273,10 +273,10 @@ def replay(symbols: list[str], max_days: int | None = None,
             s = getattr(t, "sym", "?")
             by_sym[s][0] += t.pnl_pct
             by_sym[s][1] += 1
-        best = max(by_pat.items(), key=lambda kv: kv[1])
-        worst = min(by_pat.items(), key=lambda kv: kv[1])
+        best = max(by_pat.items(), key=lambda kv: kv[1][0])
+        worst = min(by_pat.items(), key=lambda kv: kv[1][0])
         print(f"{name:12s} {len(ts_):6d} {wins/len(ts_)*100:6.1f} {gross:+8.2f} {net:+8.2f} "
-              f"₹{net/100*CAP:+10,.0f}  {best[0]}({best[1]:+.1f}) / {worst[0]}({worst[1]:+.1f})")
+              f"₹{net/100*CAP:+10,.0f}  {best[0]}({best[1][0]:+.1f}) / {worst[0]}({worst[1][0]:+.1f})")
         summary[name] = {"trades": len(ts_), "win_rate": round(wins/len(ts_)*100, 1),
                          "gross_pct": round(gross, 2), "net_pct": round(net, 2),
                          "net_inr_1L": round(net/100*CAP, 0),
