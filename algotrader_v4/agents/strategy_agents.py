@@ -141,7 +141,8 @@ class IntradayAgent(BaseAgent):
                        self._pat_prev_day_level, self._pat_momentum_surge,
                        self._pat_dual_ema_retest, self._pat_adx_breakout,
                        self._pat_supertrend_align, self._pat_bb_squeeze_walk,
-                       self._pat_fii_institutional):
+                       self._pat_fii_institutional, self._pat_gap_fade,
+                       self._pat_trend_day_ride):
             try:
                 action, base, pname = pat_fn(sym, snap, ind, ltp, t)
             except Exception:
@@ -502,6 +503,52 @@ class IntradayAgent(BaseAgent):
                 return "SELL", 5, "FII_INSTITUTIONAL"
         except Exception:
             pass
+        return "", 0, ""
+
+    def _pat_gap_fade(self, sym, snap, ind, ltp, t):
+        """Gap-FADE: a large opening gap that fails to continue retraces toward
+        prev close. Complements GAP_PLAY (continuation) — without this, gap-and-
+        retrace days had no pattern anywhere. Fade only after the continuation
+        window (>=9:45), when price has already given back the open and volume
+        shows no conviction behind the gap."""
+        import bot_state
+        if not bot_state.is_pattern_enabled("intraday", "GAP_FADE"):
+            return "", 0, ""
+        if not (time(9, 45) <= t <= time(11, 30)):
+            return "", 0, ""
+        if not ind.day_open or ind.day_open <= 0:
+            return "", 0, ""
+        gap = _opening_gap_pct(ind, ltp)
+        no_conviction = ind.volume_ratio < 1.3
+        # Up-gap >= 0.75% now trading BELOW the open with cooling RSI → fade short
+        if gap >= 0.75 and ltp < ind.day_open and no_conviction and ind.rsi_14 < 55:
+            return "SELL", 5, "GAP_FADE"
+        if gap <= -0.75 and ltp > ind.day_open and no_conviction and ind.rsi_14 > 45:
+            return "BUY", 5, "GAP_FADE"
+        return "", 0, ""
+
+    def _pat_trend_day_ride(self, sym, snap, ind, ltp, t):
+        """TREND-DAY ride: on one-sided ADX-strong sessions the whole day trades
+        on one side of VWAP; the correct trade is joining a mid-day EMA21
+        pullback and riding, which quick-target patterns never do. Only fires
+        after 11:00 so the one-sidedness is established, not guessed."""
+        import bot_state
+        if not bot_state.is_pattern_enabled("intraday", "TREND_DAY_RIDE"):
+            return "", 0, ""
+        if t < time(11, 0):
+            return "", 0, ""
+        adx = getattr(ind, "adx_14", 0.0)
+        if adx < 30 or not ind.vwap or ind.vwap <= 0 or ind.ema21 <= 0:
+            return "", 0, ""
+        near_ema21 = abs(ltp - ind.ema21) / ltp < 0.002
+        one_sided_up   = ind.day_low  >= ind.vwap * 0.999
+        one_sided_down = ind.day_high <= ind.vwap * 1.001
+        if (one_sided_up and near_ema21 and ltp > ind.vwap
+                and getattr(ind, "supertrend_dir", "") == "UP"):
+            return "BUY", 6, "TREND_DAY_RIDE"
+        if (one_sided_down and near_ema21 and ltp < ind.vwap
+                and getattr(ind, "supertrend_dir", "") == "DOWN"):
+            return "SELL", 6, "TREND_DAY_RIDE"
         return "", 0, ""
 
     # ── Context bonus (+0 to +10 points added to every pattern) ──────────────
@@ -4006,7 +4053,7 @@ class MeanReversionAgent(BaseAgent):
                        self._pat_williams_extreme, self._pat_macd_divergence,
                        self._pat_price_zscore, self._pat_rsi_divergence,
                        self._pat_atr_exhaustion, self._pat_bb_width_squeeze,
-                       self._pat_rsi_triple_extreme):
+                       self._pat_rsi_triple_extreme, self._pat_eod_reversion):
             try:
                 action, base, pname = pat_fn(sym, snap, ind, ltp, t)
             except Exception:
@@ -4147,6 +4194,26 @@ class MeanReversionAgent(BaseAgent):
             return "BUY", 3, "WILLIAMS_EXTREME"
         if w > -15:
             return "SELL", 3, "WILLIAMS_EXTREME"
+        return "", 0, ""
+
+    def _pat_eod_reversion(self, sym, snap, ind, ltp, t):
+        """END-OF-DAY reversion: fade the session extreme in the last hour —
+        the only time-of-day-aware pattern in the system. Day-extreme prints
+        into the close with an exhausted RSI tend to revert toward VWAP as
+        intraday positions unwind before the MIS square-off."""
+        import bot_state
+        if not bot_state.is_pattern_enabled("mean_reversion", "EOD_REVERSION"):
+            return "", 0, ""
+        if not (time(14, 30) <= t <= time(15, 10)):
+            return "", 0, ""
+        if not ind.day_high or not ind.day_low or ind.day_high <= ind.day_low:
+            return "", 0, ""
+        at_high = ltp >= ind.day_high * 0.997
+        at_low  = ltp <= ind.day_low * 1.003
+        if at_high and ind.rsi_14 >= 70:
+            return "SELL", 4, "EOD_REVERSION"
+        if at_low and ind.rsi_14 <= 30:
+            return "BUY", 4, "EOD_REVERSION"
         return "", 0, ""
 
     def _pat_macd_divergence(self, sym, snap, ind, ltp, t):
@@ -4371,7 +4438,8 @@ class MomentumAgent(BaseAgent):
                        self._pat_macd_zero_cross, self._pat_vwap_breakout,
                        self._pat_higher_high_confirm, self._pat_breakout_retest,
                        self._pat_acceleration, self._pat_gap_momentum,
-                       self._pat_fii_momentum, self._pat_velocity_surge):
+                       self._pat_fii_momentum, self._pat_velocity_surge,
+                       self._pat_relative_strength):
             try:
                 action, base, pname = pat_fn(sym, snap, ind, ltp, t)
             except Exception:
@@ -4637,6 +4705,30 @@ class MomentumAgent(BaseAgent):
             return "BUY",  5, "VELOCITY_SURGE"
         if last_c.close < last_c.open and ind.ema9 < ind.ema21 > 0:
             return "SELL", 5, "VELOCITY_SURGE"
+        return "", 0, ""
+
+    def _pat_relative_strength(self, sym, snap, ind, ltp, t):
+        """RELATIVE strength/weakness vs NIFTY — rotation play. Every other
+        momentum pattern is absolute; this is the only one that buys the
+        leader / shorts the laggard against the index, which is how rotation
+        days trade. Uses the index snapshot the tick engine always subscribes."""
+        import bot_state
+        if not bot_state.is_pattern_enabled("momentum", "RELATIVE_STRENGTH"):
+            return "", 0, ""
+        if sym in ("NIFTY", "BANKNIFTY"):
+            return "", 0, ""
+        try:
+            from tick_engine import tick_engine
+            _tick, _n_ind = tick_engine.latest("NIFTY")
+        except Exception:
+            return "", 0, ""
+        if not _tick or _n_ind is None:
+            return "", 0, ""
+        rel = ind.change_pct - _n_ind.change_pct
+        if rel >= 1.2 and ind.volume_ratio >= 1.2 and ind.ema9 > ind.ema21 > 0:
+            return "BUY", 5, "RELATIVE_STRENGTH"
+        if rel <= -1.2 and ind.volume_ratio >= 1.2 and ind.ema9 < ind.ema21:
+            return "SELL", 5, "RELATIVE_STRENGTH"
         return "", 0, ""
 
     # ── Context bonus (0-8) ───────────────────────────────────────────────────
