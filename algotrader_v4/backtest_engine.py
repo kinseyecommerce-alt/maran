@@ -652,6 +652,17 @@ class BacktestEngine:
         sl_pct   = params["sl_pct"] / 100
         tgt_pct  = params["target_pct"] / 100
         max_bars = params["max_hold_bars"]
+        # ATR-scaled exits (how the live agents actually trade): fixed-pct
+        # geometry put targets 4-8× the per-bar ATR away while stops sat in
+        # noise range — SL exits fired 4× more often than targets and lost
+        # ₹0.4-1.4M per strategy while TIMEOUT exits were consistently
+        # POSITIVE (the post-entry drift is favorable; the exits wasted it).
+        sl_atr_mult  = params.get("sl_atr", 0.0)
+        tgt_atr_mult = params.get("tgt_atr", 0.0)
+        atr_series = None
+        if sl_atr_mult or tgt_atr_mult:
+            atr_series = ta.volatility.AverageTrueRange(
+                df["high"], df["low"], df["close"], 14).average_true_range()
 
         # Slippage model
         apply_costs = getattr(settings, "bt_apply_tx_costs", True)
@@ -689,12 +700,15 @@ class BacktestEngine:
                 "direction": "LONG" if direction > 0 else "SHORT",
             })
 
+        entry_sl_dist  = 0.0
+        entry_tgt_dist = 0.0
+
         def _check_exit(i: int, entry_bar: bool) -> bool:
             """SL first (conservative when both touch), gap-aware fills:
             a bar that OPENS beyond the level fills at the open, not the level."""
             nonlocal in_trade
-            sl  = entry_fill * (1 - direction * sl_pct)
-            tgt = entry_fill * (1 + direction * tgt_pct)
+            sl  = entry_fill - direction * entry_sl_dist
+            tgt = entry_fill + direction * entry_tgt_dist
             open_i = df["open"].iloc[i] if "open" in df.columns else df["close"].iloc[i]
             low_i, high_i = df["low"].iloc[i], df["high"].iloc[i]
             sl_hit  = (low_i <= sl) if direction > 0 else (high_i >= sl)
@@ -737,6 +751,9 @@ class BacktestEngine:
                 entry_fill  = entry_price * (1 + direction * slip) if apply_costs else entry_price
                 entry_idx   = i
                 in_trade    = True
+                _atr = float(atr_series.iloc[i]) if atr_series is not None and not np.isnan(atr_series.iloc[i]) else 0.0
+                entry_sl_dist  = (sl_atr_mult * _atr) if (sl_atr_mult and _atr > 0) else entry_fill * sl_pct
+                entry_tgt_dist = (tgt_atr_mult * _atr) if (tgt_atr_mult and _atr > 0) else entry_fill * tgt_pct
                 # The entry bar's own range can hit the stop/target — checking
                 # it was previously skipped entirely (optimistic for tight-stop
                 # strategies like scalping's 0.3%).
