@@ -177,9 +177,14 @@ STRATEGY_PARAMS = {
         "max_hold_bars": 20,
     },
     "options": {
+        # UNDERLYING-scale params: the sim runs on the underlying's 1h bars,
+        # not option premiums. 0.8%/1.6% underlying ≈ 5%/10% premium at ~8×
+        # ATM leverage. The old premium-scale 5%/10% made targets unreachable:
+        # 69% of trades exited TIMEOUT and 91/100 symbols failed approval on
+        # sample size (median 3 trades).
         "interval": "60minute",
-        "sl_pct": 5.0,
-        "target_pct": 10.0,
+        "sl_pct": 0.8,
+        "target_pct": 1.6,
         "max_hold_bars": 40,
     },
     "swing": {
@@ -523,9 +528,13 @@ class BacktestEngine:
             for i in range(30, n - 1):
                 _atr_ma_i = float(atr_ma.iloc[i])
                 iv_proxy = (float(atr.iloc[i]) / _atr_ma_i * 50) if (math.isfinite(_atr_ma_i) and _atr_ma_i != 0) else 50
-                if iv_proxy < 40 and rsi.iloc[i] < 40:
+                # iv_proxy < 50 (was 40) and RSI 45/55 (was 40/60): the old
+                # thresholds produced a median of 3 trades/symbol on 1h bars —
+                # below the 5-trade soft-pass minimum, so options could never
+                # build an approved book regardless of edge.
+                if iv_proxy < 50 and rsi.iloc[i] < 40:
                     signals.iloc[i + 1] = 1
-                elif iv_proxy < 40 and rsi.iloc[i] > 60:
+                elif iv_proxy < 50 and rsi.iloc[i] > 60:
                     signals.iloc[i + 1] = 1
 
         elif strategy == "swing":
@@ -573,7 +582,7 @@ class BacktestEngine:
             rsi = ta.momentum.RSIIndicator(close, 14).rsi()
             for i in range(20, n - 1):
                 touched  = low.iloc[i] <= lo.iloc[i]
-                oversold = rsi.iloc[i] < 30
+                oversold = rsi.iloc[i] < 35   # was 30 — median 7 trades/symbol starved the sample
                 turning  = rsi.iloc[i] > rsi.iloc[i-1]
                 if touched and oversold and turning:
                     signals.iloc[i + 1] = 1
