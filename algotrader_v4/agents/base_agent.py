@@ -1733,7 +1733,9 @@ class BaseAgent(ABC):
         # round-trip transaction cost. Frequent small-target entries (scalping)
         # otherwise lose money to brokerage/STT/slippage even at decent win
         # rates — backtests showed PF ~0.3 across the board for scalping.
-        _edge_ratio = float(getattr(settings, "min_edge_cost_ratio", 0.0) or 0.0)
+        _edge_ratio = float(
+            getattr(settings, f"min_edge_cost_ratio_{self.name}", 0.0)
+            or getattr(settings, "min_edge_cost_ratio", 0.0) or 0.0)
         if _edge_ratio > 0:
             _ltp = snap.tick.ltp
             _tgt_abs = signal.get("target")

@@ -2661,6 +2661,14 @@ class ScalpingAgent(BaseAgent):
         if action == "HOLD":
             return "HOLD", None
 
+        # Supertrend-alignment gate: counter-trend scalps were the worst subset
+        # of a strategy that backtests at 24% win / PF ~0.3 across the board —
+        # a 0.3% stop against the prevailing trend gets tagged almost instantly.
+        # NEUTRAL supertrend (warm-up) is allowed through.
+        _st_dir = getattr(ind, "supertrend_dir", "")
+        if (action == "BUY" and _st_dir == "DOWN") or (action == "SELL" and _st_dir == "UP"):
+            return "HOLD", None
+
         # BLACK SWAN veteran: scalping only valid in RECOVERING phase on VWAP reclaim + 3× volume
         if snap.black_swan_active:
             if snap.black_swan_phase != "RECOVERING":
