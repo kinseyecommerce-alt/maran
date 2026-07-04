@@ -426,10 +426,20 @@ class BacktestEngine:
             if oos_start <= 0:
                 # Fold 0: train window [0, oos_start) would be empty — skip.
                 continue
-            oos_df = df.iloc[oos_start:oos_end]
+            # Prepend warmup bars so fold-local indicators (EMA/RSI/BB/MACD)
+            # are formed from the fold's first bar. Without this each fold's
+            # first ~20-50 bars generated no signals (indicator warm-up),
+            # silently discarding 15-40% of every OOS window — the root cause
+            # of chronic "Insufficient OOS trades" failures. Signals inside
+            # the warmup prefix are zeroed so no trade enters before the
+            # fold actually starts.
+            WARMUP = 50
+            ctx_start = max(0, oos_start - WARMUP)
+            oos_df = df.iloc[ctx_start:oos_end]
             if len(oos_df) < 20:
                 continue
             sigs = self._generate_signals(oos_df.copy(), strategy)
+            sigs.iloc[:oos_start - ctx_start] = 0
             fold_trades = self._simulate_trades(oos_df, sigs, params, strategy_name=strategy)
             oos_trades_all.extend(fold_trades)
 
@@ -520,6 +530,12 @@ class BacktestEngine:
                 if vwap_cross and ema_bull and rsi_ok:
                     # Signal confirmed on bar i; entry fills at open of bar i+1 (no look-ahead).
                     signals.iloc[i + 1] = 1
+                    continue
+                # SHORT mirror — live agents short constantly; a long-only sim
+                # measured half the strategy's edge.
+                vwap_cross_dn = close.iloc[i-1] > vwap.iloc[i-1] and close.iloc[i] < vwap.iloc[i]
+                if vwap_cross_dn and ema9.iloc[i] < ema21.iloc[i] and 35 < rsi.iloc[i] < 55:
+                    signals.iloc[i + 1] = -1
 
         elif strategy == "options":
             rsi    = ta.momentum.RSIIndicator(close, 14).rsi()
@@ -533,9 +549,9 @@ class BacktestEngine:
                 # below the 5-trade soft-pass minimum, so options could never
                 # build an approved book regardless of edge.
                 if iv_proxy < 50 and rsi.iloc[i] < 40:
-                    signals.iloc[i + 1] = 1
+                    signals.iloc[i + 1] = 1     # CE side — underlying bounce
                 elif iv_proxy < 50 and rsi.iloc[i] > 60:
-                    signals.iloc[i + 1] = 1
+                    signals.iloc[i + 1] = -1    # PE side — underlying fade
 
         elif strategy == "swing":
             ema50 = ta.trend.EMAIndicator(close, 50).ema_indicator()
@@ -550,6 +566,8 @@ class BacktestEngine:
                 rsi_ok = 40 < rsi.iloc[i] < 60
                 if near and ema_up and rsi_ok:
                     signals.iloc[i + 1] = 1
+                elif near and ema20.iloc[i] < ema50.iloc[i] and rsi_ok:
+                    signals.iloc[i + 1] = -1   # SHORT: rejection at falling EMA50
 
         elif strategy == "scalping":
             ema9   = ta.trend.EMAIndicator(close, 9).ema_indicator()
@@ -561,6 +579,10 @@ class BacktestEngine:
                 mom   = 50 < rsi.iloc[i] < 70
                 if cross and spike and mom:
                     signals.iloc[i + 1] = 1
+                    continue
+                cross_dn = close.iloc[i-1] > ema9.iloc[i-1] and close.iloc[i] < ema9.iloc[i]
+                if cross_dn and spike and 30 < rsi.iloc[i] < 50:
+                    signals.iloc[i + 1] = -1
 
         elif strategy == "momentum":
             # Momentum burst: price above trend, RSI crossing into strength,
@@ -574,11 +596,16 @@ class BacktestEngine:
                 vol_ok    = volume.iloc[i] > vol_ma.iloc[i] * 1.5
                 if trend_up and rsi_cross and vol_ok:
                     signals.iloc[i + 1] = 1
+                    continue
+                rsi_cross_dn = rsi.iloc[i-1] >= 40 > rsi.iloc[i]
+                if close.iloc[i] < ema20.iloc[i] and rsi_cross_dn and vol_ok:
+                    signals.iloc[i + 1] = -1
 
         elif strategy == "mean_reversion":
             # Oversold snap-back: lower Bollinger touch with RSI < 30 turning up.
             bb  = ta.volatility.BollingerBands(close, 20, 2)
             lo  = bb.bollinger_lband()
+            hi  = bb.bollinger_hband()
             rsi = ta.momentum.RSIIndicator(close, 14).rsi()
             for i in range(20, n - 1):
                 touched  = low.iloc[i] <= lo.iloc[i]
@@ -586,6 +613,10 @@ class BacktestEngine:
                 turning  = rsi.iloc[i] > rsi.iloc[i-1]
                 if touched and oversold and turning:
                     signals.iloc[i + 1] = 1
+                    continue
+                if (high.iloc[i] >= hi.iloc[i] and rsi.iloc[i] > 65
+                        and rsi.iloc[i] < rsi.iloc[i-1]):
+                    signals.iloc[i + 1] = -1   # SHORT: upper-band rejection
 
         elif strategy == "futures":
             # Trend + accelerating MACD histogram (mirrors FuturesAgent's
@@ -601,6 +632,11 @@ class BacktestEngine:
                 positive = hist.iloc[i] > 0
                 if trend_up and accel and positive:
                     signals.iloc[i + 1] = 1
+                    continue
+                if (ema9.iloc[i] < ema21.iloc[i]
+                        and hist.iloc[i] < hist.iloc[i-1] < hist.iloc[i-2]
+                        and hist.iloc[i] < 0):
+                    signals.iloc[i + 1] = -1
 
         return signals
 
@@ -636,73 +672,75 @@ class BacktestEngine:
         entry_price = 0.0
         entry_fill  = 0.0
         entry_idx   = 0
+        direction   = 1   # +1 long, -1 short
+
+        def _book(exit_fill: float, reason: str, i: int) -> None:
+            gross_pnl = direction * (exit_fill - entry_fill)
+            qty = max(1, int(100_000 // entry_fill)) if entry_fill > 0 else 1
+            cost = 0.0
+            if apply_costs:
+                from risk_manager import compute_tx_costs
+                cost = compute_tx_costs(qty, entry_fill, exit_fill, product)
+            trades.append({
+                "entry": entry_fill, "exit": exit_fill,
+                "pnl": gross_pnl * qty,
+                "net_pnl": gross_pnl * qty - cost, "cost": cost,
+                "bars": i - entry_idx, "exit_reason": reason,
+                "direction": "LONG" if direction > 0 else "SHORT",
+            })
+
+        def _check_exit(i: int, entry_bar: bool) -> bool:
+            """SL first (conservative when both touch), gap-aware fills:
+            a bar that OPENS beyond the level fills at the open, not the level."""
+            nonlocal in_trade
+            sl  = entry_fill * (1 - direction * sl_pct)
+            tgt = entry_fill * (1 + direction * tgt_pct)
+            open_i = df["open"].iloc[i] if "open" in df.columns else df["close"].iloc[i]
+            low_i, high_i = df["low"].iloc[i], df["high"].iloc[i]
+            sl_hit  = (low_i <= sl) if direction > 0 else (high_i >= sl)
+            tgt_hit = (high_i >= tgt) if direction > 0 else (low_i <= tgt)
+            if entry_bar:
+                # Entry filled at the open of this bar — the open itself cannot
+                # be a gap-through, but the rest of the bar's range still can
+                # hit the stop/target.
+                pass
+            if sl_hit:
+                level = sl
+                if not entry_bar and ((direction > 0 and open_i < sl) or (direction < 0 and open_i > sl)):
+                    level = open_i          # gapped through the stop → fill at open
+                _book(level * (1 - direction * slip) if apply_costs else level, "SL", i)
+                in_trade = False
+                return True
+            if tgt_hit:
+                level = tgt
+                if not entry_bar and ((direction > 0 and open_i > tgt) or (direction < 0 and open_i < tgt)):
+                    level = open_i          # gapped through the target → better fill at open
+                _book(level * (1 - direction * slip) if apply_costs else level, "TGT", i)
+                in_trade = False
+                return True
+            if not entry_bar and (i - entry_idx) >= max_bars:
+                ltp = df["close"].iloc[i]
+                _book(ltp * (1 - direction * slip) if apply_costs else ltp, "TIMEOUT", i)
+                in_trade = False
+                return True
+            return False
 
         for i in range(len(df)):
             if in_trade:
-                ltp       = df["close"].iloc[i]
-                bars_held = i - entry_idx
-                sl        = entry_fill * (1 - sl_pct)
-                tgt       = entry_fill * (1 + tgt_pct)
-                low_i     = df["low"].iloc[i]
-                high_i    = df["high"].iloc[i]
-
-                if low_i <= sl:
-                    exit_fill = sl * (1 - slip) if apply_costs else sl
-                    gross_pnl = exit_fill - entry_fill
-                    qty = max(1, int(100_000 // entry_fill)) if entry_fill > 0 else 1
-                    cost = 0.0
-                    if apply_costs:
-                        from risk_manager import compute_tx_costs
-                        cost = compute_tx_costs(qty, entry_fill, exit_fill, product)
-                    net_pnl = gross_pnl * qty - cost
-                    trades.append({
-                        "entry": entry_fill, "exit": exit_fill,
-                        "pnl": gross_pnl * qty,
-                        "net_pnl": net_pnl, "cost": cost,
-                        "bars": bars_held, "exit_reason": "SL",
-                    })
-                    in_trade = False
-                elif high_i >= tgt:
-                    exit_fill = tgt * (1 - slip) if apply_costs else tgt
-                    gross_pnl = exit_fill - entry_fill
-                    qty = max(1, int(100_000 // entry_fill)) if entry_fill > 0 else 1
-                    cost = 0.0
-                    if apply_costs:
-                        from risk_manager import compute_tx_costs
-                        cost = compute_tx_costs(qty, entry_fill, exit_fill, product)
-                    net_pnl = gross_pnl * qty - cost
-                    trades.append({
-                        "entry": entry_fill, "exit": exit_fill,
-                        "pnl": gross_pnl * qty,
-                        "net_pnl": net_pnl, "cost": cost,
-                        "bars": bars_held, "exit_reason": "TGT",
-                    })
-                    in_trade = False
-                elif bars_held >= max_bars:
-                    exit_fill = ltp * (1 - slip) if apply_costs else ltp
-                    gross_pnl = exit_fill - entry_fill
-                    qty = max(1, int(100_000 // entry_fill)) if entry_fill > 0 else 1
-                    cost = 0.0
-                    if apply_costs:
-                        from risk_manager import compute_tx_costs
-                        cost = compute_tx_costs(qty, entry_fill, exit_fill, product)
-                    net_pnl = gross_pnl * qty - cost
-                    trades.append({
-                        "entry": entry_fill, "exit": exit_fill,
-                        "pnl": gross_pnl * qty,
-                        "net_pnl": net_pnl, "cost": cost,
-                        "bars": bars_held, "exit_reason": "TIMEOUT",
-                    })
-                    in_trade = False
-
-            elif signals.iloc[i] == 1:
-                # Fill at open[i] — earliest executable price after signal confirmed on prior bar close.
-                # Using close[i] would be look-ahead bias (bar not yet closed when signal fires).
+                _check_exit(i, entry_bar=False)
+            elif signals.iloc[i] != 0:
+                # Fill at open[i] — earliest executable price after signal
+                # confirmed on prior bar close (close[i] would be look-ahead).
+                direction   = 1 if signals.iloc[i] > 0 else -1
                 entry_price = df["open"].iloc[i] if "open" in df.columns else df["close"].iloc[i]
-                # Apply entry slippage (buy at slightly higher price)
-                entry_fill  = entry_price * (1 + slip) if apply_costs else entry_price
+                # Entry slippage is adverse to the direction taken
+                entry_fill  = entry_price * (1 + direction * slip) if apply_costs else entry_price
                 entry_idx   = i
                 in_trade    = True
+                # The entry bar's own range can hit the stop/target — checking
+                # it was previously skipped entirely (optimistic for tight-stop
+                # strategies like scalping's 0.3%).
+                _check_exit(i, entry_bar=True)
 
         return trades
 
