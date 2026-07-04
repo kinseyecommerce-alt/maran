@@ -3785,7 +3785,9 @@ def t_filter_non_empty_prelearned_filters_correctly():
     assert syms == {"RELIANCE", "TCS"}, f"Unexpected approvals: {syms}"
 
 def t_filter_integration_empty_list():
-    """Integration: filter_watchlist with skip_startup_backtest + empty pre-learned list."""
+    """Integration: filter_watchlist with skip_startup_backtest + empty pre-learned list.
+    PAPER mode falls back to the full watchlist (an all-empty approved list must
+    not silently stop paper evaluation); LIVE keeps strict empty-means-don't-trade."""
     import json, unittest.mock as m
     from agents.strategy_agents import ALL_AGENTS
     from config import settings
@@ -3793,23 +3795,37 @@ def t_filter_integration_empty_list():
     agent = ALL_AGENTS["scalping"]
     agent._approved.clear()
     old_skip = settings.skip_startup_backtest
+    old_mode = settings.trading_mode
     settings.skip_startup_backtest = True
 
     pre_data = {"scalping": []}
-    with m.patch("agents.base_agent.Path") as mp:
-        mp.return_value.exists.return_value = True
-        mp.return_value.read_text.return_value = json.dumps(pre_data)
-        approved = agent.filter_watchlist([{"symbol": "RELIANCE"}, {"symbol": "TCS"}])
+    wl = [{"symbol": "RELIANCE"}, {"symbol": "TCS"}]
+    try:
+        settings.trading_mode = "PAPER"
+        with m.patch("agents.base_agent.Path") as mp:
+            mp.return_value.exists.return_value = True
+            mp.return_value.read_text.return_value = json.dumps(pre_data)
+            approved = agent.filter_watchlist(list(wl))
+        assert len(approved) == 2, f"PAPER empty list should fall back to watchlist, got {approved}"
 
-    settings.skip_startup_backtest = old_skip
-    assert approved == [], f"Empty pre-learned list should yield [], got {approved}"
-    assert "RELIANCE" not in agent._approved
-    assert "TCS" not in agent._approved
+        agent._approved.clear()
+        settings.trading_mode = "LIVE"
+        with m.patch("agents.base_agent.Path") as mp:
+            mp.return_value.exists.return_value = True
+            mp.return_value.read_text.return_value = json.dumps(pre_data)
+            approved = agent.filter_watchlist(list(wl))
+        assert approved == [], f"LIVE empty pre-learned list should yield [], got {approved}"
+        assert "RELIANCE" not in agent._approved
+        assert "TCS" not in agent._approved
+    finally:
+        settings.skip_startup_backtest = old_skip
+        settings.trading_mode = old_mode
+        agent._approved.clear()
 
 run("Empty pre-learned list yields 0 approvals (not approve-all)", t_filter_empty_prelearned_zero_approvals)
 run("Agent missing from seed file approves full watchlist",         t_filter_missing_agent_approves_all)
 run("Non-empty pre-learned list filters to listed symbols only",    t_filter_non_empty_prelearned_filters_correctly)
-run("Integration: filter_watchlist empty pre-learned → 0 approved",t_filter_integration_empty_list)
+run("Integration: PAPER empty book → watchlist fallback; LIVE → 0", t_filter_integration_empty_list)
 
 
 # ══════════════════════════════════════════════════════════════════════════
