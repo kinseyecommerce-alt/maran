@@ -264,8 +264,12 @@ def replay(symbols: list[str], max_days: int | None = None,
         gross = sum(t.pnl_pct for t in ts_)
         net = gross - COST_PCT * len(ts_)
         by_pat = defaultdict(float)
+        by_sym: dict = defaultdict(lambda: [0.0, 0])
         for t in ts_:
             by_pat[t.pattern] += t.pnl_pct
+            s = getattr(t, "sym", "?")
+            by_sym[s][0] += t.pnl_pct
+            by_sym[s][1] += 1
         best = max(by_pat.items(), key=lambda kv: kv[1])
         worst = min(by_pat.items(), key=lambda kv: kv[1])
         print(f"{name:12s} {len(ts_):6d} {wins/len(ts_)*100:6.1f} {gross:+8.2f} {net:+8.2f} "
@@ -274,6 +278,8 @@ def replay(symbols: list[str], max_days: int | None = None,
                          "gross_pct": round(gross, 2), "net_pct": round(net, 2),
                          "net_inr_1L": round(net/100*CAP, 0),
                          "by_pattern": {k: round(v, 2) for k, v in sorted(by_pat.items(), key=lambda kv: -kv[1])},
+                         "by_symbol": {k: {"pnl_pct": round(v[0], 2), "trades": v[1]}
+                                       for k, v in sorted(by_sym.items(), key=lambda kv: -kv[1][0])},
                          "daily": daily_pnl[name]}
     out = Path(f"logs/replay_backtest_result{('_' + tag) if tag else ''}.json")
     out.write_text(json.dumps({"days": [str(d) for d in dates], "symbols": list(per_sym),
