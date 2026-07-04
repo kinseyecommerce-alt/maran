@@ -77,7 +77,25 @@ def _load_approved() -> dict:
     return approved
 
 
+def _apply_seeds(approved: dict) -> dict:
+    """The proxy learner can't model the real scalping agent (its economics
+    live in tick-level patterns the simplified generator doesn't have), so an
+    empty scalping book gets the replay-evidenced seed instead of nothing."""
+    if not approved.get("scalping"):
+        try:
+            from config import settings
+            seed = [s.strip().upper() for s in
+                    (settings.scalping_book_seed or "").split(",") if s.strip()]
+        except Exception:
+            seed = []
+        if seed:
+            approved["scalping"] = seed
+            logger.info("scalping book empty — seeded from replay evidence: {}", seed)
+    return approved
+
+
 def _save_approved(approved: dict) -> None:
+    approved = _apply_seeds(approved)
     tmp = APPROVED_FILE.with_suffix(".tmp")
     try:
         with open(tmp, "w") as f:

@@ -272,10 +272,43 @@ class Settings(BaseSettings):
     # every entry here lost money gross, before costs:
     #   intraday VWAP_TREND -54.96%, EMA_PULLBACK -11.03%, VWAP_RECLAIM -5.64%
     #   scalping EMA9X -7.13%, STOCHRSI_EXTREME -8.20%, MACD_MICRO -5.37%
+    # Kill-list v2: every pattern that was gross-negative over the 62-day
+    # replay (a gross-negative pattern is ALWAYS net-negative after costs,
+    # independent of trade count). Enforced at the _try_enter chokepoint so
+    # no per-site gate is needed. Evidence: logs/replay_backtest_result_
+    # ungated_q{1-4}.json by_pattern sums. Survivors per agent:
+    #   scalping BB_BAND_WALK +156.8, SUPERTREND_FLIP +25.4, VWAP_BOUNCE +0.5
+    #   intraday BB_SQUEEZE_WALK +106.1, STOCHRSI_CROSS +22.6,
+    #            DUAL_EMA_RETEST +11.1, HMA_FLIP +1.4, VWAP_BAND_REVERT +0.5
+    #   options  TREND_PULL +16.8, BB_SQUEEZE +7.9, EXPIRY_SCALP +2.5,
+    #            ICHIMOKU_CLOUD +2.2, STOCHRSI_OPTIONS +2.2, WILLIAMS_OPTIONS
+    #            +1.3, VOL_BREAKOUT +0.9
+    #   futures  EMA200_BOUNCE +4.8, STOCHRSI_FUTURES +1.4,
+    #            TRIPLE_EMA_PULLBACK +0.6, MACD_CROSS +0.2
     disabled_patterns: str = (
+        # v1 (62d replay, pre-kill baseline)
         "intraday:VWAP_TREND,intraday:EMA_PULLBACK,intraday:VWAP_RECLAIM,"
-        "scalping:EMA9X,scalping:STOCHRSI_EXTREME,scalping:MACD_MICRO"
+        "scalping:EMA9X,scalping:STOCHRSI_EXTREME,scalping:MACD_MICRO,"
+        # v2 scalping tail (-60.6% gross combined, most of the cost churn)
+        "scalping:HMA_MICRO,scalping:EMA9_MOMENTUM,scalping:SQUEEZE_RELEASE,"
+        "scalping:WILLIAMS_SCALP,scalping:VWAP_SCALP,scalping:EMA921X,"
+        "scalping:MICROTREND,scalping:SURGE,"
+        # v2 intraday tail (-25.0% gross combined)
+        "intraday:ADX_BREAKOUT,intraday:WILLIAMS_REVERSAL,intraday:TTM_SQUEEZE,"
+        "intraday:MOMENTUM_SURGE,intraday:SUPERTREND_ALIGN,"
+        "intraday:PREV_DAY_LEVEL,intraday:BREAKOUT,"
+        # v2 options tail (-6.6% gross combined)
+        "options:EMA_CROSS,options:RSI_MOMENTUM,options:VWAP_RECLAIM,"
+        # v2 futures tail (-1.9% gross combined)
+        "futures:EMA_TREND,futures:ICHIMOKU_FUTURES,futures:HMA_TREND"
     )
+
+    # Scalping approved-book seed: the proxy learner cannot model the real
+    # scalping agent (0/100 approvals despite scalping being the top gross
+    # earner in the replay). These are the symbols where the REAL agent was
+    # net-positive after costs over 62 replayed days (+38.4% combined).
+    # Used only when the learner leaves scalping's book empty.
+    scalping_book_seed: str = "WIPRO,INFY,HDFCBANK,SBIN,TITAN,AXISBANK"
 
     # Regime entry gate: block NEW entries for agents in regimes where the
     # 62-day replay proved they lose. Format "REGIME:agent,agent;REGIME:...".

@@ -3263,6 +3263,15 @@ async def on_startup():
                 _appr.parent.mkdir(exist_ok=True)
                 _appr.write_text(_saved_appr)
                 logger.info("[startup] Approved symbols restored from state_store")
+        # Seed pass: an empty scalping book gets the replay-evidenced symbols
+        # (the proxy learner can't model the real scalping agent).
+        if _appr.exists():
+            import json as _json
+            from historical_learner import _apply_seeds as _seeds
+            _data = _json.loads(_appr.read_text())
+            if not _data.get("scalping"):
+                _appr.write_text(_json.dumps(_seeds(_data), indent=2, default=str))
+                logger.info("[startup] scalping book seeded from replay evidence")
     except Exception as _appr_exc:
         logger.warning("[startup] approved-symbols restore failed: {}", _appr_exc)
 
