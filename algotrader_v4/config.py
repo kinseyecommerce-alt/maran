@@ -328,7 +328,11 @@ class Settings(BaseSettings):
         # stocks let it overtrade).
         "futures:EMA200_BOUNCE,futures:MULTI_TF_ALIGN,futures:VOL_SURGE,"
         "futures:OPEN_DRIVE_FUT,futures:VWAP_PULL,futures:MOMENTUM_CATCH,"
-        "futures:VWAP_BAND_BREAK,futures:RANGE_COMPRESSION_BREAK"
+        "futures:VWAP_BAND_BREAK,futures:RANGE_COMPRESSION_BREAK,"
+        # v8 (final-config run): INDEX_TREND_RIDE_OPT went negative at volume
+        # (-1.83 @18tr in v6 -> -5.75 @41tr) — same edge-dies-at-scale
+        # signature as the v4 kills.
+        "options:INDEX_TREND_RIDE_OPT"
     )
 
     # Scalping approved-book seed: the proxy learner cannot model the real
@@ -347,10 +351,12 @@ class Settings(BaseSettings):
         "RELIANCE,HDFCBANK,ICICIBANK,SBIN,AXISBANK,TATASTEEL,TITAN,INFY,TCS,WIPRO"
     )
 
-    # Options approved-book seed (UNIONed into the learner book): symbols
-    # where the real OptionsAgent called direction net-positively over the
-    # 62-day replay (TITAN +9.6%, ICICIBANK +5.4%, RELIANCE +2.8%, AXISBANK +1.0%).
-    options_book_seed: str = "TITAN,ICICIBANK,RELIANCE,AXISBANK"
+    # Options approved book (REPLACES the learner book when non-empty): the
+    # proxy learner cannot model premium economics, so the replay's per-symbol
+    # evidence governs. Final-config run (62d): TITAN +15.9%, AXISBANK +12.9%,
+    # HDFCBANK +4.0%, RELIANCE +3.0%, ICICIBANK +0.4% net — the other five
+    # watchlist names bled -35% combined and are excluded from live trading.
+    options_book_seed: str = "TITAN,AXISBANK,HDFCBANK,RELIANCE,ICICIBANK"
 
     # Regime entry gate: block NEW entries for agents in regimes where the
     # 62-day replay proved they lose. Format "REGIME:agent,agent;REGIME:...".

@@ -112,6 +112,8 @@ def t_kill_list_defaults():
                        ("options", "WILLIAMS_OPTIONS"),
                        # v5: futures net-negative in every round
                        ("futures", "STOCHRSI_FUTURES"), ("futures", "MACD_CROSS"),
+                       # v8: edge died at scale (-1.8 @18tr -> -5.8 @41tr)
+                       ("options", "INDEX_TREND_RIDE_OPT"),
                        # v6: new-pattern validation failures
                        ("intraday", "HIGH_TIGHT_FLAG"), ("options", "BB_WALK_OPT"),
                        ("options", "MORNING_THRUST_OPT"), ("scalping", "MOMENTUM_STACK"),
