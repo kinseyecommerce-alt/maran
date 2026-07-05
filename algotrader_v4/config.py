@@ -356,7 +356,17 @@ class Settings(BaseSettings):
     # evidence governs. Final-config run (62d): TITAN +15.9%, AXISBANK +12.9%,
     # HDFCBANK +4.0%, RELIANCE +3.0%, ICICIBANK +0.4% net — the other five
     # watchlist names bled -35% combined and are excluded from live trading.
-    options_book_seed: str = "TITAN,AXISBANK,HDFCBANK,RELIANCE,ICICIBANK"
+    # Expanded by the 20-symbol options test (62d, final config): six more
+    # names qualified at net > +1% / >=15 trades — ADANIENT +19.1%,
+    # BAJFINANCE +9.5%, KOTAKBANK +6.9%, DLF +6.2%, EICHERMOT +4.6%,
+    # BHARTIARTL +4.0% (+50.3% combined). 14 candidates failed and stay out.
+    # NOTE before LIVE: verify lot sizes for ADANIENT/DLF/EICHERMOT/
+    # BHARTIARTL against the instruments dump (not yet in _FON_LOT_SIZES;
+    # PAPER is unaffected).
+    options_book_seed: str = (
+        "TITAN,AXISBANK,HDFCBANK,RELIANCE,ICICIBANK,"
+        "ADANIENT,BAJFINANCE,KOTAKBANK,DLF,EICHERMOT,BHARTIARTL"
+    )
 
     # Regime entry gate: block NEW entries for agents in regimes where the
     # 62-day replay proved they lose. Format "REGIME:agent,agent;REGIME:...".
