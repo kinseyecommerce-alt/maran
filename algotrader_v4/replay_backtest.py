@@ -251,7 +251,14 @@ def replay(symbols: list[str], max_days: int | None = None,
 
     # ── Report ────────────────────────────────────────────────────────────
     CAP = 100_000     # sizing used by AgentTracker
-    COST_PCT = 0.06   # approx round-trip cost at 1L MIS notional
+    # Round-trip cost as % of ₹1L notional, per product economics:
+    #   equity MIS (intraday/scalping/momentum/meanrev/pairs): ~0.06%
+    #     (brokerage 2×₹20 + STT 0.025% sell + txn/GST/stamp + slippage)
+    #   futures MIS: ~0.03% (brokerage flat, STT 0.01% sell side only,
+    #     lower txn charges at same notional)
+    #   swing CNC: ~0.12% (STT 0.1% both sides, no brokerage on delivery)
+    COST_BY_AGENT = {"Futures": 0.03, "Swing": 0.12}
+    COST_DEFAULT = 0.06
     print("\n" + "═" * 78)
     print(f"  ACTUAL-AGENT REPLAY — {len(dates)} real days, {len(per_sym)} symbols, ₹1L/trade")
     print("═" * 78)
@@ -264,7 +271,8 @@ def replay(symbols: list[str], max_days: int | None = None,
             continue
         wins = sum(1 for t in ts_ if t.won)
         gross = sum(t.pnl_pct for t in ts_)
-        net = gross - COST_PCT * len(ts_)
+        cost_pct = COST_BY_AGENT.get(name, COST_DEFAULT)
+        net = gross - cost_pct * len(ts_)
         by_pat: dict = defaultdict(lambda: [0.0, 0])
         by_sym: dict = defaultdict(lambda: [0.0, 0])
         for t in ts_:
