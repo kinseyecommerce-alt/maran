@@ -310,7 +310,17 @@ class Settings(BaseSettings):
         # when their trade count scales (per-trade edge < cost at volume;
         # BB_SQUEEZE +0.118%/tr at 74tr but +0.040%/tr at 362tr). Survivors
         # EXPIRY_SCALP and STOCHRSI_OPTIONS were net-positive in BOTH runs.
-        "options:BB_SQUEEZE,options:VOL_BREAKOUT,options:WILLIAMS_OPTIONS"
+        "options:BB_SQUEEZE,options:VOL_BREAKOUT,options:WILLIAMS_OPTIONS,"
+        # v5 (min-score grid, 62d × NIFTY/BANKNIFTY): net-negative in every
+        # measurement round. Futures survives as an EMA200_BOUNCE-only
+        # specialist (+1.62% net @94tr ungated; best futures pattern in all
+        # four rounds).
+        "futures:STOCHRSI_FUTURES,futures:MACD_CROSS,"
+        # v6 verdict (62d validation of the 22 new patterns): failures killed.
+        # Winners kept: KELTNER_RIDE +266.9% net @299tr (new intraday star),
+        # STOCHRSI_TREND_OPT +8.2% net @169tr (options' best pattern).
+        "intraday:HIGH_TIGHT_FLAG,options:BB_WALK_OPT,options:MORNING_THRUST_OPT,"
+        "scalping:MOMENTUM_STACK,scalping:SUPERTREND_PULLBACK"
     )
 
     # Scalping approved-book seed: the proxy learner cannot model the real
@@ -340,18 +350,20 @@ class Settings(BaseSettings):
     #    them; re-enable only on fresh evidence)
     #  * pairs RANGING-only (gate turned it net-positive: -15.5 → +0.1)
     regime_agent_gating: bool = True
-    # futures joined the always-blocked set after the post-v3 measurement:
-    # -2.02% net at true futures costs (0.03%/trade), zero net-positive
-    # patterns across three independent measurement rounds. Keeps learning
-    # nightly; re-enable on fresh evidence.
+    # futures was benched after post-v3 (-2.02% net), then un-benched as an
+    # EMA200_BOUNCE-only specialist: the min-score grid showed that single
+    # pattern is net-positive (+1.62% @94tr) measured UNGATED, while its
+    # other patterns lose in every round (killed in disabled_patterns v5).
+    # Like intraday, it runs ungated except BLACK_SWAN — the measurement
+    # conditions that produced the positive number.
     regime_blocked_agents: str = (
-        "UNKNOWN:futures,momentum,mean_reversion;"
-        "BULL_TREND:futures,momentum,mean_reversion,pairs;"
-        "BULL_VOLATILE:futures,momentum,mean_reversion,pairs;"
-        "BEAR_TREND:options,futures,momentum,mean_reversion,pairs;"
-        "BEAR_VOLATILE:options,futures,momentum,mean_reversion,pairs;"
-        "RANGING:options,futures,momentum,mean_reversion;"
-        "HIGH_VOLATILE:futures,momentum,mean_reversion,pairs;"
+        "UNKNOWN:momentum,mean_reversion;"
+        "BULL_TREND:momentum,mean_reversion,pairs;"
+        "BULL_VOLATILE:momentum,mean_reversion,pairs;"
+        "BEAR_TREND:options,momentum,mean_reversion,pairs;"
+        "BEAR_VOLATILE:options,momentum,mean_reversion,pairs;"
+        "RANGING:options,momentum,mean_reversion;"
+        "HIGH_VOLATILE:momentum,mean_reversion,pairs;"
         "BLACK_SWAN:swing,intraday,futures,momentum,pairs,mean_reversion"
     )
 

@@ -101,8 +101,10 @@ def build_regime_timeline(nifty_df: pd.DataFrame | None) -> dict:
     return timeline
 
 
-def load_days(symbols: list[str]) -> tuple[list, dict]:
-    """Return (sorted trading dates, {sym: {date: day_df}}) from the 1m CSVs."""
+def load_days(symbols: list[str], tf_min: int = 1) -> tuple[list, dict]:
+    """Return (sorted trading dates, {sym: {date: day_df}}) from the 1m CSVs.
+    tf_min > 1 resamples to that bar size (5 → 5-minute bars, etc.) so the
+    same agents can be tested on higher timeframes."""
     per_sym: dict = {}
     all_dates: set = set()
     for sym in symbols:
@@ -113,18 +115,25 @@ def load_days(symbols: list[str]) -> tuple[list, dict]:
         df = pd.read_csv(f, parse_dates=["date"])
         df["date"] = df["date"].dt.tz_localize(None) if df["date"].dt.tz is not None else df["date"]
         df = df.sort_values("date").reset_index(drop=True)
+        if tf_min > 1:
+            df = (df.set_index("date")
+                    .resample(f"{tf_min}min", label="left", closed="left")
+                    .agg({"open": "first", "high": "max", "low": "min",
+                          "close": "last", "volume": "sum"})
+                    .dropna(subset=["open"]).reset_index())
         df["day"] = df["date"].dt.date
         per_sym[sym] = {d: g.reset_index(drop=True) for d, g in df.groupby("day")}
         all_dates.update(per_sym[sym].keys())
     return sorted(all_dates), per_sym
 
 
-def build_session_df(day_df: pd.DataFrame, prev_df: pd.DataFrame | None) -> pd.DataFrame:
+def build_session_df(day_df: pd.DataFrame, prev_df: pd.DataFrame | None,
+                     pre_bars: int = PRE_HISTORY_BARS) -> pd.DataFrame:
     """Shape a real day into the sim's expected frame: prev-day tail as
     warm-up (is_session=False) + the real session (is_session=True)."""
     parts = []
     if prev_df is not None and len(prev_df):
-        pre = prev_df.tail(PRE_HISTORY_BARS).copy()
+        pre = prev_df.tail(pre_bars).copy()
         pre["is_session"] = False
         parts.append(pre)
     d = day_df.copy()
@@ -150,9 +159,9 @@ def _regime_at(sorted_keys: list, timeline: dict, ts) -> str:
 
 def replay(symbols: list[str], max_days: int | None = None,
            start: str | None = None, end: str | None = None,
-           tag: str = "", gating: bool = False) -> dict:
+           tag: str = "", gating: bool = False, tf_min: int = 1) -> dict:
     import bot_state as _bs
-    dates, per_sym = load_days(symbols)
+    dates, per_sym = load_days(symbols, tf_min)
     if start:
         dates = [d for d in dates if str(d) >= start]
     if end:
@@ -180,7 +189,8 @@ def replay(symbols: list[str], max_days: int | None = None,
             prev_days = [d for d in days_map if d < day]
             if prev_days:
                 prev = days_map[max(prev_days)]
-            sessions[sym] = build_session_df(days_map[day], prev)
+            sessions[sym] = build_session_df(days_map[day], prev,
+                                             max(40, PRE_HISTORY_BARS // tf_min))
         if not sessions:
             continue
 
@@ -209,7 +219,7 @@ def replay(symbols: list[str], max_days: int | None = None,
                     continue
 
                 ind  = compute_indicators_at(sym, df, bar_idx, ltp)
-                snap = make_snapshot(sym, ind, df, bar_idx, ltp, bar_seconds=60)
+                snap = make_snapshot(sym, ind, df, bar_idx, ltp, bar_seconds=60 * tf_min)
                 if regime_keys:
                     _bs.set_current_regime(_regime_at(regime_keys, regime_tl, row.name))
                 for name, agent in agents:
@@ -309,6 +319,9 @@ if __name__ == "__main__":
     ap.add_argument("--tag", default="")
     ap.add_argument("--regime-gating", action="store_true",
                     help="apply the evidence-based regime entry gate (causal NIFTY detector)")
+    ap.add_argument("--tf", type=int, default=1, choices=[1, 5, 15, 30],
+                    help="bar timeframe in minutes (resampled from 1m data)")
     args = ap.parse_args()
     replay([s.strip().upper() for s in args.symbols.split(",") if s.strip()],
-           args.days, args.start, args.end, args.tag, gating=args.regime_gating)
+           args.days, args.start, args.end, args.tag, gating=args.regime_gating,
+           tf_min=args.tf)
