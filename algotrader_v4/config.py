@@ -320,7 +320,15 @@ class Settings(BaseSettings):
         # Winners kept: KELTNER_RIDE +266.9% net @299tr (new intraday star),
         # STOCHRSI_TREND_OPT +8.2% net @169tr (options' best pattern).
         "intraday:HIGH_TIGHT_FLAG,options:BB_WALK_OPT,options:MORNING_THRUST_OPT,"
-        "scalping:MOMENTUM_STACK,scalping:SUPERTREND_PULLBACK"
+        "scalping:MOMENTUM_STACK,scalping:SUPERTREND_PULLBACK,"
+        # v7 (stock-futures validation): futures becomes a band-walk
+        # specialist — BB_WALK_FUT +74.4% net @365tr, SQUEEZE_WALK_FUT +30.2%
+        # @139tr on stock futures. Everything churning against them killed,
+        # including EMA200_BOUNCE (+1.6% on 2 indices, -33.9% @984tr once
+        # stocks let it overtrade).
+        "futures:EMA200_BOUNCE,futures:MULTI_TF_ALIGN,futures:VOL_SURGE,"
+        "futures:OPEN_DRIVE_FUT,futures:VWAP_PULL,futures:MOMENTUM_CATCH,"
+        "futures:VWAP_BAND_BREAK,futures:RANGE_COMPRESSION_BREAK"
     )
 
     # Scalping approved-book seed: the proxy learner cannot model the real
