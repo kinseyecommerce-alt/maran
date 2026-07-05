@@ -1,0 +1,60 @@
+name: Auto-PR Claude branches
+
+# Completes the automation chain: push to claude/** -> PR created here ->
+# squash-merged here -> DO App Platform deploys from main.
+# (auto-merge.yml covers PRs opened by humans/apps; PRs created with the
+# default GITHUB_TOKEN cannot trigger other workflows, so this workflow
+# merges its own PR in the same run.)
+
+on:
+  push:
+    branches: ['claude/**']
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  create-and-merge:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Create PR if missing, then squash-merge
+        uses: actions/github-script@v7
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          script: |
+            const branch = context.ref.replace('refs/heads/', '');
+            const prs = await github.rest.pulls.list({
+              owner: context.repo.owner, repo: context.repo.repo,
+              state: 'open', head: `${context.repo.owner}:${branch}`,
+            });
+            let pr;
+            if (prs.data.length) {
+              pr = prs.data[0];
+              core.info(`Open PR #${pr.number} already exists for ${branch}`);
+            } else {
+              const head = context.payload.head_commit || {};
+              const [title, ...rest] = (head.message || `Merge ${branch}`).split('\n');
+              try {
+                const resp = await github.rest.pulls.create({
+                  owner: context.repo.owner, repo: context.repo.repo,
+                  title: title.slice(0, 250), body: rest.join('\n').trim(),
+                  head: branch, base: 'main',
+                });
+                pr = resp.data;
+                core.info(`Created PR #${pr.number} for ${branch}`);
+              } catch (e) {
+                if (String(e.message).includes('No commits between')) {
+                  core.info('Branch has no new commits vs main — nothing to do');
+                  return;
+                }
+                throw e;
+              }
+            }
+            await github.rest.pulls.merge({
+              owner: context.repo.owner, repo: context.repo.repo,
+              pull_number: pr.number, merge_method: 'squash',
+              commit_title: pr.title,
+              commit_message: pr.body || '',
+            });
+            core.info(`PR #${pr.number} squash-merged into main`);
