@@ -305,7 +305,12 @@ class Settings(BaseSettings):
         # cost; final validation run with trade counts, kill rule: net <= -2%
         # over >= 20 trades)
         "scalping:VWAP_BOUNCE,intraday:DUAL_EMA_RETEST,options:TREND_PULL,"
-        "options:ICHIMOKU_CLOUD,futures:TRIPLE_EMA_PULLBACK,intraday:HMA_FLIP"
+        "options:ICHIMOKU_CLOUD,futures:TRIPLE_EMA_PULLBACK,intraday:HMA_FLIP,"
+        # v4 (post-v3 measurement): options patterns that flip net-negative
+        # when their trade count scales (per-trade edge < cost at volume;
+        # BB_SQUEEZE +0.118%/tr at 74tr but +0.040%/tr at 362tr). Survivors
+        # EXPIRY_SCALP and STOCHRSI_OPTIONS were net-positive in BOTH runs.
+        "options:BB_SQUEEZE,options:VOL_BREAKOUT,options:WILLIAMS_OPTIONS"
     )
 
     # Scalping approved-book seed: the proxy learner cannot model the real
@@ -335,15 +340,19 @@ class Settings(BaseSettings):
     #    them; re-enable only on fresh evidence)
     #  * pairs RANGING-only (gate turned it net-positive: -15.5 → +0.1)
     regime_agent_gating: bool = True
+    # futures joined the always-blocked set after the post-v3 measurement:
+    # -2.02% net at true futures costs (0.03%/trade), zero net-positive
+    # patterns across three independent measurement rounds. Keeps learning
+    # nightly; re-enable on fresh evidence.
     regime_blocked_agents: str = (
-        "UNKNOWN:momentum,mean_reversion;"
-        "BULL_TREND:momentum,mean_reversion,pairs;"
-        "BULL_VOLATILE:momentum,mean_reversion,pairs;"
+        "UNKNOWN:futures,momentum,mean_reversion;"
+        "BULL_TREND:futures,momentum,mean_reversion,pairs;"
+        "BULL_VOLATILE:futures,momentum,mean_reversion,pairs;"
         "BEAR_TREND:options,futures,momentum,mean_reversion,pairs;"
         "BEAR_VOLATILE:options,futures,momentum,mean_reversion,pairs;"
         "RANGING:options,futures,momentum,mean_reversion;"
-        "HIGH_VOLATILE:momentum,mean_reversion,pairs;"
-        "BLACK_SWAN:swing,intraday,momentum,pairs,mean_reversion"
+        "HIGH_VOLATILE:futures,momentum,mean_reversion,pairs;"
+        "BLACK_SWAN:swing,intraday,futures,momentum,pairs,mean_reversion"
     )
 
     # Phase 2/3: Position sizing
