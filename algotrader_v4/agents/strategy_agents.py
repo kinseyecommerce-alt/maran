@@ -852,6 +852,7 @@ class OptionsAgent(BaseAgent):
                 self._pat_williams_options,
                 self._pat_oi_surge,
                 self._pat_expiry_scalp,
+                self._pat_bb_walk_options,
                 self._pat_pcr_extreme,
                 self._pat_gamma_flip,
                 self._pat_skew_momentum,
@@ -1228,6 +1229,31 @@ class OptionsAgent(BaseAgent):
         if (ind.ema9 < ind.ema21 > 0 and ind.rsi_14 < 45
                 and ind.volume_ratio >= 1.5 and ind.macd_hist < 0):
             return "PE", 5, "EXPIRY_SCALP"
+        return "", 0, ""
+
+    def _pat_bb_walk_options(self, sym, snap, ind, ltp, t):
+        """BB band-walk on the underlying → directional CE/PE. Port of the
+        system's best-validated pattern family (scalping BB_BAND_WALK +265%
+        net, intraday BB_SQUEEZE_WALK +330% net over the 62-day replay):
+        3 consecutive closes outside the band + volume + MACD alignment.
+        A sustained underlying breakout is the ideal long-premium setup —
+        delta gains outrun theta while the walk lasts."""
+        import bot_state
+        if not bot_state.is_pattern_enabled("options", "BB_WALK_OPT"):
+            return "", 0, ""
+        if len(snap.candles_1min) < 3:
+            return "", 0, ""
+        bb_u = getattr(ind, 'bb_upper', 0.0)
+        bb_l = getattr(ind, 'bb_lower', 0.0)
+        if not (bb_u > 0 and bb_l > 0):
+            return "", 0, ""
+        last3 = snap.candles_1min[-3:]
+        if (all(c.close >= bb_u for c in last3)
+                and ind.volume_ratio >= 1.3 and ind.macd_hist > 0):
+            return "CE", 5, "BB_WALK_OPT"
+        if (all(c.close <= bb_l for c in last3)
+                and ind.volume_ratio >= 1.3 and ind.macd_hist < 0):
+            return "PE", 5, "BB_WALK_OPT"
         return "", 0, ""
 
     def _pat_strangle_sell(self, sym, snap, ind, ltp, t):
@@ -3331,6 +3357,7 @@ class FuturesAgent(BaseAgent):
             self._pat_williams_futures,
             self._pat_institutional_flow,
             self._pat_ema200_bounce,
+            self._pat_bb_walk_futures,
         ]
         for pat_fn in patterns:
             try:
@@ -3841,6 +3868,30 @@ class FuturesAgent(BaseAgent):
             return "LONG",  6, "EMA200_BOUNCE"   # highest base score — major level
         if full_bear and ind.rsi_14 < 58 and ind.macd_hist < 0 and ind.supertrend_dir == "DOWN":
             return "SHORT", 6, "EMA200_BOUNCE"
+        return "", 0, ""
+
+    def _pat_bb_walk_futures(self, sym, snap, ind, ltp, t):
+        """BB band-walk — port of the system's best-validated pattern family
+        (scalping BB_BAND_WALK +265% net, intraday BB_SQUEEZE_WALK +330% net
+        over the 62-day replay). Consecutive closes outside the band with
+        volume = sustained breakout momentum. Index variant: 3 closes + MACD
+        alignment (indices chop more than stocks at 2 closes)."""
+        import bot_state
+        if not bot_state.is_pattern_enabled("futures", "BB_WALK_FUT"):
+            return "", 0, ""
+        if len(snap.candles_1min) < 3:
+            return "", 0, ""
+        bb_u = getattr(ind, 'bb_upper', 0.0)
+        bb_l = getattr(ind, 'bb_lower', 0.0)
+        if not (bb_u > 0 and bb_l > 0):
+            return "", 0, ""
+        last3 = snap.candles_1min[-3:]
+        if (all(c.close >= bb_u for c in last3)
+                and ind.volume_ratio >= 1.2 and ind.macd_hist > 0):
+            return "LONG", 5, "BB_WALK_FUT"
+        if (all(c.close <= bb_l for c in last3)
+                and ind.volume_ratio >= 1.2 and ind.macd_hist < 0):
+            return "SHORT", 5, "BB_WALK_FUT"
         return "", 0, ""
 
     def _is_rollover_period(self) -> bool:
