@@ -111,7 +111,11 @@ def t_kill_list_defaults():
                        ("options", "BB_SQUEEZE"), ("options", "VOL_BREAKOUT"),
                        ("options", "WILLIAMS_OPTIONS"),
                        # v5: futures net-negative in every round
-                       ("futures", "STOCHRSI_FUTURES"), ("futures", "MACD_CROSS")]:
+                       ("futures", "STOCHRSI_FUTURES"), ("futures", "MACD_CROSS"),
+                       # v6: new-pattern validation failures
+                       ("intraday", "HIGH_TIGHT_FLAG"), ("options", "BB_WALK_OPT"),
+                       ("options", "MORNING_THRUST_OPT"), ("scalping", "MOMENTUM_STACK"),
+                       ("scalping", "SUPERTREND_PULLBACK")]:
         assert not bot_state.is_pattern_enabled(agent, pat), f"{agent}:{pat} should be killed"
     # proven NET earners stay enabled — per-agent scoping intact
     assert bot_state.is_pattern_enabled("intraday", "ORB_BREAK")
@@ -122,6 +126,8 @@ def t_kill_list_defaults():
     assert bot_state.is_pattern_enabled("options", "EXPIRY_SCALP")      # net-positive in both runs
     assert bot_state.is_pattern_enabled("options", "STOCHRSI_OPTIONS")  # net-positive in both runs
     assert bot_state.is_pattern_enabled("futures", "EMA200_BOUNCE")     # futures' sole survivor
+    assert bot_state.is_pattern_enabled("intraday", "KELTNER_RIDE")     # v6 star: +266.9% net
+    assert bot_state.is_pattern_enabled("options", "STOCHRSI_TREND_OPT")# v6: +8.2% net
     assert bot_state.is_pattern_enabled("intraday", "VWAP_BAND_REVERT") # scoping: intraday keeps it
 
 def t_kill_list_runtime_mutation():

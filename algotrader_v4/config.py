@@ -315,7 +315,12 @@ class Settings(BaseSettings):
         # measurement round. Futures survives as an EMA200_BOUNCE-only
         # specialist (+1.62% net @94tr ungated; best futures pattern in all
         # four rounds).
-        "futures:STOCHRSI_FUTURES,futures:MACD_CROSS"
+        "futures:STOCHRSI_FUTURES,futures:MACD_CROSS,"
+        # v6 verdict (62d validation of the 22 new patterns): failures killed.
+        # Winners kept: KELTNER_RIDE +266.9% net @299tr (new intraday star),
+        # STOCHRSI_TREND_OPT +8.2% net @169tr (options' best pattern).
+        "intraday:HIGH_TIGHT_FLAG,options:BB_WALK_OPT,options:MORNING_THRUST_OPT,"
+        "scalping:MOMENTUM_STACK,scalping:SUPERTREND_PULLBACK"
     )
 
     # Scalping approved-book seed: the proxy learner cannot model the real
