@@ -125,7 +125,12 @@ def t_kill_list_defaults():
     assert bot_state.is_pattern_enabled("intraday", "STOCHRSI_CROSS")   # net +36.5
     assert bot_state.is_pattern_enabled("options", "EXPIRY_SCALP")      # net-positive in both runs
     assert bot_state.is_pattern_enabled("options", "STOCHRSI_OPTIONS")  # net-positive in both runs
-    assert bot_state.is_pattern_enabled("futures", "EMA200_BOUNCE")     # futures' sole survivor
+    # v7: futures = band-walk specialist; EMA200_BOUNCE killed (-33.9% @984tr
+    # once stock futures let it overtrade)
+    assert not bot_state.is_pattern_enabled("futures", "EMA200_BOUNCE")
+    assert not bot_state.is_pattern_enabled("futures", "MULTI_TF_ALIGN")
+    assert bot_state.is_pattern_enabled("futures", "BB_WALK_FUT")       # +74.4% net @365tr
+    assert bot_state.is_pattern_enabled("futures", "SQUEEZE_WALK_FUT")  # +30.2% net @139tr
     assert bot_state.is_pattern_enabled("intraday", "KELTNER_RIDE")     # v6 star: +266.9% net
     assert bot_state.is_pattern_enabled("options", "STOCHRSI_TREND_OPT")# v6: +8.2% net
     assert bot_state.is_pattern_enabled("intraday", "VWAP_BAND_REVERT") # scoping: intraday keeps it
