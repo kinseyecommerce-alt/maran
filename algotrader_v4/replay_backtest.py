@@ -251,7 +251,14 @@ def replay(symbols: list[str], max_days: int | None = None,
 
     # ── Report ────────────────────────────────────────────────────────────
     CAP = 100_000     # sizing used by AgentTracker
-    COST_PCT = 0.06   # approx round-trip cost at 1L MIS notional
+    # Round-trip cost as % of ₹1L notional, per product economics:
+    #   equity MIS (intraday/scalping/momentum/meanrev/pairs): ~0.06%
+    #     (brokerage 2×₹20 + STT 0.025% sell + txn/GST/stamp + slippage)
+    #   futures MIS: ~0.03% (brokerage flat, STT 0.01% sell side only,
+    #     lower txn charges at same notional)
+    #   swing CNC: ~0.12% (STT 0.1% both sides, no brokerage on delivery)
+    COST_BY_AGENT = {"Futures": 0.03, "Swing": 0.12}
+    COST_DEFAULT = 0.06
     print("\n" + "═" * 78)
     print(f"  ACTUAL-AGENT REPLAY — {len(dates)} real days, {len(per_sym)} symbols, ₹1L/trade")
     print("═" * 78)
@@ -264,7 +271,8 @@ def replay(symbols: list[str], max_days: int | None = None,
             continue
         wins = sum(1 for t in ts_ if t.won)
         gross = sum(t.pnl_pct for t in ts_)
-        net = gross - COST_PCT * len(ts_)
+        cost_pct = COST_BY_AGENT.get(name, COST_DEFAULT)
+        net = gross - cost_pct * len(ts_)
         by_pat: dict = defaultdict(lambda: [0.0, 0])
         by_sym: dict = defaultdict(lambda: [0.0, 0])
         for t in ts_:
@@ -273,10 +281,10 @@ def replay(symbols: list[str], max_days: int | None = None,
             s = getattr(t, "sym", "?")
             by_sym[s][0] += t.pnl_pct
             by_sym[s][1] += 1
-        best = max(by_pat.items(), key=lambda kv: kv[1])
-        worst = min(by_pat.items(), key=lambda kv: kv[1])
+        best = max(by_pat.items(), key=lambda kv: kv[1][0])
+        worst = min(by_pat.items(), key=lambda kv: kv[1][0])
         print(f"{name:12s} {len(ts_):6d} {wins/len(ts_)*100:6.1f} {gross:+8.2f} {net:+8.2f} "
-              f"₹{net/100*CAP:+10,.0f}  {best[0]}({best[1]:+.1f}) / {worst[0]}({worst[1]:+.1f})")
+              f"₹{net/100*CAP:+10,.0f}  {best[0]}({best[1][0]:+.1f}) / {worst[0]}({worst[1][0]:+.1f})")
         summary[name] = {"trades": len(ts_), "win_rate": round(wins/len(ts_)*100, 1),
                          "gross_pct": round(gross, 2), "net_pct": round(net, 2),
                          "net_inr_1L": round(net/100*CAP, 0),

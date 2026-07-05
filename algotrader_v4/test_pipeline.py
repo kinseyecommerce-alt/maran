@@ -102,16 +102,23 @@ def t_kill_list_defaults():
                        ("scalping", "HMA_MICRO"), ("scalping", "SURGE"),
                        ("intraday", "ADX_BREAKOUT"), ("intraday", "BREAKOUT"),
                        ("options", "EMA_CROSS"), ("options", "VWAP_RECLAIM"),
-                       ("futures", "EMA_TREND")]:
+                       ("futures", "EMA_TREND"),
+                       # v3: edge < cost (net-negative with counts)
+                       ("scalping", "VWAP_BOUNCE"), ("intraday", "DUAL_EMA_RETEST"),
+                       ("options", "TREND_PULL"), ("options", "ICHIMOKU_CLOUD"),
+                       ("futures", "TRIPLE_EMA_PULLBACK"), ("intraday", "HMA_FLIP"),
+                       # v4: options patterns whose edge dies at volume
+                       ("options", "BB_SQUEEZE"), ("options", "VOL_BREAKOUT"),
+                       ("options", "WILLIAMS_OPTIONS")]:
         assert not bot_state.is_pattern_enabled(agent, pat), f"{agent}:{pat} should be killed"
-    # proven earners stay enabled — per-agent scoping intact
+    # proven NET earners stay enabled — per-agent scoping intact
     assert bot_state.is_pattern_enabled("intraday", "ORB_BREAK")
-    assert bot_state.is_pattern_enabled("scalping", "BB_BAND_WALK")     # +156.8%
-    assert bot_state.is_pattern_enabled("scalping", "SUPERTREND_FLIP")  # +25.4%
-    assert bot_state.is_pattern_enabled("scalping", "VWAP_BOUNCE")
-    assert bot_state.is_pattern_enabled("intraday", "BB_SQUEEZE_WALK")  # +106.1%
-    assert bot_state.is_pattern_enabled("options", "TREND_PULL")        # +16.8%
-    assert bot_state.is_pattern_enabled("futures", "EMA200_BOUNCE")     # +4.8%
+    assert bot_state.is_pattern_enabled("scalping", "BB_BAND_WALK")     # net +265.0
+    assert bot_state.is_pattern_enabled("scalping", "SUPERTREND_FLIP")  # net +47.4
+    assert bot_state.is_pattern_enabled("intraday", "BB_SQUEEZE_WALK")  # net +133.7
+    assert bot_state.is_pattern_enabled("intraday", "STOCHRSI_CROSS")   # net +36.5
+    assert bot_state.is_pattern_enabled("options", "EXPIRY_SCALP")      # net-positive in both runs
+    assert bot_state.is_pattern_enabled("options", "STOCHRSI_OPTIONS")  # net-positive in both runs
     assert bot_state.is_pattern_enabled("intraday", "VWAP_BAND_REVERT") # scoping: intraday keeps it
 
 def t_kill_list_runtime_mutation():
@@ -159,11 +166,12 @@ def t_regime_gate_unknown_and_toggle():
     try:
         bot_state.set_current_regime("UNKNOWN")
         assert all(bot_state.is_agent_allowed_in_regime(a)
-                   for a in ("intraday", "scalping", "options", "futures", "pairs", "swing"))
-        # momentum/mean_reversion: net -85 to -109% in every tested config —
-        # blocked even in UNKNOWN until fresh evidence clears them
+                   for a in ("intraday", "scalping", "options", "pairs", "swing"))
+        # momentum/mean_reversion/futures: net-negative in every tested
+        # config — blocked even in UNKNOWN until fresh evidence clears them
         assert not bot_state.is_agent_allowed_in_regime("momentum")
         assert not bot_state.is_agent_allowed_in_regime("mean_reversion")
+        assert not bot_state.is_agent_allowed_in_regime("futures")
         bot_state.set_current_regime("RANGING")
         settings.regime_agent_gating = False
         assert bot_state.is_agent_allowed_in_regime("momentum")   # gate off → allowed

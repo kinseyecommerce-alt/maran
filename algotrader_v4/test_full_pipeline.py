@@ -43,9 +43,11 @@ os.environ.setdefault("TRADING_MODE", "PAPER")
 
 from config import settings
 # This suite verifies pipeline MECHANICS (ingestion → order → exit), not
-# pattern selection policy — run with the evidence kill-list cleared so
-# crafted scenarios can use any pattern (e.g. futures EMA_TREND).
+# pattern/agent selection policy — run with the evidence kill-list cleared
+# and the regime gate off so crafted scenarios can use any pattern/agent
+# (e.g. futures EMA_TREND, which policy blocks in production).
 settings.disabled_patterns = ""
+settings.regime_agent_gating = False
 from tick_engine import (
     tick_engine, MarketSnapshot, Tick, LiveIndicators, Candle, TickBuffer,
 )
