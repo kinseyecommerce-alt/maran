@@ -109,7 +109,9 @@ def t_kill_list_defaults():
                        ("futures", "TRIPLE_EMA_PULLBACK"), ("intraday", "HMA_FLIP"),
                        # v4: options patterns whose edge dies at volume
                        ("options", "BB_SQUEEZE"), ("options", "VOL_BREAKOUT"),
-                       ("options", "WILLIAMS_OPTIONS")]:
+                       ("options", "WILLIAMS_OPTIONS"),
+                       # v5: futures net-negative in every round
+                       ("futures", "STOCHRSI_FUTURES"), ("futures", "MACD_CROSS")]:
         assert not bot_state.is_pattern_enabled(agent, pat), f"{agent}:{pat} should be killed"
     # proven NET earners stay enabled — per-agent scoping intact
     assert bot_state.is_pattern_enabled("intraday", "ORB_BREAK")
@@ -119,6 +121,7 @@ def t_kill_list_defaults():
     assert bot_state.is_pattern_enabled("intraday", "STOCHRSI_CROSS")   # net +36.5
     assert bot_state.is_pattern_enabled("options", "EXPIRY_SCALP")      # net-positive in both runs
     assert bot_state.is_pattern_enabled("options", "STOCHRSI_OPTIONS")  # net-positive in both runs
+    assert bot_state.is_pattern_enabled("futures", "EMA200_BOUNCE")     # futures' sole survivor
     assert bot_state.is_pattern_enabled("intraday", "VWAP_BAND_REVERT") # scoping: intraday keeps it
 
 def t_kill_list_runtime_mutation():
@@ -144,9 +147,9 @@ def t_regime_gate_matrix():
     import bot_state
     try:
         bot_state.set_current_regime("RANGING")
-        for blocked in ("options", "futures", "momentum", "mean_reversion"):
+        for blocked in ("options", "momentum", "mean_reversion"):
             assert not bot_state.is_agent_allowed_in_regime(blocked), f"{blocked} in RANGING"
-        for allowed in ("intraday", "pairs", "scalping", "swing"):
+        for allowed in ("intraday", "futures", "pairs", "scalping", "swing"):
             assert bot_state.is_agent_allowed_in_regime(allowed), f"{allowed} in RANGING"
         bot_state.set_current_regime("HIGH_VOLATILE")
         for blocked in ("mean_reversion", "pairs", "momentum"):
@@ -166,12 +169,12 @@ def t_regime_gate_unknown_and_toggle():
     try:
         bot_state.set_current_regime("UNKNOWN")
         assert all(bot_state.is_agent_allowed_in_regime(a)
-                   for a in ("intraday", "scalping", "options", "pairs", "swing"))
-        # momentum/mean_reversion/futures: net-negative in every tested
-        # config — blocked even in UNKNOWN until fresh evidence clears them
+                   for a in ("intraday", "scalping", "options", "futures", "pairs", "swing"))
+        # momentum/mean_reversion: net-negative in every tested config —
+        # blocked even in UNKNOWN until fresh evidence clears them.
+        # (futures un-benched as EMA200_BOUNCE-only specialist.)
         assert not bot_state.is_agent_allowed_in_regime("momentum")
         assert not bot_state.is_agent_allowed_in_regime("mean_reversion")
-        assert not bot_state.is_agent_allowed_in_regime("futures")
         bot_state.set_current_regime("RANGING")
         settings.regime_agent_gating = False
         assert bot_state.is_agent_allowed_in_regime("momentum")   # gate off → allowed
