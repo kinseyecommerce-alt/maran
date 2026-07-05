@@ -300,7 +300,12 @@ class Settings(BaseSettings):
         # v2 options tail (-6.6% gross combined)
         "options:EMA_CROSS,options:RSI_MOMENTUM,options:VWAP_RECLAIM,"
         # v2 futures tail (-1.9% gross combined)
-        "futures:EMA_TREND,futures:ICHIMOKU_FUTURES,futures:HMA_TREND"
+        "futures:EMA_TREND,futures:ICHIMOKU_FUTURES,futures:HMA_TREND,"
+        # v3: gross-positive but NET-negative after per-trade costs (edge <
+        # cost; final validation run with trade counts, kill rule: net <= -2%
+        # over >= 20 trades)
+        "scalping:VWAP_BOUNCE,intraday:DUAL_EMA_RETEST,options:TREND_PULL,"
+        "options:ICHIMOKU_CLOUD,futures:TRIPLE_EMA_PULLBACK,intraday:HMA_FLIP"
     )
 
     # Scalping approved-book seed: the proxy learner cannot model the real
