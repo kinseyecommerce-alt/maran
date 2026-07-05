@@ -1062,7 +1062,8 @@ class OptionsAgent(BaseAgent):
         dte = self._days_to_expiry(sym)
         strike  = self._target_delta_strike(ltp, actual_opt, atm_iv, target_delta, dte)
         opt_sym = self._nfo_symbol(sym, strike, actual_opt)
-        lot_sz  = self.LOT_SIZES.get(sym, 1)
+        from kite_client import _FON_LOT_SIZES as _kite_lots
+        lot_sz  = self.LOT_SIZES.get(sym) or _kite_lots.get(sym, 1)
 
         # Approximate BS delta for the chosen strike (informational, logged)
         import math as _math
@@ -3491,29 +3492,37 @@ class FuturesAgent(BaseAgent):
     product = "NRML"
     min_candles_1min = 15
 
-    # NSE/BSE index futures lot sizes — FuturesAgent only trades these symbols.
-    # Stock futures are excluded: their lot sizes change every expiry revision
-    # and liquidity / spread characteristics differ from index futures.
+    # Index futures lot sizes. Stock futures are added dynamically from
+    # settings.futures_stock_symbols (lot sizes resolved from kite_client's
+    # _FON_LOT_SIZES table) — indices alone proved to be the binding
+    # constraint: two efficient charts leave no selection edge.
     LOT_SIZES: dict = {"NIFTY": 75, "BANKNIFTY": 15, "MIDCPNIFTY": 75,
                        "FINNIFTY": 40, "SENSEX": 10, "BANKEX": 15}
     MIN_SCORE = 4
     COOL_S    = 180
 
+    def _tradeable_lots(self) -> dict:
+        """Index lots + configured stock-futures lots. Settings-driven so the
+        stock set can be pruned at runtime on live evidence; a stock missing
+        from the kite lot table is silently skipped (never guess a lot size)."""
+        from kite_client import _FON_LOT_SIZES
+        lots = dict(self.LOT_SIZES)
+        raw = getattr(settings, "futures_stock_symbols", "") or ""
+        for s in raw.split(","):
+            s = s.strip().upper()
+            if s and s in _FON_LOT_SIZES:
+                lots[s] = _FON_LOT_SIZES[s]
+        return lots
+
     def filter_watchlist(self, watchlist: list[dict]) -> list[dict]:
-        """FuturesAgent trades ONLY index futures, so its approved set is the
-        index underlyings it can trade (LOT_SIZES keys) — NOT the equity scanner
-        output, which is stock-oriented and filters indices out on (near-zero)
-        spot volume. The index underlyings (NIFTY, BANKNIFTY, …) are subscribed
-        for ticks via nifty100.INDEX_SYMBOLS; approving them here lets _run_loop
-        process those ticks instead of dropping them as unapproved. Exchanges are
-        preserved from the incoming watchlist when present, else default to NSE.
-        (Bypasses the per-symbol backtest gate: index futures are always liquid
-        and are the only instruments this agent can trade.)
-        """
+        """Approve the tradeable futures underlyings: index symbols (always —
+        they are subscribed via nifty100.INDEX_SYMBOLS and always liquid) plus
+        the configured stock-futures names. Exchanges are preserved from the
+        incoming watchlist when present, else default to NSE."""
         existing = {i.get("symbol"): i.get("exchange", "NSE")
                     for i in (watchlist or [])}
         return [{"symbol": s, "exchange": existing.get(s, "NSE")}
-                for s in self.LOT_SIZES]
+                for s in self._tradeable_lots()]
 
     def __init__(self) -> None:
         super().__init__()
@@ -3555,11 +3564,10 @@ class FuturesAgent(BaseAgent):
         now = now_ist()
         t   = now.time().replace(tzinfo=None)
 
-        # Index-only guard: FuturesAgent only trades index futures (NIFTY,
-        # BANKNIFTY, etc.) where lot sizes are known and liquidity is deep.
-        # Stock futures are excluded — lot sizes change every expiry and their
-        # futures contracts are not in the tick subscription.
-        if sym not in self.LOT_SIZES:
+        # Tradeable guard: index futures always; stock futures per
+        # settings.futures_stock_symbols (lots from kite_client's table —
+        # never trade a symbol whose lot size is unknown).
+        if sym not in self._tradeable_lots():
             return "HOLD", None
 
         # Rollover awareness: last 3 calendar days of expiry month → close early
@@ -3686,7 +3694,7 @@ class FuturesAgent(BaseAgent):
             return "HOLD", None
         cools[best_side] = now
 
-        lot_sz  = self.LOT_SIZES.get(sym, 1)
+        lot_sz  = self._tradeable_lots().get(sym, 1)
 
         # ATR-dynamic SL/TGT (superior to fixed % — scales with actual volatility)
         if ind.atr_14 and ind.atr_14 > 0 and ltp > 0:

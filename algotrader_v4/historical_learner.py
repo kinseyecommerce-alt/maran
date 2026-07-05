@@ -91,6 +91,21 @@ def _apply_seeds(approved: dict) -> dict:
         if seed:
             approved["scalping"] = seed
             logger.info("scalping book empty — seeded from replay evidence: {}", seed)
+    # Options: UNION the replay-evidenced direction-positive symbols into the
+    # learner book (the proxy learner under-approves options for the same
+    # reason as scalping — it can't model premium economics).
+    try:
+        from config import settings
+        opt_seed = [s.strip().upper() for s in
+                    (getattr(settings, "options_book_seed", "") or "").split(",") if s.strip()]
+    except Exception:
+        opt_seed = []
+    if opt_seed:
+        cur = {str(x).upper() for x in (approved.get("options") or [])}
+        add = [s for s in opt_seed if s not in cur]
+        if add:
+            approved["options"] = list(approved.get("options") or []) + add
+            logger.info("options book seeded (union) from replay evidence: +{}", add)
     return approved
 
 
