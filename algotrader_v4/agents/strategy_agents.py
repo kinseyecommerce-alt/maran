@@ -142,7 +142,9 @@ class IntradayAgent(BaseAgent):
                        self._pat_dual_ema_retest, self._pat_adx_breakout,
                        self._pat_supertrend_align, self._pat_bb_squeeze_walk,
                        self._pat_fii_institutional, self._pat_gap_fade,
-                       self._pat_trend_day_ride):
+                       self._pat_trend_day_ride,
+                       self._pat_band_walk_pullback, self._pat_keltner_ride,
+                       self._pat_vwap_ext_ride, self._pat_high_tight_flag):
             try:
                 action, base, pname = pat_fn(sym, snap, ind, ltp, t)
             except Exception:
@@ -494,6 +496,85 @@ class IntradayAgent(BaseAgent):
         if (all(c.close <= bb_l for c in last3)
                 and ind.volume_ratio >= 1.3 and ind.macd_hist < 0):
             return "SELL", 4, "BB_SQUEEZE_WALK"
+        return "", 0, ""
+
+    # ── Evidence-derived batch (v6): variants of the proven momentum-
+    # persistence family (BB_SQUEEZE_WALK +330% net / 62d), not crossovers ──
+
+    def _pat_band_walk_pullback(self, sym, snap, ind, ltp, t):
+        """Re-entry into an established band-walk: a walk ran earlier in the
+        last 10 bars (3+ closes outside the band), price paused inside, and
+        now re-breaks the band — same trend, better entry than chasing."""
+        import bot_state
+        if not bot_state.is_pattern_enabled("intraday", "BAND_WALK_PULLBACK"):
+            return "", 0, ""
+        if len(snap.candles_1min) < 10 or not (ind.bb_upper > 0 and ind.bb_lower > 0):
+            return "", 0, ""
+        last10 = snap.candles_1min[-10:]
+        prior, last2 = last10[:-2], last10[-2:]
+        walked_up = sum(1 for c in prior if c.close >= ind.bb_upper) >= 3
+        walked_dn = sum(1 for c in prior if c.close <= ind.bb_lower) >= 3
+        if (walked_up and last2[0].close < ind.bb_upper and last2[1].close >= ind.bb_upper
+                and ind.volume_ratio >= 1.2 and ind.macd_hist > 0):
+            return "BUY", 5, "BAND_WALK_PULLBACK"
+        if (walked_dn and last2[0].close > ind.bb_lower and last2[1].close <= ind.bb_lower
+                and ind.volume_ratio >= 1.2 and ind.macd_hist < 0):
+            return "SELL", 5, "BAND_WALK_PULLBACK"
+        return "", 0, ""
+
+    def _pat_keltner_ride(self, sym, snap, ind, ltp, t):
+        """Keltner-channel ride (BB midline ± 1.5×ATR): 3 closes beyond the
+        Keltner band = volatility-normalised persistence, complements the
+        BB walk which uses stdev bands."""
+        import bot_state
+        if not bot_state.is_pattern_enabled("intraday", "KELTNER_RIDE"):
+            return "", 0, ""
+        atr = getattr(ind, "atr_14", 0.0)
+        if len(snap.candles_1min) < 3 or atr <= 0 or not (ind.bb_upper > 0 and ind.bb_lower > 0):
+            return "", 0, ""
+        mid = (ind.bb_upper + ind.bb_lower) / 2
+        kel_u, kel_l = mid + 1.5 * atr, mid - 1.5 * atr
+        last3 = snap.candles_1min[-3:]
+        if all(c.close >= kel_u for c in last3) and ind.volume_ratio >= 1.2 and ind.rsi_14 < 78:
+            return "BUY", 4, "KELTNER_RIDE"
+        if all(c.close <= kel_l for c in last3) and ind.volume_ratio >= 1.2 and ind.rsi_14 > 22:
+            return "SELL", 4, "KELTNER_RIDE"
+        return "", 0, ""
+
+    def _pat_vwap_ext_ride(self, sym, snap, ind, ltp, t):
+        """Afternoon VWAP-extension ride: price holds >0.8% beyond VWAP after
+        11:00 with aligned MACD and volume — one-sided days stay one-sided
+        (same insight as TREND_DAY_RIDE, tighter trigger)."""
+        import bot_state
+        if not bot_state.is_pattern_enabled("intraday", "VWAP_EXT_RIDE"):
+            return "", 0, ""
+        if t < time(11, 0) or not ind.vwap or ind.vwap <= 0:
+            return "", 0, ""
+        ext = (ltp - ind.vwap) / ind.vwap * 100
+        if ext >= 0.8 and ind.macd_hist > 0 and ind.volume_ratio >= 1.1 and ind.ema9 > ind.ema21:
+            return "BUY", 4, "VWAP_EXT_RIDE"
+        if ext <= -0.8 and ind.macd_hist < 0 and ind.volume_ratio >= 1.1 and ind.ema9 < ind.ema21:
+            return "SELL", 4, "VWAP_EXT_RIDE"
+        return "", 0, ""
+
+    def _pat_high_tight_flag(self, sym, snap, ind, ltp, t):
+        """High-tight flag: >=0.8% morning run, then a tight 5-bar shelf
+        (<0.3% range) near the highs breaking out — continuation with a
+        defined invalidation. Mirrored for breakdowns."""
+        import bot_state
+        if not bot_state.is_pattern_enabled("intraday", "HIGH_TIGHT_FLAG"):
+            return "", 0, ""
+        if len(snap.candles_1min) < 8 or not ind.day_open or ind.day_open <= 0:
+            return "", 0, ""
+        run_pct = (ltp - ind.day_open) / ind.day_open * 100
+        last5 = snap.candles_1min[-6:-1]
+        hi5 = max(c.high for c in last5)
+        lo5 = min(c.low for c in last5)
+        tight = (hi5 - lo5) / ltp * 100 < 0.3
+        if run_pct >= 0.8 and tight and ltp > hi5 and ind.volume_ratio >= 1.3:
+            return "BUY", 5, "HIGH_TIGHT_FLAG"
+        if run_pct <= -0.8 and tight and ltp < lo5 and ind.volume_ratio >= 1.3:
+            return "SELL", 5, "HIGH_TIGHT_FLAG"
         return "", 0, ""
 
     # ── Pattern 18: FII_INSTITUTIONAL ────────────────────────────────────────
@@ -853,6 +934,10 @@ class OptionsAgent(BaseAgent):
                 self._pat_oi_surge,
                 self._pat_expiry_scalp,
                 self._pat_bb_walk_options,
+                self._pat_morning_thrust_opt,
+                self._pat_stochrsi_trend_opt,
+                self._pat_index_trend_ride_opt,
+                self._pat_power_hour_opt,
                 self._pat_pcr_extreme,
                 self._pat_gamma_flip,
                 self._pat_skew_momentum,
@@ -1254,6 +1339,76 @@ class OptionsAgent(BaseAgent):
         if (all(c.close <= bb_l for c in last3)
                 and ind.volume_ratio >= 1.3 and ind.macd_hist < 0):
             return "PE", 5, "BB_WALK_OPT"
+        return "", 0, ""
+
+    def _pat_morning_thrust_opt(self, sym, snap, ind, ltp, t):
+        """Morning thrust: >=0.5% impulse off the open by 9:35-10:15 with
+        volume and MACD alignment → directional premium while theta is
+        cheapest (whole day of runway)."""
+        import bot_state
+        if not bot_state.is_pattern_enabled("options", "MORNING_THRUST_OPT"):
+            return "", 0, ""
+        if not (time(9, 35) <= t <= time(10, 15)):
+            return "", 0, ""
+        if not ind.day_open or ind.day_open <= 0:
+            return "", 0, ""
+        run = (ltp - ind.day_open) / ind.day_open * 100
+        if run >= 0.5 and ind.volume_ratio >= 1.5 and ind.macd_hist > 0 and ind.ema9 > ind.ema21:
+            return "CE", 5, "MORNING_THRUST_OPT"
+        if run <= -0.5 and ind.volume_ratio >= 1.5 and ind.macd_hist < 0 and ind.ema9 < ind.ema21:
+            return "PE", 5, "MORNING_THRUST_OPT"
+        return "", 0, ""
+
+    def _pat_stochrsi_trend_opt(self, sym, snap, ind, ltp, t):
+        """Trend-filtered StochRSI: the proven STOCHRSI_OPTIONS cross, taken
+        ONLY with full EMA alignment — buys dips inside trends instead of
+        counter-trend knife-catches."""
+        import bot_state
+        if not bot_state.is_pattern_enabled("options", "STOCHRSI_TREND_OPT"):
+            return "", 0, ""
+        if (ind.ema9 > ind.ema21 > ind.ema50 > 0
+                and ind.stoch_rsi_k > ind.stoch_rsi_d and ind.stoch_rsi_k < 40
+                and ind.volume_ratio >= 1.2):
+            return "CE", 5, "STOCHRSI_TREND_OPT"
+        if (0 < ind.ema9 < ind.ema21 < ind.ema50
+                and ind.stoch_rsi_k < ind.stoch_rsi_d and ind.stoch_rsi_k > 60
+                and ind.volume_ratio >= 1.2):
+            return "PE", 5, "STOCHRSI_TREND_OPT"
+        return "", 0, ""
+
+    def _pat_index_trend_ride_opt(self, sym, snap, ind, ltp, t):
+        """Afternoon trend-day ride: after 11:30 the day is one-sided
+        (>=0.6% from open, price beyond VWAP, MACD aligned) → premium in the
+        trend direction into the close-side push. Entries still respect the
+        14:00 theta cutoff upstream."""
+        import bot_state
+        if not bot_state.is_pattern_enabled("options", "INDEX_TREND_RIDE_OPT"):
+            return "", 0, ""
+        if t < time(11, 30) or not ind.day_open or ind.day_open <= 0 or not ind.vwap:
+            return "", 0, ""
+        run = (ltp - ind.day_open) / ind.day_open * 100
+        if run >= 0.6 and ltp > ind.vwap and ind.macd_hist > 0:
+            return "CE", 4, "INDEX_TREND_RIDE_OPT"
+        if run <= -0.6 and ltp < ind.vwap and ind.macd_hist < 0:
+            return "PE", 4, "INDEX_TREND_RIDE_OPT"
+        return "", 0, ""
+
+    def _pat_power_hour_opt(self, sym, snap, ind, ltp, t):
+        """Pre-cutoff power move: 13:15-13:55 three same-direction closes
+        with volume — catches the 14:00-15:15 institutional push just before
+        the entry cutoff."""
+        import bot_state
+        if not bot_state.is_pattern_enabled("options", "POWER_HOUR_OPT"):
+            return "", 0, ""
+        if not (time(13, 15) <= t <= time(13, 55)) or len(snap.candles_1min) < 3:
+            return "", 0, ""
+        last3 = snap.candles_1min[-3:]
+        if (all(c.close > c.open for c in last3) and ind.volume_ratio >= 1.4
+                and ind.macd_hist > 0):
+            return "CE", 4, "POWER_HOUR_OPT"
+        if (all(c.close < c.open for c in last3) and ind.volume_ratio >= 1.4
+                and ind.macd_hist < 0):
+            return "PE", 4, "POWER_HOUR_OPT"
         return "", 0, ""
 
     def _pat_strangle_sell(self, sym, snap, ind, ltp, t):
@@ -2227,6 +2382,7 @@ class SwingAgent(BaseAgent):
             self._pat_prev_day_high, self._pat_weekly_vwap_pull,
             self._pat_adx_trend_confirm, self._pat_fii_swing,
             self._pat_weekly_structure_break, self._pat_ema200_retest, self._pat_hma_swing,
+            self._pat_ema21_pullback_swing, self._pat_macd_zero_turn_swing,
         ):
             try:
                 action, base, pname = pat_fn(sym, snap, ind, ltp)
@@ -2281,6 +2437,36 @@ class SwingAgent(BaseAgent):
                 and ind.ema21 > ind.ema50 and 40 < ind.rsi_14 < 60
                 and ind.volatility != "HIGH"):
             return "BUY", 4, "EMA50_BOUNCE"
+        return "", 0, ""
+
+    def _pat_ema21_pullback_swing(self, sym, snap, ind, ltp):
+        """Shallow pullback to EMA21 inside a full bull stack — enters the
+        strongest trends on their first rest instead of waiting for the
+        (deeper, rarer) EMA50 tag."""
+        import bot_state
+        if not bot_state.is_pattern_enabled("swing", "EMA21_PULLBACK_SWING"):
+            return "", 0, ""
+        if (ind.ema21 > 0 and ind.ema9 > ind.ema21 > ind.ema50 > ind.ema200 > 0
+                and abs(ltp - ind.ema21) / ind.ema21 < 0.008
+                and 40 < ind.rsi_14 < 62 and ind.macd_hist > 0):
+            return "BUY", 4, "EMA21_PULLBACK_SWING"
+        return "", 0, ""
+
+    def _pat_macd_zero_turn_swing(self, sym, snap, ind, ltp):
+        """MACD histogram turning positive while the long-term stack is
+        bullish — momentum re-igniting inside an existing uptrend (mirror
+        short in a bear stack)."""
+        import bot_state
+        if not bot_state.is_pattern_enabled("swing", "MACD_ZERO_TURN_SWING"):
+            return "", 0, ""
+        if (ind.ema50 > ind.ema200 > 0 and 0 < ind.macd_hist
+                and ltp > ind.ema50 and 45 < ind.rsi_14 < 68
+                and ind.volume_ratio >= 1.1):
+            return "BUY", 3, "MACD_ZERO_TURN_SWING"
+        if (0 < ind.ema50 < ind.ema200 and ind.macd_hist < 0
+                and ltp < ind.ema50 and 32 < ind.rsi_14 < 55
+                and ind.volume_ratio >= 1.1):
+            return "SELL", 3, "MACD_ZERO_TURN_SWING"
         return "", 0, ""
 
     # ── Pattern 2 ─────────────────────────────────────────────────────────────
@@ -2599,6 +2785,7 @@ class ScalpingAgent(BaseAgent):
         self._last_signal_dir:   dict = {}
         self._loss_streak:       dict = {}
         self._cooldown_until:    dict = {}
+        self._macd_hist_run:     dict = {}   # last 3 macd_hist values per symbol (MOMENTUM_STACK)
 
     # ── Entry ─────────────────────────────────────────────────────────────────
 
@@ -2617,6 +2804,7 @@ class ScalpingAgent(BaseAgent):
         self._prev_st_dir[sym]        = ind.supertrend_dir
         self._prev_stochrsi_k[sym]    = ind.stoch_rsi_k
         self._prev_hma_dir_sc[sym]    = ind.hma_dir
+        self._macd_hist_run[sym]      = (self._macd_hist_run.get(sym, []) + [ind.macd_hist])[-3:]
         self._prev_williams_sc[sym]   = ind.williams_r
         self._prev_squeeze_sc[sym]    = ind.squeeze_on
         self._prev_macd_hist_sc[sym]  = ind.macd_hist
@@ -2936,6 +3124,62 @@ class ScalpingAgent(BaseAgent):
             return "SELL", "RSI7_SNAP"
         if prev_rsi7 < 20 and ind.rsi_7 > 24 and ind.macd_hist > 0 and ind.volume_ratio >= 1.2:
             return "BUY",  "RSI7_SNAP"
+
+        # ── Evidence-derived batch (v6): persistence variants of the proven
+        # BB_BAND_WALK (+265% net) / SUPERTREND_FLIP (+66% net) families ──
+
+        # 18. BAND_WALK_3X — 3-close band walk with heavier volume: the
+        # higher-conviction big brother of BB_BAND_WALK's 2-close trigger.
+        if _bs.is_pattern_enabled("scalping", "BAND_WALK_3X"):
+            if len(snap.candles_1min) >= 3 and ind.bb_upper and ind.bb_upper > 0:
+                last3 = snap.candles_1min[-3:]
+                if all(c.close > ind.bb_upper for c in last3) and ind.volume_ratio >= 1.5:
+                    return "BUY",  "BAND_WALK_3X"
+                if all(c.close < ind.bb_lower for c in last3) and ind.volume_ratio >= 1.5:
+                    return "SELL", "BAND_WALK_3X"
+
+        # 19. SUPERTREND_PULLBACK — trend intact, price tags the supertrend
+        # line and bounces: persistence entry instead of chasing the flip.
+        if _bs.is_pattern_enabled("scalping", "SUPERTREND_PULLBACK"):
+            st = getattr(ind, "supertrend", 0.0)
+            if st and st > 0 and len(snap.candles_1min) >= 1:
+                c = snap.candles_1min[-1]
+                near = abs(ltp - st) / st < 0.0015
+                if (ind.supertrend_dir == "UP" and near and c.close > c.open
+                        and ind.volume_ratio >= 1.2):
+                    return "BUY",  "SUPERTREND_PULLBACK"
+                if (ind.supertrend_dir == "DOWN" and near and c.close < c.open
+                        and ind.volume_ratio >= 1.2):
+                    return "SELL", "SUPERTREND_PULLBACK"
+
+        # 20. MOMENTUM_STACK — MACD histogram expanding 3 ticks in a row with
+        # RSI in the drive zone and VWAP side agreement: stacked momentum,
+        # not a crossover (crossovers are the killed family).
+        if _bs.is_pattern_enabled("scalping", "MOMENTUM_STACK"):
+            hist = self._macd_hist_run.get(sym, [])
+            if (len(hist) >= 3 and ind.vwap and ind.vwap > 0
+                    and ind.volume_ratio >= 1.3):
+                rising  = hist[-3] < hist[-2] < hist[-1] and hist[-1] > 0
+                falling = hist[-3] > hist[-2] > hist[-1] and hist[-1] < 0
+                if rising and 55 <= ind.rsi_7 <= 82 and ltp > ind.vwap:
+                    return "BUY",  "MOMENTUM_STACK"
+                if falling and 18 <= ind.rsi_7 <= 45 and ltp < ind.vwap:
+                    return "SELL", "MOMENTUM_STACK"
+
+        # 21. RANGE_BREAK_RETEST — 20-bar high/low breaks, then the retest
+        # holds (old resistance = new support): entry with defined risk.
+        if _bs.is_pattern_enabled("scalping", "RANGE_BREAK_RETEST"):
+            if len(snap.candles_1min) >= 22:
+                base_ = snap.candles_1min[-22:-2]
+                hi20 = max(c.high for c in base_)
+                lo20 = min(c.low for c in base_)
+                brk, rt = snap.candles_1min[-2], snap.candles_1min[-1]
+                if (brk.close > hi20 and rt.low >= hi20 * 0.9995 and ltp > brk.close
+                        and ind.volume_ratio >= 1.2):
+                    return "BUY",  "RANGE_BREAK_RETEST"
+                if (brk.close < lo20 and rt.high <= lo20 * 1.0005 and ltp < brk.close
+                        and ind.volume_ratio >= 1.2):
+                    return "SELL", "RANGE_BREAK_RETEST"
 
         return "HOLD", ""
 
@@ -3358,6 +3602,10 @@ class FuturesAgent(BaseAgent):
             self._pat_institutional_flow,
             self._pat_ema200_bounce,
             self._pat_bb_walk_futures,
+            self._pat_open_drive_fut,
+            self._pat_vwap_magnet_fade,
+            self._pat_squeeze_walk_fut,
+            self._pat_adx_trend_ride,
         ]
         for pat_fn in patterns:
             try:
@@ -3894,6 +4142,91 @@ class FuturesAgent(BaseAgent):
             return "SHORT", 5, "BB_WALK_FUT"
         return "", 0, ""
 
+    def _pat_open_drive_fut(self, sym, snap, ind, ltp, t):
+        """Open-drive auction: the first 15 bars move one way off the open
+        (>=0.4%) with no meaningful retrace — statistically the strongest
+        trend-day tell on indices. Enter 9:31-10:00 only."""
+        import bot_state
+        if not bot_state.is_pattern_enabled("futures", "OPEN_DRIVE_FUT"):
+            return "", 0, ""
+        if not (time(9, 31) <= t <= time(10, 0)) or len(snap.candles_1min) < 8:
+            return "", 0, ""
+        if not ind.day_open or ind.day_open <= 0:
+            return "", 0, ""
+        run = (ltp - ind.day_open) / ind.day_open * 100
+        lo = min(c.low for c in snap.candles_1min[-15:])
+        hi = max(c.high for c in snap.candles_1min[-15:])
+        if run >= 0.4 and (ind.day_open - lo) / ind.day_open * 100 < 0.15 and ind.volume_ratio >= 1.2:
+            return "LONG", 5, "OPEN_DRIVE_FUT"
+        if run <= -0.4 and (hi - ind.day_open) / ind.day_open * 100 < 0.15 and ind.volume_ratio >= 1.2:
+            return "SHORT", 5, "OPEN_DRIVE_FUT"
+        return "", 0, ""
+
+    def _pat_vwap_magnet_fade(self, sym, snap, ind, ltp, t):
+        """Late-day VWAP magnet: indices stretched >0.9% from VWAP after
+        13:00 with fading volume revert toward VWAP as intraday books square.
+        The mean-reversion counterpart to the trend patterns."""
+        import bot_state
+        if not bot_state.is_pattern_enabled("futures", "VWAP_MAGNET_FADE"):
+            return "", 0, ""
+        if t < time(13, 0) or not ind.vwap or ind.vwap <= 0:
+            return "", 0, ""
+        ext = (ltp - ind.vwap) / ind.vwap * 100
+        fading = ind.volume_ratio < 1.0
+        if ext >= 0.9 and fading and ind.rsi_14 > 65:
+            return "SHORT", 4, "VWAP_MAGNET_FADE"
+        if ext <= -0.9 and fading and ind.rsi_14 < 35:
+            return "LONG", 4, "VWAP_MAGNET_FADE"
+        return "", 0, ""
+
+    def _pat_squeeze_walk_fut(self, sym, snap, ind, ltp, t):
+        """Squeeze-then-walk: a BB squeeze released within the last 10 bars
+        AND price now walking the band (3 closes outside) — the compressed-
+        energy version of BB_WALK_FUT, higher conviction."""
+        import bot_state
+        if not bot_state.is_pattern_enabled("futures", "SQUEEZE_WALK_FUT"):
+            return "", 0, ""
+        if len(snap.candles_1min) < 3 or ind.squeeze_on:
+            return "", 0, ""
+        if not getattr(self, "_squeeze_released_at", None):
+            self._squeeze_released_at = {}
+        if ind.squeeze_on is False and getattr(ind, "squeeze_momentum", 0) != 0:
+            self._squeeze_released_at.setdefault(sym, t)
+        rel = self._squeeze_released_at.get(sym)
+        if not rel:
+            return "", 0, ""
+        mins_since = (t.hour * 60 + t.minute) - (rel.hour * 60 + rel.minute)
+        if not (0 <= mins_since <= 10):
+            return "", 0, ""
+        bb_u, bb_l = getattr(ind, 'bb_upper', 0.0), getattr(ind, 'bb_lower', 0.0)
+        if not (bb_u > 0 and bb_l > 0):
+            return "", 0, ""
+        last3 = snap.candles_1min[-3:]
+        if all(c.close >= bb_u for c in last3) and ind.volume_ratio >= 1.2:
+            return "LONG", 6, "SQUEEZE_WALK_FUT"
+        if all(c.close <= bb_l for c in last3) and ind.volume_ratio >= 1.2:
+            return "SHORT", 6, "SQUEEZE_WALK_FUT"
+        return "", 0, ""
+
+    def _pat_adx_trend_ride(self, sym, snap, ind, ltp, t):
+        """ADX-confirmed persistence: ADX>=28 (established trend) + 4 same-
+        direction closes + Supertrend agreement. Rides what is already
+        proven to be moving — no prediction."""
+        import bot_state
+        if not bot_state.is_pattern_enabled("futures", "ADX_TREND_RIDE"):
+            return "", 0, ""
+        adx = getattr(ind, "adx_14", 0.0)
+        if adx < 28 or len(snap.candles_1min) < 4:
+            return "", 0, ""
+        last4 = snap.candles_1min[-4:]
+        if (all(c.close > c.open for c in last4) and ind.supertrend_dir == "UP"
+                and ind.volume_ratio >= 1.1):
+            return "LONG", 5, "ADX_TREND_RIDE"
+        if (all(c.close < c.open for c in last4) and ind.supertrend_dir == "DOWN"
+                and ind.volume_ratio >= 1.1):
+            return "SHORT", 5, "ADX_TREND_RIDE"
+        return "", 0, ""
+
     def _is_rollover_period(self) -> bool:
         """True if today is within 3 calendar days BEFORE NSE monthly futures expiry (last Thursday)."""
         from datetime import date, timedelta
@@ -4125,7 +4458,8 @@ class MeanReversionAgent(BaseAgent):
                        self._pat_williams_extreme, self._pat_macd_divergence,
                        self._pat_price_zscore, self._pat_rsi_divergence,
                        self._pat_atr_exhaustion, self._pat_bb_width_squeeze,
-                       self._pat_rsi_triple_extreme, self._pat_eod_reversion):
+                       self._pat_rsi_triple_extreme, self._pat_eod_reversion,
+                       self._pat_late_day_vwap_revert):
             try:
                 action, base, pname = pat_fn(sym, snap, ind, ltp, t)
             except Exception:
@@ -4286,6 +4620,23 @@ class MeanReversionAgent(BaseAgent):
             return "SELL", 4, "EOD_REVERSION"
         if at_low and ind.rsi_14 <= 30:
             return "BUY", 4, "EOD_REVERSION"
+        return "", 0, ""
+
+    def _pat_late_day_vwap_revert(self, sym, snap, ind, ltp, t):
+        """Late-day VWAP reversion: after 14:00, a >=1% stretch from VWAP
+        with an exhausted RSI reverts toward VWAP as MIS books unwind —
+        tighter, earlier cousin of EOD_REVERSION (its habitat is the same
+        range-day regime this agent is gated to)."""
+        import bot_state
+        if not bot_state.is_pattern_enabled("mean_reversion", "LATE_DAY_VWAP_REVERT"):
+            return "", 0, ""
+        if t < time(14, 0) or not ind.vwap or ind.vwap <= 0:
+            return "", 0, ""
+        ext = (ltp - ind.vwap) / ind.vwap * 100
+        if ext >= 1.0 and ind.rsi_14 >= 68 and ind.volume_ratio < 1.2:
+            return "SELL", 4, "LATE_DAY_VWAP_REVERT"
+        if ext <= -1.0 and ind.rsi_14 <= 32 and ind.volume_ratio < 1.2:
+            return "BUY", 4, "LATE_DAY_VWAP_REVERT"
         return "", 0, ""
 
     def _pat_macd_divergence(self, sym, snap, ind, ltp, t):
@@ -4511,7 +4862,7 @@ class MomentumAgent(BaseAgent):
                        self._pat_higher_high_confirm, self._pat_breakout_retest,
                        self._pat_acceleration, self._pat_gap_momentum,
                        self._pat_fii_momentum, self._pat_velocity_surge,
-                       self._pat_relative_strength):
+                       self._pat_relative_strength, self._pat_rs_breakout):
             try:
                 action, base, pname = pat_fn(sym, snap, ind, ltp, t)
             except Exception:
@@ -4801,6 +5152,37 @@ class MomentumAgent(BaseAgent):
             return "BUY", 5, "RELATIVE_STRENGTH"
         if rel <= -1.2 and ind.volume_ratio >= 1.2 and ind.ema9 < ind.ema21:
             return "SELL", 5, "RELATIVE_STRENGTH"
+        return "", 0, ""
+
+    def _pat_rs_breakout(self, sym, snap, ind, ltp, t):
+        """RS + structure: the stock leads NIFTY (rel >= 0.8) AND breaks its
+        own 30-bar high with volume — rotation leadership confirmed by price
+        structure, not just divergence. Trend-window only (>= 10:15)."""
+        import bot_state
+        if not bot_state.is_pattern_enabled("momentum", "RS_BREAKOUT"):
+            return "", 0, ""
+        if t < time(10, 15) or sym in ("NIFTY", "BANKNIFTY"):
+            return "", 0, ""
+        if len(snap.candles_1min) < 32:
+            return "", 0, ""
+        try:
+            from tick_engine import tick_engine
+            _tick, _n_ind = tick_engine.latest("NIFTY")
+        except Exception:
+            return "", 0, ""
+        if not _tick or _n_ind is None:
+            return "", 0, ""
+        rel = ind.change_pct - _n_ind.change_pct
+        base_ = snap.candles_1min[-32:-2]
+        hi30 = max(c.high for c in base_)
+        lo30 = min(c.low for c in base_)
+        prev_c = snap.candles_1min[-2]
+        if (rel >= 0.8 and prev_c.close <= hi30 and ltp > hi30
+                and ind.volume_ratio >= 1.3):
+            return "BUY", 5, "RS_BREAKOUT"
+        if (rel <= -0.8 and prev_c.close >= lo30 and ltp < lo30
+                and ind.volume_ratio >= 1.3):
+            return "SELL", 5, "RS_BREAKOUT"
         return "", 0, ""
 
     # ── Context bonus (0-8) ───────────────────────────────────────────────────
