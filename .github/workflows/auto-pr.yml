@@ -51,10 +51,21 @@ jobs:
                 throw e;
               }
             }
-            await github.rest.pulls.merge({
-              owner: context.repo.owner, repo: context.repo.repo,
-              pull_number: pr.number, merge_method: 'squash',
-              commit_title: pr.title,
-              commit_message: pr.body || '',
-            });
-            core.info(`PR #${pr.number} squash-merged into main`);
+            try {
+              await github.rest.pulls.merge({
+                owner: context.repo.owner, repo: context.repo.repo,
+                pull_number: pr.number, merge_method: 'squash',
+                commit_title: pr.title,
+                commit_message: pr.body || '',
+              });
+              core.info(`PR #${pr.number} squash-merged into main`);
+            } catch (e) {
+              // Benign race: auto-merge.yml can merge the same PR concurrently.
+              const { data: fresh } = await github.rest.pulls.get({
+                owner: context.repo.owner, repo: context.repo.repo,
+                pull_number: pr.number,
+              });
+              if (fresh.merged) {
+                core.info(`PR #${pr.number} merged concurrently — OK`);
+              } else { throw e; }
+            }
