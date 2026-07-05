@@ -2689,7 +2689,6 @@ def t_futures_filter_watchlist_approves_indices():
     processes their ticks (subscribed via nifty100.INDEX_SYMBOLS) instead of
     dropping them as unapproved."""
     agent = FuturesAgent()
-    # Equity-scanner watchlist with only stocks — none of which futures trades.
     approved = agent.filter_watchlist([
         {"symbol": "RELIANCE", "exchange": "NSE"},
         {"symbol": "SBIN", "exchange": "NSE"},
@@ -2697,10 +2696,19 @@ def t_futures_filter_watchlist_approves_indices():
     syms = {i["symbol"] for i in approved}
     assert "NIFTY" in syms and "BANKNIFTY" in syms, \
         f"futures watchlist must include NIFTY & BANKNIFTY, got {syms}"
-    # Only index underlyings it can actually trade (LOT_SIZES), no stocks.
-    assert syms == set(FuturesAgent.LOT_SIZES), \
-        f"futures watchlist must be exactly the LOT_SIZES indices, got {syms}"
-    assert "RELIANCE" not in syms and "SBIN" not in syms
+    # Indices + the configured stock-futures names (settings-driven), and
+    # every symbol has a KNOWN lot size — never guess.
+    assert syms == set(agent._tradeable_lots()), \
+        f"futures watchlist must equal the tradeable-lot set, got {syms}"
+    assert "RELIANCE" in syms and agent._tradeable_lots()["RELIANCE"] == 250
+    # A stock NOT in settings stays out even if the scanner offers it
+    from config import settings as _s
+    _old = _s.futures_stock_symbols
+    try:
+        _s.futures_stock_symbols = "RELIANCE"
+        assert "SBIN" not in {i["symbol"] for i in agent.filter_watchlist([])}
+    finally:
+        _s.futures_stock_symbols = _old
 
 run("futures TSL config present in TRAIL_CONFIGS",        t_futures_tsl_config_present)
 run("futures TSL register uses futures initial SL",       t_futures_tsl_register_uses_futures_config)

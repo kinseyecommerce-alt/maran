@@ -330,6 +330,20 @@ class Settings(BaseSettings):
     # Used only when the learner leaves scalping's book empty.
     scalping_book_seed: str = "WIPRO,INFY,HDFCBANK,SBIN,TITAN,AXISBANK"
 
+    # Stock futures for FuturesAgent (beyond its index set). Liquid F&O names
+    # with lot sizes known to kite_client._FON_LOT_SIZES; stocks give futures
+    # the selection edge indices cannot (its index-only replay showed the
+    # 2-chart universe was the binding constraint). Validated per-symbol by
+    # replay before any name earns permanence.
+    futures_stock_symbols: str = (
+        "RELIANCE,HDFCBANK,ICICIBANK,SBIN,AXISBANK,TATASTEEL,TITAN,INFY,TCS,WIPRO"
+    )
+
+    # Options approved-book seed (UNIONed into the learner book): symbols
+    # where the real OptionsAgent called direction net-positively over the
+    # 62-day replay (TITAN +9.6%, ICICIBANK +5.4%, RELIANCE +2.8%, AXISBANK +1.0%).
+    options_book_seed: str = "TITAN,ICICIBANK,RELIANCE,AXISBANK"
+
     # Regime entry gate: block NEW entries for agents in regimes where the
     # 62-day replay proved they lose. Format "REGIME:agent,agent;REGIME:...".
     # Evidence (gross P&L by NIFTY day-type, 62 real days × 12 symbols):
