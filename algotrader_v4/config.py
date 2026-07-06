@@ -407,7 +407,11 @@ class Settings(BaseSettings):
     # Like intraday, it runs ungated except BLACK_SWAN — the measurement
     # conditions that produced the positive number.
     regime_blocked_agents: str = (
-        "UNKNOWN:momentum,mean_reversion;"
+        # Options benched pre-10:15: bought options bleed theta, and firing a
+        # "trend" contract before the day's regime is even confirmed is the
+        # single biggest options loss source (8/12 losers on 2026-07-06 all
+        # entered in this window). No options entries until the trend is known.
+        "UNKNOWN:options,momentum,mean_reversion;"
         "BULL_TREND:momentum,mean_reversion,pairs;"
         "BULL_VOLATILE:momentum,mean_reversion,pairs;"
         "BEAR_TREND:options,momentum,mean_reversion,pairs;"

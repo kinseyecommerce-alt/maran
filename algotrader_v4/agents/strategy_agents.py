@@ -861,6 +861,14 @@ class OptionsAgent(BaseAgent):
     MIN_SCORE    = 4        # minimum score to fire at 0.25× size
     MAX_IV_BUY   = 72       # hard block above this IV rank
     COOL_S       = 120      # 2-min per symbol per direction
+    # Theta time-stop: a long option that hasn't gone at least MIN_HOLD_PROFIT%
+    # into profit within MAX_HOLD_MIN minutes is bleeding theta with no thesis
+    # payoff — cut it rather than ride it to the 15:25 squareoff. On 2026-07-06
+    # every options loser was held 5-6h; a 90-min stop would have exited them
+    # while the premium loss was still small.
+    MAX_HOLD_MIN     = 90     # minutes a long option may drift before theta-stop
+    MIN_HOLD_PROFIT  = 15.0   # premium % it must reach by then to keep holding
+    FLATTEN_AFTER    = time(14, 30)   # hard-flatten any held long option after this
 
     # ── Main entry loop ───────────────────────────────────────────────────────
 
@@ -885,6 +893,10 @@ class OptionsAgent(BaseAgent):
         self._prev_skew_vel:       dict = {}   # sym → float (skew velocity for SKEW_MOMENTUM)
         self._prev_risk_rev:       dict = {}   # sym → float (prev risk reversal for SKEW_MOMENTUM CE)
         self._prev_gex_val:        dict = {}   # sym → float (GEX zero-cross for GAMMA_FLIP)
+        # contract tradingsymbol → first-seen monotonic clock, for the theta
+        # time-stop in should_exit_position (approximates hold duration without
+        # needing an entry timestamp on the broker position dict).
+        self._entry_clock:         dict = {}
 
     def evaluate_tick(self, snap: MarketSnapshot) -> tuple[str, Optional[dict]]:
         ind = snap.indicators
@@ -1081,6 +1093,12 @@ class OptionsAgent(BaseAgent):
         self._update_state(sym, ind, ltp)
         # BLACK SWAN: always use limit orders (never market orders for options in panic)
         _use_limit = snap.black_swan_active
+
+        # Stamp the hold-clock for the theta time-stop at (re-)entry, keyed by
+        # the contract we're about to trade — overwrites any stale timestamp
+        # left from an earlier position in the same contract.
+        import time as _t_mono
+        self._entry_clock[opt_sym] = _t_mono.monotonic()
 
         return action_dir, {
             "exchange":           "NFO",
@@ -2252,6 +2270,27 @@ class OptionsAgent(BaseAgent):
         chg = (prem - entry) / entry * 100
         if qty < 0:
             chg = -chg
+
+        # ── Theta time-stop (long options only) ──────────────────────────────
+        # A bought option loses to theta every minute it's held; holding one that
+        # isn't working to the 15:25 squareoff is the biggest realised-loss
+        # source. Stamp first-seen as a hold-start proxy, then cut a long option
+        # that hasn't reached MIN_HOLD_PROFIT% within MAX_HOLD_MIN, and hard-
+        # flatten any long option after FLATTEN_AFTER (late-day theta accel).
+        if qty > 0:
+            import time as _t_mono
+            _csym = pos.get("tradingsymbol", "") or ""
+            _now_m = _t_mono.monotonic()
+            _t0 = self._entry_clock.setdefault(_csym, _now_m)
+            _held_min = (_now_m - _t0) / 60.0
+            _now_clock = now_ist().time()
+            if _now_clock >= self.FLATTEN_AFTER:
+                self._entry_clock.pop(_csym, None)
+                return True, f"Late-day theta flatten (>{self.FLATTEN_AFTER.strftime('%H:%M')}) ₹{prem:.1f}"
+            if _held_min >= self.MAX_HOLD_MIN and chg < self.MIN_HOLD_PROFIT:
+                self._entry_clock.pop(_csym, None)
+                return True, (f"Theta time-stop: held {_held_min:.0f}m, "
+                              f"only {chg:+.0f}% — cut before further decay")
 
         # Contract metadata parsed from the tradingsymbol — position dicts carry
         # no "option_type"/"strike" keys.

@@ -159,7 +159,8 @@ def _regime_at(sorted_keys: list, timeline: dict, ts) -> str:
 
 def replay(symbols: list[str], max_days: int | None = None,
            start: str | None = None, end: str | None = None,
-           tag: str = "", gating: bool = False, tf_min: int = 1) -> dict:
+           tag: str = "", gating: bool = False, tf_min: int = 1,
+           capital_per_agent: float = 100_000.0) -> dict:
     import bot_state as _bs
     dates, per_sym = load_days(symbols, tf_min)
     if start:
@@ -260,7 +261,22 @@ def replay(symbols: list[str], max_days: int | None = None,
         trackers["Swing"].squareoff_all(final_px, sq_ts, keep=False)
 
     # ── Report ────────────────────────────────────────────────────────────
-    CAP = 100_000     # sizing used by AgentTracker
+    # Per-trade capital deployed, given each agent's pool (capital_per_agent).
+    # Mirrors risk_manager.max_capital_for_agent: equity agents split the pool
+    # across their max concurrent positions (a % return applies to that slice);
+    # options/futures are lot-based and deploy the whole pool per position, and
+    # their pnl is already premium-/margin-scaled above.
+    from config import settings as _rset
+    _MAXPOS = {"Intraday": _rset.max_intraday_positions,
+               "Scalping": _rset.max_scalping_positions,
+               "Swing":    _rset.max_swing_positions,
+               "Momentum": _rset.max_intraday_positions,
+               "MeanRev":  _rset.max_intraday_positions,
+               "Pairs":    _rset.max_intraday_positions}
+    def _per_trade_cap(agent: str) -> float:
+        mp = _MAXPOS.get(agent)
+        return capital_per_agent / max(mp, 1) if mp else capital_per_agent
+    CAP = capital_per_agent     # legacy default (used only if an agent is unmapped)
     # Round-trip cost as % of ₹1L notional, per product economics:
     #   equity MIS (intraday/scalping/momentum/meanrev/pairs): ~0.06%
     #     (brokerage 2×₹20 + STT 0.025% sell + txn/GST/stamp + slippage)
@@ -302,7 +318,8 @@ def replay(symbols: list[str], max_days: int | None = None,
         return t.pnl_pct * FUT_LEVERAGE
 
     print("\n" + "═" * 78)
-    print(f"  ACTUAL-AGENT REPLAY — {len(dates)} real days, {len(per_sym)} symbols, ₹1L/trade")
+    print(f"  ACTUAL-AGENT REPLAY — {len(dates)} real days, {len(per_sym)} symbols, "
+          f"₹{capital_per_agent/1e5:.0f}L pool/agent")
     print(f"  (Options rows PREMIUM-scaled: {OPT_LEVERAGE:.0f}× delta leverage − "
           f"{OPT_THETA_PCT_HR}%/hr theta, {COST_BY_AGENT['Options']}%/trade costs)")
     print(f"  (Futures rows MARGIN-scaled: {FUT_LEVERAGE:.0f}× notional/margin, "
@@ -332,10 +349,13 @@ def replay(symbols: list[str], max_days: int | None = None,
             by_sym[s][1] += 1
         best = max(by_pat.items(), key=lambda kv: kv[1][0])
         worst = min(by_pat.items(), key=lambda kv: kv[1][0])
+        _cap = _per_trade_cap(name)
         print(f"{name:12s} {len(ts_):6d} {wins/len(ts_)*100:6.1f} {gross:+8.2f} {net:+8.2f} "
-              f"₹{net/100*CAP:+10,.0f}  {best[0]}({best[1][0]:+.1f}) / {worst[0]}({worst[1][0]:+.1f})")
+              f"₹{net/100*_cap:+11,.0f}  {best[0]}({best[1][0]:+.1f}) / {worst[0]}({worst[1][0]:+.1f})")
         summary[name] = {"trades": len(ts_), "win_rate": round(wins/len(ts_)*100, 1),
                          "gross_pct": round(gross, 2), "net_pct": round(net, 2),
+                         "per_trade_capital": round(_cap, 0),
+                         "net_inr": round(net/100*_cap, 0),
                          "net_inr_1L": round(net/100*CAP, 0),
                          **({"underlying_gross_pct":
                              round(sum(t.pnl_pct for t in ts_), 2),
@@ -366,7 +386,10 @@ if __name__ == "__main__":
                     help="apply the evidence-based regime entry gate (causal NIFTY detector)")
     ap.add_argument("--tf", type=int, default=1, choices=[1, 5, 15, 30],
                     help="bar timeframe in minutes (resampled from 1m data)")
+    ap.add_argument("--capital", type=float, default=100_000.0,
+                    help="capital pool per agent (₹); equity agents split it "
+                         "across max concurrent positions, F&O deploy the full pool")
     args = ap.parse_args()
     replay([s.strip().upper() for s in args.symbols.split(",") if s.strip()],
            args.days, args.start, args.end, args.tag, gating=args.regime_gating,
-           tf_min=args.tf)
+           tf_min=args.tf, capital_per_agent=args.capital)
