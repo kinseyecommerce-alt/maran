@@ -377,6 +377,7 @@ class AgentEnablesRequest(BaseModel):
     scalping: bool | None = None
 
 class CapitalAllocationRequest(BaseModel):
+    capital_per_agent:       float | None = Field(None, ge=10000, le=10_000_000)
     total_capital:           float | None = Field(None, ge=10000, le=100_000_000)
     intraday_capital_pct:    float | None = Field(None, ge=0, le=100)
     swing_capital_pct:       float | None = Field(None, ge=0, le=100)
@@ -1751,37 +1752,24 @@ def set_agent_enables(req: AgentEnablesRequest):
 # ── Capital Allocation ──────────────────────────────────────────────────────────
 @app.get("/settings/capital-allocation", tags=["Settings"])
 def get_capital_allocation():
-    intraday_bucket = round(settings.total_capital * settings.intraday_capital_pct / 100)
-    swing_bucket    = round(settings.total_capital * settings.swing_capital_pct    / 100)
-    options_bucket  = round(settings.total_capital * settings.options_capital_pct  / 100)
-    futures_bucket  = round(settings.total_capital * settings.futures_capital_pct  / 100)
+    from risk_manager import risk_manager as _rm, _AGENT_MAX_POS
+    per_agent_rupees = {name: round(_rm.max_capital_for_agent(name))
+                         for name in _AGENT_MAX_POS}
     return {
-        "total_capital":        settings.total_capital,
-        "intraday_capital_pct": settings.intraday_capital_pct,
-        "swing_capital_pct":    settings.swing_capital_pct,
-        "options_capital_pct":  settings.options_capital_pct,
-        "futures_capital_pct":  settings.futures_capital_pct,
+        "capital_per_agent": settings.capital_per_agent,
+        "total_capital":     settings.total_capital,
         "max_positions": {
             "intraday": settings.max_intraday_positions,
             "scalping":  settings.max_scalping_positions,
             "swing":     settings.max_swing_positions,
         },
-        "per_type_rupees": {
-            "intraday": intraday_bucket,
-            "swing":    swing_bucket,
-            "options":  options_bucket,
-            "futures":  futures_bucket,
-        },
-        "per_trade_rupees": {
-            "intraday": round(intraday_bucket / max(settings.max_intraday_positions, 1)),
-            "scalping":  round(intraday_bucket / max(settings.max_scalping_positions, 1)),
-            "swing":     round(swing_bucket    / max(settings.max_swing_positions,    1)),
-            "options":   options_bucket,
-        },
-        "agent_buckets": {
-            "intraday": "intraday", "scalping": "intraday",
-            "swing": "swing",       "options": "options",  "futures": "futures",
-        }
+        "per_agent_rupees": per_agent_rupees,
+        # Legacy fields — no longer used for sizing (each agent has its own
+        # flat capital_per_agent pool now), kept for dashboards still reading them.
+        "intraday_capital_pct": settings.intraday_capital_pct,
+        "swing_capital_pct":    settings.swing_capital_pct,
+        "options_capital_pct":  settings.options_capital_pct,
+        "futures_capital_pct":  settings.futures_capital_pct,
     }
 
 @app.patch("/settings/capital-allocation", tags=["Settings"])
@@ -1791,6 +1779,7 @@ def patch_capital_allocation(req: CapitalAllocationRequest):
     provided = [p for p in pcts if p is not None]
     if len(provided) == 4 and round(sum(provided), 2) > 100:
         raise HTTPException(400, "Capital percentages exceed 100%")
+    if req.capital_per_agent       is not None: settings.capital_per_agent       = req.capital_per_agent
     if req.total_capital           is not None: settings.total_capital           = req.total_capital
     if req.intraday_capital_pct    is not None: settings.intraday_capital_pct    = req.intraday_capital_pct
     if req.swing_capital_pct       is not None: settings.swing_capital_pct       = req.swing_capital_pct

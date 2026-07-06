@@ -230,25 +230,6 @@ def compute_tx_costs(
     return round(brokerage + stt + exchange_txn + sebi + gst + stamp, 2)
 
 
-# Capital bucket mapping: agent name → trading-type bucket
-_AGENT_TO_BUCKET: dict[str, str] = {
-    "intraday":       "intraday",
-    "scalping":       "intraday",   # scalping shares the equity intraday pool
-    "mean_reversion": "intraday",   # equity MIS intraday agents share the intraday pool
-    "momentum":       "intraday",
-    "pairs":          "intraday",
-    "swing":          "swing",
-    "options":        "options",
-    "futures":        "futures",
-}
-
-_BUCKET_PCT_ATTR: dict[str, str] = {
-    "intraday": "intraday_capital_pct",
-    "swing":    "swing_capital_pct",
-    "options":  "options_capital_pct",
-    "futures":  "futures_capital_pct",
-}
-
 # Max-positions config attr per agent; None = lot-based (options/futures), no per-symbol split
 _AGENT_MAX_POS: dict[str, str | None] = {
     "intraday":       "max_intraday_positions",
@@ -375,17 +356,17 @@ class RiskManager:
         return True, "OK"
 
     def max_capital_for_agent(self, agent_name: str) -> float:
-        """Return per-symbol capital (₹) for an agent: bucket total ÷ max concurrent positions."""
-        bucket      = _AGENT_TO_BUCKET.get(agent_name, "intraday")
-        pct_attr    = _BUCKET_PCT_ATTR.get(bucket, "intraday_capital_pct")
-        bucket_total = settings.total_capital * getattr(settings, pct_attr, 25.0) / 100
-
+        """Return per-symbol capital (₹) for an agent: each strategy agent has
+        its own independent pool (settings.capital_per_agent) — no sharing
+        across siblings — divided by that agent's own max concurrent
+        positions. Lot-based agents (options/futures) get the full pool
+        (no per-symbol split; lot sizing divides it further)."""
         max_pos_attr = _AGENT_MAX_POS.get(agent_name)
         if max_pos_attr:
             max_pos = getattr(settings, max_pos_attr, settings.max_open_positions)
         else:
-            max_pos = 1   # lot-based agents (fno): return full bucket
-        return bucket_total / max(max_pos, 1)
+            max_pos = 1   # lot-based agents (fno): return full pool
+        return settings.capital_per_agent / max(max_pos, 1)
 
     def calculate_quantity(
         self,

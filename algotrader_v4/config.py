@@ -62,8 +62,11 @@ class Settings(BaseSettings):
     trading_mode: Literal["PAPER", "LIVE"] = "PAPER"
 
     # Risk — money-critical fields are validated (must be sane positive values)
-    max_daily_loss: float = Field(default=5000.0, gt=0)
-    max_position_size: float = Field(default=50000.0, gt=0)
+    # Scaled to the ₹10L-per-agent capital model below: max_position_size caps
+    # a single equity order at one agent's whole pool (no trade should ever
+    # need more), max_daily_loss is 2% of the 8-agent ₹80L book.
+    max_daily_loss: float = Field(default=160000.0, gt=0)
+    max_position_size: float = Field(default=1_000_000.0, gt=0)
     max_open_positions: int = 5
     stop_loss_pct: float = Field(default=1.5, gt=0, le=50)
     target_pct: float = 3.0
@@ -453,8 +456,16 @@ class Settings(BaseSettings):
     # simulator so paper trading works without a broker connection / off-hours.
     paper_use_live_data: bool = False
 
-    # Daily capital allocation by trading type
-    total_capital:          float = Field(default=500000.0, gt=0)  # total account capital (₹)
+    # Daily capital allocation. Each of the 8 strategy agents gets its own
+    # independent pool (capital_per_agent) — no sharing across siblings, so
+    # intraday/scalping/mean_reversion/momentum/pairs no longer split one
+    # bucket 5 ways. total_capital = capital_per_agent × len(ALL_AGENTS),
+    # used only for whole-book risk limits (portfolio VaR, god_mode sizing).
+    capital_per_agent:      float = Field(default=1_000_000.0, gt=0)  # ₹ per agent (₹10L)
+    total_capital:          float = Field(default=8_000_000.0, gt=0)  # whole-book capital (₹) — VaR/god_mode only
+    # Legacy per-type percentages — retained for the /settings/capital-allocation
+    # report endpoint's backward-compat fields; max_capital_for_agent() no
+    # longer reads these (each agent has its own flat pool above).
     intraday_capital_pct:   float = Field(default=40.0, ge=0, le=100)  # % for equity intraday MIS (intraday + scalping)
     swing_capital_pct:      float = Field(default=25.0, ge=0, le=100)  # % for equity delivery CNC (swing)
     options_capital_pct:    float = Field(default=25.0, ge=0, le=100)  # % for options premium NRML (fno)
