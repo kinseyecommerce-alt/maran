@@ -1010,7 +1010,8 @@ async def download_history(months: int = 3, symbols: Optional[str] = None,
     """Bulk-download multi-timeframe Kite OHLCV into the CSV cache
     (logs/historical_data/) that agents and the backtester read. Runs in a
     background thread; poll GET /market/history/status for progress.
-    universe="nifty100" downloads the full Nifty 100 (for historical_learner)."""
+    universe="nifty500" downloads the full Nifty 500 (for historical_learner);
+    "nifty100" downloads just the top 100."""
     import historical_downloader as hd
     if hd.is_running():
         raise HTTPException(409, "History download already running")
@@ -1039,7 +1040,7 @@ _learn_task: Optional[asyncio.Task] = None
 
 @app.post("/learn/run", tags=["Market"])
 async def learn_run(strategies: Optional[str] = None, symbols: Optional[str] = None):
-    """Backtest the Nifty 100 (or given symbols) across strategies and seed the
+    """Backtest the Nifty 500 (or given symbols) across strategies and seed the
     agents' brain: adaptive params (SL/target/RSI bands, status) + the
     approved-symbols gate used by filter_watchlist. Both persist to Postgres.
     Runs in the background; poll GET /learn/status."""
@@ -1052,8 +1053,8 @@ async def learn_run(strategies: Optional[str] = None, symbols: Optional[str] = N
     if symbols:
         sym_list = [s.strip().upper() for s in symbols.split(",") if s.strip()]
     else:
-        from nifty100 import NIFTY_100
-        sym_list = list(NIFTY_100)
+        from nifty100 import NIFTY_500
+        sym_list = list(NIFTY_500)
     _learn_task = asyncio.create_task(
         learn(sym_list, strat_list, resume=True, concurrency=4),
         name="historical_learn",

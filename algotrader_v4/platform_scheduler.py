@@ -174,7 +174,7 @@ class PlatformScheduler:
             return
         try:
             from historical_learner import learn, ALL_STRATEGIES
-            from nifty100 import NIFTY_100
+            from nifty100 import NIFTY_500
             # Clear the in-process result cache — otherwise a long-running
             # container re-serves yesterday's backtests instead of re-running
             # on the candles the 16:00 refresh just appended.
@@ -182,7 +182,7 @@ class PlatformScheduler:
             with backtest_engine._cache_lock:
                 backtest_engine._cache.clear()
             # resume=False: full re-learn on fresh data (results overwrite)
-            await learn(list(NIFTY_100), list(ALL_STRATEGIES),
+            await learn(list(NIFTY_500), list(ALL_STRATEGIES),
                         resume=False, concurrency=4)
             logger.info("[platform] Nightly learning complete")
         except Exception as exc:
@@ -356,12 +356,12 @@ class PlatformScheduler:
 
         # Build watchlist — Nifty 100 flag takes priority, then explicit list, then scanner
         if settings.use_nifty100_watchlist:
-            from nifty100 import get_strategy_watchlist, NIFTY_100, as_watchlist
+            from nifty100 import get_strategy_watchlist, NIFTY_500, as_watchlist
             if len(strategies) == 1:
                 watchlist = get_strategy_watchlist(strategies[0])
             else:
-                watchlist = as_watchlist(NIFTY_100)
-            logger.info("[platform] Using full Nifty 100 watchlist ({} symbols)", len(watchlist))
+                watchlist = as_watchlist(NIFTY_500)
+            logger.info("[platform] Using full Nifty 500 watchlist ({} symbols)", len(watchlist))
         elif settings.auto_start_watchlist:
             watchlist = [
                 {"symbol": s.strip(), "exchange": "NSE"}

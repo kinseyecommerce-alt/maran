@@ -1,6 +1,7 @@
 """
 nifty100.py
-Complete Nifty 100 constituent list (Nifty 50 + Nifty Next 50).
+Complete Nifty 100 constituent list (Nifty 50 + Nifty Next 50), plus the
+next 400 names that make up the full Nifty 500 (NIFTY_NEXT_400 / NIFTY_500).
 Used as the default watchlist when USE_NIFTY100_WATCHLIST=true.
 """
 from __future__ import annotations
@@ -40,22 +41,97 @@ NIFTY_NEXT_50 = [
 # ── Combined ──────────────────────────────────────────────────────────────────
 NIFTY_100 = NIFTY_50 + NIFTY_NEXT_50
 
-# Strategy-suitability hints (used to pre-filter per-strategy watchlists)
-# High-liquidity large-caps best for scalping; mid-caps better for swing
-SCALPING_UNIVERSE = [
-    "RELIANCE", "TCS", "HDFCBANK", "INFY", "ICICIBANK", "AXISBANK",
-    "KOTAKBANK", "SBIN", "BHARTIARTL", "LT", "WIPRO", "HCLTECH",
-    "ITC", "BAJFINANCE", "TMPV", "MARUTI", "ONGC", "NTPC",
-    "POWERGRID", "HINDALCO", "TATASTEEL", "JSWSTEEL", "COALINDIA",
-    "BAJAJ-AUTO", "HEROMOTOCO", "EICHERMOT", "TECHM", "M&M",
-    "INDUSINDBK", "ADANIPORTS",
+# ── Nifty 500 ranks 101-500 ────────────────────────────────────────────────────
+# Sourced from NSE's official constituent file (archives.nseindia.com/content/
+# indices/ind_nifty500list.csv, fetched 2026-07-06 — see data/nifty500_
+# constituents.csv), diffed against NIFTY_100 above (zero overlap, zero
+# transcription — machine-diffed from the CSV). NSE reconstitutes the index
+# semi-annually (Mar/Sep) — re-fetch the CSV and re-diff around those dates.
+NIFTY_NEXT_400 = [
+    "360ONE", "3MINDIA", "ACC", "ACMESOLAR", "AIAENG", "APLAPOLLO",
+    "AUBANK", "AWL", "AADHARHFC", "AARTIIND", "AAVAS", "ABBOTINDIA",
+    "ACE", "ACUTAAS", "ADANIENSOL", "ATGL", "ABCAPITAL", "ABFRL",
+    "ABLBL", "ABREL", "ABSLAMC", "CPPLUS", "AEGISLOG", "AEGISVOPAK",
+    "AFCONS", "AFFLE", "AJANTPHARM", "ALKEM", "ABDL", "ARE&M",
+    "AMBER", "ANANDRATHI", "ANANTRAJ", "ANGELONE", "ANTHEM", "ANURAS",
+    "APARINDS", "APOLLOTYRE", "APTUS", "ASAHIINDIA", "ASHOKLEY", "ASTERDM",
+    "ASTRAL", "ATHERENERG", "ATUL", "AIIL", "BEML", "BLS",
+    "BSE", "BAJAJHLDNG", "BAJAJHFL", "BALKRISIND", "BALRAMCHIN", "BANDHANBNK",
+    "BANKINDIA", "MAHABANK", "BATAINDIA", "BAYERCROP", "BELRISE", "BDL",
+    "BEL", "BHARATFORG", "BHEL", "BHARTIHEXA", "BIKAJI", "GROWW",
+    "BIOCON", "BSOFT", "BLUEDART", "BLUEJET", "BLUESTARCO", "BBTC",
+    "FIRSTCRY", "BRIGADE", "MAPMYINDIA", "CCL", "CESC", "CGPOWER",
+    "CIEINDIA", "CRISIL", "CANFINHOME", "CANHLIFE", "CAPLIPOINT", "CGCL",
+    "CARBORUNIV", "CARTRADE", "CASTROLIND", "CEATLTD", "CEMPRO", "CENTRALBK",
+    "CDSL", "CHALET", "CHAMBLFERT", "CHENNPETRO", "CHOICEIN", "CHOLAHLDNG",
+    "CUB", "CLEAN", "COCHINSHIP", "COFORGE", "COHANCE", "CAMS",
+    "CONCORDBIO", "CONCOR", "COROMANDEL", "CRAFTSMAN", "CREDITACC", "CROMPTON",
+    "CUMMINSIND", "CYIENT", "DCMSHRIRAM", "DOMS", "DALBHARAT", "DATAPATTNS",
+    "DEEPAKFERT", "DEEPAKNTR", "DELHIVERY", "DEVYANI", "DIXON", "LALPATHLAB",
+    "EIDPARRY", "EIHOTEL", "ELECON", "ELGIEQUIP", "EMAMILTD", "EMCURE",
+    "EMMVEE", "ENDURANCE", "ENGINERSIN", "ERIS", "ESCORTS", "EXIDEIND",
+    "NYKAA", "FEDERALBNK", "FACT", "FINCABLES", "FSL", "FIVESTAR",
+    "FORCEMOT", "FORTIS", "GVT&D", "GMRAIRPORT", "GABRIEL", "GALLANTT",
+    "GRSE", "GICRE", "GILLETTE", "GLAND", "GLAXO", "GLENMARK",
+    "MEDANTA", "GODIGIT", "GPIL", "GODFRYPHLP", "GODREJIND", "GODREJPROP",
+    "GRANULES", "GRAPHITE", "GRAVITA", "GESHIP", "FLUOROCHEM", "GMDCLTD",
+    "HEG", "HBLENGINE", "HDBFS", "HDFCAMC", "HFCL", "HEXT",
+    "HSCL", "HINDCOPPER", "HINDZINC", "POWERINDIA", "HOMEFIRST", "HONASA",
+    "HONAUT", "HUDCO", "HYUNDAI", "ICICIAMC", "IDBI", "IDFCFIRSTB",
+    "IFCI", "IIFL", "IRB", "IRCON", "ITCHOTELS", "ITI",
+    "INDGN", "INDIACEM", "INDIAMART", "INDIANB", "IEX", "IOB",
+    "IRFC", "IREDA", "IGL", "INDUSTOWER", "INOXWIND", "INTELLECT",
+    "INDIGO", "IGIL", "IKS", "IPCALAB", "JBCHEPHARM", "JKCEMENT",
+    "JBMA", "JKTYRE", "JMFINANCIL", "JSWCEMENT", "JSWDULUX", "JSWENERGY",
+    "JSWINFRA", "JAINREC", "JPPOWER", "J&KBANK", "JINDALSAW", "JSL",
+    "JINDALSTEL", "JUBLINGREA", "JUBLPHARMA", "JWL", "JYOTICNC", "KPRMILL",
+    "KEI", "KPITTECH", "KAJARIACER", "KPIL", "KALYANKJIL", "KARURVYSYA",
+    "KAYNES", "KEC", "KFINTECH", "KIRLOSENG", "KIMS", "LTF",
+    "LTTS", "LGEINDIA", "LICHSGFIN", "LTFOODS", "LTM", "LATENTVIEW",
+    "LAURUSLABS", "THELEELA", "LEMONTREE", "LENSKART", "LICI", "LINDEINDIA",
+    "LLOYDSME", "MMTC", "MRF", "MGL", "M&MFIN", "MANAPPURAM",
+    "MRPL", "MANKIND", "MARICO", "MFSL", "MAXHEALTH", "MAZDOCK",
+    "MEESHO", "MINDACORP", "MSUMI", "MOTILALOFS", "MCX", "MUTHOOTFIN",
+    "NATCOPHARM", "NBCC", "NCC", "NLCINDIA", "NSLNISP", "NTPCGREEN",
+    "NH", "NATIONALUM", "NAVA", "NAVINFLUOR", "NETWEB", "NEULANDLAB",
+    "NEWGEN", "NAM-INDIA", "NIVABUPA", "NUVAMA", "NUVOCO", "OBEROIRLTY",
+    "OIL", "OLAELEC", "OLECTRA", "ONESOURCE", "POLICYBZR", "PCBL",
+    "PGEL", "PNBHOUSING", "PTCIL", "PVRINOX", "PARADEEP", "PATANJALI",
+    "PERSISTENT", "PFIZER", "PHOENIXLTD", "PWL", "PINELABS", "PIRAMALFIN",
+    "PPLPHARMA", "POLYMED", "POLYCAB", "POONAWALLA", "PFC", "PREMIERENE",
+    "PRESTIGE", "PNB", "RRKABEL", "RBLBANK", "RHIM", "RITES",
+    "RADICO", "RVNL", "RAILTEL", "RAINBOW", "RKFORGE", "REDINGTON",
+    "RPOWER", "SBFC", "SBICARD", "SJVN", "SRF", "SAGILITY",
+    "SAILIFE", "SAMMAANCAP", "SAPPHIRE", "SARDAEN", "SAREGAMA", "SCHAEFFLER",
+    "SCHNEIDER", "SCI", "SHREECEM", "SHYAMMETL", "ENRIN", "SIGNATURE",
+    "SOBHA", "SOLARINDS", "SONACOMS", "SONATSOFTW", "STARHEALTH", "SAIL",
+    "SUMICHEM", "SUNTV", "SUNDARMFIN", "SUPREMEIND", "SPLPETRO", "SUZLON",
+    "SWANCORP", "SWIGGY", "SYNGENE", "SYRMA", "TBOTEK", "TATACAP",
+    "TATACHEM", "TATACOMM", "TATAELXSI", "TATAINVEST", "TATATECH", "TTML",
+    "TECHNOE", "TEGA", "TEJASNET", "TENNIND", "NIACL", "RAMCOCEM",
+    "THERMAX", "TIMKEN", "TITAGARH", "TORNTPOWER", "TARIL", "TRAVELFOOD",
+    "TRIDENT", "TRITURBINE", "TIINDIA", "UCOBANK", "UNOMINDA", "UPL",
+    "UTIAMC", "UNIONBANK", "UBL", "URBANCO", "USHAMART", "VTL",
+    "VIJAYA", "VMM", "IDEA", "VOLTAS", "WAAREEENER", "WELCORP",
+    "WELSPUNLIV", "WHIRLPOOL", "WOCKPHARMA", "YESBANK", "ZFCVINDIA", "ZEEL",
+    "ZENTEC", "ZENSARTECH", "ZYDUSWELL", "ECLERX",
 ]
+
+NIFTY_500 = NIFTY_100 + NIFTY_NEXT_400
+
+# Strategy-suitability hints (used to pre-filter per-strategy watchlists)
+# All cash-equity strategies now scan the full Nifty 500 — the historical_learner
+# backtest gate (per-symbol win rate/sharpe) is what actually prunes illiquid or
+# no-edge names before they trade, not this list, so widening it costs nothing
+# but candidate breadth. F&O stays capped to NIFTY_50 below: most Nifty 500
+# names have no listed futures/options contract at all.
+SCALPING_UNIVERSE = NIFTY_500
 
 FNO_UNIVERSE = NIFTY_50  # Only Nifty 50 stocks have liquid F&O
 
-SWING_UNIVERSE = NIFTY_100  # All 100 for swing (hold overnight)
+SWING_UNIVERSE = NIFTY_500  # Full Nifty 500 for swing (hold overnight)
 
-INTRADAY_UNIVERSE = NIFTY_100  # All 100 for intraday MIS
+INTRADAY_UNIVERSE = NIFTY_500  # Full Nifty 500 for intraday MIS
 
 # ── Index symbols — subscribed for price/chart data, NOT traded directly ───────
 INDEX_SYMBOLS = [
@@ -74,4 +150,4 @@ def get_strategy_watchlist(strategy: str) -> list[dict]:
         "options":       FNO_UNIVERSE,
         "swing":     SWING_UNIVERSE,
     }
-    return as_watchlist(mapping.get(strategy, NIFTY_100))
+    return as_watchlist(mapping.get(strategy, NIFTY_500))
