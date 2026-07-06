@@ -354,14 +354,25 @@ class PlatformScheduler:
 
         strategies = [s.strip() for s in settings.auto_start_strategies.split(",") if s.strip()]
 
-        # Build watchlist — Nifty 100 flag takes priority, then explicit list, then scanner
+        # Build watchlist — Nifty 100 flag takes priority, then explicit list, then scanner.
+        # per_agent_watchlist (when set) carries each strategy's OWN correct universe
+        # (e.g. options → FNO_UNIVERSE) so F&O agents don't get handed 500 cash-equity
+        # names with no real lot size; watchlist itself stays the union of all of them,
+        # for tick_engine subscription (which needs every symbol any agent might trade).
+        per_agent_watchlist: dict | None = None
         if settings.use_nifty100_watchlist:
-            from nifty100 import get_strategy_watchlist, NIFTY_500, as_watchlist
+            from nifty100 import get_strategy_watchlist, as_watchlist
             if len(strategies) == 1:
                 watchlist = get_strategy_watchlist(strategies[0])
             else:
-                watchlist = as_watchlist(NIFTY_500)
-            logger.info("[platform] Using full Nifty 500 watchlist ({} symbols)", len(watchlist))
+                per_agent_watchlist = {s: get_strategy_watchlist(s) for s in strategies}
+                seen: dict = {}
+                for wl in per_agent_watchlist.values():
+                    for item in wl:
+                        seen[item["symbol"]] = item
+                watchlist = list(seen.values())
+            logger.info("[platform] Using Nifty 500 watchlist ({} unique symbols across {} strategies)",
+                        len(watchlist), len(strategies))
         elif settings.auto_start_watchlist:
             watchlist = [
                 {"symbol": s.strip(), "exchange": "NSE"}
@@ -387,10 +398,11 @@ class PlatformScheduler:
             for strat in strategies:
                 agent = _ALL.get(strat)
                 if agent and _enabled(strat):
-                    approved = await _loop.run_in_executor(None, agent.filter_watchlist, watchlist)
+                    agent_watchlist = (per_agent_watchlist or {}).get(strat, watchlist)
+                    approved = await _loop.run_in_executor(None, agent.filter_watchlist, agent_watchlist)
                     prefiltered[strat] = approved
                     logger.info("[platform] {} pre-filtered: {}/{} symbols approved",
-                                strat, len(approved), len(watchlist))
+                                strat, len(approved), len(agent_watchlist))
 
             # Call master.start() directly on the event loop (no thread) so asyncio.create_task works.
             report = master.start(strategies, watchlist, prefiltered=prefiltered)
