@@ -538,23 +538,22 @@ class BaseAgent(ABC):
                     pre_set = set(pre_data[self.name])
                     approved = [i for i in watchlist if i["symbol"] in pre_set]
                     label = f"pre-learned ({len(pre_set)} approved symbols on file)"
-                    if not approved and settings.trading_mode == "PAPER":
-                        # PAPER safety net: an all-empty approved list (strict
-                        # gate approved nothing market-wide) must not silently
-                        # leave the agent with zero tradeable symbols — paper
-                        # evaluation needs trades to learn from. LIVE keeps the
-                        # strict behaviour: empty list = don't trade.
-                        approved = list(watchlist)
-                        label = "PAPER: approved list empty — trading full watchlist (cautious size)"
-                    elif 0 < len(approved) < 5 and settings.trading_mode == "PAPER":
-                        # PAPER thin-book top-up: a 1-2 symbol book gives the
-                        # agent almost no opportunities to prove itself (options
-                        # approved only SBIN). Top up with the remaining
-                        # watchlist; live evidence then re-ranks the book.
+                    if settings.trading_mode == "PAPER" and len(approved) < len(watchlist):
+                        # PAPER top-up: backtest approval is a head start, not a
+                        # gate — a symbol added to the watchlist today (e.g. the
+                        # Nifty 500 expansion) has no history yet and would
+                        # otherwise sit dead until the next nightly re-learn.
+                        # Trade the full watchlist immediately; the nightly
+                        # portfolio-veto pruning (platform_scheduler) still
+                        # removes proven bleeders from evidence, same as any
+                        # other symbol — this only removes the *wait* before
+                        # a new name gets its first look, not the evidence
+                        # loop itself. LIVE keeps the strict gate: unapproved
+                        # symbols don't trade real money on zero history.
                         _have = {i["symbol"] for i in approved}
-                        approved += [i for i in watchlist if i["symbol"] not in _have]
-                        label = (f"PAPER: thin approved book ({len(_have)}) — "
-                                 f"topped up with watchlist to {len(approved)}")
+                        approved = approved + [i for i in watchlist if i["symbol"] not in _have]
+                        label = (f"PAPER: {len(_have)} pre-approved + "
+                                 f"{len(approved) - len(_have)} untested — trading full watchlist")
                 else:
                     # Agent not in seed file (new agent added after historical_learner ran).
                     # Approve all watchlist symbols so the agent can start immediately.
