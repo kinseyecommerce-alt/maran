@@ -368,6 +368,25 @@ class AgentTracker:
         if not tr:
             return
         is_long = tr.action in ("BUY", "CE", "LONG")
+        # Options theta time-stop — mirror OptionsAgent.should_exit_position so
+        # the sim doesn't hold a bought option to the 15:25 squareoff and eat
+        # 6h of theta. A long option held past 90m with the underlying not
+        # meaningfully in-the-money (< 0.75% ≈ +15% premium) is cut; any long
+        # option is flattened after 14:30. Shorter holds → the premium-scaled
+        # report charges far less theta, matching live behaviour.
+        if self.name == "Options" and is_long:
+            held_min = (ts - tr.entry_ts).total_seconds() / 60.0
+            undl_move = (ltp - tr.entry_px) / tr.entry_px * 100
+            if ts.time() >= time(14, 30):
+                tr.close(ltp, ts, "THETA_FLATTEN")
+                self._last_exit_ts[sym] = ts
+                del self._open[sym]
+                return
+            if held_min >= 90 and undl_move < 0.75:
+                tr.close(ltp, ts, "THETA_STOP")
+                self._last_exit_ts[sym] = ts
+                del self._open[sym]
+                return
         if is_long:
             if ltp <= tr.sl_px:
                 tr.close(ltp, ts, "SL_HIT")
