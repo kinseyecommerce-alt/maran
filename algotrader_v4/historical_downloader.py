@@ -55,14 +55,17 @@ def status() -> dict:
 
 
 def _default_symbols(universe: str | None = None) -> list[str]:
-    """Symbols to download. universe="nifty100" → the full Nifty 100 (what
-    historical_learner backtests); default → current tick-engine subscriptions,
-    else the configured watchlist. Index symbols are always included for
-    regime/trend context."""
+    """Symbols to download. universe="nifty500" → the full Nifty 500 (what
+    historical_learner backtests); "nifty100" kept for back-compat (top 100
+    only); default → current tick-engine subscriptions, else the configured
+    watchlist. Index symbols are always included for regime/trend context."""
     from config import settings
     universe = (universe or settings.history_universe or "watchlist").lower()
     syms: list[str] = []
-    if universe == "nifty100":
+    if universe == "nifty500":
+        from nifty100 import NIFTY_500
+        syms = list(NIFTY_500)
+    elif universe == "nifty100":
         from nifty100 import NIFTY_100
         syms = list(NIFTY_100)
     else:

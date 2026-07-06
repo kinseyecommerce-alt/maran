@@ -2,7 +2,7 @@
 historical_learner.py
 One-time pre-learning script. Run ONCE before going live.
 
-Backtests all Nifty 100 × 4 strategies using historical data,
+Backtests all Nifty 500 × strategies using historical data,
 then pre-populates the adaptive engine so the bot starts with
 2 years of learned knowledge instead of cold defaults.
 
@@ -241,7 +241,7 @@ async def learn(symbols: list[str], strategies: list[str],
     # Notify start
     _tg_tasks.append(asyncio.ensure_future(send_telegram(
         f"🧠 <b>Historical Learning Started</b>\n"
-        f"{len(symbols)} Nifty-100 symbols × {len(strategies)} strategies\n"
+        f"{len(symbols)} symbols × {len(strategies)} strategies\n"
         f"Expected time: ~{total//concurrency//6} min"
     )))
 
@@ -327,7 +327,7 @@ def main() -> None:
     parser.add_argument("--strategies", default=",".join(ALL_STRATEGIES),
                         help="Comma-separated strategies (default: all)")
     parser.add_argument("--symbols", default="",
-                        help="Comma-separated symbols (default: full Nifty 100)")
+                        help="Comma-separated symbols (default: full Nifty 500)")
     parser.add_argument("--resume", action="store_true",
                         help="Skip already-completed backtests")
     parser.add_argument("--concurrency", type=int, default=5,
@@ -339,8 +339,8 @@ def main() -> None:
     if args.symbols:
         symbols = [s.strip() for s in args.symbols.split(",") if s.strip()]
     else:
-        from nifty100 import NIFTY_100
-        symbols = NIFTY_100
+        from nifty100 import NIFTY_500
+        symbols = NIFTY_500
 
     asyncio.run(learn(symbols, strategies, args.resume, args.concurrency))
 
