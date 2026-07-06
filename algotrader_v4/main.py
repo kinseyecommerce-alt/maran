@@ -109,6 +109,15 @@ _SENSITIVE_GETS = frozenset({
     "/admin/users",                    # friend instance list — admin only
     "/portfolio/greeks",               # live options greeks — exposes position details
     "/portfolio/implementation-shortfall",  # slippage analytics leaks order timing
+    # QA-fix (testing swarm): endpoints that leaked business/risk state unauthenticated
+    "/auth/kite/token",                # live broker session token (?reveal=true) — CRITICAL
+    "/auth/kite/status",              # broker connection + client id
+    "/settings/capital-allocation",    # per-agent capital + risk sizing
+    "/sebi/status",                    # kill-switch state + order counts
+    "/learn/status",                   # full approved-symbol books per strategy
+    "/trailing-sl/configs",            # exact SL/trail/target params per strategy
+    "/portfolio/summary",              # net P&L + exposure
+    "/macro/status",                   # macro risk gate state
 })
 
 @app.middleware("http")
@@ -682,14 +691,20 @@ def set_token(req: TokenRequest):
     return {"status": "ok", "token_set": bool(t)}
 
 @app.get("/auth/kite/token", tags=["Auth"])
-def get_kite_token():
-    """Return the current Kite access token (last 8 chars masked).
-    Use this on your production server to copy the token to another environment."""
+def get_kite_token(reveal: bool = False):
+    """Report Kite access-token status. Returns only a masked token by default —
+    the raw token is a live broker session credential (it can place real orders),
+    so it is never returned unless ?reveal=true is passed WITH valid auth (the
+    _SENSITIVE_GETS gate covers this route). Even then, prefer copying the token
+    from the server environment, not over HTTP."""
     tok = settings.kite_access_token or ""
     if not tok:
         return {"token": "", "has_token": False}
     masked = "*" * (len(tok) - 8) + tok[-8:]
-    return {"token": tok, "masked": masked, "has_token": True}
+    out = {"masked": masked, "has_token": True}
+    if reveal:
+        out["token"] = tok
+    return out
 
 @app.get("/auth/upstox/status", tags=["Auth"])
 def upstox_status():

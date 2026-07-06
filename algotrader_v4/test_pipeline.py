@@ -4060,6 +4060,14 @@ def t_sensitive_gets_covers_trading_routes():
         "/regime/status",
         "/portfolio/stats",
         "/symbols/selected",
+        # Testing-swarm audit: these leaked business/risk/credential state
+        # unauthenticated until gated.
+        "/auth/kite/token",            # live broker session credential — CRITICAL
+        "/settings/capital-allocation",
+        "/sebi/status",
+        "/learn/status",
+        "/trailing-sl/configs",
+        "/portfolio/summary",
     }
     missing = required - _main._SENSITIVE_GETS
     assert not missing, (
@@ -4142,6 +4150,18 @@ def t_ws_url_has_no_query_token():
             f"WebSocket URL still contains ?token= (leaks to proxy logs): {line!r}"
         )
 
+def t_kite_token_not_revealed_by_default():
+    """GET /auth/kite/token must NOT return the raw token unless reveal=true —
+    the token is a live broker session credential that can place real orders."""
+    import inspect, main as _main
+    src = inspect.getsource(_main.get_kite_token)
+    assert "reveal" in src, "get_kite_token must gate the raw token behind a reveal flag"
+    assert '"masked"' in src, "get_kite_token must always return a masked form"
+    # The default (no-reveal) return dict must not unconditionally carry 'token'
+    assert 'out = {"masked"' in src or '"token": tok' not in src.split("if reveal")[0], \
+        "get_kite_token returns the raw token before the reveal check — leaks by default"
+
+run("auth: /auth/kite/token hides raw token unless reveal=true",       t_kite_token_not_revealed_by_default)
 run("schema_version table created by init_db",                        t_schema_version_table_exists)
 run("expected_fill_price / actual_fill_price columns in trades schema",t_fill_price_columns_in_schema)
 run("PAPER stale is_open positions cleared on init_db restart",        t_stale_paper_positions_cleared_on_init)
