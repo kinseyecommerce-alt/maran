@@ -945,24 +945,23 @@ def t_rm_futures_margin_sizing():
     """calculate_futures_qty sizes index futures on MARGIN, not full notional."""
     rm = RiskManager()
     _s = {k: getattr(settings, k) for k in
-          ("total_capital","futures_capital_pct","futures_margin_pct",
+          ("capital_per_agent","futures_margin_pct",
            "max_futures_lots_per_order","use_kelly_capital_sizing")}
     try:
         settings.use_kelly_capital_sizing = False
-        settings.futures_capital_pct      = 10.0
         settings.futures_margin_pct       = 20.0
         settings.max_futures_lots_per_order = 10
-        # bucket = 5,000,000 × 10% = ₹500k; NIFTY 1-lot margin = 24000×75×0.20 = ₹360k
-        settings.total_capital = 5_000_000.0
+        # pool = ₹500k; NIFTY 1-lot margin = 24000×75×0.20 = ₹360k
+        settings.capital_per_agent = 500_000.0
         assert rm.calculate_futures_qty(24000.0, 75, agent="futures") == 75, \
-            "₹500k bucket should margin exactly 1 NIFTY lot (75)"
+            "₹500k pool should margin exactly 1 NIFTY lot (75)"
         # Full-notional sizing would need ₹1.8M for 1 lot — margin sizing affords it
         # here, proving it is margin-based, not notional.
-        # Too-small bucket can't margin even 1 lot → 0 (skip, never over-leverage).
-        settings.total_capital = 100_000.0    # bucket ₹10k << ₹360k margin
+        # Too-small pool can't margin even 1 lot → 0 (skip, never over-leverage).
+        settings.capital_per_agent = 100_000.0    # pool ₹100k << ₹360k margin
         assert rm.calculate_futures_qty(24000.0, 75, agent="futures") == 0
         # max_futures_lots_per_order caps the lot count.
-        settings.total_capital = 5_000_000_000.0
+        settings.capital_per_agent = 5_000_000_000.0
         settings.max_futures_lots_per_order = 3
         assert rm.calculate_futures_qty(24000.0, 75, agent="futures") == 3 * 75
     finally:
@@ -6079,14 +6078,20 @@ run("event_calendar: _inject_rbi_dates() populates _MARKET_KEY cache",      t_in
 # 44. RISK MANAGER — AGENT CAPITAL BUCKET COVERAGE
 # ══════════════════════════════════════════════════════════════════════════
 
-def t_new_equity_agents_in_bucket_map():
-    """mean_reversion, momentum, pairs must appear in _AGENT_TO_BUCKET."""
-    import risk_manager as _rm
-    for agent in ("mean_reversion", "momentum", "pairs"):
-        assert agent in _rm._AGENT_TO_BUCKET, \
-            f"'{agent}' missing from _AGENT_TO_BUCKET — falls back to full intraday bucket"
-        assert _rm._AGENT_TO_BUCKET[agent] == "intraday", \
-            f"'{agent}' should use 'intraday' bucket, got {_rm._AGENT_TO_BUCKET[agent]!r}"
+def t_agents_have_independent_capital_pools():
+    """Every strategy agent gets its own capital_per_agent pool — sizing for
+    one agent must not depend on any other agent's max-position config."""
+    from risk_manager import risk_manager as _rm, _AGENT_MAX_POS
+    from config import settings
+    for agent in _AGENT_MAX_POS:
+        cap = _rm.max_capital_for_agent(agent)
+        max_pos_attr = _AGENT_MAX_POS[agent]
+        expected_max_pos = (getattr(settings, max_pos_attr, settings.max_open_positions)
+                             if max_pos_attr else 1)
+        expected = settings.capital_per_agent / max(expected_max_pos, 1)
+        assert abs(cap - expected) < 0.01, (
+            f"'{agent}' capital ₹{cap:.0f} != independent-pool expectation ₹{expected:.0f}"
+        )
 
 def t_new_equity_agents_in_max_pos_map():
     """mean_reversion, momentum, pairs must appear in _AGENT_MAX_POS and use per-position split."""
@@ -6097,67 +6102,52 @@ def t_new_equity_agents_in_max_pos_map():
         assert _rm._AGENT_MAX_POS[agent] is not None, \
             f"'{agent}' should have a max-positions config attr, not None (lot-based)"
 
-def t_new_equity_agents_capital_less_than_intraday_bucket():
-    """max_capital_for_agent('mean_reversion') must be < total intraday bucket."""
+def t_new_equity_agents_capital_less_than_full_pool():
+    """max_capital_for_agent('mean_reversion') must be < its full capital_per_agent
+    pool (proving it's sliced per-position, not handed the whole pool)."""
     from risk_manager import risk_manager as _rm
     from config import settings
-    intraday_bucket = settings.total_capital * settings.intraday_capital_pct / 100
     cap = _rm.max_capital_for_agent("mean_reversion")
-    assert cap < intraday_bucket, (
-        f"mean_reversion capital ₹{cap:.0f} >= full intraday bucket ₹{intraday_bucket:.0f} "
-        f"— agents receive full bucket instead of per-position slice"
+    assert cap < settings.capital_per_agent, (
+        f"mean_reversion capital ₹{cap:.0f} >= full pool ₹{settings.capital_per_agent:.0f} "
+        f"— agent receives full pool instead of per-position slice"
     )
 
-run("risk_manager: mean_reversion/momentum/pairs in _AGENT_TO_BUCKET",       t_new_equity_agents_in_bucket_map)
+run("risk_manager: every agent has an independent capital pool",            t_agents_have_independent_capital_pools)
 run("risk_manager: mean_reversion/momentum/pairs in _AGENT_MAX_POS",         t_new_equity_agents_in_max_pos_map)
-run("risk_manager: mean_reversion capital < full intraday bucket",            t_new_equity_agents_capital_less_than_intraday_bucket)
+run("risk_manager: mean_reversion capital < full agent pool",                t_new_equity_agents_capital_less_than_full_pool)
 
 
 # ══════════════════════════════════════════════════════════════════════════
 # 45. MAIN.PY — CAPITAL ALLOCATION API RESPONSE CORRECTNESS
 # ══════════════════════════════════════════════════════════════════════════
-section("45. MAIN.PY — CAPITAL ALLOCATION AGENT BUCKETS")
-
-def t_capital_allocation_futures_bucket_correct():
-    """agent_buckets in /settings/capital-allocation must show futures→futures, not futures→options."""
-    import re
-    from pathlib import Path
-    src = (Path(__file__).parent / "main.py").read_text()
-    # Locate the agent_buckets dict literal inside get_capital_allocation
-    fn_match = re.search(r'"agent_buckets"\s*:\s*\{[^}]+\}', src, re.DOTALL)
-    assert fn_match, "agent_buckets dict not found in main.py get_capital_allocation"
-    chunk = fn_match.group(0)
-    assert '"futures": "futures"' in chunk, \
-        "agent_buckets incorrectly maps futures to wrong bucket (expected futures→futures)"
-    assert '"futures": "options"' not in chunk, \
-        "agent_buckets maps futures→options (wrong — futures capital is a separate bucket)"
+section("45. MAIN.PY — CAPITAL ALLOCATION PER-AGENT POOLS")
 
 def t_capital_allocation_all_agents_covered():
-    """agent_buckets must include intraday, scalping, swing, options, futures."""
-    import re
-    from pathlib import Path
-    src = (Path(__file__).parent / "main.py").read_text()
-    fn_match = re.search(r'"agent_buckets"\s*:\s*\{[^}]+\}', src, re.DOTALL)
-    assert fn_match, "agent_buckets dict not found in main.py"
-    chunk = fn_match.group(0)
-    for agent in ("intraday", "scalping", "swing", "options", "futures"):
-        assert f'"{agent}"' in chunk, \
-            f"agent_buckets dict missing entry for '{agent}'"
+    """per_agent_rupees must include every strategy agent — each with its own
+    independent pool, none falling through to a shared/mis-mapped bucket."""
+    from main import get_capital_allocation
+    resp = get_capital_allocation()
+    for agent in ("intraday", "scalping", "swing", "options", "futures",
+                  "mean_reversion", "momentum", "pairs"):
+        assert agent in resp["per_agent_rupees"], \
+            f"per_agent_rupees missing entry for '{agent}'"
+        assert resp["per_agent_rupees"][agent] > 0, \
+            f"'{agent}' capital allocation is not positive"
 
-def t_capital_allocation_options_bucket_label():
-    """options agent must map to options bucket (not intraday or futures)."""
-    import re
-    from pathlib import Path
-    src = (Path(__file__).parent / "main.py").read_text()
-    fn_match = re.search(r'"agent_buckets"\s*:\s*\{[^}]+\}', src, re.DOTALL)
-    assert fn_match, "agent_buckets dict not found in main.py"
-    chunk = fn_match.group(0)
-    assert '"options": "options"' in chunk, \
-        "agent_buckets should map options→options"
+def t_capital_allocation_options_futures_not_split():
+    """options/futures are lot-based — full capital_per_agent pool, not
+    divided by a per-symbol position count."""
+    from main import get_capital_allocation
+    from config import settings
+    resp = get_capital_allocation()
+    for agent in ("options", "futures"):
+        assert resp["per_agent_rupees"][agent] == round(settings.capital_per_agent), \
+            (f"'{agent}' should get the full ₹{settings.capital_per_agent:.0f} pool "
+             f"(lot-based), got ₹{resp['per_agent_rupees'][agent]}")
 
-run("main: agent_buckets futures maps to futures (not options)",        t_capital_allocation_futures_bucket_correct)
-run("main: agent_buckets covers all 5 agent types",                     t_capital_allocation_all_agents_covered)
-run("main: agent_buckets options maps to options",                      t_capital_allocation_options_bucket_label)
+run("main: per_agent_rupees covers all 8 agents with positive capital", t_capital_allocation_all_agents_covered)
+run("main: options/futures get full pool (lot-based, not split)",       t_capital_allocation_options_futures_not_split)
 
 
 # ══════════════════════════════════════════════════════════════════════════
@@ -6713,7 +6703,7 @@ def t_risk_manager_fii_bullish_scaling_not_cancelled():
     alt_data_engine.get_fii_sentiment = lambda: 0.45   # strong bull → +20%
     alt_data_engine.is_high_risk_day = lambda: False    # no event-day halving
     try:
-        base_cap = settings.total_capital * settings.intraday_capital_pct / 100 / settings.max_intraday_positions
+        base_cap = settings.capital_per_agent / settings.max_intraday_positions
         price = 100.0
         base_qty = int(base_cap // price)
         qty = rm.calculate_quantity(price=price, agent="intraday")
