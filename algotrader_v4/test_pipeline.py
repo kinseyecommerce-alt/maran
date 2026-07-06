@@ -188,7 +188,7 @@ def t_regime_gate_unknown_and_toggle():
         # (futures un-benched as EMA200_BOUNCE-only specialist.)
         assert not bot_state.is_agent_allowed_in_regime("momentum")
         assert not bot_state.is_agent_allowed_in_regime("mean_reversion")
-        bot_state.set_current_regime("RANGING")
+        bot_state.set_current_regime("BULL_TREND")
         settings.regime_agent_gating = False
         assert bot_state.is_agent_allowed_in_regime("momentum")   # gate off → allowed
         settings.regime_agent_gating = True
