@@ -188,14 +188,49 @@ def _setup_tsl_callbacks() -> None:
         # so the ₹-loss halt fired late. (atomic_bracket already records net.)
         from risk_manager import compute_tx_costs
         _exit_qty = pos.quantity_remaining or pos.quantity
+        # F&O positions are tracked on the UNDERLYING (pos.entry_price = spot)
+        # but the money moved on the CONTRACT — an option's premium notional is
+        # ~2% of spot, so costing at spot overstates charges ~50×. Recover the
+        # contract prices: exit from the live position's last_price, entry
+        # derived from the (already premium-scaled) pnl.
+        _cost_entry_px, _cost_exit_px = pos.entry_price, ltp
+        if exit_sym != pos.symbol and _exit_qty:
+            try:
+                _net = await _loop.run_in_executor(None, kite_client.positions_cached)
+                _cpx = next((float(p.get("last_price") or 0.0)
+                             for p in _net.get("net", [])
+                             if p.get("tradingsymbol") == exit_sym), 0.0)
+                if _cpx > 0:
+                    # Options here are always LONG premium (agent buys CE/PE;
+                    # a long PE registers side=SELL on the underlying but its
+                    # premium still rises with profit) — premium entry is
+                    # exit − pnl/qty regardless of side. Futures are genuinely
+                    # directional, so side decides the sign.
+                    _is_opt = exit_sym.endswith(("CE", "PE"))
+                    _epx = (_cpx - pnl / _exit_qty
+                            if (_is_opt or pos.side == "BUY")
+                            else _cpx + pnl / _exit_qty)
+                    if _epx > 0:
+                        _cost_entry_px, _cost_exit_px = _epx, _cpx
+            except Exception:
+                pass
         try:
-            _cost = compute_tx_costs(_exit_qty, pos.entry_price, ltp,
+            _cost = compute_tx_costs(_exit_qty, _cost_entry_px, _cost_exit_px,
                                      (entry or {}).get("product", "MIS"))
         except Exception:
             _cost = 0.0
         order_guard.release_order(pos.symbol, pos.strategy, pos.side, pnl - _cost)
         risk_manager.record_trade(pnl - _cost)
         risk_manager.position_closed()
+        # Roll the outcome into the owning agent's day P&L — without this every
+        # SL-hit trade is silently missing from the /agents dashboard figures.
+        try:
+            from agents.strategy_agents import ALL_AGENTS as _AA
+            _ag = _AA.get(pos.strategy)
+            if _ag:
+                _ag.state.pnl_today += pnl - _cost
+        except Exception:
+            pass
         trailing_sl_engine.deregister(pos.order_id)
 
         # Attribute outcome to the pattern decay monitor.
@@ -226,8 +261,8 @@ def _setup_tsl_callbacks() -> None:
             cost = _cost
             record_trade_async(
                 symbol=pos.symbol, strategy=pos.strategy,
-                side=pos.side, entry_price=pos.entry_price,
-                exit_price=ltp, quantity=pos.quantity,
+                side=pos.side, entry_price=_cost_entry_px,
+                exit_price=_cost_exit_px, quantity=pos.quantity,
                 gross_pnl=pnl, net_pnl=pnl - cost, cost=cost,
                 exit_reason="SL_HIT",
                 entry_time=__import__("datetime").datetime.utcfromtimestamp(
@@ -1868,10 +1903,23 @@ class BaseAgent(ABC):
                              "released: {}", self.name, _exit_sym, _exit_exc)
                 continue
             logger.info("[{}] exit order latency: {:.0f}ms", self.name, (_time.monotonic() - _exit_t0) * 1000)
-            order_guard.release_order(sym, self.name, entry_side, pnl)
-            risk_manager.record_trade(pnl)
+            # Cost the trade on the instrument actually traded: for F&O the
+            # position's last_price is the CONTRACT price (premium for options)
+            # while snap.tick.ltp is the UNDERLYING — costing on the underlying
+            # inflates the options notional ~50× and corrupts the recorded
+            # exit_price. Ledger takes NET (parity with the TSL SL-hit path).
+            from risk_manager import compute_tx_costs
+            _exit_px  = float(pos.get("last_price") or snap.tick.ltp)
+            _entry_px = float(pos.get("average_price") or snap.tick.ltp)
+            try:
+                _cost = compute_tx_costs(qty, _entry_px, _exit_px,
+                                         pos.get("product", self.product))
+            except Exception:
+                _cost = 0.0
+            order_guard.release_order(sym, self.name, entry_side, pnl - _cost)
+            risk_manager.record_trade(pnl - _cost)
             risk_manager.position_closed()
-            self.state.pnl_today += pnl
+            self.state.pnl_today += pnl - _cost
             # TSL positions are keyed by ENTRY order_id, not exit order_id.
             # Pop the SL-M mapping and CANCEL the live SL-M placed at entry:
             # the MARKET exit above just flattened the position, so an orphan
@@ -1913,18 +1961,14 @@ class BaseAgent(ABC):
             # Persist to SQLite (Phase 3) — non-blocking async variant
             try:
                 from state_store import record_trade_async as _st_record
-                from risk_manager import compute_tx_costs
-                entry_price = pos.get("average_price", snap.tick.ltp)
-                product_val = pos.get("product", self.product)
-                cost = compute_tx_costs(qty, entry_price, snap.tick.ltp, product_val)
                 from market_regime import regime_detector
                 _st_record(
                     symbol=sym, strategy=self.name,
                     side=entry_side,
-                    entry_price=entry_price,
-                    exit_price=snap.tick.ltp,
+                    entry_price=_entry_px,
+                    exit_price=_exit_px,
                     quantity=qty,
-                    gross_pnl=pnl, net_pnl=pnl - cost, cost=cost,
+                    gross_pnl=pnl, net_pnl=pnl - _cost, cost=_cost,
                     exit_reason=reason,
                     regime=regime_detector.current_regime.value
                         if regime_detector.current_regime else "",
