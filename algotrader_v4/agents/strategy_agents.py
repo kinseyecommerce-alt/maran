@@ -1063,7 +1063,14 @@ class OptionsAgent(BaseAgent):
         strike  = self._target_delta_strike(ltp, actual_opt, atm_iv, target_delta, dte)
         opt_sym = self._nfo_symbol(sym, strike, actual_opt)
         from kite_client import _FON_LOT_SIZES as _kite_lots
-        lot_sz  = self.LOT_SIZES.get(sym) or _kite_lots.get(sym, 1)
+        lot_sz = self.LOT_SIZES.get(sym) or _kite_lots.get(sym)
+        if not lot_sz:
+            # No real listed F&O contract for this underlying (most Nifty 500
+            # names have none) — defaulting to lot=1 would fabricate an order
+            # on a non-existent instrument. Mirror FuturesAgent: never trade
+            # an unknown lot.
+            self._update_state(sym, ind, ltp)
+            return "HOLD", None
 
         # Approximate BS delta for the chosen strike (informational, logged)
         import math as _math
