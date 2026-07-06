@@ -182,12 +182,15 @@ def t_regime_gate_unknown_and_toggle():
     try:
         bot_state.set_current_regime("UNKNOWN")
         assert all(bot_state.is_agent_allowed_in_regime(a)
-                   for a in ("intraday", "scalping", "options", "futures", "pairs", "swing"))
+                   for a in ("intraday", "scalping", "futures", "pairs", "swing"))
         # momentum/mean_reversion: net-negative in every tested config —
         # blocked even in UNKNOWN until fresh evidence clears them.
+        # options: benched pre-10:15 — bought options bleed theta and must not
+        # fire before the day's regime is confirmed (2026-07-06 evidence).
         # (futures un-benched as EMA200_BOUNCE-only specialist.)
         assert not bot_state.is_agent_allowed_in_regime("momentum")
         assert not bot_state.is_agent_allowed_in_regime("mean_reversion")
+        assert not bot_state.is_agent_allowed_in_regime("options")
         bot_state.set_current_regime("BULL_TREND")
         settings.regime_agent_gating = False
         assert bot_state.is_agent_allowed_in_regime("momentum")   # gate off → allowed
@@ -11999,6 +12002,40 @@ run("options_agent: _pos_matches_sym accepts F&O contract prefix for underlying"
 run("futures_agent: _pos_matches_sym accepts futures contract prefix for underlying",     t_futures_agent_pos_matches_sym_prefix)
 run("base_agent: _check_exits_on_tick uses _pos_matches_sym (not raw tradingsymbol !=)", t_base_agent_check_exits_uses_pos_matches_sym)
 run("options_agent: _ctx_bonus passes snap.symbol to _days_to_expiry (not bare ())",     t_options_ctx_bonus_passes_underlying_to_days_to_expiry)
+def t_options_theta_time_stop():
+    """A long option held past MAX_HOLD_MIN without reaching MIN_HOLD_PROFIT%
+    must be cut by the theta time-stop; a profitable one is kept."""
+    import time as _t
+    from datetime import datetime as _dt, timezone as _tz, timedelta as _td
+    import agents.strategy_agents as _sa
+    from agents.strategy_agents import OptionsAgent
+    from tick_engine import LiveIndicators
+    a = OptionsAgent()
+    ind = LiveIndicators(symbol="RELIANCE", ltp=100.0)
+    csym = "RELIANCE26JUL3000CE"
+    pos = {"average_price": 10.0, "last_price": 10.2, "quantity": 75,
+           "tradingsymbol": csym}
+    # Pin the wall clock to 11:30 IST so FLATTEN_AFTER (14:30) doesn't mask the
+    # time-stop this test targets.
+    _ist = _tz(_td(hours=5, minutes=30))
+    _orig_now = _sa.now_ist
+    _sa.now_ist = lambda: _dt(2026, 7, 6, 11, 30, tzinfo=_ist)
+    try:
+        # Backdate hold clock beyond MAX_HOLD_MIN; +2% premium < MIN_HOLD_PROFIT
+        a._entry_clock[csym] = _t.monotonic() - (a.MAX_HOLD_MIN + 5) * 60
+        should, reason = a.should_exit_position(pos, ind)
+        assert should and "time-stop" in reason.lower(), \
+            f"stale unprofitable long option must theta-time-stop, got ({should}, {reason!r})"
+        # A comfortably profitable option at the same age must NOT be time-stopped
+        a._entry_clock[csym] = _t.monotonic() - (a.MAX_HOLD_MIN + 5) * 60
+        pos_win = {**pos, "last_price": 10.0 * (1 + (a.MIN_HOLD_PROFIT + 10) / 100)}
+        should2, reason2 = a.should_exit_position(pos_win, ind)
+        assert not (should2 and "time-stop" in reason2.lower()), \
+            f"profitable option must not be theta-time-stopped, got {reason2!r}"
+    finally:
+        _sa.now_ist = _orig_now
+
+run("options_agent: theta time-stop cuts stale unprofitable long options",     t_options_theta_time_stop)
 run("options_agent: should_exit_position extracts underlying via parse_nfo_symbol for DTE", t_options_should_exit_uses_parsed_underlying_for_dte)
 run("options_agent: _try_enter checks _latency_cooldown_until (latency guard active)",   t_options_try_enter_has_latency_guard_check)
 run("options_agent: _try_enter measures latency and updates _last_order_latency_ms",     t_options_try_enter_measures_and_updates_latency)
