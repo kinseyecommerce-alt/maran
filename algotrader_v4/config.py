@@ -332,7 +332,16 @@ class Settings(BaseSettings):
         # v8 (final-config run): INDEX_TREND_RIDE_OPT went negative at volume
         # (-1.83 @18tr in v6 -> -5.75 @41tr) — same edge-dies-at-scale
         # signature as the v4 kills.
-        "options:INDEX_TREND_RIDE_OPT"
+        "options:INDEX_TREND_RIDE_OPT,"
+        # v9 (range-day experiment, 62d, RANGING-only, first per-pattern
+        # attribution for these agents): kills at net <= -1% / >= 15tr.
+        # Survivors: momentum VOL_SURGE_TREND +16.5%, SQUEEZE_RELEASE +11.7%,
+        # MACD_ZERO_CROSS +8.0%; mean_reversion BB_MID_REVERT +10.4%,
+        # PRICE_ZSCORE +1.5% — the system's first proven range-day earners.
+        "mean_reversion:WILLIAMS_EXTREME,mean_reversion:MACD_DIVERGENCE,"
+        "mean_reversion:BB_UPPER_REJECT,mean_reversion:BB_WIDTH_SQUEEZE,"
+        "momentum:BREAKOUT_RETEST,momentum:HL_BREAKOUT,momentum:LL_BREAKDOWN,"
+        "momentum:HIGHER_HIGH_CONFIRM"
     )
 
     # Scalping approved-book seed: the proxy learner cannot model the real
