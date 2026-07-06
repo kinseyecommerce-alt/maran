@@ -267,10 +267,32 @@ def replay(symbols: list[str], max_days: int | None = None,
     #   futures MIS: ~0.03% (brokerage flat, STT 0.01% sell side only,
     #     lower txn charges at same notional)
     #   swing CNC: ~0.12% (STT 0.1% both sides, no brokerage on delivery)
-    COST_BY_AGENT = {"Futures": 0.03, "Swing": 0.12}
+    COST_BY_AGENT = {"Futures": 0.03, "Swing": 0.12,
+                     # Options: costs land on PREMIUM notional (₹1L of premium,
+                     # not ₹1L of underlying) — brokerage + STT 0.0625% sell +
+                     # txn 0.05% + GST/stamp + wider spreads ≈ 0.30%/round trip.
+                     "Options": 0.30}
     COST_DEFAULT = 0.06
+    # ── Options premium economics ────────────────────────────────────────
+    # The trackers record every trade as an UNDERLYING move % — but the real
+    # OptionsAgent buys a ~0.40-delta contract whose premium is ~2% of spot,
+    # so ₹1L of premium controls ~₹50L of underlying. Measured on underlying
+    # %, options look ~20× weaker than they trade. Convert to premium %:
+    #   premium % ≈ underlying % × (delta / premium_ratio) = × (0.40 / 0.02)
+    # minus theta decay while holding (weekly ATM intraday ≈ 1.5%/hour).
+    OPT_DELTA, OPT_PREMIUM_RATIO, OPT_THETA_PCT_HR = 0.40, 0.02, 1.5
+    OPT_LEVERAGE = OPT_DELTA / OPT_PREMIUM_RATIO          # ≈ 20×
+
+    def _prem_pnl(t) -> float:
+        hours = 0.0
+        if t.exit_ts is not None and t.entry_ts is not None:
+            hours = max((t.exit_ts - t.entry_ts).total_seconds() / 3600.0, 0.0)
+        return t.pnl_pct * OPT_LEVERAGE - hours * OPT_THETA_PCT_HR
+
     print("\n" + "═" * 78)
     print(f"  ACTUAL-AGENT REPLAY — {len(dates)} real days, {len(per_sym)} symbols, ₹1L/trade")
+    print(f"  (Options rows are PREMIUM-scaled: {OPT_LEVERAGE:.0f}× delta leverage − "
+          f"{OPT_THETA_PCT_HR}%/hr theta, {COST_BY_AGENT['Options']}%/trade costs)")
     print("═" * 78)
     print(f"{'agent':12s} {'trades':>6s} {'win%':>6s} {'gross%':>8s} {'net%':>8s} {'net ₹':>10s}  best/worst pattern")
     summary = {}
@@ -279,17 +301,18 @@ def replay(symbols: list[str], max_days: int | None = None,
         if not ts_:
             print(f"{name:12s} {'0':>6s}      —        —        —          —")
             continue
-        wins = sum(1 for t in ts_ if t.won)
-        gross = sum(t.pnl_pct for t in ts_)
+        _pnl_of = _prem_pnl if name == "Options" else (lambda t: t.pnl_pct)
+        wins = sum(1 for t in ts_ if _pnl_of(t) > 0)
+        gross = sum(_pnl_of(t) for t in ts_)
         cost_pct = COST_BY_AGENT.get(name, COST_DEFAULT)
         net = gross - cost_pct * len(ts_)
         by_pat: dict = defaultdict(lambda: [0.0, 0])
         by_sym: dict = defaultdict(lambda: [0.0, 0])
         for t in ts_:
-            by_pat[t.pattern][0] += t.pnl_pct
+            by_pat[t.pattern][0] += _pnl_of(t)
             by_pat[t.pattern][1] += 1
             s = getattr(t, "sym", "?")
-            by_sym[s][0] += t.pnl_pct
+            by_sym[s][0] += _pnl_of(t)
             by_sym[s][1] += 1
         best = max(by_pat.items(), key=lambda kv: kv[1][0])
         worst = min(by_pat.items(), key=lambda kv: kv[1][0])
@@ -298,6 +321,9 @@ def replay(symbols: list[str], max_days: int | None = None,
         summary[name] = {"trades": len(ts_), "win_rate": round(wins/len(ts_)*100, 1),
                          "gross_pct": round(gross, 2), "net_pct": round(net, 2),
                          "net_inr_1L": round(net/100*CAP, 0),
+                         **({"underlying_gross_pct":
+                             round(sum(t.pnl_pct for t in ts_), 2),
+                             "premium_scaled": True} if name == "Options" else {}),
                          "by_pattern": {k: {"pnl_pct": round(v[0], 2), "trades": v[1]}
                                         for k, v in sorted(by_pat.items(), key=lambda kv: -kv[1][0])},
                          "by_symbol": {k: {"pnl_pct": round(v[0], 2), "trades": v[1]}
