@@ -109,9 +109,28 @@ def _setup_tsl_callbacks() -> None:
                     trigger_price=_trig,
                     tag=_otag(f"TSL-{pos.strategy}"),
                 ))
+                _adopted = False
                 with _tsl_sl_orders_lock:
                     if pos.order_id in _tsl_sl_orders:
                         _tsl_sl_orders[pos.order_id]["sl_order_id"] = new_sl_oid
+                        _adopted = True
+                if not _adopted:
+                    # A strategy exit popped the mapping while we were replacing
+                    # the stop: the position is being flattened, and this fresh
+                    # SL-M would be a live orphan nobody tracks — it would later
+                    # fill against a flat book and open a reverse position.
+                    try:
+                        await _loop.run_in_executor(
+                            None, lambda: kite_client.cancel_order(new_sl_oid))
+                        logger.warning(
+                            "[{}] _on_sl_moved: cancelled freshly-placed SL-M {} for "
+                            "{} — exit already in flight", pos.strategy, new_sl_oid,
+                            pos.symbol)
+                    except Exception as _orph_exc:
+                        sebi_compliance.trigger_kill_switch(
+                            f"Orphan SL-M {new_sl_oid} on {pos.symbol} "
+                            f"({pos.strategy}) — stop replace raced a strategy exit "
+                            f"and cancel failed: {_orph_exc}")
             except Exception as exc:
                 logger.error("[{}] _on_sl_moved: place_order failed for {}: {}", pos.strategy, pos.symbol, exc)
 
@@ -1880,6 +1899,35 @@ class BaseAgent(ABC):
                 logger.info("[{}] {} exit skipped — TSL callback already exiting",
                             self.name, sym)
                 continue
+            # If the resting SL-M has ALREADY filled (paper trigger engine or an
+            # exchange fill racing this brain exit), the book is flat — placing
+            # our MARKET exit would silently open a reverse position, and the
+            # cancel below would raise "already COMPLETE" and trip the kill
+            # switch. Mirror _on_sl_hit's pre-check and stand down: the TSL
+            # callback owns the bookkeeping for a stop-out.
+            _pre_oid = _claimed.order_id if _claimed else None
+            with _tsl_sl_orders_lock:
+                _sl_pre = _tsl_sl_orders.get(_pre_oid) if _pre_oid else None
+            _sl_oid_pre = (_sl_pre or {}).get("sl_order_id")
+            if _sl_oid_pre:
+                _sl_prefilled = False
+                try:
+                    if hasattr(kite_client, "_paper_orders"):
+                        _o = kite_client._paper_orders.get(_sl_oid_pre)
+                        _sl_prefilled = bool(_o and _o["status"] == "COMPLETE")
+                    if not _sl_prefilled and settings.trading_mode != "PAPER":
+                        _hist = await asyncio.get_running_loop().run_in_executor(
+                            None, lambda: kite_client.order_history(_sl_oid_pre))
+                        _sl_prefilled = any(h.get("status") == "COMPLETE" for h in _hist)
+                except Exception:
+                    _sl_prefilled = False
+                if _sl_prefilled:
+                    if _claimed:
+                        trailing_sl_engine.release_exit_claim(_claimed.order_id)
+                    logger.info("[{}] {} strategy exit skipped — SL-M {} already "
+                                "filled (book flat; TSL callback handles bookkeeping)",
+                                self.name, sym, _sl_oid_pre)
+                    continue
             _exit_t0 = _time.monotonic()
             _exit_exch   = pos.get("exchange", "NSE")
             _exit_prod   = pos.get("product", self.product)
@@ -1936,14 +1984,43 @@ class BaseAgent(ABC):
                     logger.info("[{}] Cancelled SL-M {} after strategy exit on {}",
                                 self.name, _sl_oid, sym)
                 except Exception as _sl_cancel_exc:
-                    logger.critical(
-                        "[{}] FAILED to cancel SL-M {} after strategy exit on {} — "
-                        "orphan stop live on a flat book, triggering kill switch: {}",
-                        self.name, _sl_oid, sym, _sl_cancel_exc,
-                    )
-                    sebi_compliance.trigger_kill_switch(
-                        f"Orphan SL-M {_sl_oid} live after strategy exit "
-                        f"for {sym} ({self.name}) — cancel failed")
+                    _msg = str(_sl_cancel_exc)
+                    if "already CANCELLED" in _msg or "already REJECTED" in _msg:
+                        # Not an orphan: the stop is already DEAD (cancelled by a
+                        # racing on_sl_moved replace, or rejected) — nothing rests
+                        # on the book. A terminal stop must not halt the system.
+                        logger.warning("[{}] SL-M {} already terminal after strategy "
+                                       "exit on {}: {}", self.name, _sl_oid, sym, _msg)
+                    elif "already COMPLETE" in _msg:
+                        # The stop FILLED between our MARKET exit and this cancel:
+                        # two exits executed → a reverse position is now open.
+                        # Re-flatten it immediately instead of halting everything;
+                        # only an unfixable book triggers the kill switch.
+                        logger.critical(
+                            "[{}] SL-M {} filled concurrently with strategy exit on "
+                            "{} — double exit, auto-flattening reverse position",
+                            self.name, _sl_oid, sym)
+                        try:
+                            await asyncio.get_running_loop().run_in_executor(
+                                None, lambda: kite_client.place_order(
+                                    tradingsymbol=_exit_sym, exchange=_exit_exch,
+                                    transaction_type=entry_side, quantity=qty,
+                                    order_type="MARKET", product=_exit_prod,
+                                    tag=_otag(f"Agent-{self.name}", "REFLAT"),
+                                ))
+                        except Exception as _reflat_exc:
+                            sebi_compliance.trigger_kill_switch(
+                                f"Double exit on {sym} ({self.name}) and re-flatten "
+                                f"failed — reverse position live: {_reflat_exc}")
+                    else:
+                        logger.critical(
+                            "[{}] FAILED to cancel SL-M {} after strategy exit on {} — "
+                            "orphan stop live on a flat book, triggering kill switch: {}",
+                            self.name, _sl_oid, sym, _sl_cancel_exc,
+                        )
+                        sebi_compliance.trigger_kill_switch(
+                            f"Orphan SL-M {_sl_oid} live after strategy exit "
+                            f"for {sym} ({self.name}) — cancel failed")
             trailing_sl_engine.deregister(_entry_oid if _entry_oid is not None else oid)
 
             # Attribute outcome to the pattern decay monitor.
