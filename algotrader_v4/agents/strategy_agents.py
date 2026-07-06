@@ -4530,6 +4530,7 @@ class MeanReversionAgent(BaseAgent):
             "stop_loss_pct": round(sl_dist / ltp * 100, 3),
             "target_pct":    round(tgt_dist / ltp * 100, 3),
             "product": self.product,
+            "pattern": best_pattern,
             "trigger": (
                 f"{'BSW-' if snap.black_swan_active else ''}MEANREV-{best_action} [{best_pattern}] score={best_score}/13 "
                 f"rsi={ind.rsi_14:.0f} bb_pos="
@@ -4925,6 +4926,7 @@ class MomentumAgent(BaseAgent):
             "stop_loss_pct": round(sl_dist / ltp * 100, 3),
             "target_pct":    round(tgt_dist / ltp * 100, 3),
             "product": self.product,
+            "pattern": best_pattern,
             "_gate_size_factor": 1.0 if best_score >= 9 else 0.75,
             "trigger": (
                 f"MOM-{best_action} [{best_pattern}] score={best_score}/14 "

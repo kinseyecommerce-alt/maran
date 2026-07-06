@@ -160,9 +160,9 @@ def t_regime_gate_matrix():
     import bot_state
     try:
         bot_state.set_current_regime("RANGING")
-        for blocked in ("options", "momentum", "mean_reversion"):
-            assert not bot_state.is_agent_allowed_in_regime(blocked), f"{blocked} in RANGING"
-        for allowed in ("intraday", "futures", "pairs", "scalping", "swing"):
+        assert not bot_state.is_agent_allowed_in_regime("options"), "options in RANGING"
+        for allowed in ("intraday", "futures", "pairs", "scalping", "swing",
+                        "momentum", "mean_reversion"):   # mom/meanrev: RANGING-only unbench
             assert bot_state.is_agent_allowed_in_regime(allowed), f"{allowed} in RANGING"
         bot_state.set_current_regime("HIGH_VOLATILE")
         for blocked in ("mean_reversion", "pairs", "momentum"):
@@ -188,7 +188,7 @@ def t_regime_gate_unknown_and_toggle():
         # (futures un-benched as EMA200_BOUNCE-only specialist.)
         assert not bot_state.is_agent_allowed_in_regime("momentum")
         assert not bot_state.is_agent_allowed_in_regime("mean_reversion")
-        bot_state.set_current_regime("RANGING")
+        bot_state.set_current_regime("BULL_TREND")
         settings.regime_agent_gating = False
         assert bot_state.is_agent_allowed_in_regime("momentum")   # gate off → allowed
         settings.regime_agent_gating = True

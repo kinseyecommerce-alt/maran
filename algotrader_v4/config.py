@@ -400,7 +400,8 @@ class Settings(BaseSettings):
         "BULL_VOLATILE:momentum,mean_reversion,pairs;"
         "BEAR_TREND:options,momentum,mean_reversion,pairs;"
         "BEAR_VOLATILE:options,momentum,mean_reversion,pairs;"
-        "RANGING:options,momentum,mean_reversion;"
+        "RANGING:options;"  # momentum/mean_reversion unbenched for RANGING (live paper test; per-pattern verdict prunes tonight)
+        
         "HIGH_VOLATILE:momentum,mean_reversion,pairs;"
         "BLACK_SWAN:swing,intraday,futures,momentum,pairs,mean_reversion"
     )
