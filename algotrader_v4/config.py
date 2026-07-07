@@ -416,8 +416,12 @@ class Settings(BaseSettings):
         "BULL_VOLATILE:momentum,mean_reversion,pairs;"
         "BEAR_TREND:options,momentum,mean_reversion,pairs;"
         "BEAR_VOLATILE:options,momentum,mean_reversion,pairs;"
-        "RANGING:options;"  # momentum/mean_reversion unbenched for RANGING (live paper test; per-pattern verdict prunes tonight)
-        
+        # RANGING: momentum + mean_reversion RE-BENCHED. Yesterday's live paper
+        # test (2026-07-07) confirmed the 62-day replay — momentum bled -₹1,672
+        # over 31 trades on a range day (breakouts that fail), mean_reversion ~flat.
+        # Momentum needs trend; in RANGING it's a net loser. Options stays benched.
+        "RANGING:options,momentum,mean_reversion;"
+
         "HIGH_VOLATILE:momentum,mean_reversion,pairs;"
         "BLACK_SWAN:swing,intraday,futures,momentum,pairs,mean_reversion"
     )
