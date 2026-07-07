@@ -344,7 +344,22 @@ class Settings(BaseSettings):
         "mean_reversion:WILLIAMS_EXTREME,mean_reversion:MACD_DIVERGENCE,"
         "mean_reversion:BB_UPPER_REJECT,mean_reversion:BB_WIDTH_SQUEEZE,"
         "momentum:BREAKOUT_RETEST,momentum:HL_BREAKOUT,momentum:LL_BREAKDOWN,"
-        "momentum:HIGHER_HIGH_CONFIRM"
+        "momentum:HIGHER_HIGH_CONFIRM,"
+        # v10 (HONEST RULER — 62d, premium/margin-scaled P&L + realistic 0.15%
+        # equity / 0.30% options costs, calibrated to live-booked costs). This
+        # ruler overturns earlier verdicts made on the under-costed sim:
+        #   - STOCHRSI_TREND_OPT: v6 KEPT it at "+8.2% @169tr" — the honest run
+        #     shows -2068.8% over 1037 trades (-2.0%/tr). The single biggest
+        #     drain in the whole system; explains most live options losses.
+        #   - RSI_EXTREME (meanrev) -36.5% @208tr, RSI_TRIPLE_EXTREME -3.7%,
+        #     BB_MID_REVERT flat-negative @376tr (v9 "survivor" fails honest
+        #     costs), RANGE_BREAK_RETEST -6.7%, futures ATR_BREAK -2.3%.
+        # Survivors confirmed across 3 independent agents = the band-walk /
+        # squeeze family (BB_WALK_FUT, KELTNER_RIDE, BB_SQUEEZE_WALK,
+        # BB_BAND_WALK) — the real edge the lean rebuild is built around.
+        "options:STOCHRSI_TREND_OPT,mean_reversion:RSI_EXTREME,"
+        "mean_reversion:RSI_TRIPLE_EXTREME,mean_reversion:BB_MID_REVERT,"
+        "scalping:RANGE_BREAK_RETEST,futures:ATR_BREAK"
     )
 
     # Scalping approved-book seed: the proxy learner cannot model the real
