@@ -1092,7 +1092,10 @@ class BaseAgent(ABC):
 
         if settings.use_conviction_sizing:
             score = signal.get("score", 0)
-            conv  = 0.50 if score <= 5 else (0.75 if score <= 7 else (1.0 if score <= 9 else 1.25))
+            # Floor loosened 0.50 → 0.75: the old floor stacked with ATR risk
+            # sizing + Kelly + gate size_factor to shrink low-score entries to a
+            # fraction of the pool. Still score-proportional, just less punitive.
+            conv  = 0.75 if score <= 5 else (1.0 if score <= 7 else (1.25 if score <= 9 else 1.5))
             qty   = max(1, int(qty * conv))
 
         if self._adaptive_min_score_override is not None and isinstance(
