@@ -2804,23 +2804,40 @@ class ScalpingAgent(BaseAgent):
     Critical fix: state now updated AFTER pattern detection so all prev-state patterns
     correctly see LAST TICK's values (not current tick's — the original bug).
 
+    Volatility-adaptive (REDESIGN): the scalper SEEKS volatility rather than
+    hiding from it. It trades every tradeable ATR band, scaling SL/TGT to the
+    prevailing volatility and demanding proportionally stronger confirmation as
+    volatility rises. Only a dead tape (nothing to scalp) and genuinely
+    unscalpable extremes (gap/halt/circuit — stops gap straight through) are
+    skipped. Because position size is ATR-inverse (risk_manager sizes off the
+    stop distance), a wider band-scaled stop yields a smaller quantity → the
+    rupee risk per trade stays flat across all bands; the scalper simply
+    participates in more of the market instead of going silent in fast tape.
+
     Hard guards: spread <0.05%, ATR regime, level wall, loss-streak cooldown, 90s dedup.
-    SL/TGT: ATR-dynamic — tighter in calm (0.5×/1.5×), wider in volatile (0.7×/2.0×).
     """
     name    = "scalping"
     product = "MIS"
     min_candles_1min = 10
 
-    SL_ATR_CALM    = 0.5    # calm vol (ATR ratio < 0.002): tighter SL
-    SL_ATR_NORMAL  = 0.6    # normal vol
-    SL_ATR_HIGH    = 0.75   # elevated vol
-    TGT_ATR_CALM   = 1.5    # 3.0:1 R:R in calm
-    TGT_ATR_NORMAL = 1.8    # 3.0:1 R:R in normal
-    TGT_ATR_HIGH   = 2.2    # 2.93:1 R:R in high vol
+    # ── Volatility-band SL/TGT multipliers (× ATR) ──────────────────────────
+    # Higher band = wider stop (survive the swing) AND stricter entry (below).
+    SL_ATR_CALM     = 0.5    # calm  (atr_ratio < 0.002): tighter SL
+    SL_ATR_NORMAL   = 0.6    # normal (< 0.0035)
+    SL_ATR_HIGH     = 0.75   # high   (< 0.007)  — was previously REJECTED at 0.005
+    SL_ATR_EXTREME  = 0.9    # extreme(< 0.015)  — NEW band, was rejected
+    TGT_ATR_CALM    = 1.5    # 3.0:1 R:R in calm
+    TGT_ATR_NORMAL  = 1.8    # 3.0:1 R:R in normal
+    TGT_ATR_HIGH    = 2.2    # 2.93:1 R:R in high vol
+    TGT_ATR_EXTREME = 2.6    # 2.89:1 R:R in extreme vol
     SL_PCT  = 0.28
     TGT_PCT = 0.65
 
-    MIN_SCORE = 5    # raised from 3 — quality over quantity
+    # ── Volatility regime boundaries (ATR / LTP) ────────────────────────────
+    VOL_DEAD        = 0.0002   # below: no movement to scalp — skip
+    VOL_UNSCALPABLE = 0.015    # at/above: gap/halt/circuit — stops gap through, skip
+
+    MIN_SCORE = 5    # base confirmation floor; bumped +1/+2 in HIGH/EXTREME vol
 
     def __init__(self) -> None:
         super().__init__()
@@ -2869,6 +2886,21 @@ class ScalpingAgent(BaseAgent):
         self._prev_macd_hist_sc[sym]  = ind.macd_hist
         self._prev_rsi7_sc[sym]       = ind.rsi_7
 
+    def _vol_band(self, atr_ratio: float) -> tuple[str, float, float, int]:
+        """Classify tradeable volatility → (label, sl_mult, tgt_mult, score_bump).
+
+        The scalper trades every band; higher volatility widens the stop AND
+        raises the confirmation bar (score_bump) so fast tape is entered
+        selectively, not sprayed. Callers guarantee VOL_DEAD ≤ atr_ratio <
+        VOL_UNSCALPABLE before calling."""
+        if atr_ratio < 0.002:
+            return "CALM",    self.SL_ATR_CALM,    self.TGT_ATR_CALM,    0
+        if atr_ratio < 0.0035:
+            return "NORMAL",  self.SL_ATR_NORMAL,  self.TGT_ATR_NORMAL,  0
+        if atr_ratio < 0.007:
+            return "HIGH",    self.SL_ATR_HIGH,    self.TGT_ATR_HIGH,    1
+        return "EXTREME",     self.SL_ATR_EXTREME, self.TGT_ATR_EXTREME, 2
+
     def evaluate_tick(self, snap: MarketSnapshot) -> tuple[str, Optional[dict]]:
         sym = snap.symbol
         ind = snap.indicators
@@ -2904,15 +2936,23 @@ class ScalpingAgent(BaseAgent):
             self._update_prev_state(sym, ind, ltp)
             return "HOLD", None
 
-        # ── Hard guard 4: volatility regime ─────────────────────────────────
+        # ── Hard guard 4: volatility regime — SCALP volatility, don't hide ──
+        # The scalper trades every tradeable ATR band (see _vol_band), scaling
+        # SL/TGT and entry strictness to the regime. Only a dead tape (nothing
+        # to scalp) and genuinely unscalpable extremes (gap/halt/circuit —
+        # stops gap straight through) are skipped here.
         atr = ind.atr_14 or 0.0
         atr_ratio = atr / ltp if ltp > 0 else 0.0
-        if atr_ratio > 0.005:      # too volatile — wide stops required
+        if atr_ratio < self.VOL_DEAD:          # dead market — no movement
             self._update_prev_state(sym, ind, ltp)
             return "HOLD", None
-        if atr_ratio < 0.0002:     # dead market — no movement
+        if atr_ratio >= self.VOL_UNSCALPABLE:  # gap/halt/circuit — unscalpable
             self._update_prev_state(sym, ind, ltp)
             return "HOLD", None
+
+        # Classify the volatility band once — drives entry strictness (below)
+        # and SL/TGT scaling. The scalper trades ALL bands from here down.
+        vol_label, vol_sl_mult, vol_tgt_mult, vol_score_bump = self._vol_band(atr_ratio)
 
         # ── Capture ALL prev-state BEFORE any updates (critical correctness fix) ─
         prev_ema9       = self._prev_ema9.get(sym, ind.ema9)
@@ -2972,8 +3012,11 @@ class ScalpingAgent(BaseAgent):
             return "HOLD", None
 
         # ── Scoring for confidence/size ──────────────────────────────────────
+        # Confirmation bar escalates with volatility: base in CALM/NORMAL,
+        # +1 in HIGH, +2 in EXTREME — so fast tape is entered selectively.
         score, reasons = self._score_setup(snap, ind, ltp, action)
-        if score < self.MIN_SCORE:
+        min_score = self.MIN_SCORE + vol_score_bump
+        if score < min_score:
             return "HOLD", None
 
         # ── Level proximity guard ─────────────────────────────────────────────
@@ -2983,13 +3026,8 @@ class ScalpingAgent(BaseAgent):
         # ── Adaptive size from score (14-factor scale) ───────────────────────
         sf = 0.5 if score <= 7 else (0.75 if score <= 10 else 1.0)
 
-        # ── ATR-regime SL & target (dynamic: tighter in calm, wider in vol) ──
-        if atr_ratio < 0.002:
-            sl_mult, tgt_mult = self.SL_ATR_CALM,   self.TGT_ATR_CALM
-        elif atr_ratio < 0.003:
-            sl_mult, tgt_mult = self.SL_ATR_NORMAL,  self.TGT_ATR_NORMAL
-        else:
-            sl_mult, tgt_mult = self.SL_ATR_HIGH,    self.TGT_ATR_HIGH
+        # ── Volatility-band SL & target (scaled to the regime; trades ALL) ──
+        sl_mult, tgt_mult = vol_sl_mult, vol_tgt_mult
         sl_dist  = max(atr * sl_mult,  ltp * settings.sl_pct_scalping  / 100)
         tgt_dist = max(atr * tgt_mult, ltp * settings.tgt_pct_scalping / 100)
 
@@ -3025,7 +3063,7 @@ class ScalpingAgent(BaseAgent):
             "product":           self.product,
             "pattern":           pattern,
             "_gate_size_factor": sf,
-            "trigger": f"{pattern} score={score}/14 sf={sf} {' '.join(reasons[:5])}",
+            "trigger": f"{pattern} vol={vol_label} score={score}/{min_score} sf={sf} {' '.join(reasons[:5])}",
         }
 
     # ── Pattern detection ─────────────────────────────────────────────────────
@@ -3424,12 +3462,11 @@ class ScalpingAgent(BaseAgent):
 
         atr      = ind.atr_14 or 0.0
         atr_ratio = atr / ltp if ltp > 0 else 0.003
-        if atr_ratio < 0.002:
-            sl_mult, tgt_mult = self.SL_ATR_CALM,   self.TGT_ATR_CALM
-        elif atr_ratio < 0.003:
-            sl_mult, tgt_mult = self.SL_ATR_NORMAL,  self.TGT_ATR_NORMAL
-        else:
-            sl_mult, tgt_mult = self.SL_ATR_HIGH,    self.TGT_ATR_HIGH
+        # Same volatility banding as entry (_vol_band) so a position's exit
+        # stop/target match the band it was entered in — otherwise an EXTREME
+        # entry (0.9× ATR stop) would be checked against a HIGH exit (0.75×)
+        # and get tagged early.
+        _, sl_mult, tgt_mult, _ = self._vol_band(atr_ratio)
         sl_dist  = max(atr * sl_mult,  entry * self.SL_PCT  / 100)
         tgt_dist = max(atr * tgt_mult, entry * self.TGT_PCT / 100)
 
