@@ -359,7 +359,17 @@ class Settings(BaseSettings):
         # BB_BAND_WALK) — the real edge the lean rebuild is built around.
         "options:STOCHRSI_TREND_OPT,mean_reversion:RSI_EXTREME,"
         "mean_reversion:RSI_TRIPLE_EXTREME,mean_reversion:BB_MID_REVERT,"
-        "scalping:RANGE_BREAK_RETEST,futures:ATR_BREAK"
+        "scalping:RANGE_BREAK_RETEST,futures:ATR_BREAK,"
+        # v11 (honest ruler, per-pattern prune of the two still-red agents).
+        # Rule: cut net-negative at >=15 trades. mean_reversion has NO pattern
+        # that clears real costs at sample size — every remaining live pattern
+        # bleeds (STOCHRSI_CROSS -44%@415tr the worst), so it is effectively
+        # benched. Momentum keeps its 3 real winners (VOL_SURGE_TREND +16.3%,
+        # MACD_ZERO_CROSS +19.4%, VWAP_BREAKOUT +0.4%) and drops the bleeders,
+        # led by its SUPERTREND_FLIP entry (-43.6% @627tr — the whipsaw).
+        "mean_reversion:STOCHRSI_CROSS,mean_reversion:BB_LOWER_BOUNCE,"
+        "mean_reversion:PRICE_ZSCORE,mean_reversion:VWAP_EXTREME,"
+        "momentum:SUPERTREND_FLIP,momentum:EMA_ALIGNMENT,momentum:SQUEEZE_RELEASE"
     )
 
     # Scalping approved-book seed: the proxy learner cannot model the real
