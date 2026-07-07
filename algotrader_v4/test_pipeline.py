@@ -12037,6 +12037,28 @@ def t_options_theta_time_stop():
     finally:
         _sa.now_ist = _orig_now
 
+def t_intraday_supertrend_exit_adx_gated():
+    """Intraday supertrend-flip exit must NOT fire on a flat trade in a range
+    (low ADX) — that whipsaw cut 81 trades at avg -Rs49 on 2026-07-07. It must
+    still fire when ADX confirms a trend or the trade has moved adversely."""
+    from agents.strategy_agents import IntradayAgent
+    from tick_engine import LiveIndicators
+    a = IntradayAgent()
+    pos = {"average_price": 1000.0, "quantity": 100}  # long
+    # Range noise: supertrend flipped DOWN but ADX low and price flat → HOLD
+    ind = LiveIndicators(symbol="X", ltp=1000.5, supertrend_dir="DOWN",
+                         adx_14=12, atr_14=5.0, rsi_14=55, trend="NEUTRAL")
+    should, reason = a.should_exit_position(pos, ind)
+    assert not (should and "supertrend" in reason.lower()), \
+        f"supertrend exit should be suppressed in a low-ADX range, got {reason!r}"
+    # Confirmed trend: same flip but ADX high → exit
+    ind_trend = LiveIndicators(symbol="X", ltp=1000.5, supertrend_dir="DOWN",
+                               adx_14=28, atr_14=5.0, rsi_14=55, trend="DOWN")
+    should2, reason2 = a.should_exit_position(pos, ind_trend)
+    assert should2 and "supertrend" in reason2.lower(), \
+        f"supertrend exit must fire in a confirmed trend, got ({should2}, {reason2!r})"
+
+run("intraday_agent: supertrend-flip exit ADX-gated (no range whipsaw)",       t_intraday_supertrend_exit_adx_gated)
 run("options_agent: theta time-stop cuts stale unprofitable long options",     t_options_theta_time_stop)
 run("options_agent: should_exit_position extracts underlying via parse_nfo_symbol for DTE", t_options_should_exit_uses_parsed_underlying_for_dte)
 run("options_agent: _try_enter checks _latency_cooldown_until (latency guard active)",   t_options_try_enter_has_latency_guard_check)

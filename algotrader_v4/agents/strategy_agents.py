@@ -769,8 +769,14 @@ class IntradayAgent(BaseAgent):
                 return True, f"SL hit ₹{ltp:.2f}"
             if ltp >= entry + tgt_dist:
                 return True, f"Target ₹{ltp:.2f}"
-            # Supertrend flip against position
-            if ind.supertrend_dir == "DOWN":
+            # Supertrend flip against position — ONLY in a confirmed trend or on a
+            # real adverse move. Supertrend is a trend-following indicator, so in a
+            # range (low ADX) its flip is noise: on 2026-07-07 this rule whipsawed
+            # 81 trades out at avg −₹49 before target (live target-hit rate 1%).
+            # Require ADX≥20 (trend) OR price below entry by >0.3×ATR; else let
+            # SL/target/TSL manage the trade.
+            _adx = getattr(ind, "adx_14", 0) or 0
+            if ind.supertrend_dir == "DOWN" and (_adx >= 20 or ltp < entry - 0.3 * atr):
                 return True, "Supertrend flip (DOWN) exit"
             # RSI-14 exhaustion — overbought signal on an intraday long
             if ind.rsi_14 >= 76:
@@ -791,8 +797,10 @@ class IntradayAgent(BaseAgent):
                 return True, f"SL hit ₹{ltp:.2f}"
             if ltp <= entry - tgt_dist:
                 return True, f"Target ₹{ltp:.2f}"
-            # Supertrend flip against short
-            if ind.supertrend_dir == "UP":
+            # Supertrend flip against short — only in a confirmed trend or on a
+            # real adverse move (see the long-side note above).
+            _adx = getattr(ind, "adx_14", 0) or 0
+            if ind.supertrend_dir == "UP" and (_adx >= 20 or ltp > entry + 0.3 * atr):
                 return True, "Supertrend flip (UP) exit"
             # RSI-14 exhaustion — oversold on an intraday short
             if ind.rsi_14 <= 24:
@@ -2731,7 +2739,10 @@ class SwingAgent(BaseAgent):
                 return True, f"Swing TGT ₹{ltp:.2f}"
             if ind.ema200 and ltp < ind.ema200 * 0.998:
                 return True, "EMA200 breakdown exit"
-            if ind.supertrend_dir in ("DOWN", "down"):
+            # Supertrend flip — only honour in a confirmed trend (ADX≥20) or on a
+            # real adverse move; in a range it whipsaws swing holds out at a loss.
+            if ind.supertrend_dir in ("DOWN", "down") and (
+                    (getattr(ind, "adx_14", 0) or 0) >= 20 or ltp < entry - 0.3 * atr):
                 return True, "Supertrend flip (DOWN) exit"
             if ind.rsi_14 >= 78:
                 return True, f"RSI overbought {ind.rsi_14:.0f} exit"
@@ -2747,7 +2758,8 @@ class SwingAgent(BaseAgent):
                 return True, f"Swing TGT ₹{ltp:.2f}"
             if ind.ema200 and ltp > ind.ema200 * 1.002:
                 return True, "EMA200 reclaim exit"
-            if ind.supertrend_dir in ("UP", "up"):
+            if ind.supertrend_dir in ("UP", "up") and (
+                    (getattr(ind, "adx_14", 0) or 0) >= 20 or ltp > entry + 0.3 * atr):
                 return True, "Supertrend flip (UP) exit"
             if ind.rsi_14 <= 22:
                 return True, f"RSI oversold {ind.rsi_14:.0f} exit"
@@ -5299,7 +5311,9 @@ class MomentumAgent(BaseAgent):
                 return True, f"Momentum TGT ₹{ltp:.2f}"
             if adx < 18 and ind.macd_hist < 0:
                 return True, f"ADX fade {adx:.0f} — momentum gone"
-            if ind.supertrend_dir in ("DOWN", "down"):
+            # Supertrend flip — only in a confirmed trend or on a real adverse
+            # move; otherwise it whipsaws momentum trades out on range noise.
+            if ind.supertrend_dir in ("DOWN", "down") and (adx >= 20 or ltp < entry - 0.3 * atr):
                 return True, "Supertrend flip (DOWN) exit"
             if ind.rsi_14 >= 78 and ind.macd_hist < 0:
                 return True, f"RSI exhaustion {ind.rsi_14:.0f}"
@@ -5313,7 +5327,7 @@ class MomentumAgent(BaseAgent):
                 return True, f"Momentum TGT ₹{ltp:.2f}"
             if adx < 18 and ind.macd_hist > 0:
                 return True, f"ADX fade {adx:.0f} — momentum gone"
-            if ind.supertrend_dir in ("UP", "up"):
+            if ind.supertrend_dir in ("UP", "up") and (adx >= 20 or ltp > entry + 0.3 * atr):
                 return True, "Supertrend flip (UP) exit"
             if ind.rsi_14 <= 22 and ind.macd_hist > 0:
                 return True, f"RSI exhaustion {ind.rsi_14:.0f}"
