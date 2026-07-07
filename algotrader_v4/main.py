@@ -379,11 +379,17 @@ class TradingLimitsRequest(BaseModel):
     cooldown_after_loss_sec: int | None = Field(default=None, ge=0, le=3600)
 
 class AgentEnablesRequest(BaseModel):
-    intraday: bool | None = None
-    options:  bool | None = None
-    futures:  bool | None = None
-    swing:    bool | None = None
-    scalping: bool | None = None
+    intraday:        bool | None = None
+    options:         bool | None = None
+    futures:         bool | None = None
+    swing:           bool | None = None
+    scalping:        bool | None = None
+    # Newer equity agents were missing here — they could not be enabled/disabled
+    # via the API at all, so a bleeding agent (e.g. momentum on a range day)
+    # could only be stopped by a redeploy. Now toggleable live.
+    momentum:        bool | None = None
+    mean_reversion:  bool | None = None
+    pairs:           bool | None = None
 
 class CapitalAllocationRequest(BaseModel):
     capital_per_agent:       float | None = Field(None, ge=10000, le=10_000_000)

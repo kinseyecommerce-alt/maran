@@ -160,9 +160,11 @@ def t_regime_gate_matrix():
     import bot_state
     try:
         bot_state.set_current_regime("RANGING")
-        assert not bot_state.is_agent_allowed_in_regime("options"), "options in RANGING"
-        for allowed in ("intraday", "futures", "pairs", "scalping", "swing",
-                        "momentum", "mean_reversion"):   # mom/meanrev: RANGING-only unbench
+        # options/momentum/mean_reversion re-benched in RANGING (2026-07-07 live
+        # evidence: momentum -₹1,672/31 trades on a range day — needs trend).
+        for blocked in ("options", "momentum", "mean_reversion"):
+            assert not bot_state.is_agent_allowed_in_regime(blocked), f"{blocked} in RANGING"
+        for allowed in ("intraday", "futures", "pairs", "scalping", "swing"):
             assert bot_state.is_agent_allowed_in_regime(allowed), f"{allowed} in RANGING"
         bot_state.set_current_regime("HIGH_VOLATILE")
         for blocked in ("mean_reversion", "pairs", "momentum"):
