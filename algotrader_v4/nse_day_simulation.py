@@ -406,6 +406,29 @@ class AgentTracker:
                 self._last_exit_ts[sym] = ts
                 del self._open[sym]
 
+    def check_real_exit(self, sym: str, ind, ts: datetime, agent_obj) -> None:
+        """Exit an open position using the agent's REAL should_exit_position,
+        so the backtest matches live instead of the sim's simple SL/target.
+        This is what makes the ruler honest: the live brain exits (supertrend
+        flip, RSI, trend reversal, ADX fade, breakeven) that dominate real
+        outcomes now fire in the sim too. Cash-equity agents only — Options
+        (premium marks) and Futures keep their own simplified paths."""
+        tr = self._open.get(sym)
+        if not tr or agent_obj is None:
+            return
+        _long = tr.action in ("BUY", "CE", "LONG")
+        pos = {"average_price": tr.entry_px,
+               "quantity": tr.qty if _long else -tr.qty,
+               "last_price": ind.ltp, "tradingsymbol": sym}
+        try:
+            should, reason = agent_obj.should_exit_position(pos, ind)
+        except Exception:
+            return
+        if should:
+            tr.close(ind.ltp, ts, reason or "brain_exit")
+            self._last_exit_ts[sym] = ts
+            del self._open[sym]
+
     def squareoff_all(self, prices: dict[str, float], ts: datetime,
                       keep: bool = False):
         """Close all open positions at *prices*. keep=True carries them

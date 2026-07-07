@@ -53,6 +53,15 @@ AGENT_KEY = {"Intraday": "intraday", "Scalping": "scalping", "Options": "options
              "Futures": "futures", "Swing": "swing", "Momentum": "momentum",
              "MeanRev": "mean_reversion", "Pairs": "pairs"}
 
+# Cash-equity agents whose should_exit_position works cleanly on price+ind, so
+# the replay CAN drive their REAL exits (brain exits) for a live-faithful sim.
+# DISABLED by default (empty set): calling should_exit_position every bar is
+# ~20ms/call, which does not scale to 62 days × 100 symbols in a Python loop —
+# it needs a perf rewrite (precomputed indicator arrays / vectorised exits)
+# before it can run at scale. Enable via --real-exit for small samples.
+_REAL_EXIT_AGENTS_ALL = {"Intraday", "Scalping", "Swing", "Momentum", "MeanRev"}
+_REAL_EXIT_AGENTS: set = set()
+
 
 def build_regime_timeline(nifty_df: pd.DataFrame | None) -> dict:
     """CAUSAL intraday day-type detector — classifies the day at each NIFTY bar
@@ -223,6 +232,13 @@ def replay(symbols: list[str], max_days: int | None = None,
                 snap = make_snapshot(sym, ind, df, bar_idx, ltp, bar_seconds=60 * tf_min)
                 if regime_keys:
                     _bs.set_current_regime(_regime_at(regime_keys, regime_tl, row.name))
+                # HONEST EXIT: run the agent's real should_exit_position (brain
+                # exits — supertrend/RSI/trend/ADX/breakeven) so the sim exits
+                # match live, not the simple SL/target the tracker used before.
+                # Cash-equity agents only (Options=premium, Futures keep on_price).
+                for name, agent in agents:
+                    if name in _REAL_EXIT_AGENTS:
+                        trackers[name].check_real_exit(sym, ind, ts, agent)
                 for name, agent in agents:
                     try:
                         action, signal = agent.evaluate_tick(snap)
@@ -283,16 +299,18 @@ def replay(symbols: list[str], max_days: int | None = None,
     #   futures MIS: ~0.03% (brokerage flat, STT 0.01% sell side only,
     #     lower txn charges at same notional)
     #   swing CNC: ~0.12% (STT 0.1% both sides, no brokerage on delivery)
-    COST_BY_AGENT = {"Swing": 0.12,
-                     # Futures: 0.03% of NOTIONAL per round trip — but sizing
-                     # below is per ₹1L of MARGIN, which controls 5× notional,
-                     # so the cost per ₹1L of deployed capital is 5 × 0.03%.
+    # HONEST COSTS — calibrated to observed live: 2026-07-07 booked ₹9,440 of
+    # costs on 206 trades averaging ~₹37k notional = ~0.124%/round-trip. Add
+    # slippage (market entries, wider spreads on mid-caps) → ~0.15% all-in for
+    # equity MIS. The old 0.06% was ~half the real cost and was the single
+    # biggest reason the sim overstated profit.
+    COST_BY_AGENT = {"Swing": 0.15,       # CNC: STT 0.1%/side dominates; ~0.20 real, but held longer
+                     # Futures: ~0.03% of NOTIONAL, ×5 margin leverage = 0.15% of capital.
                      "Futures": 0.15,
-                     # Options: costs land on PREMIUM notional (₹1L of premium,
-                     # not ₹1L of underlying) — brokerage + STT 0.0625% sell +
-                     # txn 0.05% + GST/stamp + wider spreads ≈ 0.30%/round trip.
+                     # Options: on PREMIUM notional — brokerage + STT 0.0625% sell
+                     # + txn 0.05% + GST/stamp + wide spreads ≈ 0.30%/round trip.
                      "Options": 0.30}
-    COST_DEFAULT = 0.06
+    COST_DEFAULT = 0.15   # equity MIS all-in (was 0.06 — understated real costs ~2×)
     # ── Options premium economics ────────────────────────────────────────
     # The trackers record every trade as an UNDERLYING move % — but the real
     # OptionsAgent buys a ~0.40-delta contract whose premium is ~2% of spot,
@@ -389,7 +407,13 @@ if __name__ == "__main__":
     ap.add_argument("--capital", type=float, default=100_000.0,
                     help="capital pool per agent (₹); equity agents split it "
                          "across max concurrent positions, F&O deploy the full pool")
+    ap.add_argument("--real-exit", action="store_true",
+                    help="drive cash-equity exits through the agents' real "
+                         "should_exit_position (live-faithful but ~20ms/call — "
+                         "use on small samples only until perf-optimised)")
     args = ap.parse_args()
+    if args.real_exit:
+        _REAL_EXIT_AGENTS = set(_REAL_EXIT_AGENTS_ALL)
     replay([s.strip().upper() for s in args.symbols.split(",") if s.strip()],
            args.days, args.start, args.end, args.tag, gating=args.regime_gating,
            tf_min=args.tf, capital_per_agent=args.capital)
