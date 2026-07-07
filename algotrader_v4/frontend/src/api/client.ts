@@ -162,6 +162,7 @@ export const api = {
   // ── Settings — Capital Allocation ───────────────────────────────────────────
   getCapitalAllocation: () => ax().get('/settings/capital-allocation'),
   patchCapitalAllocation: (data: {
+    capital_per_agent?: number
     total_capital?: number
     intraday_capital_pct?: number; swing_capital_pct?: number
     options_capital_pct?: number; futures_capital_pct?: number

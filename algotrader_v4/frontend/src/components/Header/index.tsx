@@ -836,10 +836,11 @@ function TradingConfigPanel({ addToast }: { addToast: (msg: string, type?: any) 
   const [modeSaving, setModeSaving] = useState(false)
 
   const [cap, setCap] = useState({
-    total_capital: 100000, intraday_capital_pct: 40, swing_capital_pct: 20,
-    options_capital_pct: 20, futures_capital_pct: 20,
-    max_intraday_positions: 5, max_scalping_positions: 3, max_swing_positions: 3,
+    capital_per_agent: 1000000,
+    max_intraday_positions: 5, max_scalping_positions: 5, max_swing_positions: 3,
   })
+  // Read-only per-agent rupee breakdown the backend actually sizes trades at.
+  const [perAgentRupees, setPerAgentRupees] = useState<Record<string, number>>({})
   const [capSaving, setCapSaving] = useState(false)
 
   const [limits, setLimits] = useState({
@@ -862,15 +863,12 @@ function TradingConfigPanel({ addToast }: { addToast: (msg: string, type?: any) 
     api.getCapitalAllocation().then(r => {
       const d = r.data
       setCap({
-        total_capital: d.total_capital ?? 100000,
-        intraday_capital_pct: d.intraday_capital_pct ?? 40,
-        swing_capital_pct: d.swing_capital_pct ?? 20,
-        options_capital_pct: d.options_capital_pct ?? 20,
-        futures_capital_pct: d.futures_capital_pct ?? 20,
+        capital_per_agent: d.capital_per_agent ?? 1000000,
         max_intraday_positions: d.max_positions?.intraday ?? 5,
-        max_scalping_positions: d.max_positions?.scalping ?? 3,
+        max_scalping_positions: d.max_positions?.scalping ?? 5,
         max_swing_positions:    d.max_positions?.swing ?? 3,
       })
+      setPerAgentRupees(d.per_agent_rupees ?? {})
     }).catch(() => {})
     api.getTradingLimits().then(r => setLimits(r.data)).catch(() => {})
     api.getIntelligence().then(r => setIntel(r.data)).catch(() => {})
@@ -891,11 +889,10 @@ function TradingConfigPanel({ addToast }: { addToast: (msg: string, type?: any) 
   }
 
   const handleSaveCap = async () => {
-    const sum = cap.intraday_capital_pct + cap.swing_capital_pct + cap.options_capital_pct + cap.futures_capital_pct
-    if (sum > 100) { addToast('Capital percentages exceed 100%', 'error'); return }
     setCapSaving(true)
     try {
-      await api.patchCapitalAllocation(cap)
+      const r = await api.patchCapitalAllocation(cap)
+      setPerAgentRupees(r.data?.per_agent_rupees ?? perAgentRupees)
       addToast('Capital allocation saved', 'buy')
     } catch (e: any) {
       addToast(e.response?.data?.detail || 'Save failed', 'error')
@@ -957,26 +954,37 @@ function TradingConfigPanel({ addToast }: { addToast: (msg: string, type?: any) 
         <p className="text-[11px] text-slate-600">Current mode: <span className={`font-mono font-semibold ${mode === 'LIVE' ? 'text-rose-400' : 'text-emerald-400'}`}>{mode}</span></p>
       </div>
 
-      {/* Capital Allocation */}
+      {/* Capital Allocation — flat per-agent pool model */}
       <div className="space-y-3">
         <SectionLabel>Capital Allocation</SectionLabel>
-        <NumInput label="Total Capital (₹)" value={cap.total_capital} min={10000} step={5000}
-          onChange={v => setCap(p => ({ ...p, total_capital: v }))} hint="Deployable capital across all strategies" />
-        <NumInput label="Intraday %" value={cap.intraday_capital_pct} min={0} max={100}
-          onChange={v => setCap(p => ({ ...p, intraday_capital_pct: v }))} />
-        <NumInput label="Swing %" value={cap.swing_capital_pct} min={0} max={100}
-          onChange={v => setCap(p => ({ ...p, swing_capital_pct: v }))} />
-        <NumInput label="Options %" value={cap.options_capital_pct} min={0} max={100}
-          onChange={v => setCap(p => ({ ...p, options_capital_pct: v }))} />
-        <NumInput label="Futures %" value={cap.futures_capital_pct} min={0} max={100}
-          onChange={v => setCap(p => ({ ...p, futures_capital_pct: v }))}
-          hint={`Sum: ${cap.intraday_capital_pct + cap.swing_capital_pct + cap.options_capital_pct + cap.futures_capital_pct}% (must be ≤ 100)`} />
+        <NumInput label="Capital per Agent (₹)" value={cap.capital_per_agent} min={10000} step={50000}
+          onChange={v => setCap(p => ({ ...p, capital_per_agent: v }))}
+          hint="Each of the 8 strategy agents gets its own independent pool. Total book = this × 8." />
         <NumInput label="Max Intraday Pos" value={cap.max_intraday_positions} min={1} max={20}
           onChange={v => setCap(p => ({ ...p, max_intraday_positions: v }))} />
         <NumInput label="Max Scalping Pos" value={cap.max_scalping_positions} min={1} max={20}
           onChange={v => setCap(p => ({ ...p, max_scalping_positions: v }))} />
         <NumInput label="Max Swing Pos" value={cap.max_swing_positions} min={1} max={10}
           onChange={v => setCap(p => ({ ...p, max_swing_positions: v }))} />
+        {Object.keys(perAgentRupees).length > 0 && (
+          <div className="mt-1 rounded-lg border border-slate-800 bg-slate-900/40 p-3">
+            <div className="text-[11px] font-semibold text-slate-400 mb-1.5">
+              Per-trade capital the backend actually sizes at
+            </div>
+            <div className="grid grid-cols-2 gap-x-4 gap-y-1">
+              {Object.entries(perAgentRupees).map(([agent, rupees]) => (
+                <div key={agent} className="flex items-center justify-between text-[11px]">
+                  <span className="text-slate-500 capitalize">{agent.replace('_', ' ')}</span>
+                  <span className="font-mono text-slate-300">₹{Number(rupees).toLocaleString('en-IN')}</span>
+                </div>
+              ))}
+            </div>
+            <div className="text-[10px] text-slate-600 mt-1.5">
+              Equity agents = pool ÷ max positions · options/futures deploy the full pool (lot-based).
+              Kelly sizing may deploy smaller until a live edge is proven.
+            </div>
+          </div>
+        )}
         <SaveSection onSave={handleSaveCap} saving={capSaving} label="Save Capital" />
       </div>
 
