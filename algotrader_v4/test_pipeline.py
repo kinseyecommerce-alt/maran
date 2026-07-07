@@ -1331,18 +1331,26 @@ def t_scalping_win_resets_streak():
     assert agent._loss_streak.get(sym, 0) == 0
 
 def t_scalping_dedup_90s():
-    """Same symbol+direction within 90s should be deduplicated."""
+    """Same symbol+direction within cooldown should be deduplicated.
+
+    Clock is pinned to market hours (the scalper now trades all volatility
+    bands, so it reaches the dedup gate instead of being rejected by the old
+    high-ATR guard) and the seeded signal timestamp uses the SAME pinned clock
+    so the recency subtraction is well-defined."""
+    from unittest.mock import patch
+    _mkt_dt = datetime(2026, 1, 15, 10, 30, 0)   # 10:30 AM, matches now_ist mock
     agent = ScalpingAgent()
     sym = "TESTDEDUP"
-    agent._last_signal_ts[sym]  = datetime.now()
+    agent._last_signal_ts[sym]  = _mkt_dt         # same clock as the mock below
     agent._last_signal_dir[sym] = "BUY"
-    # Force an EMA9 cross setup
+    # Force a bullish EMA9 cross setup
     agent._prev_ema9[sym] = 2810.0
     agent._prev_ltp[sym]  = 2808.0
     snap = _make_snap(symbol=sym, ltp=2812.0, ema9=2809.0, n_candles=15,
                       rsi=56.0, volume_ratio=1.5, macd_hist=0.5, vwap=2800.0)
-    action, _ = agent.evaluate_tick(snap)
-    assert action == "HOLD", "Dedup should suppress signal within 90s"
+    with patch("agents.strategy_agents.now_ist", return_value=_mkt_dt):
+        action, _ = agent.evaluate_tick(snap)
+    assert action == "HOLD", "Dedup should suppress repeat BUY within cooldown"
 
 def t_scalping_5_patterns_exist():
     """The agent must define all 5 pattern types in _detect_pattern."""
