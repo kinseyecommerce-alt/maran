@@ -170,11 +170,12 @@ def t_regime_gate_matrix():
     import bot_state
     try:
         bot_state.set_current_regime("RANGING")
-        # options/momentum/mean_reversion re-benched in RANGING (2026-07-07 live
-        # evidence: momentum -₹1,672/31 trades on a range day — needs trend).
-        for blocked in ("options", "momentum", "mean_reversion"):
+        # options/momentum/mean_reversion/pairs re-benched in RANGING (2026-07-07
+        # live + honest-ruler evidence: momentum -₹1,672/31tr on a range day,
+        # pairs -38% net over 62d with no winning pattern).
+        for blocked in ("options", "momentum", "mean_reversion", "pairs"):
             assert not bot_state.is_agent_allowed_in_regime(blocked), f"{blocked} in RANGING"
-        for allowed in ("intraday", "futures", "pairs", "scalping", "swing"):
+        for allowed in ("intraday", "futures", "scalping", "swing"):
             assert bot_state.is_agent_allowed_in_regime(allowed), f"{allowed} in RANGING"
         bot_state.set_current_regime("HIGH_VOLATILE")
         for blocked in ("mean_reversion", "pairs", "momentum"):
@@ -194,7 +195,7 @@ def t_regime_gate_unknown_and_toggle():
     try:
         bot_state.set_current_regime("UNKNOWN")
         assert all(bot_state.is_agent_allowed_in_regime(a)
-                   for a in ("intraday", "scalping", "futures", "pairs", "swing"))
+                   for a in ("intraday", "scalping", "futures", "swing"))
         # momentum/mean_reversion: net-negative in every tested config —
         # blocked even in UNKNOWN until fresh evidence clears them.
         # options: benched pre-10:15 — bought options bleed theta and must not
@@ -203,6 +204,7 @@ def t_regime_gate_unknown_and_toggle():
         assert not bot_state.is_agent_allowed_in_regime("momentum")
         assert not bot_state.is_agent_allowed_in_regime("mean_reversion")
         assert not bot_state.is_agent_allowed_in_regime("options")
+        assert not bot_state.is_agent_allowed_in_regime("pairs")  # honest ruler: -38% net/62d
         bot_state.set_current_regime("BULL_TREND")
         settings.regime_agent_gating = False
         assert bot_state.is_agent_allowed_in_regime("momentum")   # gate off → allowed

@@ -436,7 +436,7 @@ class Settings(BaseSettings):
         # "trend" contract before the day's regime is even confirmed is the
         # single biggest options loss source (8/12 losers on 2026-07-06 all
         # entered in this window). No options entries until the trend is known.
-        "UNKNOWN:options,momentum,mean_reversion;"
+        "UNKNOWN:options,momentum,mean_reversion,pairs;"
         "BULL_TREND:momentum,mean_reversion,pairs;"
         "BULL_VOLATILE:momentum,mean_reversion,pairs;"
         "BEAR_TREND:options,momentum,mean_reversion,pairs;"
@@ -445,7 +445,9 @@ class Settings(BaseSettings):
         # test (2026-07-07) confirmed the 62-day replay — momentum bled -₹1,672
         # over 31 trades on a range day (breakouts that fail), mean_reversion ~flat.
         # Momentum needs trend; in RANGING it's a net loser. Options stays benched.
-        "RANGING:options,momentum,mean_reversion;"
+        # Pairs added (honest ruler): -38% net over 62d with no winning pattern —
+        # benched in every regime now (already off in all trend/volatile ones).
+        "RANGING:options,momentum,mean_reversion,pairs;"
 
         "HIGH_VOLATILE:momentum,mean_reversion,pairs;"
         "BLACK_SWAN:swing,intraday,futures,momentum,pairs,mean_reversion"
