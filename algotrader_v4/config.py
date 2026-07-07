@@ -359,7 +359,17 @@ class Settings(BaseSettings):
         # BB_BAND_WALK) — the real edge the lean rebuild is built around.
         "options:STOCHRSI_TREND_OPT,mean_reversion:RSI_EXTREME,"
         "mean_reversion:RSI_TRIPLE_EXTREME,mean_reversion:BB_MID_REVERT,"
-        "scalping:RANGE_BREAK_RETEST,futures:ATR_BREAK"
+        "scalping:RANGE_BREAK_RETEST,futures:ATR_BREAK,"
+        # v11 (honest ruler, per-pattern prune of the two still-red agents).
+        # Rule: cut net-negative at >=15 trades. mean_reversion has NO pattern
+        # that clears real costs at sample size — every remaining live pattern
+        # bleeds (STOCHRSI_CROSS -44%@415tr the worst), so it is effectively
+        # benched. Momentum keeps its 3 real winners (VOL_SURGE_TREND +16.3%,
+        # MACD_ZERO_CROSS +19.4%, VWAP_BREAKOUT +0.4%) and drops the bleeders,
+        # led by its SUPERTREND_FLIP entry (-43.6% @627tr — the whipsaw).
+        "mean_reversion:STOCHRSI_CROSS,mean_reversion:BB_LOWER_BOUNCE,"
+        "mean_reversion:PRICE_ZSCORE,mean_reversion:VWAP_EXTREME,"
+        "momentum:SUPERTREND_FLIP,momentum:EMA_ALIGNMENT,momentum:SQUEEZE_RELEASE"
     )
 
     # Scalping approved-book seed: the proxy learner cannot model the real
@@ -426,7 +436,7 @@ class Settings(BaseSettings):
         # "trend" contract before the day's regime is even confirmed is the
         # single biggest options loss source (8/12 losers on 2026-07-06 all
         # entered in this window). No options entries until the trend is known.
-        "UNKNOWN:options,momentum,mean_reversion;"
+        "UNKNOWN:options,momentum,mean_reversion,pairs;"
         "BULL_TREND:momentum,mean_reversion,pairs;"
         "BULL_VOLATILE:momentum,mean_reversion,pairs;"
         "BEAR_TREND:options,momentum,mean_reversion,pairs;"
@@ -435,7 +445,9 @@ class Settings(BaseSettings):
         # test (2026-07-07) confirmed the 62-day replay — momentum bled -₹1,672
         # over 31 trades on a range day (breakouts that fail), mean_reversion ~flat.
         # Momentum needs trend; in RANGING it's a net loser. Options stays benched.
-        "RANGING:options,momentum,mean_reversion;"
+        # Pairs added (honest ruler): -38% net over 62d with no winning pattern —
+        # benched in every regime now (already off in all trend/volatile ones).
+        "RANGING:options,momentum,mean_reversion,pairs;"
 
         "HIGH_VOLATILE:momentum,mean_reversion,pairs;"
         "BLACK_SWAN:swing,intraday,futures,momentum,pairs,mean_reversion"
