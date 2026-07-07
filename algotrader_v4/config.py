@@ -428,8 +428,12 @@ class Settings(BaseSettings):
 
     # Phase 2/3: Position sizing
     use_atr_sizing: bool = True
-    risk_per_trade_pct: float = Field(default=0.5, gt=0, le=50)
-    use_conviction_sizing: bool = True  # score-proportional size: low=0.5×, mid=0.75×, high=1.0×
+    # Risk budget per trade as % of the agent's pool. 0.5% risked only ~₹1k on a
+    # ₹2L slice → ~₹66k notional, then compounded down by Kelly/conviction/gate,
+    # so the ₹10L pools sat barely used. 2.0% ~4× the risk budget; ATR sizing
+    # still caps each position at the pool slice, so it can't overshoot capital.
+    risk_per_trade_pct: float = Field(default=2.0, gt=0, le=50)
+    use_conviction_sizing: bool = True  # score-proportional size (floor loosened: low=0.75×, mid=1.0×, high=1.25×)
 
     # Phase 3: Intelligence
     max_positions_per_sector: int = 2
