@@ -133,9 +133,19 @@ def t_kill_list_defaults():
     assert not bot_state.is_pattern_enabled("futures", "MULTI_TF_ALIGN")
     assert bot_state.is_pattern_enabled("futures", "BB_WALK_FUT")       # +74.4% net @365tr
     assert bot_state.is_pattern_enabled("futures", "SQUEEZE_WALK_FUT")  # +30.2% net @139tr
-    assert bot_state.is_pattern_enabled("intraday", "KELTNER_RIDE")     # v6 star: +266.9% net
-    assert bot_state.is_pattern_enabled("options", "STOCHRSI_TREND_OPT")# v6: +8.2% net
+    assert bot_state.is_pattern_enabled("intraday", "KELTNER_RIDE")     # honest ruler: +496.9% net
     assert bot_state.is_pattern_enabled("intraday", "VWAP_BAND_REVERT") # scoping: intraday keeps it
+    # v10 HONEST RULER (62d, premium/margin-scaled + realistic costs) overturns
+    # the under-costed sim's verdicts. STOCHRSI_TREND_OPT was v6-KEPT at
+    # "+8.2% @169tr" but is -2068% over 1037 honest trades — the system's
+    # single biggest drain. These six are now muted:
+    for _ag, _p in [("options", "STOCHRSI_TREND_OPT"), ("mean_reversion", "RSI_EXTREME"),
+                    ("mean_reversion", "RSI_TRIPLE_EXTREME"), ("mean_reversion", "BB_MID_REVERT"),
+                    ("scalping", "RANGE_BREAK_RETEST"), ("futures", "ATR_BREAK")]:
+        assert not bot_state.is_pattern_enabled(_ag, _p), f"v10 honest-ruler bleeder {_ag}:{_p} must be killed"
+    # The band-walk / squeeze family — the confirmed cross-agent edge — stays on.
+    assert bot_state.is_pattern_enabled("futures", "BB_WALK_FUT")
+    assert bot_state.is_pattern_enabled("intraday", "KELTNER_RIDE")
 
 def t_kill_list_runtime_mutation():
     """Mutating settings.disabled_patterns takes effect immediately (cache refresh)."""
