@@ -1466,6 +1466,69 @@ def t_add_symbols_paper_promotes():
     assert agent.add_symbols(["HOTMOVER1"]) == 0   # idempotent
 
 run("add_symbols: PAPER promotes scanner picks, dedups", t_add_symbols_paper_promotes)
+
+def t_conviction_2x_slice():
+    """Top-conviction signals (gate size-factor >= 1.0) get a doubled slice;
+    lower-conviction ones don't; kill-switch flag disables the boost."""
+    agent = ScalpingAgent()
+    snap = _make_snap(n_candles=15, rsi=56.0, volume_ratio=1.8, macd_hist=0.8)
+    base_sig = {"stop_loss_pct": 0.5, "score": 6}   # conviction-curve 1.0x — isolates the 2x block
+    old_flag = settings.conviction_2x_enabled
+    try:
+        settings.conviction_2x_enabled = True
+        q_top  = agent._compute_qty(snap, "BUY", dict(base_sig, _gate_size_factor=1.0))
+        settings.conviction_2x_enabled = False
+        q_off  = agent._compute_qty(snap, "BUY", dict(base_sig, _gate_size_factor=1.0))
+        settings.conviction_2x_enabled = True
+        q_low  = agent._compute_qty(snap, "BUY", dict(base_sig, _gate_size_factor=0.75))
+        assert q_top > q_off, f"2x flag should raise qty ({q_top} vs {q_off})"
+        assert q_off * snap.tick.ltp <= settings.max_position_size + snap.tick.ltp, "hard clamp must hold"
+        # The boost is doubled-then-capped at conviction_2x_mult x the agent
+        # slice (2 x 2L = 4L notional): q_top must equal the smaller of 2x the
+        # base or that cap — never less.
+        from risk_manager import risk_manager as _rm
+        _cap = int(min(float(settings.max_position_size),
+                       _rm.buying_power_for_agent("scalping") * settings.conviction_2x_mult)
+                   // snap.tick.ltp)
+        assert q_top == min(q_off * 2, _cap), f"q_top={q_top} base={q_off} cap={_cap}"
+        # low-conviction path gets no concentration (0.75 sf also shrinks base)
+        assert q_low < q_top
+    finally:
+        settings.conviction_2x_enabled = old_flag
+
+run("conviction 2x: top-score signals get doubled slice", t_conviction_2x_slice)
+
+def t_mis_leverage_buying_power():
+    """MIS equity agents get slice x mis_leverage buying power; swing (CNC)
+    and lot-based agents don't. Risk budget stays on the cash slice."""
+    from risk_manager import risk_manager as rm
+    slice_ = rm.max_capital_for_agent("scalping")
+    assert rm.buying_power_for_agent("scalping") == slice_ * settings.mis_leverage
+    assert rm.buying_power_for_agent("swing") == rm.max_capital_for_agent("swing")
+    # afford cap in ATR sizing now uses buying power: a tight-SL scalp is no
+    # longer chopped to the cash slice
+    qty = rm.calculate_quantity_atr(1000.0, 10.0, agent="scalping", sl_dist=3.0)
+    risk_qty   = int(slice_ * settings.risk_per_trade_pct / 100 / 3.0)
+    afford_qty = int(slice_ * settings.mis_leverage // 1000.0)
+    maxpos_qty = int(settings.max_position_size // 1000.0)
+    assert qty == min(risk_qty, afford_qty, maxpos_qty),         f"qty={qty} risk={risk_qty} afford={afford_qty} maxpos={maxpos_qty}"
+    assert qty * 1000.0 > slice_, "leverage must lift notional above the cash slice"
+
+run("MIS leverage: buying power 5x for intraday equity agents", t_mis_leverage_buying_power)
+
+def t_swing_restart_warmup():
+    """Swing takes NO entries in the first 15 minutes after process start —
+    the restart churn guard (2026-07-08: 25 junk trades over 5 restarts)."""
+    agent = SwingAgent()
+    snap = _make_snap(n_candles=210)
+    action, _ = agent.evaluate_tick(snap)
+    assert action == "HOLD" and agent._warmup_start is not None
+    # simulate warm-up elapsed
+    agent._warmup_start -= 16 * 60
+    action2, _ = agent.evaluate_tick(snap)
+    assert action2 in ("BUY", "SELL", "HOLD", "EXIT")   # normal path reachable
+
+run("swing restart warm-up: 15 min no-entry guard", t_swing_restart_warmup)
 run("should_exit_position returns (bool, str)",  t_exit_position_type)
 run("exit: long position on overbought RSI",     t_exit_overbought_long)
 run("exit: short position on oversold RSI",      t_exit_short_oversold)

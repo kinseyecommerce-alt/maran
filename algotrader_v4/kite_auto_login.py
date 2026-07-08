@@ -118,7 +118,22 @@ def run_kite_auto_login() -> str:
             try:
                 page.wait_for_url(f"{redirect_prefix}**", timeout=20_000)
             except PwTimeout:
-                raise RuntimeError("Kite did not redirect to callback URL in time")
+                # Repeat logins sometimes land on Kite's app-authorization
+                # (consent) page instead of redirecting. Click through it
+                # once, then wait again. Otherwise surface WHERE we are.
+                try:
+                    btn = page.query_selector(
+                        'button:has-text("Authorize"), button:has-text("Continue"), '
+                        'button[type="submit"]')
+                    if btn:
+                        btn.click()
+                        page.wait_for_url(f"{redirect_prefix}**", timeout=15_000)
+                    else:
+                        raise PwTimeout("no consent button")
+                except Exception:
+                    raise RuntimeError(
+                        f"Kite did not redirect to callback URL in time "
+                        f"(stuck at {page.url})")
 
             request_token = _extract_request_token(page.url)
             if not request_token:
