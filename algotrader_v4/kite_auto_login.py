@@ -73,14 +73,36 @@ def run_kite_auto_login() -> str:
             page.click('button[type="submit"]')
 
             # ── 3. TOTP 2FA ───────────────────────────────────────────────
-            page.wait_for_selector(
-                'input[id="pin"], input[placeholder*="TOTP"], input[placeholder*="code"]',
-                timeout=15_000,
+            # Zerodha has changed this page over time: the classic input#pin
+            # became a numeric input (id reused as "userid") inside
+            # form.twofa-form. Match the form first, then fall back through
+            # every shape seen in the wild.
+            twofa_sel = (
+                'form.twofa-form input:not([type="hidden"]), '
+                'input[type="number"], '
+                'input[autocomplete="one-time-code"], '
+                'input[id="pin"], input[placeholder*="TOTP"], '
+                'input[placeholder*="code"]'
             )
-            page.fill(
-                'input[id="pin"], input[placeholder*="TOTP"], input[placeholder*="code"]',
-                totp.now(),
-            )
+            try:
+                page.wait_for_selector(twofa_sel, timeout=15_000)
+            except PwTimeout:
+                # Distinguish "bad password" from "Zerodha changed the DOM":
+                # surface any visible error banner + where we actually landed.
+                err_txt = ""
+                try:
+                    el = page.query_selector('.su-error, .error, [class*="error"]')
+                    if el:
+                        err_txt = (el.inner_text() or "").strip()[:120]
+                except Exception:
+                    pass
+                raise RuntimeError(
+                    f"2FA input never appeared. url={page.url} "
+                    f"login-error={err_txt or 'none visible'} "
+                    f"(an error banner here usually means wrong password; "
+                    f"no banner means the 2FA page DOM changed again)"
+                )
+            page.fill(twofa_sel, totp.now())
             page.click('button[type="submit"]')
 
             # ── 4. Wait for redirect to our callback URL ──────────────────
