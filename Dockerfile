@@ -7,6 +7,11 @@ COPY --from=ghcr.io/astral-sh/uv:0.8.17 /uv /usr/local/bin/uv
 
 WORKDIR /app
 
+# C toolchain for source-only deps (lz4 3.1.3 via truedata-ws has no wheel)
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends build-essential \
+    && rm -rf /var/lib/apt/lists/*
+
 # Dependency layer (cached until pyproject/uv.lock change)
 COPY pyproject.toml uv.lock .python-version* ./
 RUN uv sync --locked --no-default-groups
