@@ -1452,6 +1452,20 @@ run("dedup blocks same signal within 90s",          t_scalping_dedup_90s)
 run("all 5 entry patterns implemented",             t_scalping_5_patterns_exist)
 run("adaptive size: score≤4→0.5, score≥7→1.0",    t_scalping_adaptive_size)
 run("ORB builder populates high/low correctly",     t_scalping_orb_update)
+
+def t_add_symbols_paper_promotes():
+    """Intraday scanner promotion: PAPER approves new symbols immediately,
+    dedups already-approved ones, and appends to state.approved_symbols."""
+    agent = ScalpingAgent()
+    agent._approved = {"RELIANCE"}
+    agent.state.approved_symbols = ["RELIANCE"]
+    added = agent.add_symbols(["RELIANCE", "HOTMOVER1", "HOTMOVER2"])
+    assert added == 2, f"expected 2 new, got {added}"
+    assert {"HOTMOVER1", "HOTMOVER2"} <= agent._approved
+    assert agent.state.approved_symbols.count("RELIANCE") == 1
+    assert agent.add_symbols(["HOTMOVER1"]) == 0   # idempotent
+
+run("add_symbols: PAPER promotes scanner picks, dedups", t_add_symbols_paper_promotes)
 run("should_exit_position returns (bool, str)",  t_exit_position_type)
 run("exit: long position on overbought RSI",     t_exit_overbought_long)
 run("exit: short position on oversold RSI",      t_exit_short_oversold)

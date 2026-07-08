@@ -1154,7 +1154,12 @@ def live_symbol(symbol: str):
 async def market_status():
     status = await tick_engine.get_market_status()
     status["market_open"] = is_market_open()
-    status["data_source"] = "NSE India API (not Kite)"
+    # Report the REAL tick source (this used to be a hard-coded string that
+    # claimed NSE polling even when Kite live quotes were driving ticks).
+    if tick_engine._live_data_enabled():
+        status["data_source"] = "Kite live quotes"
+    else:
+        status["data_source"] = "GBM simulator (PAPER, no live feed)"
     return status
 
 @app.get("/market/option-chain/{symbol}", tags=["Market"])

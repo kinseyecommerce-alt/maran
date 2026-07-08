@@ -605,6 +605,36 @@ class BaseAgent(ABC):
         self.state.approved_symbols = [a["symbol"] for a in approved]
         return approved
 
+    def add_symbols(self, symbols: list[str]) -> int:
+        """Promote intraday scanner picks into this agent's tradeable book.
+
+        PAPER: approve immediately (same philosophy as the startup top-up —
+        paper is where untested symbols earn their evidence).
+        LIVE: only accept symbols already in the learner's approved book;
+        never widen live risk to an unvetted name mid-session."""
+        live_ok: set[str] | None = None
+        if settings.trading_mode == "LIVE":
+            try:
+                import json as _json
+                from pathlib import Path as _Path
+                data = _json.loads(_Path("logs/approved_symbols.json").read_text())
+                live_ok = {s for syms in data.values() for s in syms} if isinstance(data, dict) else set(data)
+            except Exception:
+                live_ok = set()   # no book → accept nothing in LIVE
+        added = 0
+        for sym in symbols:
+            if sym in self._approved:
+                continue
+            if live_ok is not None and sym not in live_ok:
+                continue
+            self._approved.add(sym)
+            if sym not in self.state.approved_symbols:
+                self.state.approved_symbols.append(sym)
+            added += 1
+        if added:
+            logger.info("[{}] intraday scan promoted {} symbols into book", self.name, added)
+        return added
+
     # ── Lifecycle ──────────────────────────────────────────────────────
 
     def start(self, queue: asyncio.Queue) -> None:
