@@ -103,7 +103,16 @@ def run_kite_auto_login() -> str:
                     f"no banner means the 2FA page DOM changed again)"
                 )
             page.fill(twofa_sel, totp.now())
-            page.click('button[type="submit"]')
+            # Kite AUTO-SUBMITS the 2FA form once 6 digits land — by the time
+            # we'd click, the page is usually already navigating to the
+            # callback (proven live 2026-07-08: click timed out AFTER the
+            # redirect carried request_token & status=success). The click is
+            # only a fallback for the older non-auto-submit page; never let
+            # it block the redirect wait below.
+            try:
+                page.click('button[type="submit"]', timeout=4_000)
+            except Exception:
+                pass  # already navigated / button gone — wait_for_url decides
 
             # ── 4. Wait for redirect to our callback URL ──────────────────
             try:
