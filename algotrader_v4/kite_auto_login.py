@@ -53,6 +53,7 @@ def run_kite_auto_login() -> str:
     # what the browser-side URL race says (proven live 2026-07-08: the
     # callback page bounces to /dashboard before wait_for_url starts).
     _token_before = settings.kite_access_token
+    _xchg_before  = getattr(kite_client, "last_token_exchange_ts", 0.0)
 
     import os
     chromium = _CHROMIUM if os.path.exists(_CHROMIUM) else None  # falls back to installed
@@ -130,8 +131,10 @@ def run_kite_auto_login() -> str:
                 # /dashboard within ~1s — landing ANYWHERE on our own app
                 # host means the callback already ran server-side.
                 _own_host = redirect_prefix.split("/auth/")[0]
-                if page.url.startswith(_own_host) and settings.kite_access_token \
-                        and settings.kite_access_token != _token_before:
+                _exchanged = getattr(kite_client, "last_token_exchange_ts", 0.0) > _xchg_before
+                if page.url.startswith(_own_host) and (_exchanged or (
+                        settings.kite_access_token
+                        and settings.kite_access_token != _token_before)):
                     logger.info("[kite_login] callback completed server-side "
                                 "(landed on {})", page.url)
                 else:
@@ -150,8 +153,10 @@ def run_kite_auto_login() -> str:
                             f"(stuck at {page.url})")
 
             request_token = _extract_request_token(page.url)
-            if not request_token and settings.kite_access_token \
-                    and settings.kite_access_token != _token_before:
+            if not request_token and (
+                    getattr(kite_client, "last_token_exchange_ts", 0.0) > _xchg_before
+                    or (settings.kite_access_token
+                        and settings.kite_access_token != _token_before)):
                 # Server-side callback already exchanged the token — done.
                 logger.info("[kite_login] token refreshed via in-process callback")
                 return settings.kite_access_token

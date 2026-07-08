@@ -170,6 +170,11 @@ class KiteClient:
             data  = kite.generate_session(request_token,
                                           api_secret=settings.kite_api_secret)
             token = data["access_token"]
+            # Monotonic marker for "a real exchange just happened" — Zerodha
+            # returns the SAME access token for repeat same-day logins, so
+            # token-string comparison cannot detect a successful re-login.
+            import time as _t
+            self.last_token_exchange_ts = _t.monotonic()
         else:
             token = access_token or settings.kite_access_token
         kite.set_access_token(token)
