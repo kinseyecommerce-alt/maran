@@ -282,6 +282,9 @@ class MasterAgent:
         self._scheduler.add_job(self._refresh_macro_job,   "interval", minutes=5,
                                  id="refresh_macro", replace_existing=True, max_instances=1, coalesce=True,
                                  misfire_grace_time=120)
+        self._scheduler.add_job(self._intraday_scan_job,   "interval", minutes=10,
+                                 id="intraday_scan", replace_existing=True, max_instances=1, coalesce=True,
+                                 misfire_grace_time=300)
         self._scheduler.start()
         logger.info("[master_v5] started — tick-driven 1s")
         _fire(send_telegram(
@@ -686,6 +689,48 @@ class MasterAgent:
             )
         except Exception as exc:
             logger.debug("[master_v5] Macro refresh failed: {}", exc)
+
+    async def _intraday_scan_job(self) -> None:
+        """
+        Intraday market watcher: every 10 minutes during market hours, re-scan
+        the full universe and push the day's movers downstream —
+          tick_engine.subscribe() (idempotent) so their ticks start streaming,
+          and agent.add_symbols() so running agents may actually trade them
+          (PAPER approves immediately; LIVE only pre-vetted names).
+        Closes the gap where the scanner ran once at startup and a stock that
+        turned hot at 11:30 was never seen by anyone.
+        """
+        if not self.running or not is_market_open():
+            return
+        try:
+            from symbol_scanner import symbol_scanner
+            await symbol_scanner.run(force=True)
+            flat = symbol_scanner.all_selected_flat()
+            if not flat:
+                return
+            tick_engine.subscribe(flat)
+            sel = symbol_scanner.get_selected() or {}
+            selections = sel.get("selections", sel)
+            promoted = 0
+            for strat, agent in ALL_AGENTS.items():
+                if not agent.state.running:
+                    continue
+                block = selections.get(strat) or {}
+                picks = [s["symbol"] if isinstance(s, dict) else s
+                         for s in (block.get("symbols") or [])]
+                if not picks:
+                    continue
+                promoted += agent.add_symbols(picks)
+                merged = {(i["symbol"] if isinstance(i, dict) else i)
+                          for i in self._agent_watchlists.get(strat, [])}
+                self._agent_watchlists.setdefault(strat, []).extend(
+                    {"symbol": p, "exchange": "NSE"} for p in picks if p not in merged
+                )
+            if promoted:
+                logger.info("[master_v5] intraday scan: {} symbols streaming, {} promoted into agent books",
+                            len(flat), promoted)
+        except Exception as exc:
+            logger.warning("[master_v5] intraday scan failed (non-fatal): {}", exc)
 
     async def _portfolio_optimize_job(self) -> None:
         """
