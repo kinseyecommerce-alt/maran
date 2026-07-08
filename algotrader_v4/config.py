@@ -471,6 +471,21 @@ class Settings(BaseSettings):
     # still caps each position at the pool slice, so it can't overshoot capital.
     risk_per_trade_pct: float = Field(default=2.0, gt=0, le=50)
     use_conviction_sizing: bool = True  # score-proportional size (floor loosened: low=0.75×, mid=1.0×, high=1.25×)
+    # Conviction concentration: a signal that reaches sizing with a FULL gate
+    # size-factor (top score bucket AND gate-confident) earns a doubled capital
+    # slice — the "manual trader" concentration on the highest-probability
+    # setups (replay win rates at top scores run 60-96%). Scales the proven
+    # edge linearly; caps at max_position_size and 2x the per-agent slice.
+    conviction_2x_enabled: bool = True
+    conviction_2x_mult: float = Field(default=2.0, ge=1.0, le=3.0)
+    # MIS intraday leverage: Zerodha margins equity intraday at min 20%
+    # (SEBI VAR+ELM floor) = up to 5x buying power on the MIS list. Sizing
+    # previously capped every equity position at the raw CASH slice, so the
+    # ATR risk formula's intended position (rupee risk / stop distance) was
+    # chopped to ~1/5th by affordability, not by risk. This raises only the
+    # AFFORDABILITY cap — risk_per_trade_pct stays anchored to the cash
+    # slice, so rupee risk per trade is unchanged.
+    mis_leverage: float = Field(default=5.0, ge=1.0, le=5.0)
 
     # Phase 3: Intelligence
     max_positions_per_sector: int = 2

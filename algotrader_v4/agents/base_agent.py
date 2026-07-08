@@ -1086,6 +1086,11 @@ class BaseAgent(ABC):
     def _compute_qty(self, snap: MarketSnapshot, action: str, signal: dict) -> int:
         """Compute final order quantity applying all sizing factors."""
         ltp    = snap.tick.ltp
+        # Conviction concentration: read the gate size-factor BEFORE the pop
+        # below — sf >= 1.0 means the agent scored this in its top bucket and
+        # the Claude gate did not shrink it. Those signals earn a 2x slice.
+        _conviction_2x = (getattr(settings, "conviction_2x_enabled", False)
+                          and float(signal.get("_gate_size_factor", 0.0)) >= 1.0)
         atr_14 = getattr(snap.indicators, "atr_14", 0)
         # Index futures are margin products — size on posted margin, not full
         # notional (which would demand ~₹1.8M cash for one NIFTY lot). A lot-based
@@ -1164,11 +1169,42 @@ class BaseAgent(ABC):
                 # agent's capital bucket — otherwise a consensus boost can
                 # overrun the per-agent allocation by ~25%.
                 cap_notional = min(float(settings.max_position_size),
-                                   risk_manager.max_capital_for_agent(self.name))
+                                   risk_manager.buying_power_for_agent(self.name))
                 cap = int(cap_notional // max(ltp, 1))
                 qty = min(int(qty * (1 + boost)), cap)
                 logger.info("[{}] {} CONSENSUS boost {:.0%} → qty={}",
                             self.name, snap.symbol, boost, qty)
+            except Exception:
+                pass
+
+        # FINAL notional clamp: the post-sizing multipliers above (Kelly,
+        # conviction curve, consensus) could push qty past max_position_size
+        # and the agent's buying power — nothing re-checked notional after
+        # them. Clamp before (and again inside) the conviction block.
+        try:
+            _hard_cap = int(min(float(settings.max_position_size),
+                                risk_manager.buying_power_for_agent(self.name))
+                            // max(ltp, 1))
+            if _hard_cap > 0:
+                qty = min(qty, _hard_cap)
+        except Exception:
+            pass
+
+        # Conviction concentration (top-score + gate-confident signals only):
+        # double the quantity, capped at conviction_2x_mult x the per-agent
+        # slice and the global max_position_size. Applied LAST so every risk
+        # haircut above still shapes the base; this scales the survivor, not
+        # the raw ask.
+        if _conviction_2x and qty > 0:
+            try:
+                mult = float(getattr(settings, "conviction_2x_mult", 2.0))
+                cap_notional = min(float(settings.max_position_size),
+                                   risk_manager.buying_power_for_agent(self.name) * mult)
+                boosted = min(int(qty * mult), int(cap_notional // max(ltp, 1)))
+                if boosted > qty:
+                    logger.info("[{}] {} CONVICTION {}x slice → qty {}→{}",
+                                self.name, snap.symbol, mult, qty, boosted)
+                    qty = boosted
             except Exception:
                 pass
 

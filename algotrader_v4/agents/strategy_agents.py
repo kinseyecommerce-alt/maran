@@ -2415,11 +2415,21 @@ class SwingAgent(BaseAgent):
         self._prev_adx:       dict[str, float] = {}
         self._prev_hma_dir:   dict[str, str]   = {}
         self._prev_ema50_above: dict[str, bool] = {}   # GOLDEN_CROSS event state
+        self._warmup_start: float | None = None        # process-restart warm-up
 
     def evaluate_tick(self, snap: MarketSnapshot) -> tuple[str, Optional[dict]]:
         import time as _time
         sym  = snap.symbol
         now_s = _time.time()
+        # Restart warm-up guard: every deploy resets the prev-state dicts
+        # above, and SUPERTREND_BOUNCE / EMA50_BOUNCE then fire on their first
+        # evaluation across the whole book (2026-07-08 live: 25 junk trades,
+        # -Rs 2,251 after 5 restarts). No swing entries until the indicator
+        # state has been rebuilt from live ticks for 15 minutes.
+        if self._warmup_start is None:
+            self._warmup_start = now_s
+        if now_s - self._warmup_start < 15 * 60:
+            return "HOLD", None
         if now_s - self._last_eval.get(sym, 0) < 60:
             return "HOLD", None
         self._last_eval[sym] = now_s

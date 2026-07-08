@@ -368,6 +368,20 @@ class RiskManager:
             max_pos = 1   # lot-based agents (fno): return full pool
         return settings.capital_per_agent / max(max_pos, 1)
 
+    # Equity agents that trade product MIS — eligible for intraday margin.
+    MIS_EQUITY_AGENTS = {"intraday", "scalping", "momentum", "mean_reversion", "pairs"}
+
+    def buying_power_for_agent(self, agent_name: str) -> float:
+        """Affordability cap for an agent: the cash slice x MIS leverage for
+        intraday-equity agents, plain slice for everything else (CNC swing,
+        lot-margined F&O). Risk budgets stay anchored to the CASH slice —
+        leverage widens what the agent can HOLD, never what it can LOSE per
+        trade."""
+        cap = self.max_capital_for_agent(agent_name)
+        if agent_name in self.MIS_EQUITY_AGENTS:
+            cap *= float(getattr(settings, "mis_leverage", 1.0) or 1.0)
+        return cap
+
     def calculate_quantity(
         self,
         price: float,
@@ -551,8 +565,11 @@ class RiskManager:
         if max_qty <= 0:
             # max_position_size cannot cover even 1 share — skip the trade
             return 0
-        # Cap to max_position_size AND to the actual affordable capital
-        return min(qty, max_qty, int(cap // price))
+        # Cap to max_position_size AND to actual buying power (cash slice x
+        # MIS leverage for intraday-equity agents; explicit capital wins).
+        afford = capital if capital is not None else (
+            self.buying_power_for_agent(agent) if agent else cap)
+        return min(qty, max_qty, int(afford // price))
 
     def kelly_fraction(self, strategy: str, symbol: str = "") -> float:
         """

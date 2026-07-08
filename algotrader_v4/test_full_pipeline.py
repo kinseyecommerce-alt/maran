@@ -60,6 +60,13 @@ from agents.strategy_agents import (
     IntradayAgent, OptionsAgent, SwingAgent, ScalpingAgent, FuturesAgent,
 )
 
+def _aged_swing():
+    """SwingAgent with the 15-min restart warm-up guard pre-aged, so the E2E
+    entry check exercises the normal path (the guard itself is unit-tested)."""
+    a = SwingAgent()
+    a._warmup_start = -1e9
+    return a
+
 # ── Tiny test harness (mirrors test_sim_orders_flow.py) ───────────────────────
 _results: list[tuple[str, bool, str]] = []
 
@@ -148,7 +155,7 @@ def recipes():
             mk("TCS", 3512, rsi=60, vwap=3496, macd_hist=1.6, volume_ratio=2.4,
                ema9=3500, ema21=3496, ema50=3482, spread=0.6, n_candles=30),
         ]),
-        "swing": (SwingAgent(), "HDFCBANK", [
+        "swing": (_aged_swing(), "HDFCBANK", [
             mk("HDFCBANK", 1700, rsi=50, vwap=1690, macd_hist=1.0,
                volume_ratio=1.5, ema9=1705, ema21=1700, ema50=1690,
                ema200=1600, n_candles=210),
