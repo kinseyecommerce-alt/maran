@@ -1,7 +1,9 @@
 # AlgoTrader Pro — DO App Platform image
 # Replaces the Python buildpack so Chromium's system libraries can be
 # installed for the automated Kite TOTP login (playwright headless flow).
-FROM python:3.11-slim
+# bookworm pin: playwright 1.52's --with-deps knows Debian 12 package names
+# (trixie renamed ttf-unifont -> fonts-unifont and the install exits 100)
+FROM python:3.11-slim-bookworm
 
 COPY --from=ghcr.io/astral-sh/uv:0.8.17 /uv /usr/local/bin/uv
 
