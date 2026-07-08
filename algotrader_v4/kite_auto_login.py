@@ -48,6 +48,11 @@ def run_kite_auto_login() -> str:
     totp = pyotp.TOTP(settings.kite_totp_secret)
     login_url = kite_client.login_url()
     redirect_prefix = settings.kite_redirect_url.split("?")[0]
+    # The callback endpoint runs IN THIS PROCESS and stores the exchanged
+    # token — if it changes during the flow, the login succeeded no matter
+    # what the browser-side URL race says (proven live 2026-07-08: the
+    # callback page bounces to /dashboard before wait_for_url starts).
+    _token_before = settings.kite_access_token
 
     import os
     chromium = _CHROMIUM if os.path.exists(_CHROMIUM) else None  # falls back to installed
@@ -121,21 +126,35 @@ def run_kite_auto_login() -> str:
                 # Repeat logins sometimes land on Kite's app-authorization
                 # (consent) page instead of redirecting. Click through it
                 # once, then wait again. Otherwise surface WHERE we are.
-                try:
-                    btn = page.query_selector(
-                        'button:has-text("Authorize"), button:has-text("Continue"), '
-                        'button[type="submit"]')
-                    if btn:
-                        btn.click()
-                        page.wait_for_url(f"{redirect_prefix}**", timeout=15_000)
-                    else:
-                        raise PwTimeout("no consent button")
-                except Exception:
-                    raise RuntimeError(
-                        f"Kite did not redirect to callback URL in time "
-                        f"(stuck at {page.url})")
+                # Success race: the callback page redirects onward to
+                # /dashboard within ~1s — landing ANYWHERE on our own app
+                # host means the callback already ran server-side.
+                _own_host = redirect_prefix.split("/auth/")[0]
+                if page.url.startswith(_own_host) and settings.kite_access_token \
+                        and settings.kite_access_token != _token_before:
+                    logger.info("[kite_login] callback completed server-side "
+                                "(landed on {})", page.url)
+                else:
+                    try:
+                        btn = page.query_selector(
+                            'button:has-text("Authorize"), button:has-text("Continue"), '
+                            'button[type="submit"]')
+                        if btn:
+                            btn.click()
+                            page.wait_for_url(f"{redirect_prefix}**", timeout=15_000)
+                        else:
+                            raise PwTimeout("no consent button")
+                    except Exception:
+                        raise RuntimeError(
+                            f"Kite did not redirect to callback URL in time "
+                            f"(stuck at {page.url})")
 
             request_token = _extract_request_token(page.url)
+            if not request_token and settings.kite_access_token \
+                    and settings.kite_access_token != _token_before:
+                # Server-side callback already exchanged the token — done.
+                logger.info("[kite_login] token refreshed via in-process callback")
+                return settings.kite_access_token
             if not request_token:
                 raise RuntimeError("Kite did not include request_token in redirect URL")
 
