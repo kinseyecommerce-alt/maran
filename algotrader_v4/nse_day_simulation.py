@@ -23,6 +23,13 @@ from typing import Optional
 import pandas as pd
 import numpy as np
 
+# RUNNER_EXITS=1 (env) — exit-policy experiment: at target, bank HALF and
+# trail the remaining half one target-distance behind the high-water mark
+# (breakeven floor). Lets proven trend patterns ride the 5-15%% movers that
+# fixed targets cut at ~1%%. Sim/replay-only until validated on the ruler.
+RUNNER_EXITS = os.environ.get("RUNNER_EXITS", "") == "1"
+_RUNNER_AGENTS = {"Intraday", "Scalping", "Momentum", "Futures"}
+
 os.chdir(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, ".")
 
@@ -292,6 +299,11 @@ class TradeRecord:
     def closed(self): return self.exit_px is not None
 
     def close(self, px: float, ts: datetime, reason: str):
+        # Runner mode (RUNNER_EXITS=1 experiment): half was banked at the
+        # original target, the other half trailed — the effective exit price
+        # is the 50/50 blend, whatever path (trail stop / squareoff) ends it.
+        if getattr(self, "_runner", False):
+            px = 0.5 * self._banked + 0.5 * px
         self.exit_px  = px
         self.exit_ts  = ts
         self.exit_reason = reason
@@ -387,24 +399,49 @@ class AgentTracker:
                 self._last_exit_ts[sym] = ts
                 del self._open[sym]
                 return
+        # Runner maintenance: ratchet the trail on the un-banked half
+        if getattr(tr, "_runner", False):
+            if is_long:
+                tr._trail_hw = max(tr._trail_hw, ltp)
+                tr.sl_px = max(tr.sl_px, tr._trail_hw - tr._trail_d)
+            else:
+                tr._trail_hw = min(tr._trail_hw, ltp)
+                tr.sl_px = min(tr.sl_px, tr._trail_hw + tr._trail_d)
         if is_long:
             if ltp <= tr.sl_px:
-                tr.close(ltp, ts, "SL_HIT")
+                tr.close(ltp, ts, "RUNNER_TRAIL" if getattr(tr, "_runner", False) else "SL_HIT")
                 self._last_exit_ts[sym] = ts
                 del self._open[sym]
             elif ltp >= tr.tgt_px:
-                tr.close(ltp, ts, "TARGET")
-                self._last_exit_ts[sym] = ts
-                del self._open[sym]
+                if RUNNER_EXITS and self.name in _RUNNER_AGENTS:
+                    # Bank half at target; trail the rest (breakeven floor).
+                    tr._runner   = True
+                    tr._banked   = tr.tgt_px
+                    tr._trail_hw = ltp
+                    tr._trail_d  = tr.tgt_px - tr.entry_px
+                    tr.sl_px     = max(tr.sl_px, tr.entry_px)
+                    tr.tgt_px    = float("inf")
+                else:
+                    tr.close(ltp, ts, "TARGET")
+                    self._last_exit_ts[sym] = ts
+                    del self._open[sym]
         else:
             if ltp >= tr.sl_px:
-                tr.close(ltp, ts, "SL_HIT")
+                tr.close(ltp, ts, "RUNNER_TRAIL" if getattr(tr, "_runner", False) else "SL_HIT")
                 self._last_exit_ts[sym] = ts
                 del self._open[sym]
             elif ltp <= tr.tgt_px:
-                tr.close(ltp, ts, "TARGET")
-                self._last_exit_ts[sym] = ts
-                del self._open[sym]
+                if RUNNER_EXITS and self.name in _RUNNER_AGENTS:
+                    tr._runner   = True
+                    tr._banked   = tr.tgt_px
+                    tr._trail_hw = ltp
+                    tr._trail_d  = tr.entry_px - tr.tgt_px
+                    tr.sl_px     = min(tr.sl_px, tr.entry_px)
+                    tr.tgt_px    = float("-inf")
+                else:
+                    tr.close(ltp, ts, "TARGET")
+                    self._last_exit_ts[sym] = ts
+                    del self._open[sym]
 
     def check_real_exit(self, sym: str, ind, ts: datetime, agent_obj) -> None:
         """Exit an open position using the agent's REAL should_exit_position,
