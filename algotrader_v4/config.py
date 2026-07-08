@@ -442,9 +442,15 @@ class Settings(BaseSettings):
         # "trend" contract before the day's regime is even confirmed is the
         # single biggest options loss source (8/12 losers on 2026-07-06 all
         # entered in this window). No options entries until the trend is known.
-        "UNKNOWN:options,momentum,mean_reversion,pairs;"
-        "BULL_TREND:momentum,mean_reversion,pairs;"
-        "BULL_VOLATILE:momentum,mean_reversion,pairs;"
+        # Swing BENCHED everywhere (2026-07-08 live): churned to its 25-trade
+        # daily cap TWICE in one session (-Rs 5.5k), both times within ~45 min
+        # of a restart AND after the 15-min warm-up guard — its
+        # SUPERTREND_BOUNCE/EMA50_BOUNCE "weekly" patterns fire at intraday
+        # frequency. Benched until the pattern-frequency bug is diagnosed and
+        # replay-validated.
+        "UNKNOWN:options,momentum,mean_reversion,pairs,swing;"
+        "BULL_TREND:momentum,mean_reversion,pairs,swing;"
+        "BULL_VOLATILE:momentum,mean_reversion,pairs,swing;"
         # Momentum UNBENCHED in bear/ranging/high-vol (matrix v3, post-v11-prune
         # 62d ungated re-measure of the 3-winner book, honest costs): net ≈
         # +27 BEAR_TREND, +31 RANGING, +22 HIGH_VOLATILE — vs ~flat BULL_TREND,
@@ -454,12 +460,12 @@ class Settings(BaseSettings):
         # also pre-prune momentum. mean_reversion stays benched everywhere: the
         # v9 range-candidates FAILED the honest re-test (BB_MID_REVERT -42%
         # GROSS @775tr, PRICE_ZSCORE net -17% @140tr, RANGING-day gross -13).
-        "BEAR_TREND:options,mean_reversion,pairs;"
-        "BEAR_VOLATILE:options,mean_reversion,pairs;"
+        "BEAR_TREND:options,mean_reversion,pairs,swing;"
+        "BEAR_VOLATILE:options,mean_reversion,pairs,swing;"
         # RANGING: options + mean_reversion + pairs stay benched (options -46.7%
         # on range days; pairs -38% net over 62d with no winning pattern).
-        "RANGING:options,mean_reversion,pairs;"
-        "HIGH_VOLATILE:mean_reversion,pairs;"
+        "RANGING:options,mean_reversion,pairs,swing;"
+        "HIGH_VOLATILE:mean_reversion,pairs,swing;"
         "BLACK_SWAN:swing,intraday,futures,momentum,pairs,mean_reversion"
     )
 
