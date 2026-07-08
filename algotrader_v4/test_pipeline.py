@@ -146,6 +146,11 @@ def t_kill_list_defaults():
     # The band-walk / squeeze family — the confirmed cross-agent edge — stays on.
     assert bot_state.is_pattern_enabled("futures", "BB_WALK_FUT")
     assert bot_state.is_pattern_enabled("intraday", "KELTNER_RIDE")
+    # v12 (regime-matrix re-measure): momentum book = its 2 proven earners;
+    # VWAP_BREAKOUT killed (net -9.7% after costs @79tr).
+    assert not bot_state.is_pattern_enabled("momentum", "VWAP_BREAKOUT")
+    assert bot_state.is_pattern_enabled("momentum", "VOL_SURGE_TREND")   # net ~+56% @538tr
+    assert bot_state.is_pattern_enabled("momentum", "MACD_ZERO_CROSS")   # net ~+33% @176tr
 
 def t_kill_list_runtime_mutation():
     """Mutating settings.disabled_patterns takes effect immediately (cache refresh)."""
@@ -166,25 +171,29 @@ run("kill-list: runtime settings mutation applies", t_kill_list_runtime_mutation
 # ── Regime entry gate (settings.regime_blocked_agents → bot_state) ──────────
 
 def t_regime_gate_matrix():
-    """Matrix v2 (gated-vs-baseline validated): losers blocked, intraday free."""
+    """Matrix v3 (post-v11-prune re-measure): momentum unbenched where its
+    pruned 3-winner book proved net-positive (bear +27 / ranging +31 /
+    high-vol +22, honest costs) — still blocked in BULL_TREND (~flat) and
+    UNKNOWN. mean_reversion/pairs blocked everywhere; options bull/high-vol only."""
     import bot_state
     try:
         bot_state.set_current_regime("RANGING")
-        # options/momentum/mean_reversion/pairs re-benched in RANGING (2026-07-07
-        # live + honest-ruler evidence: momentum -₹1,672/31tr on a range day,
-        # pairs -38% net over 62d with no winning pattern).
-        for blocked in ("options", "momentum", "mean_reversion", "pairs"):
+        for blocked in ("options", "mean_reversion", "pairs"):
             assert not bot_state.is_agent_allowed_in_regime(blocked), f"{blocked} in RANGING"
-        for allowed in ("intraday", "futures", "scalping", "swing"):
+        for allowed in ("intraday", "futures", "scalping", "swing", "momentum"):
             assert bot_state.is_agent_allowed_in_regime(allowed), f"{allowed} in RANGING"
         bot_state.set_current_regime("HIGH_VOLATILE")
-        for blocked in ("mean_reversion", "pairs", "momentum"):
+        for blocked in ("mean_reversion", "pairs"):
             assert not bot_state.is_agent_allowed_in_regime(blocked)
+        assert bot_state.is_agent_allowed_in_regime("momentum")   # +22 net post-prune
         assert bot_state.is_agent_allowed_in_regime("intraday")
         bot_state.set_current_regime("BEAR_TREND")
         assert not bot_state.is_agent_allowed_in_regime("options")  # -38.6% on down-trends
+        assert bot_state.is_agent_allowed_in_regime("momentum")     # +27 net post-prune
         assert bot_state.is_agent_allowed_in_regime("scalping")
         assert bot_state.is_agent_allowed_in_regime("intraday")     # kill-list fixed it
+        bot_state.set_current_regime("BULL_TREND")
+        assert not bot_state.is_agent_allowed_in_regime("momentum")  # ~flat net — stays out
     finally:
         bot_state.set_current_regime("UNKNOWN")
 
@@ -196,8 +205,9 @@ def t_regime_gate_unknown_and_toggle():
         bot_state.set_current_regime("UNKNOWN")
         assert all(bot_state.is_agent_allowed_in_regime(a)
                    for a in ("intraday", "scalping", "futures", "swing"))
-        # momentum/mean_reversion: net-negative in every tested config —
-        # blocked even in UNKNOWN until fresh evidence clears them.
+        # momentum: unbenched in bear/ranging/high-vol (matrix v3) but still
+        # blocked in UNKNOWN — no entries before the day's type is confirmed.
+        # mean_reversion: no pattern clears honest costs — blocked everywhere.
         # options: benched pre-10:15 — bought options bleed theta and must not
         # fire before the day's regime is confirmed (2026-07-06 evidence).
         # (futures un-benched as EMA200_BOUNCE-only specialist.)

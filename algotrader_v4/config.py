@@ -369,7 +369,13 @@ class Settings(BaseSettings):
         # led by its SUPERTREND_FLIP entry (-43.6% @627tr — the whipsaw).
         "mean_reversion:STOCHRSI_CROSS,mean_reversion:BB_LOWER_BOUNCE,"
         "mean_reversion:PRICE_ZSCORE,mean_reversion:VWAP_EXTREME,"
-        "momentum:SUPERTREND_FLIP,momentum:EMA_ALIGNMENT,momentum:SQUEEZE_RELEASE"
+        "momentum:SUPERTREND_FLIP,momentum:EMA_ALIGNMENT,momentum:SQUEEZE_RELEASE,"
+        # v12 (regime-matrix re-measure of the pruned momentum book, 62d × 12
+        # symbols, honest costs): VWAP_BREAKOUT gross +2.2% @79tr − ~11.9% costs
+        # = net -9.7% → kill (rule: net <= -2% at >= 15tr). Momentum's real
+        # earners are VOL_SURGE_TREND (net ~+56% @538tr) and MACD_ZERO_CROSS
+        # (net ~+33% @176tr) — the book behind the bear/ranging/high-vol unbench.
+        "momentum:VWAP_BREAKOUT"
     )
 
     # Scalping approved-book seed: the proxy learner cannot model the real
@@ -439,17 +445,21 @@ class Settings(BaseSettings):
         "UNKNOWN:options,momentum,mean_reversion,pairs;"
         "BULL_TREND:momentum,mean_reversion,pairs;"
         "BULL_VOLATILE:momentum,mean_reversion,pairs;"
-        "BEAR_TREND:options,momentum,mean_reversion,pairs;"
-        "BEAR_VOLATILE:options,momentum,mean_reversion,pairs;"
-        # RANGING: momentum + mean_reversion RE-BENCHED. Yesterday's live paper
-        # test (2026-07-07) confirmed the 62-day replay — momentum bled -₹1,672
-        # over 31 trades on a range day (breakouts that fail), mean_reversion ~flat.
-        # Momentum needs trend; in RANGING it's a net loser. Options stays benched.
-        # Pairs added (honest ruler): -38% net over 62d with no winning pattern —
-        # benched in every regime now (already off in all trend/volatile ones).
-        "RANGING:options,momentum,mean_reversion,pairs;"
-
-        "HIGH_VOLATILE:momentum,mean_reversion,pairs;"
+        # Momentum UNBENCHED in bear/ranging/high-vol (matrix v3, post-v11-prune
+        # 62d ungated re-measure of the 3-winner book, honest costs): net ≈
+        # +27 BEAR_TREND, +31 RANGING, +22 HIGH_VOLATILE — vs ~flat BULL_TREND,
+        # so it stays blocked there and in UNKNOWN. The earlier global bench was
+        # measured on the PRE-prune book (SUPERTREND_FLIP -43.6% et al, killed
+        # v11); the pruned book earns. The 2026-07-07 live bleed (-₹1,672) was
+        # also pre-prune momentum. mean_reversion stays benched everywhere: the
+        # v9 range-candidates FAILED the honest re-test (BB_MID_REVERT -42%
+        # GROSS @775tr, PRICE_ZSCORE net -17% @140tr, RANGING-day gross -13).
+        "BEAR_TREND:options,mean_reversion,pairs;"
+        "BEAR_VOLATILE:options,mean_reversion,pairs;"
+        # RANGING: options + mean_reversion + pairs stay benched (options -46.7%
+        # on range days; pairs -38% net over 62d with no winning pattern).
+        "RANGING:options,mean_reversion,pairs;"
+        "HIGH_VOLATILE:mean_reversion,pairs;"
         "BLACK_SWAN:swing,intraday,futures,momentum,pairs,mean_reversion"
     )
 
