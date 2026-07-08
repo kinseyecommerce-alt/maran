@@ -376,7 +376,21 @@ class KiteClient:
         data is stubbed (PAPER without paper_use_live_data)."""
         if self._paper_data_stub() or not instruments:
             return {}
-        return _with_retry(lambda: self.kite.quote(instruments), label="quote")
+        # Kite hard-caps quote() at 500 instruments per call. The full Nifty
+        # 500 watchlist + indices is 502 — it only ever worked because the WS
+        # covered exactly 2 symbols; one dead WS and EVERY batch call fails,
+        # silently stopping all ticks. Chunk defensively.
+        CHUNK = 450
+        if len(instruments) <= CHUNK:
+            return _with_retry(lambda: self.kite.quote(instruments), label="quote")
+        out: dict[str, dict] = {}
+        for i in range(0, len(instruments), CHUNK):
+            part = instruments[i:i + CHUNK]
+            try:
+                out.update(_with_retry(lambda p=part: self.kite.quote(p), label="quote"))
+            except Exception as exc:
+                logger.warning("[KiteClient] quote chunk {}-{} failed: {}", i, i+len(part), exc)
+        return out
 
     # ── Order placement ────────────────────────────────────────────────────
 
