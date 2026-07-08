@@ -180,8 +180,11 @@ def t_regime_gate_matrix():
         bot_state.set_current_regime("RANGING")
         for blocked in ("options", "mean_reversion", "pairs"):
             assert not bot_state.is_agent_allowed_in_regime(blocked), f"{blocked} in RANGING"
-        for allowed in ("intraday", "futures", "scalping", "swing", "momentum"):
+        for allowed in ("intraday", "futures", "scalping", "momentum"):
             assert bot_state.is_agent_allowed_in_regime(allowed), f"{allowed} in RANGING"
+        # swing benched everywhere (live 2026-07-08: churned to its daily cap
+        # twice, warm-up guard insufficient — pattern-frequency bug)
+        assert not bot_state.is_agent_allowed_in_regime("swing")
         bot_state.set_current_regime("HIGH_VOLATILE")
         for blocked in ("mean_reversion", "pairs"):
             assert not bot_state.is_agent_allowed_in_regime(blocked)
@@ -204,7 +207,8 @@ def t_regime_gate_unknown_and_toggle():
     try:
         bot_state.set_current_regime("UNKNOWN")
         assert all(bot_state.is_agent_allowed_in_regime(a)
-                   for a in ("intraday", "scalping", "futures", "swing"))
+                   for a in ("intraday", "scalping", "futures"))
+        assert not bot_state.is_agent_allowed_in_regime("swing")  # benched 2026-07-08
         # momentum: unbenched in bear/ranging/high-vol (matrix v3) but still
         # blocked in UNKNOWN — no entries before the day's type is confirmed.
         # mean_reversion: no pattern clears honest costs — blocked everywhere.
