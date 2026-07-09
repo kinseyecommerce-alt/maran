@@ -785,6 +785,18 @@ class TickEngine:
                     len(self._symbols),
                     "KiteConnect REST+WS" if self._live_data_enabled() else "Paper simulator")
 
+        # Feed NEW symbols to the live WebSocket (or start one if REST-only).
+        # Without this, everything subscribed after boot — the 500-name
+        # watchlist, every 10-min mover promotion — polled REST forever.
+        if _new_syms and self._live_data_enabled():
+            if not self._use_ws:
+                self._try_start_ws()
+            elif self._kite_ticker and hasattr(self._kite_ticker, "add_symbols"):
+                try:
+                    self._kite_ticker.add_symbols(_new_syms)
+                except Exception as exc:
+                    logger.warning("TickEngine: WS add_symbols failed: {}", exc)
+
     def start_loop(self) -> None:
         """Called once FastAPI is running — starts the async polling loop and WebSocket."""
         self._running = True
@@ -796,7 +808,19 @@ class TickEngine:
 
         # Start tick WebSocket when using the real feed.
         # Priority: TrueData WebSocket → Kite WebSocket (auto-fallback) → REST polling.
-        if self._live_data_enabled():
+        self._try_start_ws()
+
+        logger.info("TickEngine poll loop started (ws={})", self._use_ws)
+
+    def _try_start_ws(self) -> None:
+        """Attempt WebSocket startup. Retryable: the old inline version ran
+        exactly once at boot — before the Kite token loaded and while only 2
+        seed symbols were subscribed — failed, and never tried again, leaving
+        502 symbols on slow REST polling (measured live: 12-32s tick age).
+        subscribe() now re-invokes this until a WS is up."""
+        if self._use_ws or not self._live_data_enabled():
+            return
+        if True:
             _ws_started = False
 
             # 1) TrueData WebSocket — primary source
@@ -841,8 +865,6 @@ class TickEngine:
             if not _ws_started:
                 logger.warning("TickEngine: no WebSocket source available — "
                                "using REST polling only")
-
-        logger.info("TickEngine poll loop started (ws={})", self._use_ws)
 
     def stop(self) -> None:
         self._running = False
