@@ -905,6 +905,9 @@ class OptionsAgent(BaseAgent):
         # time-stop in should_exit_position (approximates hold duration without
         # needing an entry timestamp on the broker position dict).
         self._entry_clock:         dict = {}
+        self._sleeve_day             = None
+        self._sleeve_count:    int   = 0
+        self._sleeve_contracts: set  = set()
 
     def evaluate_tick(self, snap: MarketSnapshot) -> tuple[str, Optional[dict]]:
         ind = snap.indicators
@@ -941,6 +944,7 @@ class OptionsAgent(BaseAgent):
 
         if iv_rank <= self.MAX_IV_BUY:
             buy_patterns = [
+                self._pat_sleeve_consensus,
                 self._pat_ema_cross,
                 self._pat_trend_pull,
                 self._pat_orb,
@@ -1075,6 +1079,11 @@ class OptionsAgent(BaseAgent):
         elif is_sell_signal:
             target_delta = 0.25    # far OTM for premium selling
             otm_mult     = 1.5
+        elif best_pattern == "SLEEVE_CONSENSUS":
+            # Aggression sleeve: deep delta = the position actually moves with
+            # the trend; premium hard-stop + wide target set below.
+            target_delta = float(getattr(settings, "sleeve_target_delta", 0.60))
+            otm_mult     = 0.5
         else:
             target_delta = 0.40    # near-ATM for directional buys
             otm_mult     = 1.0
@@ -1107,6 +1116,14 @@ class OptionsAgent(BaseAgent):
         # left from an earlier position in the same contract.
         import time as _t_mono
         self._entry_clock[opt_sym] = _t_mono.monotonic()
+        if best_pattern == "SLEEVE_CONSENSUS":
+            # Premium-based bracket: hard stop -40%, wide target +90%; exempt
+            # from the 90-min theta stop (trend rides need the afternoon) but
+            # NOT from the 14:30 hard flatten.
+            sl_pct  = float(getattr(settings, "sleeve_premium_sl_pct", 40.0))
+            tgt_pct = float(getattr(settings, "sleeve_premium_tgt_pct", 90.0))
+            self._sleeve_count += 1
+            self._sleeve_contracts.add(opt_sym)
 
         return action_dir, {
             "exchange":           "NFO",
@@ -1230,6 +1247,31 @@ class OptionsAgent(BaseAgent):
         return "", 0, ""
 
     # ── Pattern 7: SURGE — large candle body + volume ─────────────────────────
+
+    def _pat_sleeve_consensus(self, sym, snap, ind, ltp, t):
+        """AGGRESSION SLEEVE — high-delta trend ride. Fires only when the
+        full trend stack agrees in a bull/volatile regime: ADX>=25, EMA9>21,
+        price above VWAP, supertrend UP, real volume. Max
+        settings.sleeve_max_trades_day per day; delta/exit overrides applied
+        at contract selection. Flag-gated: aggression_sleeve_enabled."""
+        if not getattr(settings, "aggression_sleeve_enabled", False):
+            return "", 0, ""
+        import bot_state as _bs
+        if getattr(_bs, "_current_regime", "UNKNOWN") not in (
+                "BULL_TREND", "BULL_VOLATILE", "HIGH_VOLATILE"):
+            return "", 0, ""
+        today = t and now_ist().date()
+        if self._sleeve_day != today:
+            self._sleeve_day, self._sleeve_count = today, 0
+        if self._sleeve_count >= int(getattr(settings, "sleeve_max_trades_day", 2)):
+            return "", 0, ""
+        if not (time(10, 15) <= t <= time(13, 30)):   # trend must be established, time to ride
+            return "", 0, ""
+        adx = getattr(ind, "adx_14", 0.0) or 0.0
+        if (adx >= 25 and ind.ema9 > ind.ema21 > 0 and ind.vwap and ltp > ind.vwap
+                and ind.supertrend_dir == "UP" and ind.volume_ratio >= 1.5):
+            return "CE", 9, "SLEEVE_CONSENSUS"
+        return "", 0, ""
 
     def _pat_surge(self, sym, snap, ind, ltp, t):
         if len(snap.candles_1min) < 2:

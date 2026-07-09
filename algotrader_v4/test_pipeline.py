@@ -1533,6 +1533,40 @@ def t_swing_restart_warmup():
     assert action2 in ("BUY", "SELL", "HOLD", "EXIT")   # normal path reachable
 
 run("swing restart warm-up: 15 min no-entry guard", t_swing_restart_warmup)
+
+def t_aggression_sleeve():
+    """Sleeve fires only when flag on + bull/volatile regime + full trend
+    stack; respects the daily cap; silent when disabled (default)."""
+    import bot_state
+    from datetime import time as _time
+    agent = OptionsAgent()
+    snap = _make_snap(n_candles=30, rsi=60.0, volume_ratio=2.0,
+                      ema9=2810.0, ema21=2795.0, vwap=2790.0, trend="UP")
+    ind = snap.indicators
+    ind.supertrend_dir = "UP"
+    ind.adx_14 = 30.0
+    t_ok = _time(11, 0)
+    old_flag = settings.aggression_sleeve_enabled
+    try:
+        # disabled (default) → never fires
+        settings.aggression_sleeve_enabled = False
+        assert agent._pat_sleeve_consensus("RELIANCE", snap, ind, 2812.0, t_ok)[2] == ""
+        # enabled + wrong regime → no fire
+        settings.aggression_sleeve_enabled = True
+        bot_state.set_current_regime("RANGING")
+        assert agent._pat_sleeve_consensus("RELIANCE", snap, ind, 2812.0, t_ok)[2] == ""
+        # enabled + BULL_TREND + trend stack → fires CE
+        bot_state.set_current_regime("BULL_TREND")
+        r = agent._pat_sleeve_consensus("RELIANCE", snap, ind, 2812.0, t_ok)
+        assert r == ("CE", 9, "SLEEVE_CONSENSUS"), f"got {r}"
+        # daily cap
+        agent._sleeve_count = settings.sleeve_max_trades_day
+        assert agent._pat_sleeve_consensus("RELIANCE", snap, ind, 2812.0, t_ok)[2] == ""
+    finally:
+        settings.aggression_sleeve_enabled = old_flag
+        bot_state.set_current_regime("UNKNOWN")
+
+run("aggression sleeve: flag+regime+trend-stack gated, daily cap", t_aggression_sleeve)
 run("should_exit_position returns (bool, str)",  t_exit_position_type)
 run("exit: long position on overbought RSI",     t_exit_overbought_long)
 run("exit: short position on oversold RSI",      t_exit_short_oversold)
