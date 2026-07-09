@@ -53,23 +53,46 @@ class KiteTicker:
         self._vol_date = now_ist().date()
 
     def load_instruments(self, symbols: list[str]) -> None:
-        """Fetch instrument tokens for symbols from Kite instruments API."""
+        """Resolve instrument tokens via kite_client.get_instrument_tokens —
+        it has retry, a shared instruments cache, AND the index name mapping
+        (NIFTY → "NIFTY 50") that the old raw-matching here lacked, which is
+        why indices never resolved and the WS never carried them."""
         try:
-            instruments = kite_client.kite.instruments("NSE")
-            sym_set = set(symbols)
-            for inst in instruments:
-                ts = inst.get("tradingsymbol", "")
-                if ts in sym_set:
-                    tok = inst["instrument_token"]
-                    self._token_map[ts] = tok
-                    self._reverse_map[tok] = ts
+            tokens = kite_client.get_instrument_tokens(symbols)
+            for sym, tok in tokens.items():
+                self._token_map[sym] = tok
+                self._reverse_map[tok] = sym
             logger.info("[KiteTicker] Loaded {} instrument tokens ({} requested)",
                         len(self._token_map), len(symbols))
-            missing = sym_set - set(self._token_map.keys())
+            missing = set(symbols) - set(self._token_map.keys())
             if missing:
-                logger.warning("[KiteTicker] Tokens not found: {}", missing)
+                logger.warning("[KiteTicker] Tokens not found for {} symbols "
+                               "(first 10: {})", len(missing), sorted(missing)[:10])
         except Exception as exc:
             logger.error("[KiteTicker] Failed to load instruments: {}", exc)
+
+    def add_symbols(self, symbols: list[str]) -> int:
+        """Incrementally resolve + subscribe NEW symbols on a live WebSocket.
+        The old design loaded tokens exactly once at start(); symbols added
+        later via tick_engine.subscribe() (the whole 500-name watchlist, the
+        10-min mover scans) never joined the WS and fell back to slow REST
+        polling forever. Returns how many new tokens were subscribed."""
+        fresh = [s for s in symbols if s not in self._token_map]
+        if not fresh:
+            return 0
+        self.load_instruments(fresh)
+        new_toks = [self._token_map[s] for s in fresh if s in self._token_map]
+        if not new_toks:
+            return 0
+        if self._kws and self.is_connected():
+            try:
+                self._kws.subscribe(new_toks)
+                self._kws.set_mode(self._kws.MODE_FULL, new_toks)
+                logger.info("[KiteTicker] Subscribed {} new tokens on live WS", len(new_toks))
+            except Exception as exc:
+                logger.warning("[KiteTicker] live subscribe failed ({}) — "
+                               "tokens queued for next reconnect", exc)
+        return len(new_toks)
 
     def start(self, symbols: list[str], on_tick_callback: Callable,
               loop: asyncio.AbstractEventLoop) -> None:
