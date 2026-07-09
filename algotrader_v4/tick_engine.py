@@ -609,7 +609,11 @@ def _kite_quote_to_quote(symbol: str, data: dict) -> Quote:
 
     # Cumulative → delta volume. First observation of the day emits 0 (we have
     # no baseline to diff against); max(0, …) guards against feed resets.
-    cum_vol = int(data.get("volume_traded", 0) or 0)
+    # Kite REST quote() names day volume "volume"; "volume_traded" is the
+    # WEBSOCKET tick field. Reading only the WS name pinned every candle's
+    # volume to 0 → volume_ratio stuck at 1.0 → every volume-gated pattern
+    # (band-walks, surges) silently disabled (found live 2026-07-09).
+    cum_vol = int(data.get("volume_traded") or data.get("volume") or 0)
     with _rest_vol_lock:
         last = _rest_last_cum_vol.get(symbol)
         vol_delta = max(0, cum_vol - last) if last is not None else 0

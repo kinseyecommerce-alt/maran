@@ -492,6 +492,17 @@ class Settings(BaseSettings):
     # AFFORDABILITY cap — risk_per_trade_pct stays anchored to the cash
     # slice, so rupee risk per trade is unchanged.
     mis_leverage: float = Field(default=5.0, ge=1.0, le=5.0)
+    # Aggression sleeve (user-requested "10% day" venue, honest version):
+    # a high-delta options trend-ride that fires ONLY on strong trend stacks
+    # in bull/volatile regimes, max N trades/day, premium hard-stop. It can
+    # print +50-100% premium days (= big book days) occasionally; most days
+    # it does nothing. OFF until the qualifying week's base engine passes
+    # AND the sleeve's own replay validation is positive.
+    aggression_sleeve_enabled: bool = False
+    sleeve_max_trades_day: int = Field(default=2, ge=0, le=5)
+    sleeve_target_delta: float = Field(default=0.60, gt=0, le=0.9)
+    sleeve_premium_sl_pct: float = Field(default=40.0, gt=0, le=100)
+    sleeve_premium_tgt_pct: float = Field(default=90.0, gt=0)
 
     # Phase 3: Intelligence
     max_positions_per_sector: int = 2
