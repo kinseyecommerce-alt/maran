@@ -3006,6 +3006,14 @@ class ScalpingAgent(BaseAgent):
         # and SL/TGT scaling. The scalper trades ALL bands from here down.
         vol_label, vol_sl_mult, vol_tgt_mult, vol_score_bump = self._vol_band(atr_ratio)
 
+        # Dead-tape gate: calm band + no confirmed trend = the whipsaw grinder
+        # (2026-07-09: 27/27 SL_HIT exits). Sit it out like a veteran.
+        if getattr(settings, "dead_tape_gate", False) and vol_label == "CALM":
+            import bot_state as _bs_dtg
+            if getattr(_bs_dtg, "_current_regime", "UNKNOWN") in ("RANGING", "UNKNOWN"):
+                self._update_prev_state(sym, ind, ltp)
+                return "HOLD", None
+
         # ── Capture ALL prev-state BEFORE any updates (critical correctness fix) ─
         prev_ema9       = self._prev_ema9.get(sym, ind.ema9)
         prev_ema21      = self._prev_ema21.get(sym, ind.ema21 or ind.ema9)
@@ -5009,6 +5017,16 @@ class MomentumAgent(BaseAgent):
             return "HOLD", None
         if not ind.ema9 or ind.ema9 != ind.ema9:
             return "HOLD", None
+
+        # Dead-tape gate (shared with scalping): momentum entries in a calm
+        # no-trend tape are the whipsaw grinder — 2026-07-09 live: 6% win rate.
+        if getattr(settings, "dead_tape_gate", False):
+            _atr = ind.atr_14 or 0.0
+            if ltp > 0 and (_atr / ltp) < 0.002:
+                import bot_state as _bs_dtg
+                if getattr(_bs_dtg, "_current_regime", "UNKNOWN") in ("RANGING", "UNKNOWN"):
+                    self._update_state(sym, ind, ltp)
+                    return "HOLD", None
 
         best_score, best_action, best_pattern = -1, "", ""
         for pat_fn in (self._pat_hl_breakout, self._pat_ll_breakdown,

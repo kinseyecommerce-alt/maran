@@ -503,6 +503,14 @@ class Settings(BaseSettings):
     sleeve_target_delta: float = Field(default=0.60, gt=0, le=0.9)
     sleeve_premium_sl_pct: float = Field(default=40.0, gt=0, le=100)
     sleeve_premium_tgt_pct: float = Field(default=90.0, gt=0)
+    # Dead-tape gate (2026-07-09 evidence): on an ultra-calm RANGING day
+    # (ATR 0.04-0.09%) the fast agents ground 27/27 exits into SL_HIT — zero
+    # targets all day, costs 37% of the bleed. A veteran sits that tape out.
+    # Blocks NEW scalping/momentum entries when the vol band is CALM AND the
+    # confirmed regime is RANGING/UNKNOWN. Trend days keep calm-band trading.
+    # Default OFF in code — activated via DEAD_TAPE_GATE=true env once the
+    # 62-day replay validation passes (ship code and switch-on separately).
+    dead_tape_gate: bool = False
 
     # Phase 3: Intelligence
     max_positions_per_sector: int = 2
