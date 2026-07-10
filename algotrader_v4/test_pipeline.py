@@ -15730,6 +15730,19 @@ run("manual: stale guard entry self-heals when book is flat",           t_manual
 run("main: /positions/{symbol}/squareoff closes one position cleanly",  t_single_position_squareoff_endpoint)
 run("tick_engine: daily reset re-seeds candle buffers (open-blind fix)", t_tick_engine_daily_reset_reseeds)
 
+def t_tick_engine_seed_order_prioritises_core():
+    """_seed_order must put indices/core names before scanner movers."""
+    from tick_engine import TickEngine
+    eng = TickEngine.__new__(TickEngine)   # no __init__ — wire only what we need
+    eng._bufs_1min = {s: object() for s in
+                      ["ZOMATO", "PAYTM", "TCS", "NIFTY", "RELIANCE", "IDEA"]}
+    eng._symbols = ["ZOMATO", "PAYTM", "TCS", "NIFTY", "RELIANCE", "IDEA"]
+    order = eng._seed_order()
+    assert order[:3] == ["NIFTY", "RELIANCE", "TCS"], f"core must seed first, got {order[:3]}"
+    assert set(order) == set(eng._symbols), "no symbol may be dropped"
+
+run("tick_engine: _seed_order puts indices/core before movers",         t_tick_engine_seed_order_prioritises_core)
+
 # ══════════════════════════════════════════════════════════════════════════
 # FINAL SUMMARY
 # ══════════════════════════════════════════════════════════════════════════
