@@ -226,6 +226,24 @@ class OrderGuard:
             snapshot = dict(self._trade_count)
         self._persist_trade_count(snapshot)
 
+    def release_symbol(self, symbol: str, strategy: str | None = None) -> int:
+        """Release every active entry for a symbol (both sides), optionally
+        restricted to one strategy. Used by the per-position squareoff
+        endpoint and by the manual-path self-heal: manual/webhook orders have
+        no exit pipeline that calls release_order(), so their entries
+        otherwise stay active forever and block any opposite-side (exit)
+        order — found live 2026-07-10, a manual position could not be closed
+        at all. Returns the number of entries released."""
+        with self._lock:
+            keys = [k for k in self._active
+                    if k[0] == symbol and (strategy is None or k[1] == strategy)]
+            for k in keys:
+                self._active.pop(k, None)
+            owner = self._symbol_owner.get(symbol)
+            if owner and (strategy is None or owner.startswith(f"{strategy}:")):
+                self._symbol_owner.pop(symbol, None)
+            return len(keys)
+
     def is_symbol_active_anywhere(self, symbol: str) -> list[str]:
         """Returns list of strategy names holding an active position on this symbol."""
         with self._lock:

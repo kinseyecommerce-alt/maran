@@ -15122,11 +15122,15 @@ run("trade_memory: _time_of_day uses _now_ist() not datetime.now() for session b
 # ══════════════════════════════════════════════════════════════════════════
 
 def t_scalping_skip_gate_in_config():
-    """config.py must expose scalping_skip_gate defaulting to True."""
+    """config.py must expose scalping_skip_gate defaulting to False.
+    (Was True at first ship; deliberately flipped so scalping gates through
+    the Claude assessment like every other agent — see config.py comment.
+    This test sat in the dead zone behind the startup.py import-exit and
+    never saw the flip.)"""
     from config import Settings
     s = Settings()
     assert hasattr(s, "scalping_skip_gate"), "Settings must have scalping_skip_gate field"
-    assert s.scalping_skip_gate is True, "scalping_skip_gate must default to True"
+    assert s.scalping_skip_gate is False, "scalping_skip_gate must default to False"
 
 def t_scalping_skip_gate_in_base_agent_source():
     """base_agent._try_enter must have a scalping fast-path that skips the Claude gate."""
@@ -15553,6 +15557,178 @@ run("main.py: /portfolio/implementation-shortfall is in _SENSITIVE_GETS",       
 run("main.py: /notifications/test does not reflect raw str(e) to client",                  t_main_notifications_test_no_str_exc)
 run("main.py: /twap/place qty has upper bound",                                             t_main_twap_place_qty_bounded)
 run("main.py: /bot/test-order qty has upper bound le=10",                                   t_main_test_order_qty_bounded)
+
+# ══════════════════════════════════════════════════════════════════════════
+# 51. MANUAL ORDER PATH — reduce-only exits, guard release, single squareoff
+#     (Findings #1–#3, live 2026-07-10)
+# ══════════════════════════════════════════════════════════════════════════
+
+def t_guard_release_symbol_frees_manual_entry():
+    """release_symbol clears manual actives so the opposite side can trade."""
+    from order_guard import OrderGuard
+    g = OrderGuard()
+    g.register_order("TSTX", "manual", "SELL", "OID1")
+    ok, reason = g.can_place("TSTX", "manual", "BUY")
+    assert not ok and "Conflicting" in reason
+    n = g.release_symbol("TSTX", strategy="manual")
+    assert n == 1
+    ok, _ = g.can_place("TSTX", "manual", "BUY")
+    assert ok, "after release_symbol the opposite side must be placeable"
+
+def t_guard_release_symbol_strategy_scoped():
+    """release_symbol(strategy=...) must not touch other strategies' entries."""
+    from order_guard import OrderGuard
+    g = OrderGuard()
+    g.register_order("TSTX", "scalping", "BUY", "OID-A")
+    g.register_order("TSTX", "manual",   "SELL", "OID-B")
+    n = g.release_symbol("TSTX", strategy="manual")
+    assert n == 1
+    ok, reason = g.can_place("TSTX", "scalping", "BUY")
+    assert not ok and "Duplicate" in reason, "scalping entry must survive a manual-scoped release"
+
+def t_tsl_deregister_symbol():
+    """deregister_symbol removes every tracker on that symbol only."""
+    from trailing_sl_engine import TrailingSLEngine
+    eng = TrailingSLEngine()
+    eng.register(symbol="TSTX", strategy="intraday", side="BUY",
+                 entry_price=100.0, quantity=10, order_id="O1")
+    eng.register(symbol="TSTX", strategy="scalping", side="BUY",
+                 entry_price=100.0, quantity=10, order_id="O2")
+    eng.register(symbol="OTHR", strategy="intraday", side="BUY",
+                 entry_price=50.0, quantity=5, order_id="O3")
+    n = eng.deregister_symbol("TSTX")
+    assert n == 2, f"expected 2 deregistered, got {n}"
+    assert eng._positions.get("O3") is not None, "other symbol's tracker must survive"
+    assert "O1" not in eng._positions and "O2" not in eng._positions
+
+def _manual_order_env(net_qty: int):
+    """Patch main's broker surface for endpoint-level reduce-only tests."""
+    from unittest.mock import patch
+    import main as _main
+    placed: list[dict] = []
+
+    def _fake_place_order(**kw):
+        placed.append(kw)
+        return f"PAPER-TEST-{len(placed)}"
+
+    patches = [
+        patch.object(_main.kite_client, "positions",
+                     lambda: {"net": [{"tradingsymbol": "TSTX", "exchange": "NSE",
+                                       "product": "MIS", "quantity": net_qty}]}),
+        patch.object(_main.kite_client, "place_order", _fake_place_order),
+        patch.object(_main.kite_client, "orders", lambda: []),
+        patch.object(_main.sebi_compliance, "pre_order_check",
+                     lambda **kw: (True, "TEST-ALGO", "ok")),
+        patch.object(_main.sebi_compliance, "record_order_id", lambda *a, **kw: None),
+        patch.object(_main, "_resolve_order_price", lambda *a, **kw: 100.0),
+    ]
+    return _main, placed, patches
+
+def t_manual_reduce_only_exit_bypasses_guard_and_releases():
+    """Full MARKET flatten of a short must pass the guard and release it."""
+    import asyncio
+    from contextlib import ExitStack
+    _main, placed, patches = _manual_order_env(net_qty=-100)
+    _main.order_guard.release_symbol("TSTX")          # clean slate
+    _main.order_guard.register_order("TSTX", "manual", "SELL", "OID-ENTRY")
+    req = _main.OrderRequest(symbol="TSTX", transaction_type="BUY",
+                             quantity=100, order_type="MARKET", product="MIS")
+    with ExitStack() as st:
+        for p in patches: st.enter_context(p)
+        resp = asyncio.run(_main.place_order(req))
+    assert resp["status"] == "ok" and resp["reduce_only"] is True
+    ok, _ = _main.order_guard.can_place("TSTX", "manual", "SELL")
+    assert ok, "guard entry must be released after a full flatten"
+    _main.order_guard.release_symbol("TSTX")
+
+def t_manual_protective_stop_allowed_when_short():
+    """A BUY SL-M sized to the open short must be accepted (protective stop)."""
+    import asyncio
+    from contextlib import ExitStack
+    _main, placed, patches = _manual_order_env(net_qty=-100)
+    _main.order_guard.release_symbol("TSTX")
+    _main.order_guard.register_order("TSTX", "manual", "SELL", "OID-ENTRY")
+    req = _main.OrderRequest(symbol="TSTX", transaction_type="BUY",
+                             quantity=100, order_type="SL-M", product="MIS",
+                             trigger_price=105.0)
+    with ExitStack() as st:
+        for p in patches: st.enter_context(p)
+        resp = asyncio.run(_main.place_order(req))
+    assert resp["reduce_only"] is True
+    # Resting stop is NOT a flatten: the entry must stay guarded.
+    ok, reason = _main.order_guard.can_place("TSTX", "manual", "SELL")
+    assert not ok and "Duplicate" in reason
+    _main.order_guard.release_symbol("TSTX")
+
+def t_manual_oversized_opposite_is_not_reduce_only():
+    """An opposite order BIGGER than the position is a reversal → normal gates."""
+    import asyncio
+    from contextlib import ExitStack
+    _main, placed, patches = _manual_order_env(net_qty=-100)
+    _main.order_guard.release_symbol("TSTX")
+    _main.order_guard.register_order("TSTX", "manual", "SELL", "OID-ENTRY")
+    req = _main.OrderRequest(symbol="TSTX", transaction_type="BUY",
+                             quantity=150, order_type="MARKET", product="MIS")
+    with ExitStack() as st:
+        for p in patches: st.enter_context(p)
+        try:
+            asyncio.run(_main.place_order(req))
+            raise AssertionError("reversal-sized order must hit the guard conflict")
+        except Exception as exc:
+            assert "Guard" in str(getattr(exc, "detail", exc))
+    _main.order_guard.release_symbol("TSTX")
+
+def t_manual_stale_guard_self_heals_when_flat():
+    """Flat book + stale manual guard entry → new entry self-heals and passes."""
+    import asyncio
+    from contextlib import ExitStack
+    _main, placed, patches = _manual_order_env(net_qty=0)
+    _main.order_guard.release_symbol("TSTX")
+    _main.order_guard.register_order("TSTX", "manual", "SELL", "OID-STALE")
+    req = _main.OrderRequest(symbol="TSTX", transaction_type="SELL",
+                             quantity=10, order_type="MARKET", product="MIS")
+    with ExitStack() as st:
+        for p in patches: st.enter_context(p)
+        resp = asyncio.run(_main.place_order(req))
+    assert resp["status"] == "ok" and resp["reduce_only"] is False
+    _main.order_guard.release_symbol("TSTX")
+
+def t_single_position_squareoff_endpoint():
+    """/positions/{symbol}/squareoff places the opposite order and cleans up."""
+    import asyncio
+    from contextlib import ExitStack
+    _main, placed, patches = _manual_order_env(net_qty=-100)
+    _main.order_guard.release_symbol("TSTX")
+    _main.order_guard.register_order("TSTX", "manual", "SELL", "OID-ENTRY")
+    with ExitStack() as st:
+        for p in patches: st.enter_context(p)
+        resp = asyncio.run(_main.squareoff_position("TSTX"))
+    assert resp["status"] == "ok" and resp["side"] == "BUY" and resp["quantity"] == 100
+    assert resp["guard_released"] >= 1
+    assert placed and placed[-1]["transaction_type"] == "BUY" and placed[-1]["quantity"] == 100
+    ok, _ = _main.order_guard.can_place("TSTX", "manual", "SELL")
+    assert ok
+    _main.order_guard.release_symbol("TSTX")
+
+def t_tick_engine_daily_reset_reseeds():
+    """Daily session reset must re-trigger _backfill_bufs (agents opened blind)."""
+    import inspect
+    from tick_engine import TickEngine
+    src = inspect.getsource(TickEngine._process_tick)
+    reset_block = src.split("daily buffer reset for IST session")[1][:800]
+    assert "_backfill_bufs" in reset_block, (
+        "the daily reset block must schedule a candle re-seed — without it every "
+        "agent opens the day with empty buffers (EMA=0/RSI=50) until ~09:45")
+
+run("guard: release_symbol frees a stuck manual entry",                 t_guard_release_symbol_frees_manual_entry)
+run("guard: release_symbol(strategy=) is strategy-scoped",              t_guard_release_symbol_strategy_scoped)
+run("tsl: deregister_symbol removes all trackers on that symbol only",  t_tsl_deregister_symbol)
+run("manual: full MARKET flatten bypasses guard + releases entry",      t_manual_reduce_only_exit_bypasses_guard_and_releases)
+run("manual: protective SL-M on open short is accepted",                t_manual_protective_stop_allowed_when_short)
+run("manual: oversized opposite order is NOT reduce-only",              t_manual_oversized_opposite_is_not_reduce_only)
+run("manual: stale guard entry self-heals when book is flat",           t_manual_stale_guard_self_heals_when_flat)
+run("main: /positions/{symbol}/squareoff closes one position cleanly",  t_single_position_squareoff_endpoint)
+run("tick_engine: daily reset re-seeds candle buffers (open-blind fix)", t_tick_engine_daily_reset_reseeds)
 
 # ══════════════════════════════════════════════════════════════════════════
 # FINAL SUMMARY

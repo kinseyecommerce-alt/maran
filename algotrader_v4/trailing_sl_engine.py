@@ -397,6 +397,21 @@ class TrailingSLEngine:
         if pos:
             logger.info("TSL deregistered: {} {}", pos.symbol, order_id)
 
+    def deregister_symbol(self, symbol: str) -> int:
+        """Deregister every tracked position on a symbol. Used by the
+        per-position squareoff endpoint: once the whole position is squared
+        off externally, any remaining TSL tracker would double-fire an exit
+        on a flat book. Returns the number of positions deregistered."""
+        with self._lock:
+            ids = [oid for oid, p in self._positions.items() if p.symbol == symbol]
+            for oid in ids:
+                pos = self._positions.pop(oid, None)
+                if pos:
+                    pos.status = SLStatus.CANCELLED
+        if ids:
+            logger.info("TSL deregistered {} position(s) on {} (squareoff)", len(ids), symbol)
+        return len(ids)
+
     # ── Main tick handler ─────────────────────────────────────────────
 
     async def on_tick(
