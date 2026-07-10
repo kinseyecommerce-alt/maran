@@ -226,6 +226,17 @@ class OrderGuard:
             snapshot = dict(self._trade_count)
         self._persist_trade_count(snapshot)
 
+    def entry_placed_at(self, symbol: str, strategy: str) -> float | None:
+        """Epoch time the strategy's confirmed entry on this symbol was placed
+        (None if no active entry). Used by the min-hold gate: indicator exits
+        must not fire inside the first minutes of a trade."""
+        with self._lock:
+            for side in ("BUY", "SELL"):
+                ao = self._active.get((symbol, strategy, side))
+                if ao is not None and not ao.pending:
+                    return ao.placed_at
+        return None
+
     def release_symbol(self, symbol: str, strategy: str | None = None) -> int:
         """Release every active entry for a symbol (both sides), optionally
         restricted to one strategy. Used by the per-position squareoff

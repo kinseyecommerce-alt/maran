@@ -522,6 +522,12 @@ class BaseAgent(ABC):
         # order placement (stale-price protection); last measured latency (ms).
         self._latency_cooldown_until: float = 0.0
         self._last_order_latency_ms: float = 0.0
+        # Decision cadence: last forming-bar timestamp per symbol for which an
+        # entry evaluation / indicator-exit evaluation already ran. Decisions
+        # fire once per bar roll (the replay-validated cadence); stops and
+        # trailing stops stay tick-level. See settings.agent_decisions_on_bar_close.
+        self._last_entry_bar: dict[str, object] = {}
+        self._last_exit_bar:  dict[str, object] = {}
         # Entries skipped by the cost-floor gate (edge < N× round-trip cost)
         self._cost_gate_skips: int = 0
         # Entries skipped by the regime gate (agent blocked in current regime)
@@ -711,6 +717,19 @@ class BaseAgent(ABC):
                     snap.symbol, snap.tick.ltp, snap.indicators.atr_14
                 )
                 await self._check_exits_on_tick(snap)
+                # Entry decisions fire ONCE per bar roll — the cadence the
+                # replay validated (+53%/2d on identical days). Tick-cadence
+                # evaluation fired 200 entries in 32 minutes on forming-bar
+                # noise (live 2026-07-10: gross −₹5.4k, costs ₹17.4k). The
+                # protection layers above (TSL, exit checks, SL-M triggers)
+                # keep running on every tick.
+                if getattr(settings, "agent_decisions_on_bar_close", True):
+                    _bars_e = snap.candles_1min
+                    _bts_e = _bars_e[-1].ts if _bars_e else None
+                    if _bts_e is not None:
+                        if self._last_entry_bar.get(snap.symbol) == _bts_e:
+                            continue
+                        self._last_entry_bar[snap.symbol] = _bts_e
                 action, signal = self.evaluate_tick(snap)
                 if action in ("BUY", "SELL") and signal:
                     # Pattern decay guard — mute a setup whose live edge has gone
@@ -1938,6 +1957,24 @@ class BaseAgent(ABC):
         import time as _time
         sym = snap.symbol
         ind = snap.indicators
+        # Indicator/discretionary exits decide on CLOSED bars only, and never
+        # inside the first minutes of a trade. Tick-cadence exit evaluation
+        # against the FORMING bar fired "RSI7 oversold"/"Supertrend flip"
+        # exits seconds after entry — live 2026-07-10: 175 of 208 exits were
+        # such fires, 21 closed at the exact entry price, ₹17.4k costs on
+        # −₹5.4k gross. Hard stops, trailing stops and targets are NOT gated
+        # here — they run tick-level via the TSL engine and resting SL-M.
+        if getattr(settings, "indicator_exit_on_bar_close", True):
+            _bars_x = snap.candles_1min
+            _bts_x = _bars_x[-1].ts if _bars_x else None
+            if _bts_x is None or self._last_exit_bar.get(sym) == _bts_x:
+                return
+            self._last_exit_bar[sym] = _bts_x
+        _min_hold = getattr(settings, "min_hold_before_indicator_exit_sec", 0)
+        if _min_hold > 0:
+            _entry_ts = order_guard.entry_placed_at(sym, self.name)
+            if _entry_ts and (_time.time() - _entry_ts) < _min_hold:
+                return
         _exit_pos_data = await asyncio.get_running_loop().run_in_executor(
             None, kite_client.positions_cached
         )

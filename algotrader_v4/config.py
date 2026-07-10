@@ -269,6 +269,21 @@ class Settings(BaseSettings):
     # Scalping gets a stricter floor — its edge is thinnest relative to costs.
     min_edge_cost_ratio_scalping: float = 3.0
 
+    # Decision cadence — THE churn fix (live 2026-07-10: tick-cadence
+    # decisions produced 200 round trips in 32 minutes; gross −₹5.4k but
+    # ₹17.4k transaction costs → net −₹22.8k; 175/208 exits were forming-bar
+    # indicator fires, 21 closed at the exact entry price). The replay that
+    # validated every strategy (+53%/2d) decides once per CLOSED 1-min bar —
+    # these flags restore that exact cadence live. Hard stops, trailing
+    # stops, targets and SL-M triggers remain tick-level. Env-overridable
+    # (AGENT_DECISIONS_ON_BAR_CLOSE=false) for instant rollback, no deploy.
+    agent_decisions_on_bar_close: bool = True   # entries evaluate on bar roll
+    indicator_exit_on_bar_close:  bool = True   # discretionary exits too
+    # No indicator exit inside the first N seconds of a trade (SL/TSL exempt).
+    # 120s = 2 full bars: a trade must survive its first two closes before a
+    # momentum-fade/RSI exit is allowed to kill it.
+    min_hold_before_indicator_exit_sec: int = 120
+
     # Pattern kill-list: "agent:PATTERN,agent:PATTERN" muted at the source
     # (bot_state.is_pattern_enabled checks this before the runtime toggles).
     # Seeded from the 62-day real-agent replay over recorded 1m candles —

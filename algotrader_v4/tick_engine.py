@@ -187,7 +187,21 @@ class TickBuffer:
         self._current_ts: Optional[datetime] = None
         self._lock = Lock()
 
+    @staticmethod
+    def _to_ist(ts: datetime) -> datetime:
+        """Normalize to IST-aware. Timestamps reach the buffer from three
+        sources — live WS ticks, REST quotes (aware), and seeded history
+        (CSV cache: naive). A mixed buffer makes candles()'s sort raise
+        'can't compare offset-naive and offset-aware datetimes', which kills
+        every snapshot for the symbol (found by the daily-reset re-seed,
+        2026-07-10)."""
+        if ts.tzinfo is None:
+            from ist_clock import _IST as _ist_tz
+            return ts.replace(tzinfo=_ist_tz)
+        return ts
+
     def push(self, ltp: float, volume: int, ts: datetime) -> Optional[Candle]:
+        ts = self._to_ist(ts)
         # Bucket on total seconds since midnight so resolutions > 60s (e.g. 300s
         # 5-min bars) floor across minute boundaries, not just within a minute.
         secs = (ts.hour * 3600 + ts.minute * 60 + ts.second) \
@@ -219,6 +233,7 @@ class TickBuffer:
         for the whole warm-up window. Bars whose bucketed timestamp already
         exists (live ticks racing the backfill fetch) are skipped so the
         indicator dataframe never double-counts a minute."""
+        ts = self._to_ist(ts)
         secs = (ts.hour * 3600 + ts.minute * 60 + ts.second) \
                // self.resolution * self.resolution
         bar_ts = datetime(ts.year, ts.month, ts.day, tzinfo=ts.tzinfo) \
@@ -1360,6 +1375,13 @@ class TickEngine:
                     ts = row.date
                     if hasattr(ts, "to_pydatetime"):
                         ts = ts.to_pydatetime()
+                    # Cached CSVs store tz-NAIVE timestamps while live tick
+                    # candles are IST-aware — a mixed buffer makes candles()'s
+                    # sort raise "can't compare offset-naive and offset-aware
+                    # datetimes" and kills every snapshot for the symbol.
+                    if getattr(ts, "tzinfo", None) is None:
+                        from ist_clock import _IST as _ist_tz
+                        ts = ts.replace(tzinfo=_ist_tz)
                     o = float(getattr(row, "open",  row.close))
                     h = float(getattr(row, "high",  row.close))
                     l = float(getattr(row, "low",   row.close))

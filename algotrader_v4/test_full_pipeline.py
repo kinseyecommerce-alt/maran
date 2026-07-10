@@ -48,6 +48,13 @@ from config import settings
 # (e.g. futures EMA_TREND, which policy blocks in production).
 settings.disabled_patterns = ""
 settings.regime_agent_gating = False
+# Cadence policy off too: E2E stages feed tick BURSTS inside one minute bar
+# to trigger patterns; the bar-close decision gate (the 2026-07-10 churn fix)
+# would collapse each burst to a single evaluation. Cadence semantics have
+# their own unit tests in test_pipeline (section 51) and replay validation.
+settings.agent_decisions_on_bar_close = False
+settings.indicator_exit_on_bar_close = False
+settings.min_hold_before_indicator_exit_sec = 0
 from tick_engine import (
     tick_engine, MarketSnapshot, Tick, LiveIndicators, Candle, TickBuffer,
 )

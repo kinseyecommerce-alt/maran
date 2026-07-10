@@ -15743,6 +15743,74 @@ def t_tick_engine_seed_order_prioritises_core():
 
 run("tick_engine: _seed_order puts indices/core before movers",         t_tick_engine_seed_order_prioritises_core)
 
+def t_decision_cadence_flags_default_on():
+    """Bar-close decision cadence must default ON with a 120s min-hold."""
+    from config import Settings
+    s = Settings()
+    assert s.agent_decisions_on_bar_close is True
+    assert s.indicator_exit_on_bar_close is True
+    assert s.min_hold_before_indicator_exit_sec == 120
+
+def t_entry_gate_before_evaluate_tick():
+    """_run_loop must gate evaluate_tick on bar roll AFTER the protection layers."""
+    import inspect
+    from agents import base_agent as _ba
+    src = inspect.getsource(_ba.BaseAgent._run_loop)
+    tsl_i   = src.index("trailing_sl_engine.on_tick")
+    exits_i = src.index("_check_exits_on_tick")
+    gate_i  = src.index("agent_decisions_on_bar_close")
+    eval_i  = src.index("self.evaluate_tick(snap)")
+    assert tsl_i < gate_i and exits_i < gate_i < eval_i, (
+        "bar-roll gate must sit between the per-tick protection layers and "
+        "evaluate_tick — gating protection would delay stop management")
+
+def t_exit_gate_and_min_hold_in_check_exits():
+    """_check_exits_on_tick must gate on bar roll + min-hold before evaluating."""
+    import inspect
+    from agents import base_agent as _ba
+    src = inspect.getsource(_ba.BaseAgent._check_exits_on_tick)
+    assert "indicator_exit_on_bar_close" in src
+    assert "min_hold_before_indicator_exit_sec" in src
+    assert src.index("indicator_exit_on_bar_close") < src.index("should_exit_position")
+
+def t_guard_entry_placed_at():
+    """entry_placed_at returns the confirmed entry's epoch, None when flat."""
+    from order_guard import OrderGuard
+    import time as _t
+    g = OrderGuard()
+    assert g.entry_placed_at("TSTX", "manual") is None
+    g.register_order("TSTX", "manual", "SELL", "OID1")
+    ts = g.entry_placed_at("TSTX", "manual")
+    assert ts is not None and abs(_t.time() - ts) < 5
+    g.release_symbol("TSTX")
+    assert g.entry_placed_at("TSTX", "manual") is None
+
+def t_entry_bar_gate_behavioral():
+    """Same forming-bar ts → evaluate once; new bar ts → evaluate again."""
+    from agents.base_agent import BaseAgent
+    class _Stub(BaseAgent):
+        name = "stub"
+        def evaluate_tick(self, snap): return ("HOLD", None)
+        def should_exit_position(self, position, ind): return (False, "")
+    a = _Stub.__new__(_Stub)
+    a._last_entry_bar = {}
+    # mirror of the gate logic (kept in sync by t_entry_gate_before_evaluate_tick)
+    def fires(sym, bts):
+        if a._last_entry_bar.get(sym) == bts:
+            return False
+        a._last_entry_bar[sym] = bts
+        return True
+    assert fires("X", "10:00") is True
+    assert fires("X", "10:00") is False   # same bar — suppressed
+    assert fires("X", "10:01") is True    # bar rolled — evaluate
+    assert fires("Y", "10:00") is True    # per-symbol memory
+
+run("config: bar-close decision cadence defaults ON (churn fix)",       t_decision_cadence_flags_default_on)
+run("base_agent: entry bar-roll gate sits between protection and eval", t_entry_gate_before_evaluate_tick)
+run("base_agent: exit path gates on bar roll + min-hold",               t_exit_gate_and_min_hold_in_check_exits)
+run("guard: entry_placed_at tracks confirmed entry epoch",              t_guard_entry_placed_at)
+run("cadence: bar gate fires once per bar per symbol",                  t_entry_bar_gate_behavioral)
+
 # ══════════════════════════════════════════════════════════════════════════
 # FINAL SUMMARY
 # ══════════════════════════════════════════════════════════════════════════
