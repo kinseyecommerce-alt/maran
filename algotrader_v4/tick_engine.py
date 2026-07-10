@@ -936,7 +936,7 @@ class TickEngine:
             # compute is session-scoped to the latest bar's date.
             try:
                 self._reseed_task = asyncio.create_task(
-                    self._backfill_bufs(max_symbols=60))
+                    self._backfill_bufs(max_symbols=120))
             except RuntimeError:
                 pass  # no running loop (sync/offline callers) — boot seeding only
 
@@ -1296,7 +1296,25 @@ class TickEngine:
 
     # ── Historical data (for backtesting + warm-up) ───────────────────
 
-    async def _backfill_bufs(self, max_symbols: int = 30) -> None:
+    # Seeding priority: indices + the most-traded core names first. With 500+
+    # subscribed symbols, plain insertion order let scanner-promoted movers
+    # eat the whole seeding budget while TCS/RELIANCE stayed indicator-blind
+    # for hours after a mid-day restart (found live 2026-07-10 12:23).
+    _SEED_PRIORITY = (
+        "NIFTY", "BANKNIFTY", "NIFTY 50", "NIFTY BANK",
+        "RELIANCE", "ICICIBANK", "SBIN", "HDFCBANK", "INFY", "TCS",
+        "AXISBANK", "TATASTEEL", "HINDALCO", "BAJFINANCE", "ITC", "LT",
+        "KOTAKBANK", "BHARTIARTL", "MARUTI", "TATAMOTORS",
+    )
+
+    def _seed_order(self) -> list[str]:
+        """Subscribed symbols, priority names first, insertion order after."""
+        pri = [s for s in self._SEED_PRIORITY if s in self._bufs_1min]
+        seen = set(pri)
+        rest = [s for s in self._symbols if s in self._bufs_1min and s not in seen]
+        return pri + rest
+
+    async def _backfill_bufs(self, max_symbols: int = 120) -> None:
         """Seed 1-min and 5-min candle buffers with Kite historical bars.
 
         Called once after start_loop() so agents have enough candle history
@@ -1304,7 +1322,7 @@ class TickEngine:
         minutes for real-time ticks to fill the buffers.
         """
         loop = asyncio.get_running_loop()
-        syms = [s for s in self._symbols if s in self._bufs_1min][:max_symbols]
+        syms = self._seed_order()[:max_symbols]
         if not syms:
             return
 
