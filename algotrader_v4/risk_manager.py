@@ -260,7 +260,13 @@ class RiskManager:
         price: float,
         transaction_type: str,
         exchange: str = "NSE",
+        slots_bonus: int = 0,
     ) -> tuple[bool, str]:
+        """slots_bonus: extra open-position headroom for this caller — the
+        manual/dashboard path passes settings.manual_extra_slots so a human
+        override is never boxed out by agents holding every slot (live
+        2026-07-10: both manual power-hour entries were rejected with 'Max
+        open positions reached (5)' while agents owned all five)."""
         # Entire check sequence under lock: prevents two concurrent agents both
         # reading stale daily_pnl / position_count and racing past the limits.
         with self._lock:
@@ -289,7 +295,7 @@ class RiskManager:
                 return False, msg
 
             if transaction_type == "BUY":
-                ok, msg = self._check_position_count()
+                ok, msg = self._check_position_count(slots_bonus)
                 if not ok:
                     return False, msg
 
@@ -330,9 +336,10 @@ class RiskManager:
             )
         return True, "OK"
 
-    def _check_position_count(self) -> tuple[bool, str]:
-        if self.open_position_count >= settings.max_open_positions:
-            return False, f"Max open positions reached ({settings.max_open_positions})"
+    def _check_position_count(self, slots_bonus: int = 0) -> tuple[bool, str]:
+        limit = settings.max_open_positions + max(0, slots_bonus)
+        if self.open_position_count >= limit:
+            return False, f"Max open positions reached ({limit})"
         return True, "OK"
 
     # F&O / derivative exchanges — these trade on margin and are exempt from the
