@@ -416,9 +416,29 @@ class MarketRegimeDetector:
         except Exception as exc:
             logger.debug("VIX collect error: {}", exc)
         if s.india_vix == 0:
-            # NSE feed down. 0.0 means "unavailable", NOT "calm market" —
+            # NSE public API is blocked from most cloud IPs, so in production
+            # this branch ran EVERY cycle and VIX-based regime flags (z-score,
+            # black-swan backstop) were permanently dark (runtime logs
+            # 2026-07-10: "Regime: ... VIX=0.0"). The broker session can serve
+            # the same number — fall back to a Kite quote before giving up.
+            try:
+                from kite_client import kite_client as _kc
+                q = await asyncio.get_running_loop().run_in_executor(
+                    None, lambda: _kc.quote_kite(["NSE:INDIA VIX"]))
+                item = (q or {}).get("NSE:INDIA VIX") or {}
+                last = float(item.get("last_price") or 0)
+                if last > 0:
+                    s.india_vix = last
+                    prev = float((item.get("ohlc") or {}).get("close") or 0)
+                    if prev > 0:
+                        s.vix_prev_close = prev
+                        s.vix_chg_pct = (last - prev) / prev * 100
+            except Exception as exc:
+                logger.debug("VIX kite fallback error: {}", exc)
+        if s.india_vix == 0:
+            # Both feeds down. 0.0 means "unavailable", NOT "calm market" —
             # _classify() must skip all VIX-based flags rather than read it as low vol.
-            logger.warning("[regime] India VIX unavailable (NSE API failed) — "
+            logger.warning("[regime] India VIX unavailable (NSE + Kite failed) — "
                            "VIX-based regime flags disabled this cycle")
 
     async def _collect_breadth(self, s: RegimeSignals) -> None:

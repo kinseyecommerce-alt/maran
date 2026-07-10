@@ -233,6 +233,16 @@ class KiteClient:
         "NIFTY": "NIFTY 50", "NIFTY50": "NIFTY 50",
         "BANKNIFTY": "NIFTY BANK", "FINNIFTY": "NIFTY FIN SERVICE",
         "MIDCPNIFTY": "NIFTY MID SELECT", "SENSEX": "SENSEX", "BANKEX": "BANKEX",
+        # Sector indices + VIX — Kite spells these with a space; the compact
+        # spellings produced "No instrument tokens found" every scan cycle
+        # (runtime logs 2026-07-10), silently disabling sector-strength
+        # features and the VIX quote fallback.
+        "NIFTYIT": "NIFTY IT", "NIFTYAUTO": "NIFTY AUTO",
+        "NIFTYFMCG": "NIFTY FMCG", "NIFTYPHARMA": "NIFTY PHARMA",
+        "NIFTYMETAL": "NIFTY METAL", "NIFTYENERGY": "NIFTY ENERGY",
+        "NIFTYREALTY": "NIFTY REALTY", "NIFTYINFRA": "NIFTY INFRA",
+        "NIFTYPSUBANK": "NIFTY PSU BANK", "NIFTYMEDIA": "NIFTY MEDIA",
+        "INDIAVIX": "INDIA VIX", "INDIA VIX": "INDIA VIX",
     }
 
     @classmethod
