@@ -927,6 +927,18 @@ class TickEngine:
             with _rest_vol_lock:
                 _rest_last_cum_vol.clear()  # REST cumulative-volume baseline resets daily
             logger.info("TickEngine: daily buffer reset for IST session {}", tick_date)
+            # Re-seed candle history for the new session. Boot-time backfill
+            # runs ONCE per process, so this reset used to leave every agent
+            # indicator-blind (EMA=0, RSI=50, MACD dead) until ~09:45 while
+            # live candles accumulated — every day, regardless of restart
+            # timing (found live 2026-07-10: first agent trade at 09:45:50,
+            # exactly the warm-up boundary). VWAP is safe to seed: its
+            # compute is session-scoped to the latest bar's date.
+            try:
+                self._reseed_task = asyncio.create_task(
+                    self._backfill_bufs(max_symbols=60))
+            except RuntimeError:
+                pass  # no running loop (sync/offline callers) — boot seeding only
 
         _vol = tick.volume + self._dedup_pending_vol.pop(symbol, 0)
         self._bufs_1min[symbol].push(tick.ltp, _vol, tick.timestamp)

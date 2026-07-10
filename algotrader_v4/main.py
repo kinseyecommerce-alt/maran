@@ -1414,37 +1414,144 @@ def _resolve_order_price(symbol: str, exchange: str, price: float | None) -> flo
     raise HTTPException(422, "cannot price MARKET order — no market data")
 
 
+def _net_position_qty(symbol: str) -> int:
+    """Signed net open quantity for a symbol (0 if flat/unknown)."""
+    try:
+        for p in (kite_client.positions() or {}).get("net", []):
+            if p.get("tradingsymbol") == symbol:
+                return int(p.get("quantity") or 0)
+    except Exception as exc:
+        logger.warning("net-position lookup failed for {}: {}", symbol, exc)
+    return 0
+
+
+def _cancel_open_stops(symbol: str) -> int:
+    """Best-effort cancel of resting SL/SL-M orders on a symbol. Called when
+    a position is fully flattened externally — a surviving stop would fire on
+    a flat book and OPEN a fresh reverse position. Returns count cancelled."""
+    n = 0
+    try:
+        for o in kite_client.orders() or []:
+            if (o.get("tradingsymbol") == symbol
+                    and o.get("order_type") in ("SL", "SL-M")
+                    and o.get("status") in ("OPEN", "TRIGGER PENDING")):
+                try:
+                    kite_client.cancel_order(o.get("order_id"))
+                    n += 1
+                except Exception as exc:
+                    logger.warning("stop-cancel failed {} {}: {}", symbol, o.get("order_id"), exc)
+    except Exception as exc:
+        logger.warning("stop-scan failed for {}: {}", symbol, exc)
+    return n
+
+
 @app.post("/orders/place", tags=["Orders"])
 async def place_order(req: OrderRequest):
     req.symbol = _clean_symbol(req.symbol)
-    ok, reason = order_guard.can_place(req.symbol, "manual", req.transaction_type)
-    if not ok: raise HTTPException(400, f"Guard: {reason}")
-    # P0 fix: MARKET orders must be checked against a real price, never ₹1
-    check_price = _resolve_order_price(req.symbol, req.exchange, req.price)
-    ok, reason = risk_manager.check_before_order(req.symbol, req.quantity, check_price, req.transaction_type)
-    if not ok: raise HTTPException(400, f"Risk: {reason}")
+    # Reduce-only detection: an opposite-side order that only shrinks an open
+    # position (exit, partial exit, or protective SL/SL-M). These must NEVER
+    # be blocked by the guard's direction-conflict check or by entry risk
+    # gates — found live 2026-07-10: a manual short could not place its stop
+    # (Finding #2) and could not be closed AT ALL until EOD squareoff
+    # (Finding #3), because nothing on the manual path ever releases the
+    # guard entry. Agents don't hit this: their exits bypass the guard.
+    net_qty = _net_position_qty(req.symbol)
+    reduce_only = (
+        (net_qty > 0 and req.transaction_type == "SELL" and req.quantity <= net_qty)
+        or (net_qty < 0 and req.transaction_type == "BUY" and req.quantity <= -net_qty)
+    )
+    if not reduce_only:
+        if net_qty == 0:
+            # Self-heal: a manual entry whose position is already flat (stop
+            # fired, EOD squareoff, broker-side close) leaves a stale guard
+            # entry that blocks the symbol for the rest of the day.
+            released = order_guard.release_symbol(req.symbol, strategy="manual")
+            if released:
+                logger.info("guard self-heal: released {} stale manual entr(ies) on {}",
+                            released, req.symbol)
+        ok, reason = order_guard.can_place(req.symbol, "manual", req.transaction_type)
+        if not ok: raise HTTPException(400, f"Guard: {reason}")
+        # P0 fix: MARKET orders must be checked against a real price, never ₹1
+        check_price = _resolve_order_price(req.symbol, req.exchange, req.price)
+        ok, reason = risk_manager.check_before_order(req.symbol, req.quantity, check_price, req.transaction_type)
+        if not ok: raise HTTPException(400, f"Risk: {reason}")
+    else:
+        check_price = _resolve_order_price(req.symbol, req.exchange, req.price)
     sebi_ok, algo_id, sebi_reason = sebi_compliance.pre_order_check(
         strategy="manual", symbol=req.symbol, exchange=req.exchange,
         transaction_type=req.transaction_type, quantity=req.quantity,
         order_type=req.order_type, price_at_signal=check_price,
         signal_source="manual_api", regime=regime_detector.current_regime.value)
-    if not sebi_ok: raise HTTPException(403, f"SEBI compliance: {sebi_reason}")
+    if not sebi_ok and not reduce_only:
+        raise HTTPException(403, f"SEBI compliance: {sebi_reason}")
+    if not sebi_ok and reduce_only:
+        # Risk-REDUCING orders stay possible even under compliance blocks
+        # (mirrors the kill-switch squareoff path, which also closes
+        # positions while new entries are blocked). Audit-logged below.
+        algo_id = "MANUAL-EXIT"
+        logger.warning("SEBI check failed but order is reduce-only — allowing exit on {}: {}",
+                       req.symbol, sebi_reason)
     oid = kite_client.place_order(
         tradingsymbol=req.symbol, exchange=req.exchange,
         transaction_type=req.transaction_type, quantity=req.quantity,
         order_type=req.order_type, product=req.product,
         price=req.price, trigger_price=req.trigger_price, tag=algo_id)
     sebi_compliance.record_order_id("manual", req.symbol, oid)
-    order_guard.register_order(req.symbol, "manual", req.transaction_type, oid)
-    # Manual positions must count against max_open_positions like agent entries do
-    if req.transaction_type == "BUY":
-        risk_manager.position_opened()
+    if not reduce_only:
+        order_guard.register_order(req.symbol, "manual", req.transaction_type, oid)
+        # Manual positions must count against max_open_positions like agent entries do
+        if req.transaction_type == "BUY":
+            risk_manager.position_opened()
+    elif req.order_type == "MARKET" and req.quantity == abs(net_qty):
+        # Immediate full flatten: free the guard entry so the symbol is
+        # tradeable again, cancel any resting stop (it would re-open a
+        # position on a flat book), and give back the position slot.
+        order_guard.release_symbol(req.symbol, strategy="manual")
+        _cancel_open_stops(req.symbol)
+        if net_qty > 0:
+            risk_manager.position_closed()
     await broadcast({"event": "order_placed", "order_id": oid, "symbol": req.symbol})
-    return {"status": "ok", "order_id": oid}
+    return {"status": "ok", "order_id": oid, "reduce_only": reduce_only}
 
 @app.delete("/orders/{order_id}", tags=["Orders"])
 async def cancel(order_id: str):
     kite_client.cancel_order(order_id); return {"status": "ok"}
+
+@app.post("/positions/{symbol}/squareoff", tags=["Orders"])
+async def squareoff_position(symbol: str):
+    """Square off ONE symbol's open position (any strategy, manual or agent).
+    The only whole-book alternative (/orders/squareoff) closes EVERYTHING —
+    there was no surgical exit for a single stuck position (Finding #3,
+    2026-07-10). Places an opposite MARKET order sized to the net quantity,
+    releases guard entries, deregisters TSL trackers, cancels resting stops."""
+    symbol = _clean_symbol(symbol)
+    pos = None
+    try:
+        for p in (kite_client.positions() or {}).get("net", []):
+            if p.get("tradingsymbol") == symbol and int(p.get("quantity") or 0) != 0:
+                pos = p
+                break
+    except Exception as exc:
+        raise HTTPException(502, f"position lookup failed: {exc}")
+    if pos is None:
+        raise HTTPException(404, f"no open position for {symbol}")
+    qty = int(pos["quantity"])
+    side = "SELL" if qty > 0 else "BUY"
+    oid = kite_client.place_order(
+        tradingsymbol=symbol, exchange=pos.get("exchange", "NSE"),
+        transaction_type=side, quantity=abs(qty), order_type="MARKET",
+        product=pos.get("product", "MIS"), tag="SQOFF-1")
+    sebi_compliance.record_order_id("manual", symbol, oid)
+    released = order_guard.release_symbol(symbol)
+    tsl_removed = trailing_sl_engine.deregister_symbol(symbol)
+    stops_cancelled = _cancel_open_stops(symbol)
+    if qty > 0:
+        risk_manager.position_closed()
+    await broadcast({"event": "position_squared_off", "symbol": symbol, "order_id": oid})
+    return {"status": "ok", "order_id": oid, "symbol": symbol, "quantity": abs(qty),
+            "side": side, "guard_released": released, "tsl_deregistered": tsl_removed,
+            "stops_cancelled": stops_cancelled}
+
 
 @app.post("/orders/squareoff", tags=["Orders"])
 async def squareoff():
