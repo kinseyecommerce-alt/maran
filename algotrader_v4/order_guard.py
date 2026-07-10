@@ -147,11 +147,15 @@ class OrderGuard:
     @staticmethod
     def _persist_trade_count(snapshot: dict[str, int]) -> None:
         """Best-effort persist of trade counts — DB issues must never block orders.
-        Called OUTSIDE self._lock (a slow DB write must not stall order placement)."""
+        Called OUTSIDE self._lock (a slow DB write must not stall order placement).
+        Date-stamped: counts are DAILY, so a boot the next morning (before the
+        scheduled reset job runs) must not resurrect yesterday's totals."""
         try:
             import json
+            from ist_clock import now_ist
             from state_store import set_kv
-            set_kv("order_guard_trade_count", json.dumps(snapshot))
+            payload = {"_date": now_ist().strftime("%Y-%m-%d"), **snapshot}
+            set_kv("order_guard_trade_count", json.dumps(payload))
         except Exception as exc:
             logger.warning("OrderGuard: trade count persist failed (counts survive in-memory until restart): {}", exc)
 
@@ -168,6 +172,13 @@ class OrderGuard:
                 return
             data = json.loads(raw)
             if not isinstance(data, dict):
+                return
+            # Counts are daily. Old-format payloads (no _date) and payloads
+            # from a previous session date are ignored — restoring them would
+            # block every strategy for the whole morning after an overnight
+            # restart that boots before the daily-reset job fires.
+            from ist_clock import now_ist
+            if data.pop("_date", None) != now_ist().strftime("%Y-%m-%d"):
                 return
             with self._lock:
                 for strategy, count in data.items():

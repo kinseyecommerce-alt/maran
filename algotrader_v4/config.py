@@ -279,6 +279,9 @@ class Settings(BaseSettings):
     # (AGENT_DECISIONS_ON_BAR_CLOSE=false) for instant rollback, no deploy.
     agent_decisions_on_bar_close: bool = True   # entries evaluate on bar roll
     indicator_exit_on_bar_close:  bool = True   # discretionary exits too
+    # Manual/dashboard orders get this much extra open-position headroom so a
+    # human override is never boxed out by agents holding every slot.
+    manual_extra_slots: int = Field(default=1, ge=0, le=5)
     # No indicator exit inside the first N seconds of a trade (SL/TSL exempt).
     # 120s = 2 full bars: a trade must survive its first two closes before a
     # momentum-fade/RSI exit is allowed to kill it.

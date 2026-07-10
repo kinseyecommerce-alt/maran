@@ -1461,6 +1461,14 @@ async def place_order(req: OrderRequest):
         or (net_qty < 0 and req.transaction_type == "BUY" and req.quantity <= -net_qty)
     )
     if not reduce_only:
+        # A stop order that is NOT protecting a position would OPEN one when
+        # it triggers — live 2026-07-10 a protective SL-M was accepted after
+        # its entry got rejected, leaving a naked resting short. Stops are
+        # for protection; entries must be explicit MARKET/LIMIT orders.
+        if req.order_type in ("SL", "SL-M"):
+            raise HTTPException(400,
+                f"Naked {req.order_type} rejected: no open position on {req.symbol} "
+                f"to protect (net qty {net_qty}). Place the entry first.")
         if net_qty == 0:
             # Self-heal: a manual entry whose position is already flat (stop
             # fired, EOD squareoff, broker-side close) leaves a stale guard
@@ -1473,7 +1481,9 @@ async def place_order(req: OrderRequest):
         if not ok: raise HTTPException(400, f"Guard: {reason}")
         # P0 fix: MARKET orders must be checked against a real price, never ₹1
         check_price = _resolve_order_price(req.symbol, req.exchange, req.price)
-        ok, reason = risk_manager.check_before_order(req.symbol, req.quantity, check_price, req.transaction_type)
+        ok, reason = risk_manager.check_before_order(
+            req.symbol, req.quantity, check_price, req.transaction_type,
+            slots_bonus=getattr(settings, "manual_extra_slots", 1))
         if not ok: raise HTTPException(400, f"Risk: {reason}")
     else:
         check_price = _resolve_order_price(req.symbol, req.exchange, req.price)
@@ -1499,17 +1509,36 @@ async def place_order(req: OrderRequest):
     sebi_compliance.record_order_id("manual", req.symbol, oid)
     if not reduce_only:
         order_guard.register_order(req.symbol, "manual", req.transaction_type, oid)
-        # Manual positions must count against max_open_positions like agent entries do
-        if req.transaction_type == "BUY":
-            risk_manager.position_opened()
+        # Manual positions count against max_open_positions for BOTH sides —
+        # shorts consume a risk slot exactly like longs (the BUY-only
+        # accounting left the counter reading 5 while 23 positions were open).
+        risk_manager.position_opened()
+        # Persist so the boot-time reconcile restores manual positions too —
+        # agents' entries go through _register_position/upsert_position, the
+        # manual path never did: a mid-day restart silently erased the manual
+        # book (live 2026-07-10, a +₹8k short vanished).
+        try:
+            from state_store import upsert_position
+            upsert_position(order_id=str(oid), symbol=req.symbol, strategy="manual",
+                            side=req.transaction_type, entry_price=check_price,
+                            quantity=req.quantity, sl_price=0.0, target=0.0,
+                            product=req.product)
+        except Exception as exc:
+            logger.warning("manual position persist failed for {}: {}", req.symbol, exc)
     elif req.order_type == "MARKET" and req.quantity == abs(net_qty):
         # Immediate full flatten: free the guard entry so the symbol is
         # tradeable again, cancel any resting stop (it would re-open a
         # position on a flat book), and give back the position slot.
         order_guard.release_symbol(req.symbol, strategy="manual")
         _cancel_open_stops(req.symbol)
-        if net_qty > 0:
-            risk_manager.position_closed()
+        risk_manager.position_closed()
+        try:
+            from state_store import get_open_positions, close_position
+            for p in get_open_positions():
+                if p.get("symbol") == req.symbol and p.get("strategy") == "manual":
+                    close_position(p.get("order_id"))
+        except Exception as exc:
+            logger.warning("manual position close-persist failed for {}: {}", req.symbol, exc)
     await broadcast({"event": "order_placed", "order_id": oid, "symbol": req.symbol})
     return {"status": "ok", "order_id": oid, "reduce_only": reduce_only}
 
@@ -1545,8 +1574,14 @@ async def squareoff_position(symbol: str):
     released = order_guard.release_symbol(symbol)
     tsl_removed = trailing_sl_engine.deregister_symbol(symbol)
     stops_cancelled = _cancel_open_stops(symbol)
-    if qty > 0:
-        risk_manager.position_closed()
+    risk_manager.position_closed()
+    try:
+        from state_store import get_open_positions, close_position
+        for p in get_open_positions():
+            if p.get("symbol") == symbol:
+                close_position(p.get("order_id"))
+    except Exception as exc:
+        logger.warning("squareoff close-persist failed for {}: {}", symbol, exc)
     await broadcast({"event": "position_squared_off", "symbol": symbol, "order_id": oid})
     return {"status": "ok", "order_id": oid, "symbol": symbol, "quantity": abs(qty),
             "side": side, "guard_released": released, "tsl_deregistered": tsl_removed,
@@ -3359,6 +3394,12 @@ async def on_startup():
     # (a restart must never silently clear an emergency halt). Also re-halts
     # risk_manager when KILLED was restored.
     sebi_compliance.restore_state_from_db()
+    # Restore per-strategy daily trade counts. They were persisted on every
+    # confirm but NEVER read back — each restart handed every strategy a
+    # fresh daily budget (2026-07-10: three boots let scalping take 95
+    # entries against max_trades_scalping=60). restore_counts() keeps the
+    # max of memory and DB, so calling it here can never lower a live count.
+    order_guard.restore_counts()
     # Restore Kite access token from state_store if .env has none (crash-restart
     # recovery). Must go through kite_client.set_access_token() — merely setting
     # settings.kite_access_token leaves kite_client._kite = None, so the tick

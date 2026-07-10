@@ -15811,6 +15811,89 @@ run("base_agent: exit path gates on bar roll + min-hold",               t_exit_g
 run("guard: entry_placed_at tracks confirmed entry epoch",              t_guard_entry_placed_at)
 run("cadence: bar gate fires once per bar per symbol",                  t_entry_bar_gate_behavioral)
 
+def t_naked_stop_rejected_when_flat():
+    """SL/SL-M with no position to protect must be rejected (naked entry)."""
+    import asyncio
+    from contextlib import ExitStack
+    _main, placed, patches = _manual_order_env(net_qty=0)
+    _main.order_guard.release_symbol("TSTX")
+    req = _main.OrderRequest(symbol="TSTX", transaction_type="SELL",
+                             quantity=10, order_type="SL-M", product="MIS",
+                             trigger_price=95.0)
+    with ExitStack() as st:
+        for p in patches: st.enter_context(p)
+        try:
+            asyncio.run(_main.place_order(req))
+            raise AssertionError("naked SL-M must be rejected")
+        except Exception as exc:
+            assert "Naked" in str(getattr(exc, "detail", exc))
+    _main.order_guard.release_symbol("TSTX")
+
+def t_manual_slots_bonus():
+    """check_before_order honors slots_bonus for the manual path."""
+    from risk_manager import RiskManager
+    from config import settings as _s
+    rm = RiskManager()
+    rm.open_position_count = _s.max_open_positions       # agents hold every slot
+    ok, reason = rm.check_before_order("TSTX", 1, 100.0, "BUY")
+    assert not ok and "Max open positions" in reason
+    ok, _ = rm.check_before_order("TSTX", 1, 100.0, "BUY", slots_bonus=1)
+    assert ok, "manual bonus slot must clear the cap"
+    rm.open_position_count = _s.max_open_positions + 1   # bonus slot consumed
+    ok, _ = rm.check_before_order("TSTX", 1, 100.0, "BUY", slots_bonus=1)
+    assert not ok
+
+def t_trade_count_restore_is_date_aware():
+    """restore_counts loads same-day counts, ignores stale/undated payloads."""
+    import json
+    from unittest.mock import patch
+    from order_guard import OrderGuard
+    from ist_clock import now_ist
+    today = now_ist().strftime("%Y-%m-%d")
+    g = OrderGuard()
+    base = g._trade_count.get("scalping", 0)
+    with patch("state_store.get_kv",
+               lambda k, d="": json.dumps({"_date": today, "scalping": 45})):
+        g.restore_counts()
+    assert g._trade_count.get("scalping", 0) >= 45, "same-day counts must restore"
+    g2 = OrderGuard()
+    _before2 = g2._trade_count.get("scalping", 0)
+    with patch("state_store.get_kv",
+               lambda k, d="": json.dumps({"_date": "2020-01-01", "scalping": 45})):
+        g2.restore_counts()
+    assert g2._trade_count.get("scalping", 0) == _before2, "stale-dated payload must be ignored"
+    # legacy payload without a date must not resurrect either
+    g3 = OrderGuard()
+    _before = g3._trade_count.get("scalping", 0)
+    with patch("state_store.get_kv",
+               lambda k, d="": json.dumps({"scalping": 45})):   # undated legacy
+        g3.restore_counts()
+    assert g3._trade_count.get("scalping", 0) == _before, "undated payload must be ignored"
+
+def t_restore_counts_called_at_startup():
+    """main.on_startup must call order_guard.restore_counts()."""
+    import inspect
+    import main as _main
+    src = inspect.getsource(_main.on_startup)
+    assert "restore_counts()" in src, (
+        "counts were persisted but never restored — every restart handed each "
+        "strategy a fresh daily budget (95 scalping entries vs cap 60 on 2026-07-10)")
+
+def t_manual_entry_counts_both_sides():
+    """Manual SELL (short) entries must consume a position slot like BUYs."""
+    import inspect
+    import main as _main
+    src = inspect.getsource(_main.place_order)
+    entry_block = src.split("if not reduce_only:")[-1]
+    assert 'transaction_type == "BUY"' not in entry_block.split("elif")[0], (
+        "position_opened must fire for BOTH entry sides on the manual path")
+
+run("manual: naked SL/SL-M with no position is rejected",               t_naked_stop_rejected_when_flat)
+run("risk: slots_bonus grants manual headroom over the agent cap",      t_manual_slots_bonus)
+run("guard: trade-count restore is date-aware (no stale resurrection)", t_trade_count_restore_is_date_aware)
+run("main: on_startup restores persisted trade counts",                 t_restore_counts_called_at_startup)
+run("manual: short entries consume a position slot too",                t_manual_entry_counts_both_sides)
+
 # ══════════════════════════════════════════════════════════════════════════
 # FINAL SUMMARY
 # ══════════════════════════════════════════════════════════════════════════
