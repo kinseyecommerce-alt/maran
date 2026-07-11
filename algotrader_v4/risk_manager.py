@@ -378,6 +378,30 @@ class RiskManager:
     # Equity agents that trade product MIS — eligible for intraday margin.
     MIS_EQUITY_AGENTS = {"intraday", "scalping", "momentum", "mean_reversion", "pairs"}
 
+    @staticmethod
+    def calendar_size_factor() -> float:
+        """Size multiplier from the India trading calendar: <1 on weekly-expiry
+        weekdays (settings.expiry_size_down_weekdays, Mon=0) and on operator-
+        listed event dates (Budget, RBI MPC — settings.event_risk_dates).
+        Fails safe to 1.0 on any error."""
+        try:
+            from ist_clock import now_ist
+            f = 1.0
+            now = now_ist()
+            wds = {w.strip() for w in
+                   (getattr(settings, "expiry_size_down_weekdays", "") or "").split(",")
+                   if w.strip()}
+            if str(now.weekday()) in wds:
+                f *= float(getattr(settings, "expiry_day_size_factor", 1.0) or 1.0)
+            dates = {d.strip() for d in
+                     (getattr(settings, "event_risk_dates", "") or "").split(",")
+                     if d.strip()}
+            if now.strftime("%Y-%m-%d") in dates:
+                f *= float(getattr(settings, "event_day_size_factor", 1.0) or 1.0)
+            return max(0.1, min(1.0, f))
+        except Exception:
+            return 1.0
+
     def buying_power_for_agent(self, agent_name: str) -> float:
         """Affordability cap for an agent: the cash slice x MIS leverage for
         intraday-equity agents, plain slice for everything else (CNC swing,
@@ -536,6 +560,11 @@ class RiskManager:
             capital
             or (self.max_capital_for_agent(agent) if agent else settings.max_position_size)
         )
+        # India calendar risk-down (expiry weekday / event dates) — applied to
+        # CAPITAL, i.e. before any lot rounding, so it can never resurrect the
+        # post-rounding sizing-mutation bugs. Year replay: Thursday (weekly
+        # index expiry) is the worst weekday for every trend agent.
+        cap *= self.calendar_size_factor()
         if int(cap // price) <= 0:
             # Capital cannot cover even 1 share — skip rather than force qty=1
             logger.warning(

@@ -279,6 +279,21 @@ class Settings(BaseSettings):
     # (AGENT_DECISIONS_ON_BAR_CLOSE=false) for instant rollback, no deploy.
     agent_decisions_on_bar_close: bool = True   # entries evaluate on bar roll
     indicator_exit_on_bar_close:  bool = True   # discretionary exits too
+    # Decision timeframe per agent in minutes ("agent:min,agent:min"; absent
+    # agents decide on 1m bars). 1-YEAR replay (245 days, 2026-07-10):
+    # intraday +954% @5m vs +613% @15m; futures +3,281% @5m vs +1,804% @15m —
+    # both with >78% win rates. Scalping's patterns exist only at 1m.
+    # Indicators stay 1m-computed; only DECISION timing changes.
+    decision_bar_minutes: str = "intraday:5,futures:5"
+    # India calendar risk-down. Thursday (weekly index expiry) is measurably
+    # the worst weekday for every trend agent over the year (expiry gamma
+    # chop): intraday +162% vs ~+180% other days, futures +57% vs ~+84%.
+    expiry_size_down_weekdays: str = "3"                       # Mon=0 CSV
+    expiry_day_size_factor: float = Field(default=0.6, gt=0, le=1.0)
+    # Operator-maintained event dates (Budget, RBI MPC…): momentum's worst
+    # day of the year was Budget day 2026-02-01.
+    event_risk_dates: str = ""                                 # "YYYY-MM-DD,…"
+    event_day_size_factor: float = Field(default=0.5, gt=0, le=1.0)
     # Manual/dashboard orders get this much extra open-position headroom so a
     # human override is never boxed out by agents holding every slot.
     manual_extra_slots: int = Field(default=1, ge=0, le=5)
@@ -388,6 +403,10 @@ class Settings(BaseSettings):
         "mean_reversion:STOCHRSI_CROSS,mean_reversion:BB_LOWER_BOUNCE,"
         "mean_reversion:PRICE_ZSCORE,mean_reversion:VWAP_EXTREME,"
         "momentum:SUPERTREND_FLIP,momentum:EMA_ALIGNMENT,momentum:SQUEEZE_RELEASE,"
+        # v13 (1-YEAR replay 2026-07-10, 245 days): POWER_HOUR_OPT negative at
+        # every cadence (−40.2% @5m, −43.7% @15m); MACD_ZERO_CROSS −19.4%/yr
+        # @15m (its +5.1 on Jul 8-9 was small-sample noise).
+        "options:POWER_HOUR_OPT,momentum:MACD_ZERO_CROSS,"
         # v12 (regime-matrix re-measure of the pruned momentum book, 62d × 12
         # symbols, honest costs): VWAP_BREAKOUT gross +2.2% @79tr − ~11.9% costs
         # = net -9.7% → kill (rule: net <= -2% at >= 15tr). Momentum's real
@@ -478,12 +497,18 @@ class Settings(BaseSettings):
         # also pre-prune momentum. mean_reversion stays benched everywhere: the
         # v9 range-candidates FAILED the honest re-test (BB_MID_REVERT -42%
         # GROSS @775tr, PRICE_ZSCORE net -17% @140tr, RANGING-day gross -13).
-        "BEAR_TREND:options,mean_reversion,pairs,swing;"
-        "BEAR_VOLATILE:options,mean_reversion,pairs,swing;"
+        # Momentum RE-BENCHED everywhere (matrix v4, 1-YEAR replay 2026-07-10):
+        # net −85.6% @15m and −103.5% @5m over 245 days — gross positive
+        # (+153 @5m) but its 1,700-trade frequency is structurally
+        # cost-negative. The 62d bear/ranging unbench was a shorter-window
+        # read; the year overrules it. Re-evaluate only with a validated
+        # frequency cut (trade budget or higher-conviction entries).
+        "BEAR_TREND:options,momentum,mean_reversion,pairs,swing;"
+        "BEAR_VOLATILE:options,momentum,mean_reversion,pairs,swing;"
         # RANGING: options + mean_reversion + pairs stay benched (options -46.7%
         # on range days; pairs -38% net over 62d with no winning pattern).
-        "RANGING:options,mean_reversion,pairs,swing;"
-        "HIGH_VOLATILE:mean_reversion,pairs,swing;"
+        "RANGING:options,momentum,mean_reversion,pairs,swing;"
+        "HIGH_VOLATILE:momentum,mean_reversion,pairs,swing;"
         "BLACK_SWAN:swing,intraday,futures,momentum,pairs,mean_reversion"
     )
 
