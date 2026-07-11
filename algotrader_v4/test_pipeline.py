@@ -150,7 +150,11 @@ def t_kill_list_defaults():
     # VWAP_BREAKOUT killed (net -9.7% after costs @79tr).
     assert not bot_state.is_pattern_enabled("momentum", "VWAP_BREAKOUT")
     assert bot_state.is_pattern_enabled("momentum", "VOL_SURGE_TREND")   # net ~+56% @538tr
-    assert bot_state.is_pattern_enabled("momentum", "MACD_ZERO_CROSS")   # net ~+33% @176tr
+    # v13 (1-YEAR replay): MACD_ZERO_CROSS killed — the 62d +33% was
+    # small-sample; over 245 days it nets -19.4%. POWER_HOUR_OPT killed too
+    # (negative at every cadence: -40.2% @5m, -43.7% @15m).
+    assert not bot_state.is_pattern_enabled("momentum", "MACD_ZERO_CROSS")
+    assert not bot_state.is_pattern_enabled("options", "POWER_HOUR_OPT")
 
 def t_kill_list_runtime_mutation():
     """Mutating settings.disabled_patterns takes effect immediately (cache refresh)."""
@@ -171,28 +175,28 @@ run("kill-list: runtime settings mutation applies", t_kill_list_runtime_mutation
 # ── Regime entry gate (settings.regime_blocked_agents → bot_state) ──────────
 
 def t_regime_gate_matrix():
-    """Matrix v3 (post-v11-prune re-measure): momentum unbenched where its
-    pruned 3-winner book proved net-positive (bear +27 / ranging +31 /
-    high-vol +22, honest costs) — still blocked in BULL_TREND (~flat) and
-    UNKNOWN. mean_reversion/pairs blocked everywhere; options bull/high-vol only."""
+    """Matrix v4 (1-YEAR replay 2026-07-10): momentum RE-BENCHED everywhere —
+    the 62d bear/ranging unbench (v3) was a short-window read; over 245 days
+    momentum nets −85.6% @15m / −103.5% @5m (gross-positive but its 1,700-trade
+    frequency is structurally cost-negative). mean_reversion/pairs/swing
+    blocked everywhere; options bull/high-vol only."""
     import bot_state
     try:
         bot_state.set_current_regime("RANGING")
-        for blocked in ("options", "mean_reversion", "pairs"):
+        for blocked in ("options", "momentum", "mean_reversion", "pairs"):
             assert not bot_state.is_agent_allowed_in_regime(blocked), f"{blocked} in RANGING"
-        for allowed in ("intraday", "futures", "scalping", "momentum"):
+        for allowed in ("intraday", "futures", "scalping"):
             assert bot_state.is_agent_allowed_in_regime(allowed), f"{allowed} in RANGING"
         # swing benched everywhere (live 2026-07-08: churned to its daily cap
         # twice, warm-up guard insufficient — pattern-frequency bug)
         assert not bot_state.is_agent_allowed_in_regime("swing")
         bot_state.set_current_regime("HIGH_VOLATILE")
-        for blocked in ("mean_reversion", "pairs"):
+        for blocked in ("momentum", "mean_reversion", "pairs"):
             assert not bot_state.is_agent_allowed_in_regime(blocked)
-        assert bot_state.is_agent_allowed_in_regime("momentum")   # +22 net post-prune
         assert bot_state.is_agent_allowed_in_regime("intraday")
         bot_state.set_current_regime("BEAR_TREND")
         assert not bot_state.is_agent_allowed_in_regime("options")  # -38.6% on down-trends
-        assert bot_state.is_agent_allowed_in_regime("momentum")     # +27 net post-prune
+        assert not bot_state.is_agent_allowed_in_regime("momentum") # year overrules 62d
         assert bot_state.is_agent_allowed_in_regime("scalping")
         assert bot_state.is_agent_allowed_in_regime("intraday")     # kill-list fixed it
         bot_state.set_current_regime("BULL_TREND")
@@ -15893,6 +15897,89 @@ run("risk: slots_bonus grants manual headroom over the agent cap",      t_manual
 run("guard: trade-count restore is date-aware (no stale resurrection)", t_trade_count_restore_is_date_aware)
 run("main: on_startup restores persisted trade counts",                 t_restore_counts_called_at_startup)
 run("manual: short entries consume a position slot too",                t_manual_entry_counts_both_sides)
+
+def t_decision_tf_parsing_and_default():
+    """decision_bar_minutes map: configured agents get their tf, rest get 1m."""
+    from agents.base_agent import BaseAgent
+    class _Stub(BaseAgent):
+        name = "intraday"
+        def evaluate_tick(self, snap): return ("HOLD", None)
+        def should_exit_position(self, position, ind): return (False, "")
+    a = _Stub.__new__(_Stub); a._decision_tf_cache = None
+    assert a._decision_tf_min() == 5, "intraday must decide on 5m bars"
+    class _Stub2(_Stub): name = "scalping"
+    b = _Stub2.__new__(_Stub2); b._decision_tf_cache = None
+    assert b._decision_tf_min() == 1, "scalping must stay on 1m bars"
+
+def t_decision_bar_ts_uses_5m_for_configured_agent():
+    """_decision_bar_ts must read candles_5min for a 5m agent, 1m otherwise."""
+    from types import SimpleNamespace
+    from agents.base_agent import BaseAgent
+    class _Stub(BaseAgent):
+        name = "futures"
+        def evaluate_tick(self, snap): return ("HOLD", None)
+        def should_exit_position(self, position, ind): return (False, "")
+    a = _Stub.__new__(_Stub); a._decision_tf_cache = None
+    c1 = SimpleNamespace(ts="T1M"); c5 = SimpleNamespace(ts="T5M")
+    snap = SimpleNamespace(candles_1min=[c1], candles_5min=[c5])
+    assert a._decision_bar_ts(snap) == "T5M"
+    class _Stub2(_Stub): name = "scalping"
+    b = _Stub2.__new__(_Stub2); b._decision_tf_cache = None
+    assert b._decision_bar_ts(snap) == "T1M"
+
+def t_calendar_size_factor():
+    """Expiry weekday and event dates scale sizing down; normal days = 1.0."""
+    from unittest.mock import patch
+    from datetime import datetime
+    from zoneinfo import ZoneInfo
+    from risk_manager import RiskManager
+    from config import settings as _s
+    ist = ZoneInfo("Asia/Kolkata")
+    thu = datetime(2026, 7, 16, 10, 0, tzinfo=ist)   # Thursday
+    wed = datetime(2026, 7, 15, 10, 0, tzinfo=ist)   # Wednesday
+    with patch("ist_clock.now_ist", lambda: thu):
+        f = RiskManager.calendar_size_factor()
+        assert abs(f - _s.expiry_day_size_factor) < 1e-9, f"thu factor {f}"
+    with patch("ist_clock.now_ist", lambda: wed):
+        assert RiskManager.calendar_size_factor() == 1.0
+    _old = _s.event_risk_dates
+    _s.event_risk_dates = "2026-07-15"
+    try:
+        with patch("ist_clock.now_ist", lambda: wed):
+            f = RiskManager.calendar_size_factor()
+            assert abs(f - _s.event_day_size_factor) < 1e-9, f"event factor {f}"
+    finally:
+        _s.event_risk_dates = _old
+
+def t_momentum_benched_everywhere_v4():
+    """Matrix v4: the 1-year replay re-benched momentum in every regime."""
+    from config import Settings
+    blocked = Settings().regime_blocked_agents
+    for r in ("UNKNOWN", "BULL_TREND", "BULL_VOLATILE", "BEAR_TREND",
+              "BEAR_VOLATILE", "RANGING", "HIGH_VOLATILE"):
+        seg = [x for x in blocked.split(";") if x.strip().startswith(r + ":")]
+        assert seg and "momentum" in seg[0], f"momentum not benched in {r}"
+
+def t_kill_list_v13():
+    """v13 additions from the year replay."""
+    from config import Settings
+    dp = Settings().disabled_patterns
+    assert "options:POWER_HOUR_OPT" in dp
+    assert "momentum:MACD_ZERO_CROSS" in dp
+
+def t_scheduler_has_tick_recorder_job():
+    """platform_scheduler must arm the tick recorder every morning."""
+    import inspect
+    import platform_scheduler as _ps
+    src = inspect.getsource(_ps.PlatformScheduler.start)
+    assert "_tick_recorder_start" in src and 'id="tick_recorder"' in src
+
+run("cadence: decision_bar_minutes parses per agent (5m/1m)",           t_decision_tf_parsing_and_default)
+run("cadence: _decision_bar_ts picks 5m candles for configured agents", t_decision_bar_ts_uses_5m_for_configured_agent)
+run("risk: calendar_size_factor scales down expiry/event days",         t_calendar_size_factor)
+run("config: matrix v4 benches momentum in every regime",               t_momentum_benched_everywhere_v4)
+run("config: kill-list v13 adds POWER_HOUR_OPT + MACD_ZERO_CROSS",      t_kill_list_v13)
+run("platform: tick recorder auto-starts at 09:12",                     t_scheduler_has_tick_recorder_job)
 
 # ══════════════════════════════════════════════════════════════════════════
 # FINAL SUMMARY

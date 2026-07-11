@@ -42,6 +42,10 @@ class PlatformScheduler:
             hour=9, minute=10, day_of_week="mon-fri", id="morning_data",
         )
         self._sched.add_job(
+            self._tick_recorder_start, "cron",
+            hour=9, minute=12, day_of_week="mon-fri", id="tick_recorder",
+        )
+        self._sched.add_job(
             self._auto_start_bot, "cron",
             hour=9, minute=16, day_of_week="mon-fri", id="auto_start",
         )
@@ -319,6 +323,20 @@ class PlatformScheduler:
                 f"Reason: {exc}\n\n"
                 f"Renew manually before 09:15:\n{login_url}"
             )
+
+    async def _tick_recorder_start(self) -> None:
+        """09:12 IST: start the tick recorder for the core book so every
+        session's tape exists without a manual API call (the recorder is
+        in-memory-armed only — every restart silently disarmed it)."""
+        try:
+            from tick_recorder import tick_recorder
+            syms = ["RELIANCE", "ICICIBANK", "SBIN", "HDFCBANK", "INFY", "TCS",
+                    "AXISBANK", "TATASTEEL", "HINDALCO", "BAJFINANCE",
+                    "NIFTY", "BANKNIFTY", "NIFTY 50", "NIFTY BANK"]
+            tick_recorder.start(syms)
+            logger.info("[platform] tick recorder armed for {} symbols", len(syms))
+        except Exception as exc:
+            logger.warning("[platform] tick recorder start failed: {}", exc)
 
     async def _auto_start_bot(self) -> None:
         from ist_clock import is_nse_holiday, now_ist

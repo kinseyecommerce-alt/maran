@@ -528,6 +528,31 @@ class BaseAgent(ABC):
         # trailing stops stay tick-level. See settings.agent_decisions_on_bar_close.
         self._last_entry_bar: dict[str, object] = {}
         self._last_exit_bar:  dict[str, object] = {}
+        self._decision_tf_cache: int | None = None
+
+    def _decision_tf_min(self) -> int:
+        """This agent's decision bar size in minutes (default 1). Year replay:
+        intraday/futures earn dramatically more deciding on 5m bars; scalping
+        needs 1m. Parsed once from settings.decision_bar_minutes."""
+        if self._decision_tf_cache is None:
+            tf = 1
+            raw = getattr(settings, "decision_bar_minutes", "") or ""
+            for part in raw.split(","):
+                if ":" in part:
+                    k, v = part.split(":", 1)
+                    if k.strip() == self.name:
+                        try:
+                            tf = max(1, int(v.strip()))
+                        except ValueError:
+                            tf = 1
+                        break
+            self._decision_tf_cache = tf
+        return self._decision_tf_cache
+
+    def _decision_bar_ts(self, snap: MarketSnapshot):
+        """Forming-bar timestamp of this agent's DECISION timeframe."""
+        bars = snap.candles_5min if self._decision_tf_min() >= 5 else snap.candles_1min
+        return bars[-1].ts if bars else None
         # Entries skipped by the cost-floor gate (edge < N× round-trip cost)
         self._cost_gate_skips: int = 0
         # Entries skipped by the regime gate (agent blocked in current regime)
@@ -724,8 +749,7 @@ class BaseAgent(ABC):
                 # protection layers above (TSL, exit checks, SL-M triggers)
                 # keep running on every tick.
                 if getattr(settings, "agent_decisions_on_bar_close", True):
-                    _bars_e = snap.candles_1min
-                    _bts_e = _bars_e[-1].ts if _bars_e else None
+                    _bts_e = self._decision_bar_ts(snap)
                     if _bts_e is not None:
                         if self._last_entry_bar.get(snap.symbol) == _bts_e:
                             continue
@@ -1965,8 +1989,7 @@ class BaseAgent(ABC):
         # −₹5.4k gross. Hard stops, trailing stops and targets are NOT gated
         # here — they run tick-level via the TSL engine and resting SL-M.
         if getattr(settings, "indicator_exit_on_bar_close", True):
-            _bars_x = snap.candles_1min
-            _bts_x = _bars_x[-1].ts if _bars_x else None
+            _bts_x = self._decision_bar_ts(snap)
             if _bts_x is None or self._last_exit_bar.get(sym) == _bts_x:
                 return
             self._last_exit_bar[sym] = _bts_x
