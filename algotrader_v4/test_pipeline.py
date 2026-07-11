@@ -15981,6 +15981,20 @@ run("config: matrix v4 benches momentum in every regime",               t_moment
 run("config: kill-list v13 adds POWER_HOUR_OPT + MACD_ZERO_CROSS",      t_kill_list_v13)
 run("platform: tick recorder auto-starts at 09:12",                     t_scheduler_has_tick_recorder_job)
 
+def t_every_agent_constructs_and_reports_status():
+    """Every production agent must construct AND serve get_status() — the
+    2026-07-11 deploy broke /agents with AttributeError because an edit
+    orphaned the tail of BaseAgent.__init__ inside another method; nothing
+    in the suites exercised get_status() on real instances."""
+    from agents.strategy_agents import ALL_AGENTS
+    for name, agent in ALL_AGENTS.items():
+        st = agent.get_status()
+        assert isinstance(st, dict) and st, f"{name}.get_status() returned {st!r}"
+        assert "cost_gate_skips" in st, f"{name} status missing cost_gate_skips"
+        assert agent._decision_tf_min() >= 1, f"{name} decision tf invalid"
+
+run("agents: every agent constructs and serves get_status()",           t_every_agent_constructs_and_reports_status)
+
 # ══════════════════════════════════════════════════════════════════════════
 # FINAL SUMMARY
 # ══════════════════════════════════════════════════════════════════════════

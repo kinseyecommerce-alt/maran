@@ -529,6 +529,10 @@ class BaseAgent(ABC):
         self._last_entry_bar: dict[str, object] = {}
         self._last_exit_bar:  dict[str, object] = {}
         self._decision_tf_cache: int | None = None
+        # Entries skipped by the cost-floor gate (edge < N× round-trip cost)
+        self._cost_gate_skips: int = 0
+        # Entries skipped by the regime gate (agent blocked in current regime)
+        self._regime_gate_skips: int = 0
 
     def _decision_tf_min(self) -> int:
         """This agent's decision bar size in minutes (default 1). Year replay:
@@ -553,10 +557,6 @@ class BaseAgent(ABC):
         """Forming-bar timestamp of this agent's DECISION timeframe."""
         bars = snap.candles_5min if self._decision_tf_min() >= 5 else snap.candles_1min
         return bars[-1].ts if bars else None
-        # Entries skipped by the cost-floor gate (edge < N× round-trip cost)
-        self._cost_gate_skips: int = 0
-        # Entries skipped by the regime gate (agent blocked in current regime)
-        self._regime_gate_skips: int = 0
 
     @abstractmethod
     def evaluate_tick(self, snap: MarketSnapshot) -> tuple[str, Optional[dict]]:
