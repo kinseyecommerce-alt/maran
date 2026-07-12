@@ -2461,6 +2461,19 @@ class OptionScalpingAgent(OptionsAgent):
         return [self._pat_expiry_gamma_scalp, self._pat_vol_spike_scalp,
                 self._pat_trend_walk_scalp, self._pat_range_fade_scalp]
 
+    @staticmethod
+    def _index_thrust(ind, bars, mult: float) -> bool:
+        """Volume-free activity trigger for INDEX underlyings. NIFTY/BANKNIFTY
+        are calculated indices — their volume is 0 on every bar, so any
+        volume_ratio condition is permanently false (found 2026-07-12: the
+        first validation replay produced ZERO trades in 245 days because all
+        four patterns demanded volume that cannot exist). A thrust bar —
+        true range ≥ mult × ATR — is the index equivalent of a volume spike."""
+        if not bars or not getattr(ind, "atr_14", 0):
+            return False
+        last = bars[-1]
+        return (last.high - last.low) >= mult * ind.atr_14
+
     def _sell_pattern_fns(self) -> list:
         return []   # pure scalper — premium selling is a different animal
 
@@ -2484,11 +2497,13 @@ class OptionScalpingAgent(OptionsAgent):
         if not (time(9, 30) <= t <= time(13, 30)):
             return "", 0, ""
         if (ind.ema9 > ind.ema21 > 0 and ind.rsi_14 > 55
-                and ind.volume_ratio >= 1.5 and ind.macd_hist > 0
+                and self._index_thrust(ind, snap.candles_1min, 1.3)
+                and ind.macd_hist > 0
                 and getattr(ind, "supertrend_dir", "") != "DOWN"):
             return "CE", 6, "EXPIRY_GAMMA_SCALP"
         if (0 < ind.ema9 < ind.ema21 and ind.rsi_14 < 45
-                and ind.volume_ratio >= 1.5 and ind.macd_hist < 0
+                and self._index_thrust(ind, snap.candles_1min, 1.3)
+                and ind.macd_hist < 0
                 and getattr(ind, "supertrend_dir", "") != "UP"):
             return "PE", 6, "EXPIRY_GAMMA_SCALP"
         return "", 0, ""
@@ -2500,7 +2515,7 @@ class OptionScalpingAgent(OptionsAgent):
         25-minute hold. Stricter than any pattern the year killed."""
         if not (time(9, 30) <= t <= time(14, 30)):
             return "", 0, ""
-        if ind.volume_ratio < 2.0:
+        if not self._index_thrust(ind, snap.candles_1min, 1.8):
             return "", 0, ""
         if (ind.ema9 > ind.ema21 > 0 and ind.rsi_14 > 58 and ind.macd_hist > 0
                 and getattr(ind, "supertrend_dir", "") == "UP"):
@@ -2521,7 +2536,7 @@ class OptionScalpingAgent(OptionsAgent):
         if not (time(9, 30) <= t <= time(14, 30)):
             return "", 0, ""
         bars = snap.candles_1min
-        if len(bars) < 3 or ind.volume_ratio < 1.5 or not ind.bb_upper:
+        if len(bars) < 3 or not ind.bb_upper or not self._index_thrust(ind, bars, 1.4):
             return "", 0, ""
         c1, c2 = bars[-2], bars[-1]
         if (c1.close > ind.bb_upper and c2.close > ind.bb_upper
@@ -2545,7 +2560,7 @@ class OptionScalpingAgent(OptionsAgent):
         if not (time(9, 45) <= t <= time(14, 15)):
             return "", 0, ""
         bars = snap.candles_1min
-        if len(bars) < 2 or ind.volume_ratio < 1.2 or not ind.bb_upper:
+        if len(bars) < 2 or not ind.bb_upper or not self._index_thrust(ind, bars, 1.1):
             return "", 0, ""
         last = bars[-1]
         # rejection bar: close back inside the band after poking outside
