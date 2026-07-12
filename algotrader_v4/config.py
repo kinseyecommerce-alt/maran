@@ -294,6 +294,15 @@ class Settings(BaseSettings):
     # day of the year was Budget day 2026-02-01.
     event_risk_dates: str = ""                                 # "YYYY-MM-DD,…"
     event_day_size_factor: float = Field(default=0.5, gt=0, le=1.0)
+
+    # OptionScalpingAgent (ships DARK — not in AUTO_START_STRATEGIES until
+    # replay + paper validation). Built around EXPIRY_SCALP, the only options
+    # pattern net-positive over the 1-year replay. Small budget by design:
+    # the unlocked arm (−6,420%) is what unbudgeted option scalping becomes.
+    max_trades_option_scalping: int = 8
+    cooldown_option_scalping:   int = 300
+    min_score_option_scalping:  int = 6
+    option_scalp_max_hold_min:  int = Field(default=25, ge=5, le=120)
     # Manual/dashboard orders get this much extra open-position headroom so a
     # human override is never boxed out by agents holding every slot.
     manual_extra_slots: int = Field(default=1, ge=0, le=5)
@@ -485,7 +494,10 @@ class Settings(BaseSettings):
         # SUPERTREND_BOUNCE/EMA50_BOUNCE "weekly" patterns fire at intraday
         # frequency. Benched until the pattern-frequency bug is diagnosed and
         # replay-validated.
-        "UNKNOWN:options,momentum,mean_reversion,pairs,swing;"
+        # option_scalping (dark until validated): benched in UNKNOWN/RANGING —
+        # its two patterns are momentum-burst shaped; the unlocked-arm proof
+        # says option scalps without regime discipline are the graveyard.
+        "UNKNOWN:options,option_scalping,momentum,mean_reversion,pairs,swing;"
         "BULL_TREND:momentum,mean_reversion,pairs,swing;"
         "BULL_VOLATILE:momentum,mean_reversion,pairs,swing;"
         # Momentum UNBENCHED in bear/ranging/high-vol (matrix v3, post-v11-prune
@@ -507,7 +519,7 @@ class Settings(BaseSettings):
         "BEAR_VOLATILE:options,momentum,mean_reversion,pairs,swing;"
         # RANGING: options + mean_reversion + pairs stay benched (options -46.7%
         # on range days; pairs -38% net over 62d with no winning pattern).
-        "RANGING:options,momentum,mean_reversion,pairs,swing;"
+        "RANGING:options,option_scalping,momentum,mean_reversion,pairs,swing;"
         "HIGH_VOLATILE:momentum,mean_reversion,pairs,swing;"
         "BLACK_SWAN:swing,intraday,futures,momentum,pairs,mean_reversion"
     )
