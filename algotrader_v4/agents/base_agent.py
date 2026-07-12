@@ -614,6 +614,17 @@ class BaseAgent(ABC):
                 approved = list(watchlist)
                 label = "skip_backtest=true, no seed file — approving all"
 
+            # Book cap: the full-year breadth test (30-symbol book, tf15,
+            # gated) beat the 12-symbol core on every live agent (intraday
+            # +1,757% vs +613%) at a controlled ~21 trades/day — while the
+            # ~500-symbol uncapped live book is UNTESTED and multiplied the
+            # 2026-07-10 churn. Trade the tested width: first-listed symbols
+            # win the slots (scanner/learner order = ranked).
+            _cap = int(getattr(settings, "max_symbols_per_agent", 30) or 0)
+            if _cap > 0 and len(approved) > _cap:
+                logger.info("[{}] book capped {} → {} (max_symbols_per_agent)",
+                            self.name, len(approved), _cap)
+                approved = approved[:_cap]
             for item in approved:
                 self._approved.add(item["symbol"])
             self.state.approved_symbols = [a["symbol"] for a in approved]
@@ -652,12 +663,16 @@ class BaseAgent(ABC):
                 live_ok = {s for syms in data.values() for s in syms} if isinstance(data, dict) else set(data)
             except Exception:
                 live_ok = set()   # no book → accept nothing in LIVE
+        _cap = int(getattr(settings, "max_symbols_per_agent", 30) or 0)
         added = 0
         for sym in symbols:
             if sym in self._approved:
                 continue
             if live_ok is not None and sym not in live_ok:
                 continue
+            if _cap > 0 and len(self._approved) >= _cap:
+                logger.info("[{}] book at cap ({}) — scan promotion stopped", self.name, _cap)
+                break
             self._approved.add(sym)
             if sym not in self.state.approved_symbols:
                 self.state.approved_symbols.append(sym)
