@@ -49,6 +49,7 @@ class OrderGuard:
             "mean_reversion": settings.max_trades_mean_reversion,
             "momentum":       settings.max_trades_momentum,
             "pairs":          settings.max_trades_pairs,
+            "option_scalping": settings.max_trades_option_scalping,
         }.get(strategy, 2000)
 
     def _check(self, symbol: str, strategy: str, side: str) -> tuple[bool, str]:

@@ -33,14 +33,15 @@ from nse_day_simulation import (
     _sa_mod,
 )
 from agents.strategy_agents import (
-    MomentumAgent, MeanReversionAgent, PairsAgent,
+    MomentumAgent, MeanReversionAgent, PairsAgent, OptionScalpingAgent,
 )
 
-# The day-sim predates the newer agents — replay covers all 8.
+# The day-sim predates the newer agents — replay covers all 9.
 AGENT_CLASSES = list(sim.AGENT_CLASSES) + [
     ("Momentum",  MomentumAgent),
     ("MeanRev",   MeanReversionAgent),
     ("Pairs",     PairsAgent),
+    ("OptScalp",  OptionScalpingAgent),
 ]
 
 WATCHLIST = ["RELIANCE", "TCS", "HDFCBANK", "INFY", "ICICIBANK", "SBIN",
@@ -50,6 +51,7 @@ PRE_HISTORY_BARS = 120        # prev-day bars prepended for indicator warm-up
 
 # Tracker name → ALL_AGENTS key (for the regime entry gate)
 AGENT_KEY = {"Intraday": "intraday", "Scalping": "scalping", "Options": "options",
+             "OptScalp": "option_scalping",
              "Futures": "futures", "Swing": "swing", "Momentum": "momentum",
              "MeanRev": "mean_reversion", "Pairs": "pairs"}
 
@@ -309,7 +311,10 @@ def replay(symbols: list[str], max_days: int | None = None,
                      "Futures": 0.15,
                      # Options: on PREMIUM notional — brokerage + STT 0.0625% sell
                      # + txn 0.05% + GST/stamp + wide spreads ≈ 0.30%/round trip.
-                     "Options": 0.30}
+                     "Options": 0.30,
+                     # OptScalp trades index weeklies only (tightest spreads),
+                     # but scalp frequency keeps the same premium cost model.
+                     "OptScalp": 0.30}
     COST_DEFAULT = 0.15   # equity MIS all-in (was 0.06 — understated real costs ~2×)
     # ── Options premium economics ────────────────────────────────────────
     # The trackers record every trade as an UNDERLYING move % — but the real
@@ -350,7 +355,7 @@ def replay(symbols: list[str], max_days: int | None = None,
         if not ts_:
             print(f"{name:12s} {'0':>6s}      —        —        —          —")
             continue
-        _pnl_of = (_prem_pnl if name == "Options"
+        _pnl_of = (_prem_pnl if name in ("Options", "OptScalp")
                    else _fut_pnl if name == "Futures"
                    else (lambda t: t.pnl_pct))
         wins = sum(1 for t in ts_ if _pnl_of(t) > 0)
@@ -377,7 +382,7 @@ def replay(symbols: list[str], max_days: int | None = None,
                          "net_inr_1L": round(net/100*CAP, 0),
                          **({"underlying_gross_pct":
                              round(sum(t.pnl_pct for t in ts_), 2),
-                             "premium_scaled": True} if name == "Options" else {}),
+                             "premium_scaled": True} if name in ("Options", "OptScalp") else {}),
                          **({"underlying_gross_pct":
                              round(sum(t.pnl_pct for t in ts_), 2),
                              "margin_scaled": True} if name == "Futures" else {}),

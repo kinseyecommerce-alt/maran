@@ -909,6 +909,39 @@ class OptionsAgent(BaseAgent):
         self._sleeve_count:    int   = 0
         self._sleeve_contracts: set  = set()
 
+    def _buy_pattern_fns(self) -> list:
+        """Premium-BUY pattern book. Subclasses override to run a subset."""
+        return [
+            self._pat_sleeve_consensus,
+            self._pat_ema_cross,
+            self._pat_trend_pull,
+            self._pat_orb,
+            self._pat_vwap_reclaim,
+            self._pat_bb_squeeze,
+            self._pat_rsi_extreme,
+            self._pat_surge,
+            self._pat_ichimoku_cloud,
+            self._pat_stochrsi_options,
+            self._pat_williams_options,
+            self._pat_oi_surge,
+            self._pat_expiry_scalp,
+            self._pat_bb_walk_options,
+            self._pat_morning_thrust_opt,
+            self._pat_stochrsi_trend_opt,
+            self._pat_index_trend_ride_opt,
+            self._pat_power_hour_opt,
+            self._pat_pcr_extreme,
+            self._pat_gamma_flip,
+            self._pat_skew_momentum,
+            self._pat_atm_straddle,
+            self._pat_vol_contraction_breakout,
+            self._pat_smart_money_divergence,
+        ]
+
+    def _sell_pattern_fns(self) -> list:
+        """Premium-SELL pattern book. Subclasses override to run a subset."""
+        return [self._pat_strangle_sell, self._pat_iron_condor]
+
     def evaluate_tick(self, snap: MarketSnapshot) -> tuple[str, Optional[dict]]:
         ind = snap.indicators
         sym = snap.symbol
@@ -941,34 +974,12 @@ class OptionsAgent(BaseAgent):
         # Run all BUY patterns (blocked if IV too high for premium buying)
         best_score, best_opt, best_pattern = -1, "", ""
         is_sell_signal = False
+        # NOTE: pattern books come from _buy_pattern_fns/_sell_pattern_fns so
+        # subclasses (OptionScalpingAgent) can run a focused subset without
+        # duplicating the dispatch loop.
 
         if iv_rank <= self.MAX_IV_BUY:
-            buy_patterns = [
-                self._pat_sleeve_consensus,
-                self._pat_ema_cross,
-                self._pat_trend_pull,
-                self._pat_orb,
-                self._pat_vwap_reclaim,
-                self._pat_bb_squeeze,
-                self._pat_rsi_extreme,
-                self._pat_surge,
-                self._pat_ichimoku_cloud,
-                self._pat_stochrsi_options,
-                self._pat_williams_options,
-                self._pat_oi_surge,
-                self._pat_expiry_scalp,
-                self._pat_bb_walk_options,
-                self._pat_morning_thrust_opt,
-                self._pat_stochrsi_trend_opt,
-                self._pat_index_trend_ride_opt,
-                self._pat_power_hour_opt,
-                self._pat_pcr_extreme,
-                self._pat_gamma_flip,
-                self._pat_skew_momentum,
-                self._pat_atm_straddle,
-                self._pat_vol_contraction_breakout,
-                self._pat_smart_money_divergence,
-            ]
+            buy_patterns = self._buy_pattern_fns()
             for pat_fn in buy_patterns:
                 try:
                     opt_type, base, pname = pat_fn(sym, snap, ind, ltp, t)
@@ -982,7 +993,7 @@ class OptionsAgent(BaseAgent):
 
         # Run SELL patterns (premium selling when IV is elevated)
         # These can fire even when BUY patterns are blocked by IV gate
-        sell_patterns = [self._pat_strangle_sell, self._pat_iron_condor]
+        sell_patterns = self._sell_pattern_fns()
         for pat_fn in sell_patterns:
             try:
                 opt_type, base, pname = pat_fn(sym, snap, ind, ltp, t)
@@ -2410,6 +2421,105 @@ class OptionsAgent(BaseAgent):
             return True, f"Trend reversed UP — exit {'put' if opt_type == 'PE' else 'short call'}"
 
         return False, ""
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# 2b.  OPTION SCALPING  —  index-only premium scalps around the ONE proven edge
+# ═══════════════════════════════════════════════════════════════════════════════
+
+class OptionScalpingAgent(OptionsAgent):
+    """Dedicated option premium scalper (user-requested 2026-07-12), built
+    around the ONLY options pattern that was net-positive over the 1-year
+    replay: EXPIRY_SCALP (+8.8% @5m / +10.8% @15m gated — and −36% when its
+    gates were removed, proving the edge is discipline-dependent).
+
+    Design rules, all from the year's evidence:
+    - INDEX weeklies only (NIFTY/BANKNIFTY): tightest spreads, deepest books —
+      stock-option scalps die on spread alone.
+    - Two patterns, nothing else: the expiry gamma burst (generalised
+      EXPIRY_SCALP with a wider window) and a volume-spike thrust for
+      non-expiry days. Every pattern the year condemned stays out.
+    - Scalps are RENTED, not owned: hard time-stop (option_scalp_max_hold_min,
+      default 25) — theta rent compounds per minute held.
+    - Tight premium bracket via TRAIL_CONFIGS['option_scalping']
+      (≈ −20% SL / +30% T1 / +60% T2 premium terms).
+    - Small daily budget (max_trades_option_scalping) + long cooldown: the
+      unlocked-arm graveyard (−6,420%) is what unbudgeted option scalping
+      looks like.
+    Ships DARK: not in AUTO_START_STRATEGIES until replay + paper validation.
+    """
+    name = "option_scalping"
+    SCALP_UNDERLYINGS = frozenset({"NIFTY", "BANKNIFTY"})
+
+    def _buy_pattern_fns(self) -> list:
+        return [self._pat_expiry_gamma_scalp, self._pat_vol_spike_scalp]
+
+    def _sell_pattern_fns(self) -> list:
+        return []   # pure scalper — premium selling is a different animal
+
+    def evaluate_tick(self, snap: MarketSnapshot) -> tuple[str, Optional[dict]]:
+        if snap.symbol not in self.SCALP_UNDERLYINGS:
+            return ("HOLD", None)
+        return super().evaluate_tick(snap)
+
+    # ── Pattern A: expiry gamma burst (the proven edge, wider window) ────────
+    def _pat_expiry_gamma_scalp(self, sym, snap, ind, ltp, t):
+        """Expiry day: cheap premium + high gamma means a small index thrust
+        pays multiples. Same conditions the year validated, window extended
+        to 13:30 (the original 11:30 cut-off was untested, not evidence)."""
+        try:
+            from alt_data import alt_data_engine
+            is_exp, event_name = alt_data_engine.is_event_day()
+            if not is_exp or "expiry" not in event_name.lower():
+                return "", 0, ""
+        except Exception:
+            return "", 0, ""
+        if not (time(9, 30) <= t <= time(13, 30)):
+            return "", 0, ""
+        if (ind.ema9 > ind.ema21 > 0 and ind.rsi_14 > 55
+                and ind.volume_ratio >= 1.5 and ind.macd_hist > 0
+                and getattr(ind, "supertrend_dir", "") != "DOWN"):
+            return "CE", 6, "EXPIRY_GAMMA_SCALP"
+        if (0 < ind.ema9 < ind.ema21 and ind.rsi_14 < 45
+                and ind.volume_ratio >= 1.5 and ind.macd_hist < 0
+                and getattr(ind, "supertrend_dir", "") != "UP"):
+            return "PE", 6, "EXPIRY_GAMMA_SCALP"
+        return "", 0, ""
+
+    # ── Pattern B: volume-spike thrust (non-expiry days, rarer + stricter) ───
+    def _pat_vol_spike_scalp(self, sym, snap, ind, ltp, t):
+        """A genuine index volume shock with full trend agreement — the only
+        non-expiry condition where premium can outrun theta inside a
+        25-minute hold. Stricter than any pattern the year killed."""
+        if not (time(9, 30) <= t <= time(14, 30)):
+            return "", 0, ""
+        if ind.volume_ratio < 2.0:
+            return "", 0, ""
+        if (ind.ema9 > ind.ema21 > 0 and ind.rsi_14 > 58 and ind.macd_hist > 0
+                and getattr(ind, "supertrend_dir", "") == "UP"):
+            return "CE", 6, "VOL_SPIKE_SCALP"
+        if (0 < ind.ema9 < ind.ema21 and ind.rsi_14 < 42 and ind.macd_hist < 0
+                and getattr(ind, "supertrend_dir", "") == "DOWN"):
+            return "PE", 6, "VOL_SPIKE_SCALP"
+        return "", 0, ""
+
+    # ── Time-stop: a scalp that hasn't paid in N minutes pays theta instead ──
+    def should_exit_position(self, position: dict, ind) -> tuple[bool, str]:
+        try:
+            import time as _t
+            from order_guard import order_guard
+            sym = getattr(ind, "symbol", "") or position.get("tradingsymbol", "")
+            for u in self.SCALP_UNDERLYINGS:
+                if sym.startswith(u):
+                    sym = u
+                    break
+            entered = order_guard.entry_placed_at(sym, self.name)
+            max_min = int(getattr(settings, "option_scalp_max_hold_min", 25) or 25)
+            if entered and (_t.time() - entered) > max_min * 60:
+                return True, f"SCALP_TIME_STOP {int((_t.time()-entered)/60)}m"
+        except Exception:
+            pass
+        return super().should_exit_position(position, ind)
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -5706,6 +5816,7 @@ class PairsAgent(BaseAgent):
 ALL_AGENTS: dict[str, BaseAgent] = {
     "intraday":      IntradayAgent(),
     "options":       OptionsAgent(),
+    "option_scalping": OptionScalpingAgent(),
     "futures":       FuturesAgent(),
     "swing":         SwingAgent(),
     "scalping":      ScalpingAgent(),

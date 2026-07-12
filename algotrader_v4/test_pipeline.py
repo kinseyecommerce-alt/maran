@@ -15995,6 +15995,51 @@ def t_every_agent_constructs_and_reports_status():
 
 run("agents: every agent constructs and serves get_status()",           t_every_agent_constructs_and_reports_status)
 
+def t_option_scalping_agent_registered_and_scoped():
+    """New OptionScalpingAgent: registered, index-only, focused pattern book."""
+    from agents.strategy_agents import ALL_AGENTS, OptionScalpingAgent
+    a = ALL_AGENTS.get("option_scalping")
+    assert isinstance(a, OptionScalpingAgent)
+    fns = a._buy_pattern_fns()
+    names = [f.__name__ for f in fns]
+    assert names == ["_pat_expiry_gamma_scalp", "_pat_vol_spike_scalp"], names
+    assert a._sell_pattern_fns() == []
+    # index-only guard: non-index symbols must HOLD without touching patterns
+    from types import SimpleNamespace
+    snap = SimpleNamespace(symbol="RELIANCE", indicators=None, tick=None,
+                           candles_1min=[], candles_5min=[])
+    assert a.evaluate_tick(snap) == ("HOLD", None)
+
+def t_option_scalping_caps_and_configs():
+    """Budget, cooldown, hold cap, trail config and regime bench all wired."""
+    from config import Settings
+    from order_guard import OrderGuard
+    from trailing_sl_engine import TRAIL_CONFIGS
+    s = Settings()
+    assert s.max_trades_option_scalping == 8
+    assert s.option_scalp_max_hold_min == 25
+    assert OrderGuard._max_trades("option_scalping") == s.max_trades_option_scalping
+    cfg = TRAIL_CONFIGS["option_scalping"]
+    assert cfg.initial_sl_pct == 0.80 and cfg.target1_pct == 1.20
+    blocked = s.regime_blocked_agents
+    for r in ("UNKNOWN", "RANGING"):
+        seg = [x for x in blocked.split(";") if x.strip().startswith(r + ":")]
+        assert seg and "option_scalping" in seg[0], f"option_scalping not benched in {r}"
+
+def t_option_scalping_in_replay_wiring():
+    """Replay must track the new agent premium-scaled under 'OptScalp'."""
+    import replay_backtest as rb
+    assert rb.AGENT_KEY.get("OptScalp") == "option_scalping"
+    assert any(n == "OptScalp" for n, _ in rb.AGENT_CLASSES)
+    import inspect
+    src = inspect.getsource(rb.replay)
+    assert 'name in ("Options", "OptScalp")' in src, \
+        "OptScalp must share the Options premium-scaling path"
+
+run("option_scalping: registered, index-only, 2-pattern book",          t_option_scalping_agent_registered_and_scoped)
+run("option_scalping: caps/cooldown/trail/regime bench wired",          t_option_scalping_caps_and_configs)
+run("option_scalping: replay tracks it premium-scaled",                 t_option_scalping_in_replay_wiring)
+
 # ══════════════════════════════════════════════════════════════════════════
 # FINAL SUMMARY
 # ══════════════════════════════════════════════════════════════════════════

@@ -109,6 +109,21 @@ TRAIL_CONFIGS: dict[str, TrailConfig] = {
         mode            = SLMode.TRAILING,
         atr_multiplier  = 2.0,
     ),
+    "option_scalping": TrailConfig(
+        # Same underlying-percentage convention as "options" (premium % ≈
+        # 25 × underlying %). Scalp bracket: SL −20%, T1 +30%, T2 +60%
+        # premium — tighter than the swing-style options book because the
+        # position also carries a hard time-stop (~25 min); a scalp that
+        # needs hours isn't a scalp, it's theta rent.
+        initial_sl_pct  = 0.80,   # ≈ −20% premium
+        trail_pct       = 0.40,   # ≈ 10% premium behind best
+        breakeven_pct   = 0.30,   # ≈ +7.5% premium
+        activation_pct  = 0.60,   # ≈ +15% premium
+        target1_pct     = 1.20,   # ≈ +30% premium
+        target2_pct     = 2.40,   # ≈ +60% premium
+        mode            = SLMode.TRAILING,
+        atr_multiplier  = 1.5,
+    ),
     "swing": TrailConfig(
         initial_sl_pct  = 3.00,
         trail_pct       = 1.00,
