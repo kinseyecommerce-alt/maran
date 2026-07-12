@@ -2452,7 +2452,14 @@ class OptionScalpingAgent(OptionsAgent):
     SCALP_UNDERLYINGS = frozenset({"NIFTY", "BANKNIFTY"})
 
     def _buy_pattern_fns(self) -> list:
-        return [self._pat_expiry_gamma_scalp, self._pat_vol_spike_scalp]
+        # One tool per market type (all-market coverage, user-requested
+        # 2026-07-12); the year replay attributes P&L per pattern and the
+        # losers get killed before activation, same as the equity scalper:
+        #   expiry day     → EXPIRY_GAMMA_SCALP  (the proven edge)
+        #   trending       → VOL_SPIKE_SCALP + TREND_WALK_SCALP
+        #   ranging        → RANGE_FADE_SCALP    (extreme-fade, tiny targets)
+        return [self._pat_expiry_gamma_scalp, self._pat_vol_spike_scalp,
+                self._pat_trend_walk_scalp, self._pat_range_fade_scalp]
 
     def _sell_pattern_fns(self) -> list:
         return []   # pure scalper — premium selling is a different animal
@@ -2501,6 +2508,53 @@ class OptionScalpingAgent(OptionsAgent):
         if (0 < ind.ema9 < ind.ema21 and ind.rsi_14 < 42 and ind.macd_hist < 0
                 and getattr(ind, "supertrend_dir", "") == "DOWN"):
             return "PE", 6, "VOL_SPIKE_SCALP"
+        return "", 0, ""
+
+    # ── Pattern C: trend band-walk continuation (trending markets) ───────────
+    def _pat_trend_walk_scalp(self, sym, snap, ind, ltp, t):
+        """The system's best-validated family (band walks: BB_BAND_WALK +265%,
+        BB_WALK_FUT +2,977% @5m) applied to short-hold option scalps: two
+        consecutive closes beyond the band WITH volume and full alignment.
+        NOTE: the unlocked arm's BB_WALK_OPT lost −220%/yr — but that was
+        untimed and ungated; this version carries the 25-min time-stop and
+        the regime gate. The replay decides if that's enough."""
+        if not (time(9, 30) <= t <= time(14, 30)):
+            return "", 0, ""
+        bars = snap.candles_1min
+        if len(bars) < 3 or ind.volume_ratio < 1.5 or not ind.bb_upper:
+            return "", 0, ""
+        c1, c2 = bars[-2], bars[-1]
+        if (c1.close > ind.bb_upper and c2.close > ind.bb_upper
+                and ind.ema9 > ind.ema21
+                and getattr(ind, "supertrend_dir", "") == "UP"):
+            return "CE", 6, "TREND_WALK_SCALP"
+        if (c1.close < ind.bb_lower and c2.close < ind.bb_lower
+                and 0 < ind.ema9 < ind.ema21
+                and getattr(ind, "supertrend_dir", "") == "DOWN"):
+            return "PE", 6, "TREND_WALK_SCALP"
+        return "", 0, ""
+
+    # ── Pattern D: range-extreme fade (ranging markets) ──────────────────────
+    def _pat_range_fade_scalp(self, sym, snap, ind, ltp, t):
+        """Ranging tape: buy the reversal AT the range extreme, take the small
+        middle, leave fast. The measured danger (options −46.7% on range
+        days) came from untimed directional buys mid-range — this fires only
+        at a band extreme with an RSI extreme AND a rejection bar, and the
+        time-stop caps theta exposure. Tiny expectations by design; the
+        replay's per-pattern attribution keeps or kills it."""
+        if not (time(9, 45) <= t <= time(14, 15)):
+            return "", 0, ""
+        bars = snap.candles_1min
+        if len(bars) < 2 or ind.volume_ratio < 1.2 or not ind.bb_upper:
+            return "", 0, ""
+        last = bars[-1]
+        # rejection bar: close back inside the band after poking outside
+        if (last.high > ind.bb_upper and last.close < ind.bb_upper
+                and ind.rsi_14 >= 68):
+            return "PE", 6, "RANGE_FADE_SCALP"
+        if (last.low < ind.bb_lower and last.close > ind.bb_lower
+                and ind.rsi_14 <= 32):
+            return "CE", 6, "RANGE_FADE_SCALP"
         return "", 0, ""
 
     # ── Time-stop: a scalp that hasn't paid in N minutes pays theta instead ──

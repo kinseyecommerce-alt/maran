@@ -526,7 +526,11 @@ class Settings(BaseSettings):
         "BEAR_VOLATILE:options,momentum,mean_reversion,pairs,swing;"
         # RANGING: options + mean_reversion + pairs stay benched (options -46.7%
         # on range days; pairs -38% net over 62d with no winning pattern).
-        "RANGING:options,option_scalping,momentum,mean_reversion,pairs,swing;"
+        # option_scalping unbenched in RANGING (2026-07-12): its
+        # RANGE_FADE_SCALP pattern exists precisely for this tape. The agent
+        # is DARK; the year replay's per-pattern attribution decides whether
+        # the fade earns its place before anything activates.
+        "RANGING:options,momentum,mean_reversion,pairs,swing;"
         "HIGH_VOLATILE:momentum,mean_reversion,pairs,swing;"
         "BLACK_SWAN:swing,intraday,futures,momentum,pairs,mean_reversion"
     )
