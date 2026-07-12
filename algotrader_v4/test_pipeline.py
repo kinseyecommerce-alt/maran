@@ -16002,7 +16002,8 @@ def t_option_scalping_agent_registered_and_scoped():
     assert isinstance(a, OptionScalpingAgent)
     fns = a._buy_pattern_fns()
     names = [f.__name__ for f in fns]
-    assert names == ["_pat_expiry_gamma_scalp", "_pat_vol_spike_scalp"], names
+    assert names == ["_pat_expiry_gamma_scalp", "_pat_vol_spike_scalp",
+                     "_pat_trend_walk_scalp", "_pat_range_fade_scalp"], names
     assert a._sell_pattern_fns() == []
     # index-only guard: non-index symbols must HOLD without touching patterns
     from types import SimpleNamespace
@@ -16022,9 +16023,11 @@ def t_option_scalping_caps_and_configs():
     cfg = TRAIL_CONFIGS["option_scalping"]
     assert cfg.initial_sl_pct == 0.80 and cfg.target1_pct == 1.20
     blocked = s.regime_blocked_agents
-    for r in ("UNKNOWN", "RANGING"):
-        seg = [x for x in blocked.split(";") if x.strip().startswith(r + ":")]
-        assert seg and "option_scalping" in seg[0], f"option_scalping not benched in {r}"
+    seg = [x for x in blocked.split(";") if x.strip().startswith("UNKNOWN:")]
+    assert seg and "option_scalping" in seg[0], "option_scalping must stay benched in UNKNOWN"
+    seg = [x for x in blocked.split(";") if x.strip().startswith("RANGING:")]
+    assert seg and "option_scalping" not in seg[0], \
+        "option_scalping unbenched in RANGING — RANGE_FADE_SCALP trades that tape (agent is dark)"
 
 def t_option_scalping_in_replay_wiring():
     """Replay must track the new agent premium-scaled under 'OptScalp'."""
