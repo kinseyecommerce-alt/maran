@@ -16040,6 +16040,31 @@ run("option_scalping: registered, index-only, 2-pattern book",          t_option
 run("option_scalping: caps/cooldown/trail/regime bench wired",          t_option_scalping_caps_and_configs)
 run("option_scalping: replay tracks it premium-scaled",                 t_option_scalping_in_replay_wiring)
 
+def t_book_cap_limits_approved_and_scan_promotion():
+    """max_symbols_per_agent caps both startup approval and scan promotion."""
+    from agents.base_agent import BaseAgent
+    from config import settings as _s
+    class _Stub(BaseAgent):
+        name = "intraday"
+        def evaluate_tick(self, snap): return ("HOLD", None)
+        def should_exit_position(self, position, ind): return (False, "")
+    a = _Stub.__new__(_Stub)
+    a._approved = set(); a.state = type("S", (), {"approved_symbols": []})()
+    old = _s.max_symbols_per_agent
+    _s.max_symbols_per_agent = 3
+    try:
+        a._approved = {"A", "B", "C"}
+        added = a.add_symbols(["D", "E"])
+        assert added == 0 and len(a._approved) == 3, "scan must stop at the cap"
+        _s.max_symbols_per_agent = 5
+        added = a.add_symbols(["D", "E", "F"])
+        assert added == 2 and len(a._approved) == 5, "scan fills up to the cap only"
+    finally:
+        _s.max_symbols_per_agent = old
+    assert old == 30, "default cap must match the tested 30-symbol book"
+
+run("book: max_symbols_per_agent caps startup book + scan promotion",   t_book_cap_limits_approved_and_scan_promotion)
+
 # ══════════════════════════════════════════════════════════════════════════
 # FINAL SUMMARY
 # ══════════════════════════════════════════════════════════════════════════

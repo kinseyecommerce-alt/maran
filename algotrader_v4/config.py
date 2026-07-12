@@ -303,6 +303,13 @@ class Settings(BaseSettings):
     cooldown_option_scalping:   int = 300
     min_score_option_scalping:  int = 6
     option_scalp_max_hold_min:  int = Field(default=25, ge=5, le=120)
+
+    # Book width per agent. Full-year breadth test (tf15, gated): the
+    # 30-symbol book beat the 12-symbol core on every live agent (intraday
+    # +1,757% vs +613%, futures +1,999% vs +1,804%, options +64% vs −17%)
+    # at ~21 trades/day. The old uncapped live book (~500 subscriptions) was
+    # never tested and amplified the 2026-07-10 churn. 0 = uncapped.
+    max_symbols_per_agent: int = Field(default=30, ge=0, le=500)
     # Manual/dashboard orders get this much extra open-position headroom so a
     # human override is never boxed out by agents holding every slot.
     manual_extra_slots: int = Field(default=1, ge=0, le=5)
