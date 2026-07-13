@@ -56,7 +56,10 @@ class Settings(BaseSettings):
     admin_password: str = ""            # plain fallback for dev only
     admin_password_hash: str = ""       # bcrypt hash — takes precedence
     jwt_secret_key: str = ""  # auto-generated at boot if empty
-    jwt_expire_hours: int = 8
+    # 24h, not 8: an 8h token issued at Friday's login died over the weekend and
+    # the Monday dashboard sat frozen on 401s (2026-07-13) — the page shell loads
+    # without auth so it looks alive while every data call is silently rejected.
+    jwt_expire_hours: int = 24
 
     # Trading
     trading_mode: Literal["PAPER", "LIVE"] = "PAPER"
