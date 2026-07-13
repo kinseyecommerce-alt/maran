@@ -5842,10 +5842,10 @@ def t_greeks_parse_monthly_banknifty():
     assert r["underlying"] == "BANKNIFTY"
     assert r["strike"] == 52000
     assert r["opt_type"] == "PE"
-    # Monthly expiry is last Thursday of Jan 2026
+    # Monthly expiry is the last TUESDAY (NSE, since the 2025 SEBI change)
     assert r["expiry"].year == 2026
     assert r["expiry"].month == 1
-    assert r["expiry"].weekday() == 3  # Thursday
+    assert r["expiry"].weekday() == 1  # Tuesday
 
 def t_greeks_ce_delta_range():
     from greeks_engine import calculate_greeks
@@ -15937,11 +15937,11 @@ def t_calendar_size_factor():
     from risk_manager import RiskManager
     from config import settings as _s
     ist = ZoneInfo("Asia/Kolkata")
-    thu = datetime(2026, 7, 16, 10, 0, tzinfo=ist)   # Thursday
+    tue = datetime(2026, 7, 14, 10, 0, tzinfo=ist)   # Tuesday — NSE expiry day
     wed = datetime(2026, 7, 15, 10, 0, tzinfo=ist)   # Wednesday
-    with patch("ist_clock.now_ist", lambda: thu):
+    with patch("ist_clock.now_ist", lambda: tue):
         f = RiskManager.calendar_size_factor()
-        assert abs(f - _s.expiry_day_size_factor) < 1e-9, f"thu factor {f}"
+        assert abs(f - _s.expiry_day_size_factor) < 1e-9, f"tue factor {f}"
     with patch("ist_clock.now_ist", lambda: wed):
         assert RiskManager.calendar_size_factor() == 1.0
     _old = _s.event_risk_dates

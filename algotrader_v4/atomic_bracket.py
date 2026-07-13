@@ -296,7 +296,11 @@ class AtomicBracketEngine:
         oid = bracket.entry_order_id
         while time.monotonic() < deadline:
             await asyncio.sleep(self.FILL_POLL_INTERVAL_MS / 1000)
-            if hasattr(kite_client, "_paper_orders"):
+            # trading_mode gate, NOT hasattr: _paper_orders exists unconditionally
+            # on KiteClient, so the old hasattr guard was always True and LIVE
+            # fills were never polled from order_history — every LIVE bracket
+            # timed out and cancelled its (possibly already filled) entry.
+            if settings.trading_mode == "PAPER":
                 o = kite_client._paper_orders.get(oid)
                 if o and o["status"] == "COMPLETE":
                     return float(o.get("price") or bracket.signal_price)

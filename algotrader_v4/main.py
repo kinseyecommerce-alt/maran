@@ -1251,14 +1251,18 @@ def agents(): return {n: a.get_status() for n, a in ALL_AGENTS.items()}
 def pause_agent(name: str):
     a = ALL_AGENTS.get(name)
     if not a: raise HTTPException(404, "Not found")
-    a.stop(); return {"status": "paused"}
+    a.stop()
+    # Persist the pause — a deliberately halted agent must not be silently
+    # resumed by auto-start after a deploy restart (bit us live 2026-07-13).
+    bot_state.set_agent_enabled(name, False)
+    return {"status": "paused"}
 
 @app.post("/agents/{name}/resume", tags=["Agents"])
 async def resume_agent(name: str):
     a = ALL_AGENTS.get(name)
     if not a: raise HTTPException(404, "Not found")
-    if not bot_state.is_agent_enabled(name):
-        raise HTTPException(400, f"Agent '{name}' is disabled")
+    # An explicit manual resume overrides (and clears) a persisted pause/disable.
+    bot_state.set_agent_enabled(name, True)
 
     wl = master_agent._agent_watchlists.get(name, [])
     if not wl:
@@ -3288,9 +3292,12 @@ async def _reconcile_open_positions() -> None:
                 pass
             continue
 
-        # Register in order_guard → prevents a new entry on this symbol/strategy
+        # Register in order_guard → prevents a new entry on this symbol/strategy.
+        # count_trade=False: restore_counts() already reloaded today's persisted
+        # trade counts — counting rehydrated positions again shrank the day's
+        # remaining trade budget by one per open position.
         try:
-            order_guard.register_order(symbol, strategy, side, order_id)
+            order_guard.register_order(symbol, strategy, side, order_id, count_trade=False)
         except Exception as exc:
             logger.error("[Reconcile] order_guard.register_order failed for {}: {}", order_id, exc)
 
@@ -3324,6 +3331,41 @@ async def _reconcile_open_positions() -> None:
                     }
         except Exception as exc:
             logger.warning("[Reconcile] _tsl_sl_orders repopulate failed for {}: {}", order_id, exc)
+
+        # Ticks must reach the TSL engine even when the fresh morning scan does
+        # not re-select this symbol: TSL evaluation is driven from the owning
+        # agent's tick loop, which skips symbols outside its approved set — a
+        # registration alone sits inert (restart audit, 2026-07-13).
+        try:
+            tick_engine.subscribe([{"symbol": symbol, "exchange": "NSE"}])
+            _owner = ALL_AGENTS.get(strategy)
+            if _owner is not None:
+                _owner._approved.add(symbol)
+        except Exception as exc:
+            logger.error("[Reconcile] tick re-subscribe failed for {}: {}", symbol, exc)
+
+        # PAPER: the resting SL-M lived only in kite_client._paper_orders (in
+        # memory) and died with the old process — without recreating it the
+        # position has no tick-engine-level hard stop after a restart.
+        if settings.trading_mode == "PAPER" and sl_price:
+            try:
+                _sl_side = "SELL" if side == "BUY" else "BUY"
+                _sl_exch = "NFO" if _tsym != symbol else "NSE"
+                _sl_id = kite_client.place_order(
+                    _tsym, _sl_exch, _sl_side, qty,
+                    order_type="SL-M", trigger_price=float(sl_price),
+                    price=float(sl_price),
+                    product=pos.get("product", "MIS"),
+                    tag=f"Agent-{strategy}-SL"[:20],
+                )
+                from agents.base_agent import _tsl_sl_orders as _tso, _tsl_sl_orders_lock as _tsol
+                with _tsol:
+                    if order_id in _tso:
+                        _tso[order_id]["sl_order_id"] = _sl_id
+                logger.info("[Reconcile] Re-placed PAPER SL-M for {} @ ₹{:.2f} ({})",
+                            _tsym, float(sl_price), _sl_id)
+            except Exception as exc:
+                logger.error("[Reconcile] PAPER SL-M re-place failed for {}: {}", _tsym, exc)
 
         # In PAPER mode the broker returns empty positions; track the count manually
         if settings.trading_mode == "PAPER":
@@ -3562,6 +3604,13 @@ async def on_startup():
     asyncio.create_task(_prewarm_gate(), name="prewarm_gate").add_done_callback(_log_task_exc)
     from platform_scheduler import platform_scheduler
     platform_scheduler.start()
+
+    # Reload persisted agent enables/pauses BEFORE any auto-start path runs —
+    # without this a deploy restart silently re-enabled manually paused agents.
+    try:
+        bot_state.load_persisted_enables()
+    except Exception as _lpe_exc:
+        logger.warning("[startup] could not load persisted agent enables: {}", _lpe_exc)
 
     # Immediate auto-start on server restart when strategies are configured.
     # The scheduled job fires at 09:16 IST only; this covers restarts at any time.

@@ -4,11 +4,15 @@ Both main.py and master_agent_v5.py import from here.
 """
 
 _agent_enabled: dict[str, bool] = {
-    "intraday": True,
-    "options":  True,
-    "futures":  True,
-    "swing":    True,
-    "scalping": True,
+    "intraday":        True,
+    "options":         True,
+    "futures":         True,
+    "swing":           True,
+    "scalping":        True,
+    "momentum":        True,
+    "mean_reversion":  True,
+    "pairs":           True,
+    "option_scalping": True,
 }
 
 # Pattern toggles — all enabled by default; runtime-mutable via /settings/pattern-toggles
@@ -79,6 +83,29 @@ def is_agent_enabled(name: str) -> bool:
 def set_agent_enabled(name: str, val: bool) -> None:
     if name in _agent_enabled:
         _agent_enabled[name] = val
+        # Persist — a deliberately disabled agent must NOT come back enabled
+        # after a deploy restart (observed live 2026-07-13: scalping, paused
+        # mid-day for risk, silently resumed when the evening deploy rebooted).
+        try:
+            import json as _json
+            from state_store import set_kv as _set_kv
+            _set_kv("agent_enabled_map", _json.dumps(_agent_enabled))
+        except Exception:
+            pass
+
+
+def load_persisted_enables() -> None:
+    """Reload persisted agent enables on boot — call BEFORE auto-start."""
+    try:
+        import json as _json
+        from state_store import get_kv as _get_kv
+        raw = _get_kv("agent_enabled_map", "")
+        if raw:
+            for k, v in _json.loads(raw).items():
+                if k in _agent_enabled:
+                    _agent_enabled[k] = bool(v)
+    except Exception:
+        pass
 
 
 # ── Regime entry gate ────────────────────────────────────────────────────────

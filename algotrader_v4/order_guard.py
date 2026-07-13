@@ -122,12 +122,17 @@ class OrderGuard:
                 if self._symbol_owner.get(symbol) == f"{strategy}:{side}":
                     self._symbol_owner.pop(symbol, None)
 
-    def register_order(self, symbol: str, strategy: str, side: str, order_id: str) -> None:
+    def register_order(self, symbol: str, strategy: str, side: str, order_id: str,
+                       count_trade: bool = True) -> None:
         """Legacy direct-register (used by tests and non-claim callers).
 
         Skips registration when a live (non-pending) claim already exists for the
         key, preventing double-counting of trades when a prior try_claim() was already
         promoted via confirm_order().
+
+        count_trade=False is for restart reconciliation: rehydrated positions were
+        already counted by restore_counts(), so only the active-claim state should
+        be rebuilt, not the daily trade budget.
         """
         with self._lock:
             key = (symbol, strategy, side)
@@ -140,10 +145,12 @@ class OrderGuard:
                 return
             self._active[key] = ActiveOrder(symbol=symbol, strategy=strategy, side=side,
                                              order_id=order_id, placed_at=time.time())
-            self._trade_count[strategy] += 1
+            if count_trade:
+                self._trade_count[strategy] += 1
             self._symbol_owner[symbol] = f"{strategy}:{side}"
             snapshot = dict(self._trade_count)
-        self._persist_trade_count(snapshot)
+        if count_trade:
+            self._persist_trade_count(snapshot)
 
     @staticmethod
     def _persist_trade_count(snapshot: dict[str, int]) -> None:

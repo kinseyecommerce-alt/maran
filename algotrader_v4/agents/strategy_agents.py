@@ -35,7 +35,32 @@ def _expiry_weekday(underlying: str) -> int:
                     return max(0, min(6, int(v)))
     except Exception:
         pass
-    return 2 if underlying in ("BANKNIFTY", "MIDCPNIFTY") else 3
+    # NSE = Tuesday since 2025-09-01 (SEBI standardization); BSE = Thursday.
+    return 3 if underlying in ("SENSEX", "BANKEX") else 1
+
+
+def _roll_off_holiday(d):
+    """NSE rule: expiry falling on a holiday moves to the PREVIOUS working day.
+    Weekday-walk expiry math never consulted the holiday calendar, emitting
+    holiday-dated (non-existent) contract symbols on those weeks."""
+    from datetime import timedelta
+    try:
+        from ist_clock import is_nse_holiday
+        while d.weekday() >= 5 or is_nse_holiday(d):
+            d -= timedelta(days=1)
+    except Exception:
+        pass
+    return d
+
+
+def _nse_monthly_expiry(y: int, m: int):
+    """Last monthly-expiry weekday (NSE: Tuesday) of the month, holiday-rolled."""
+    from datetime import date, timedelta
+    wd = max(0, min(6, int(getattr(settings, "nse_monthly_expiry_weekday", 1))))
+    last = date(y, m + 1, 1) - timedelta(days=1) if m < 12 else date(y + 1, 1, 1) - timedelta(days=1)
+    while last.weekday() != wd:
+        last -= timedelta(days=1)
+    return _roll_off_holiday(last)
 
 
 def _opening_gap_pct(ind, ltp: float) -> float:
@@ -1776,19 +1801,13 @@ class OptionsAgent(BaseAgent):
         ≤7 DTE skewed delta/theta and strike selection.
         Returns 0 ON the expiry day itself (0-DTE) — callers must floor
         time-to-expiry at a small epsilon in BS formulas, not fake the DTE."""
-        from datetime import date, timedelta
+        from datetime import date
         today = date.today()
         if underlying not in self._INDEX_UNDERLYINGS:
-            def _last_thursday(y: int, m: int) -> date:
-                last = (date(y, m + 1, 1) - timedelta(days=1) if m < 12
-                        else date(y + 1, 1, 1) - timedelta(days=1))
-                while last.weekday() != 3:
-                    last -= timedelta(days=1)
-                return last
-            expiry = _last_thursday(today.year, today.month)
+            expiry = _nse_monthly_expiry(today.year, today.month)
             if expiry < today:
                 ny, nm = (today.year + 1, 1) if today.month == 12 else (today.year, today.month + 1)
-                expiry = _last_thursday(ny, nm)
+                expiry = _nse_monthly_expiry(ny, nm)
             return (expiry - today).days
         target = _expiry_weekday(underlying)
         return (target - today.weekday()) % 7
@@ -1900,19 +1919,13 @@ class OptionsAgent(BaseAgent):
         from datetime import date, timedelta
         today = date.today()
 
-        def _last_thursday(y: int, m: int) -> date:
-            last = date(y, m + 1, 1) - timedelta(days=1) if m < 12 else date(y + 1, 1, 1) - timedelta(days=1)
-            while last.weekday() != 3:
-                last -= timedelta(days=1)
-            return last
-
         if underlying not in self._INDEX_UNDERLYINGS:
             # Stock options have NO weekly contracts — nearest expiry is the
-            # monthly one (last Thursday); roll to next month once it has passed.
-            expiry = _last_thursday(today.year, today.month)
+            # monthly one (NSE: last Tuesday); roll to next month once passed.
+            expiry = _nse_monthly_expiry(today.year, today.month)
             if expiry < today:
                 ny, nm = (today.year + 1, 1) if today.month == 12 else (today.year, today.month + 1)
-                expiry = _last_thursday(ny, nm)
+                expiry = _nse_monthly_expiry(ny, nm)
             return f"{underlying}{expiry.strftime('%y')}{expiry.strftime('%b').upper()}{strike}{opt_type}"
 
         target = _expiry_weekday(underlying)
@@ -1923,6 +1936,9 @@ class OptionsAgent(BaseAgent):
         expiry = today
         while expiry.weekday() != target:
             expiry += timedelta(days=1)
+        _rolled = _roll_off_holiday(expiry)
+        if _rolled >= today:
+            expiry = _rolled
         if (expiry + timedelta(days=7)).month != expiry.month:
             # Last weekly of the month IS the monthly contract → monthly naming
             return f"{underlying}{expiry.strftime('%y')}{expiry.strftime('%b').upper()}{strike}{opt_type}"
@@ -4582,17 +4598,15 @@ class FuturesAgent(BaseAgent):
         return "", 0, ""
 
     def _is_rollover_period(self) -> bool:
-        """True if today is within 3 calendar days BEFORE NSE monthly futures expiry (last Thursday)."""
-        from datetime import date, timedelta
+        """True if today is within 3 calendar days BEFORE NSE monthly futures expiry
+        (last Tuesday since the 2025 SEBI expiry standardization)."""
+        from datetime import date
         today = date.today()
         for month_offset in (0, 1):
             y, m = today.year, today.month + month_offset
             if m > 12:
                 y, m = y + 1, m - 12
-            last_day = date(y, m + 1, 1) - timedelta(days=1) if m < 12 else date(y + 1, 1, 1) - timedelta(days=1)
-            while last_day.weekday() != 3:
-                last_day -= timedelta(days=1)
-            days_to = (last_day - today).days
+            days_to = (_nse_monthly_expiry(y, m) - today).days
             if 0 <= days_to <= 3:
                 return True
         return False
@@ -4659,25 +4673,15 @@ class FuturesAgent(BaseAgent):
 
     def _futures_symbol(self, underlying: str, rollover: bool = False) -> str:
         """Build NFO futures symbol. During rollover window, trade the far (next) month."""
-        from datetime import date, timedelta
+        from datetime import date
         today = date.today()
 
-        def last_thursday(y: int, m: int) -> date:
-            # Find last Thursday of month
-            if m == 12:
-                last = date(y + 1, 1, 1) - timedelta(days=1)
-            else:
-                last = date(y, m + 1, 1) - timedelta(days=1)
-            while last.weekday() != 3:
-                last -= timedelta(days=1)
-            return last
-
-        near_exp = last_thursday(today.year, today.month)
+        near_exp = _nse_monthly_expiry(today.year, today.month)
         if today > near_exp or rollover:
             # Use next month expiry
             nm = today.month + 1 if today.month < 12 else 1
             ny = today.year if today.month < 12 else today.year + 1
-            expiry = last_thursday(ny, nm)
+            expiry = _nse_monthly_expiry(ny, nm)
         else:
             expiry = near_exp
         return f"{underlying}{expiry.strftime('%y%b').upper()}FUT"

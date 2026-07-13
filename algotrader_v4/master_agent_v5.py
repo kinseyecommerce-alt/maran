@@ -286,6 +286,20 @@ class MasterAgent:
                                  id="intraday_scan", replace_existing=True, max_instances=1, coalesce=True,
                                  misfire_grace_time=300)
         self._scheduler.start()
+
+        # Catch-up squareoff: a restart AFTER squareoff_time computes the cron's
+        # next run as TOMORROW, silently skipping today's flatten — a mid-
+        # afternoon deploy would leave intraday positions open overnight.
+        try:
+            from ist_clock import now_ist as _now_ist, is_market_open as _imo
+            _now = _now_ist()
+            if (_now.hour, _now.minute) >= (sq_h, sq_m) and _imo():
+                logger.warning("[master_v5] restart after squareoff time — running catch-up squareoff")
+                self._scheduler.add_job(self._auto_squareoff, id="squareoff_catchup",
+                                         replace_existing=True)
+        except Exception as _sq_exc:
+            logger.warning("[master_v5] catch-up squareoff check failed: {}", _sq_exc)
+
         logger.info("[master_v5] started — tick-driven 1s")
         _fire(send_telegram(
             f"<b>AlgoTrader Pro v5</b> started\nMode: {settings.trading_mode} | Tick: 1s\n"

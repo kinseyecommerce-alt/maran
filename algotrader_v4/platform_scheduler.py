@@ -303,7 +303,20 @@ class PlatformScheduler:
         try:
             from kite_auto_login import refresh_kite_token_async
             from ist_clock import is_nse_holiday, now_ist
-            token = await refresh_kite_token_async()
+            # 3 attempts, 60s apart: a single transient Playwright/DOM/network
+            # hiccup at 08:50 must not block the whole trading day (there is no
+            # other automatic attempt before the 09:16 auto-start auth check).
+            token = None
+            for _attempt in range(3):
+                try:
+                    token = await refresh_kite_token_async()
+                    break
+                except Exception as _lexc:
+                    if _attempt == 2:
+                        raise
+                    logger.warning("[platform] login attempt {} failed ({}) — retrying in 60s",
+                                   _attempt + 1, _lexc)
+                    await asyncio.sleep(60)
             self._token_ok = True
             market_note = "NSE holiday today — no trading." if is_nse_holiday(now_ist().date()) \
                           else "Market opens in 25 minutes."
@@ -371,6 +384,13 @@ class PlatformScheduler:
             logger.info("[platform] PAPER mode — skipping Kite auth check for auto-start")
 
         strategies = [s.strip() for s in settings.auto_start_strategies.split(",") if s.strip()]
+        # Respect persisted manual pauses/disables: a deliberately halted agent
+        # must not be silently resumed by a deploy restart (live 2026-07-13).
+        import bot_state as _bs
+        _skipped = [s for s in strategies if not _bs.is_agent_enabled(s)]
+        if _skipped:
+            logger.warning("[platform] auto-start skipping persistently paused agent(s): {}", _skipped)
+            strategies = [s for s in strategies if _bs.is_agent_enabled(s)]
 
         # Build watchlist — Nifty 100 flag takes priority, then explicit list, then scanner.
         # per_agent_watchlist (when set) carries each strategy's OWN correct universe
