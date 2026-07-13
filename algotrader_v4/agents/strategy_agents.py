@@ -2025,9 +2025,11 @@ class OptionsAgent(BaseAgent):
         opt_price, price_src = await self._fetch_option_ltp(opt_sym, exch, bs_est, loop)
         logger.info("[options] {} premium ₹{:.2f} ({})", opt_sym, opt_price, price_src)
 
+        # One lot per position, always a WHOLE lot: int(lot_size * sf) produced
+        # exchange-invalid quantities (live 2026-07-13: 70/262/46 with every
+        # trade gate-reduced) — F&O trades in lot multiples only, and a size
+        # reduction can never shrink a single-lot position below one lot.
         qty = lot_size
-        if settings.use_kelly_sizing and sf < 1.0:
-            qty = max(1, int(lot_size * sf))
 
         if order_guard.is_symbol_active_anywhere(underlying):
             return

@@ -717,6 +717,17 @@ class KiteClient:
 
         if product == "NRML" or exchange in ("NFO", "BFO", "CDS", "MCX"):
             lot = _FON_LOT_SIZES.get(symbol)
+            if lot is None:
+                # Contract symbols (BAJFINANCE26JUL1050CE) miss a table keyed by
+                # underlying — live 2026-07-13: qty 70/262/46 option entries
+                # passed unvalidated (exchange-invalid in LIVE).
+                try:
+                    from greeks_engine import parse_nfo_symbol
+                    parsed = parse_nfo_symbol(symbol)
+                    if parsed:
+                        lot = _FON_LOT_SIZES.get(parsed.get("underlying", ""))
+                except Exception:
+                    pass
             if lot and quantity % lot != 0:
                 snapped = (quantity // lot) * lot
                 if snapped <= 0:
