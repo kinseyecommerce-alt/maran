@@ -578,6 +578,12 @@ class Settings(BaseSettings):
     # 62-day replay validation passes (ship code and switch-on separately).
     dead_tape_gate: bool = False
 
+    # Day-drift veto for scalping (2026-07-13 live evidence): 29 counter-drift
+    # SELL scalps into a +0.5% up-drift session lost ₹5.4k while the 6 BUY
+    # scalps net made money. Blocks the counter-drift side once the day is
+    # ±0.3% from open (same thresholds as the options intraday-drift veto).
+    scalping_day_drift_veto: bool = True
+
     # Phase 3: Intelligence
     max_positions_per_sector: int = 2
     min_rolling_sharpe: float = 0.5
