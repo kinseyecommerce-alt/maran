@@ -2025,9 +2025,11 @@ class OptionsAgent(BaseAgent):
         opt_price, price_src = await self._fetch_option_ltp(opt_sym, exch, bs_est, loop)
         logger.info("[options] {} premium ₹{:.2f} ({})", opt_sym, opt_price, price_src)
 
+        # One lot per position, always a WHOLE lot: scaling the lot by the gate
+        # size factor produced exchange-invalid quantities (live 2026-07-13:
+        # 70/262/46 with every trade gate-reduced) — F&O trades in lot multiples
+        # only, and a reduction can never shrink a single-lot position further.
         qty = lot_size
-        if settings.use_kelly_sizing and sf < 1.0:
-            qty = max(1, int(lot_size * sf))
 
         if order_guard.is_symbol_active_anywhere(underlying):
             return
@@ -3229,6 +3231,16 @@ class ScalpingAgent(BaseAgent):
         _st_dir = getattr(ind, "supertrend_dir", "")
         if (action == "BUY" and _st_dir == "DOWN") or (action == "SELL" and _st_dir == "UP"):
             return "HOLD", None
+
+        # Day-drift veto — manual emergency switch, DEFAULT OFF. Year tf1 A/B
+        # refuted always-on: it cut 10% of trades but 85% of scalping's yearly
+        # profit (counter-drift scalps are a top family). Flip on only for a
+        # hostile chop-with-drift day like 2026-07-13 (29 drift-shorts −₹5.4k).
+        if getattr(settings, "scalping_day_drift_veto", False) and ind.day_open and ind.day_open > 0:
+            _day_down = ltp < ind.day_open and ind.change_pct <= -0.3
+            _day_up   = ltp > ind.day_open and ind.change_pct >= 0.3
+            if (action == "SELL" and _day_up) or (action == "BUY" and _day_down):
+                return "HOLD", None
 
         # BLACK SWAN veteran: scalping only valid in RECOVERING phase on VWAP reclaim + 3× volume
         if snap.black_swan_active:

@@ -56,7 +56,10 @@ class Settings(BaseSettings):
     admin_password: str = ""            # plain fallback for dev only
     admin_password_hash: str = ""       # bcrypt hash — takes precedence
     jwt_secret_key: str = ""  # auto-generated at boot if empty
-    jwt_expire_hours: int = 8
+    # 24h, not 8: an 8h token issued at Friday's login died over the weekend and
+    # the Monday dashboard sat frozen on 401s (2026-07-13) — the page shell loads
+    # without auth so it looks alive while every data call is silently rejected.
+    jwt_expire_hours: int = 24
 
     # Trading
     trading_mode: Literal["PAPER", "LIVE"] = "PAPER"
@@ -577,6 +580,14 @@ class Settings(BaseSettings):
     # Default OFF in code — activated via DEAD_TAPE_GATE=true env once the
     # 62-day replay validation passes (ship code and switch-on separately).
     dead_tape_gate: bool = False
+
+    # Day-drift veto for scalping — default OFF: the 2026-07-13 session
+    # (29 counter-drift SELL scalps −₹5.4k in RANGING chop) motivated it, but
+    # the year tf1 A/B replay refuted it decisively: veto ON cut only 10% of
+    # trades yet dropped scalping +706.6% → +107.9% (win 60.8% → 51.1%) —
+    # counter-drift scalps are a top trade family over the year. Kept as a
+    # manual emergency switch for hostile chop-with-drift days.
+    scalping_day_drift_veto: bool = False
 
     # Phase 3: Intelligence
     max_positions_per_sector: int = 2
