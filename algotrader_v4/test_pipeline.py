@@ -441,7 +441,7 @@ def t_paper_market_untracked_contract_uses_price_hint():
     """A PAPER MARKET order for a contract with no tick feed (options/futures)
     must fill at the passed price hint, NOT the ₹100 _paper_place fallback."""
     kc = KiteClient()
-    oid = kc.place_order("INFY26JUL1650CE", "NFO", "BUY", 1,
+    oid = kc.place_order("INFY26JUL1650CE", "NFO", "BUY", 300,
                          order_type="MARKET", price=22.46, tag="t")
     o = kc._paper_orders[oid]
     assert abs(o["average_price"] - 22.46) < 0.01, \
@@ -465,17 +465,17 @@ def t_paper_option_bs_mark_to_market():
     kc = KiteClient()
     kc._paper_positions.clear()
     kc._paper_option_meta.clear()
-    kc.place_order("INFY26JUL1650CE", "NFO", "BUY", 1,
+    kc.place_order("INFY26JUL1650CE", "NFO", "BUY", 300,
                    order_type="MARKET", price=22.0, tag="t")
     kc.register_paper_option("INFY26JUL1650CE", "INFY", entry_spot=1600.0, delta=0.5)
     pos = next(p for p in kc._paper_positions if p["tradingsymbol"] == "INFY26JUL1650CE")
     # At entry spot → premium == entry fill → P&L ~0 (no jump)
     kc.reprice_paper_options("INFY", 1600.0)
     assert abs(pos["pnl"]) < 0.01, f"P&L at entry spot must be ~0, got {pos['pnl']}"
-    # Spot +20 → premium + 0.5×20 = +10 → long CE gains ₹10
+    # Spot +20 → premium + 0.5×20 = +10/unit → long CE gains ₹10 × 300 lot
     kc.reprice_paper_options("INFY", 1620.0)
     assert abs(pos["last_price"] - 32.0) < 0.01, f"premium should be 32, got {pos['last_price']}"
-    assert abs(pos["pnl"] - 10.0) < 0.01, f"P&L should be +10, got {pos['pnl']}"
+    assert abs(pos["pnl"] - 3000.0) < 0.01, f"P&L should be +3000, got {pos['pnl']}"
     assert abs(kc._paper_ltp["INFY26JUL1650CE"] - 32.0) < 0.01, "contract _paper_ltp must update"
 
 run("_TokenBucket.acquire() no raise",          t_bucket_acquire)
@@ -10290,14 +10290,16 @@ def t_options_agent_theta_uses_options_intelligence():
     )
 
 def t_options_agent_kelly_sizing_min_one():
-    """OptionsAgent Kelly sizing must use max(1, ...) not max(lot_size, ...) (BUG-4)."""
+    """OptionsAgent must size in WHOLE lots — int(lot_size * sf) produced
+    exchange-invalid fractional-lot quantities (live 2026-07-13: 70/262/46)."""
     import inspect
     from agents.strategy_agents import OptionsAgent
     src = inspect.getsource(OptionsAgent._try_enter)
-    assert "max(1, int(lot_size * sf))" in src, (
-        "OptionsAgent._try_enter Kelly sizing must use max(1, int(lot_size * sf)), "
-        "not max(lot_size, int(lot_size * sf)) which always returns lot_size (disabling Kelly)"
+    assert "int(lot_size * sf)" not in src, (
+        "OptionsAgent._try_enter must not scale a single-lot position by the "
+        "gate size factor — sub-lot quantities are exchange-invalid on NFO"
     )
+    assert "qty = lot_size" in src, "OptionsAgent entry qty must be exactly one whole lot"
 
 def t_pairs_agent_sample_std():
     """PairsAgent must use sample std (divide by N-1) not population std (divide by N)."""
