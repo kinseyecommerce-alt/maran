@@ -1358,8 +1358,12 @@ class TickEngine:
                 continue
             try:
                 exch = self._exchange.get(sym, "NSE")
+                # 10 calendar days, not 2: "2d" from a Monday-morning boot spans
+                # only Sat+Sun and returns ZERO bars (live 2026-07-13: 2/120
+                # symbols seeded, agents opened blind). tail(200) below keeps
+                # the request cheap regardless of how many days come back.
                 df = await loop.run_in_executor(
-                    None, lambda s=sym, e=exch: yf_client.historical(s, e, "1m", "2d")
+                    None, lambda s=sym, e=exch: yf_client.historical(s, e, "1m", "10d")
                 )
                 if df is None or df.empty:
                     continue
@@ -1410,7 +1414,13 @@ class TickEngine:
             except Exception as exc:
                 logger.debug("TickEngine: backfill failed for {}: {}", sym, exc)
 
-        logger.info("TickEngine: backfill complete — {}/{} symbols seeded", seeded, len(syms))
+        if seeded < len(syms) // 4:
+            logger.warning(
+                "TickEngine: backfill seeded only {}/{} symbols — agents may "
+                "open with cold indicators (check Kite token / data source)",
+                seeded, len(syms))
+        else:
+            logger.info("TickEngine: backfill complete — {}/{} symbols seeded", seeded, len(syms))
 
     def get_historical(
         self, symbol: str, exchange: str = "NSE",

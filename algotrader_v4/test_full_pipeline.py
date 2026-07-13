@@ -55,6 +55,11 @@ settings.regime_agent_gating = False
 settings.agent_decisions_on_bar_close = False
 settings.indicator_exit_on_bar_close = False
 settings.min_hold_before_indicator_exit_sec = 0
+# The live earnings calendar must not gate a deterministic mechanics suite:
+# the options leg hardcodes INFY and went red for the 5 days around every
+# real INFY results date (first hit: 2026-07-13, Q1 results Jul 15).
+from alt_data import alt_data_engine as _alt_engine
+_alt_engine.is_earnings_period = lambda *a, **k: False
 from tick_engine import (
     tick_engine, MarketSnapshot, Tick, LiveIndicators, Candle, TickBuffer,
 )

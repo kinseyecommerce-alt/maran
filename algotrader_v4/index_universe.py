@@ -16,7 +16,7 @@ _CSV_PATH = Path(__file__).parent / "data" / "nifty100_history.csv"
 
 # Fallback: known current Nifty 50 symbols (used if CSV missing)
 _FALLBACK_NIFTY50 = [
-    "RELIANCE", "TCS", "HDFCBANK", "INFOSYS", "ICICIBANK",
+    "RELIANCE", "TCS", "HDFCBANK", "INFY", "ICICIBANK",
     "BHARTIARTL", "SBIN", "KOTAKBANK", "TMCV", "WIPRO",
     "HCLTECH", "AXISBANK", "BAJFINANCE", "SUNPHARMA", "TITAN",
     "NESTLEIND", "ULTRACEMCO", "TMPV", "TATASTEEL", "MARUTI",
