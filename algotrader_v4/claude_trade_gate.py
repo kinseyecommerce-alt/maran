@@ -861,7 +861,11 @@ async def assess(snap, action: str, signal: dict, strategy: str) -> GateDecision
         try:
             extra: dict = {}
             if settings.use_extended_thinking:
-                extra["thinking"] = {"type": "enabled", "budget_tokens": settings.gate_thinking_budget}
+                # Opus 4.8 rejects the legacy {"type": "enabled", "budget_tokens": N}
+                # thinking param (live 400s, 2026-07-13: '"thinking.type.enabled" is
+                # not supported for this model'). Adaptive thinking lets the model
+                # size its own reasoning; budget stays as the max_tokens cap below.
+                extra["thinking"] = {"type": "adaptive"}
 
             async def _call():
                 return await asyncio.wait_for(
