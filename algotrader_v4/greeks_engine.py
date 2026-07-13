@@ -208,12 +208,13 @@ def select_strike_by_delta(
     return best_strike
 
 
-def days_to_next_expiry(option_type_day: str = "thursday") -> int:
-    """Return calendar days to next weekly NSE expiry (Thursday=NIFTY)."""
+def days_to_next_expiry(option_type_day: str = "tuesday") -> int:
+    """Return calendar days to next weekly NSE expiry (Tuesday=NIFTY since the
+    2025-09 SEBI expiry standardization; BSE/SENSEX stays Thursday)."""
     today = datetime.now(_IST).date()
     day_map = {"monday": 0, "tuesday": 1, "wednesday": 2,
                "thursday": 3, "friday": 4, "saturday": 5, "sunday": 6}
-    target = day_map.get(option_type_day.lower(), 3)
+    target = day_map.get(option_type_day.lower(), 1)
     days_ahead = (target - today.weekday()) % 7
     return days_ahead if days_ahead > 0 else 7
 
@@ -225,13 +226,20 @@ _WEEKLY_MONTH_CODES = "123456789OND"
 
 
 def _last_thursday_of_month(year: int, month: int) -> date:
-    """Return the last Thursday of the given month."""
+    """Return the month's monthly-expiry day. Name kept for callers — NSE moved
+    monthlies to the last TUESDAY (2025 SEBI standardization); the weekday now
+    comes from settings so a future circular is a config edit."""
     from datetime import timedelta
+    try:
+        from config import settings as _s
+        wd = max(0, min(6, int(getattr(_s, "nse_monthly_expiry_weekday", 1))))
+    except Exception:
+        wd = 1
     if month == 12:
         last_day = date(year + 1, 1, 1) - timedelta(days=1)
     else:
         last_day = date(year, month + 1, 1) - timedelta(days=1)
-    while last_day.weekday() != 3:
+    while last_day.weekday() != wd:
         last_day -= timedelta(days=1)
     return last_day
 

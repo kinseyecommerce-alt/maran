@@ -84,7 +84,9 @@ class KiteTicker:
         new_toks = [self._token_map[s] for s in fresh if s in self._token_map]
         if not new_toks:
             return 0
-        if self._kws and self.is_connected():
+        # is_connected is a @property — calling it raised TypeError in LIVE and
+        # silently kept every newly scanned symbol off the live WebSocket.
+        if self._kws and self.is_connected:
             try:
                 self._kws.subscribe(new_toks)
                 self._kws.set_mode(self._kws.MODE_FULL, new_toks)

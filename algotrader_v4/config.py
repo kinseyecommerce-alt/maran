@@ -175,7 +175,13 @@ class Settings(BaseSettings):
     # circulars) — when they change again, update this setting instead of
     # code. Empty entries fall back to the legacy defaults
     # (Thu=3; Wed=2 for BANKNIFTY/MIDCPNIFTY).
-    index_expiry_weekdays:    str = ""
+    # NSE index derivatives expire TUESDAY since 2025-09-01 (SEBI single-weekly
+    # standardization: NSE=Tue, BSE=Thu). BANKNIFTY/FINNIFTY/MIDCPNIFTY weeklies
+    # are discontinued — monthly only, last Tuesday. Stale Thursday defaults
+    # built non-existent contract symbols and mistimed every expiry-day gate.
+    index_expiry_weekdays:    str = "NIFTY:1,BANKNIFTY:1,FINNIFTY:1,MIDCPNIFTY:1,SENSEX:3,BANKEX:3"
+    # NSE monthly expiry weekday (stock options + index monthlies): last Tuesday.
+    nse_monthly_expiry_weekday: int = 1
     min_score_swing:          int = 1
     min_score_mean_reversion: int = 3
     min_score_momentum:       int = 4
@@ -291,7 +297,7 @@ class Settings(BaseSettings):
     # India calendar risk-down. Thursday (weekly index expiry) is measurably
     # the worst weekday for every trend agent over the year (expiry gamma
     # chop): intraday +162% vs ~+180% other days, futures +57% vs ~+84%.
-    expiry_size_down_weekdays: str = "3"                       # Mon=0 CSV
+    expiry_size_down_weekdays: str = "1"                       # Mon=0 CSV; Tue = NSE expiry
     expiry_day_size_factor: float = Field(default=0.6, gt=0, le=1.0)
     # Operator-maintained event dates (Budget, RBI MPC…): momentum's worst
     # day of the year was Budget day 2026-02-01.
