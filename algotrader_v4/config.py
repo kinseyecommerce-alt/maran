@@ -581,11 +581,13 @@ class Settings(BaseSettings):
     # 62-day replay validation passes (ship code and switch-on separately).
     dead_tape_gate: bool = False
 
-    # Day-drift veto for scalping (2026-07-13 live evidence): 29 counter-drift
-    # SELL scalps into a +0.5% up-drift session lost ₹5.4k while the 6 BUY
-    # scalps net made money. Blocks the counter-drift side once the day is
-    # ±0.3% from open (same thresholds as the options intraday-drift veto).
-    scalping_day_drift_veto: bool = True
+    # Day-drift veto for scalping — default OFF: the 2026-07-13 session
+    # (29 counter-drift SELL scalps −₹5.4k in RANGING chop) motivated it, but
+    # the year tf1 A/B replay refuted it decisively: veto ON cut only 10% of
+    # trades yet dropped scalping +706.6% → +107.9% (win 60.8% → 51.1%) —
+    # counter-drift scalps are a top trade family over the year. Kept as a
+    # manual emergency switch for hostile chop-with-drift days.
+    scalping_day_drift_veto: bool = False
 
     # Phase 3: Intelligence
     max_positions_per_sector: int = 2

@@ -3232,11 +3232,11 @@ class ScalpingAgent(BaseAgent):
         if (action == "BUY" and _st_dir == "DOWN") or (action == "SELL" and _st_dir == "UP"):
             return "HOLD", None
 
-        # Day-drift veto — mirror of the options agent's intraday-drift veto.
-        # Live 2026-07-13: 29 SELL scalps into a +0.5% up-drift day lost ₹5.4k
-        # while the 6 BUY scalps net made money; the 1-min supertrend flips
-        # DOWN in chop and says nothing about the session's drift.
-        if getattr(settings, "scalping_day_drift_veto", True) and ind.day_open and ind.day_open > 0:
+        # Day-drift veto — manual emergency switch, DEFAULT OFF. Year tf1 A/B
+        # refuted always-on: it cut 10% of trades but 85% of scalping's yearly
+        # profit (counter-drift scalps are a top family). Flip on only for a
+        # hostile chop-with-drift day like 2026-07-13 (29 drift-shorts −₹5.4k).
+        if getattr(settings, "scalping_day_drift_veto", False) and ind.day_open and ind.day_open > 0:
             _day_down = ltp < ind.day_open and ind.change_pct <= -0.3
             _day_up   = ltp > ind.day_open and ind.change_pct >= 0.3
             if (action == "SELL" and _day_up) or (action == "BUY" and _day_down):
