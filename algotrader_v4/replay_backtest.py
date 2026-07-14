@@ -20,7 +20,12 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
+
+# Honest intra-bar fills (adverse extreme first). Default ON; HONEST_FILLS=0
+# reproduces the legacy close-only mode whose year showed 0 negative days.
+_HONEST_FILLS = os.environ.get("HONEST_FILLS", "1") != "0"
 from collections import defaultdict
 from datetime import datetime, time, timedelta
 from pathlib import Path
@@ -221,8 +226,17 @@ def replay(symbols: list[str], max_days: int | None = None,
                 sim._sim_bar_time = ts
                 _sa_mod.now_ist = sim._fake_now_ist
 
-                for name, _ in AGENT_CLASSES:
-                    trackers[name].on_price(sym, ltp, ts)
+                # Honest fills (default ON): resolve each bar's adverse extreme
+                # before the favorable one so wick stop-outs exist. Close-only
+                # mode (HONEST_FILLS=0) kept solely to reproduce old runs —
+                # it produced a year with ZERO negative days in 245.
+                if _HONEST_FILLS:
+                    _h, _l = float(row.high), float(row.low)
+                    for name, _ in AGENT_CLASSES:
+                        trackers[name].on_bar(sym, _h, _l, ltp, ts)
+                else:
+                    for name, _ in AGENT_CLASSES:
+                        trackers[name].on_price(sym, ltp, ts)
 
                 if not bool(row.get("is_session", True)) or bar_idx >= n_bars - 1:
                     continue
