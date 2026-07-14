@@ -429,6 +429,12 @@ class TrailingSLEngine:
 
     # ── Main tick handler ─────────────────────────────────────────────
 
+    def has_active_for(self, symbol: str) -> bool:
+        """Cheap gate for the tick engine's agent-independent TSL drive."""
+        with self._lock:
+            return any(p.symbol == symbol and p.status == SLStatus.ACTIVE
+                       for p in self._positions.values())
+
     async def on_tick(
         self,
         symbol:  str,
