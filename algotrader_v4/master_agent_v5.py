@@ -328,9 +328,10 @@ class MasterAgent:
         if not self.running:
             return
         # Market-hours gate: don't burn a Claude call every 60s around the clock.
-        # PAPER mode is exempt (testing override — the GBM simulator ticks 24/7,
-        # same convention as tick_engine._poll_loop).
-        if not is_market_open() and settings.trading_mode == "LIVE":
+        # The PAPER exemption burned an entire Anthropic credit purchase
+        # overnight (2026-07-13/14: ~1,200 Opus calls reviewing a closed
+        # market). Off-hours review is now opt-in for offline GBM testing.
+        if not is_market_open() and not getattr(settings, "master_review_when_closed", False):
             logger.debug("[master] Market closed — skipping master review")
             return
         try:

@@ -203,9 +203,14 @@ class Settings(BaseSettings):
     # Intelligence layer — Claude Opus real-time market timing gate
     use_claude_trade_gate: bool = True    # per-trade Opus assessment before every order
     claude_gate_model: str = "claude-opus-4-8"   # Opus: deepest reasoning for trade timing
+    # Regime review fires every 60s ALL DAY — on Opus that burned an entire
+    # credit purchase overnight (2026-07-13/14, ~1,200 calls with the market
+    # closed). Sonnet is fully adequate for a summarize-and-direct job; Opus
+    # stays where depth pays: the per-trade gate above.
     claude_gate_threshold: int = 25       # min confidence to enter — low bar keeps good trades flowing
-    master_review_model: str = "claude-opus-4-8"   # regime review model
-    signal_engine_model: str = "claude-opus-4-8"   # signal generation model
+    master_review_model: str = "claude-sonnet-5"   # regime review: Sonnet (cost fix, see above)
+    master_review_when_closed: bool = False        # opt-in: off-hours review for offline GBM testing
+    signal_engine_model: str = "claude-sonnet-5"   # signal generation: Sonnet (cost fix)
     use_extended_thinking: bool = True             # extended thinking ON — Opus deep-reasons before every trade
     gate_thinking_budget: int = 5000               # thinking tokens per trade assessment (Opus with extended thinking)
     gate_api_timeout: float = 15.0                 # seconds — 15s accommodates Opus + extended thinking latency
