@@ -2671,9 +2671,15 @@ class SwingAgent(BaseAgent):
         self._cool_ts: dict = {}   # sym → {"BUY": datetime, "SELL": datetime}
 
     def evaluate_tick(self, snap: MarketSnapshot) -> tuple[str, Optional[dict]]:
-        import time as _time
         sym  = snap.symbol
-        now_s = _time.time()
+        # now_ist() (not time.time()) — it's the clock replay_backtest patches
+        # to simulated market time. Using wall-clock here meant the 15-minute
+        # warm-up guard below could never release within a single backtest
+        # process (each monthly chunk finishes in a few minutes of real CPU
+        # time): Swing has never completed a single successful backtest in
+        # this project's history, gated or ungated, honest or biased — every
+        # prior "Swing" result was silently empty for this exact reason.
+        now_s = now_ist().timestamp()
         # Restart warm-up guard: every deploy resets the prev-state dicts
         # above, and SUPERTREND_BOUNCE / EMA50_BOUNCE then fire on their first
         # evaluation across the whole book (2026-07-08 live: 25 junk trades,
