@@ -235,6 +235,20 @@ def t_expiry_day_bench():
 
 run("regime: expiry-day bench overrides bull regimes", t_expiry_day_bench)
 
+def t_trade_ledger_pattern_attribution():
+    """Both trade-record paths must pass pattern= to the ledger — 69/69 live
+    trades landed pattern-less (2026-07-14 audit), blinding the nightly
+    learner and kill-list to live results."""
+    import inspect, agents.base_agent as _ba
+    src = inspect.getsource(_ba)
+    calls = [seg for seg in src.split("record_trade_async(")[1:]
+             if "exit_reason" in seg[:900]]
+    assert len(calls) >= 2, f"expected both record paths, found {len(calls)}"
+    for seg in calls:
+        assert "pattern=" in seg[:1200], "a record_trade_async call dropped pattern attribution"
+
+run("ledger: every trade-record path passes pattern", t_trade_ledger_pattern_attribution)
+
 def t_regime_gate_unknown_and_toggle():
     """UNKNOWN blocks only the always-off agents; gating flag disables all."""
     import bot_state
