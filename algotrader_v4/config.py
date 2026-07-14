@@ -192,6 +192,13 @@ class Settings(BaseSettings):
     cooldown_scalping:       int = 180     # was 90 — fewer re-entries on the same symbol
     cooldown_options:        int = 120
     cooldown_futures:        int = 180
+    # Swing had NO re-entry cooldown at all (only a 60s scan throttle that
+    # re-arms regardless of trade outcome) — a "hold for days" strategy could
+    # re-enter the same symbol a minute after its own exit (2026-07-08 live:
+    # churned to the 25-trade daily cap TWICE in one session). 3600s (1h) is a
+    # conservative floor for a multi-day-hold strategy; tune with replay
+    # evidence once the honest-fills swing backtest exists.
+    cooldown_swing:          int = 3600
     cooldown_mean_reversion: int = 180
     cooldown_momentum:       int = 180
     cooldown_pairs:          int = 120
