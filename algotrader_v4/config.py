@@ -352,6 +352,10 @@ class Settings(BaseSettings):
     #   futures  EMA200_BOUNCE +4.8, STOCHRSI_FUTURES +1.4,
     #            TRIPLE_EMA_PULLBACK +0.6, MACD_CROSS +0.2
     disabled_patterns: str = (
+        # v14 (HONEST-fills year, tf5 core-12, 2026-07-14): first kill under
+        # the wick-aware simulator — VWAP_EXT_RIDE −56% over 84 trades while
+        # BB_SQUEEZE_WALK (+707%) and KELTNER_RIDE (+597%) carry the agent.
+        "intraday:VWAP_EXT_RIDE,"
         # v1 (62d replay, pre-kill baseline)
         "intraday:VWAP_TREND,intraday:EMA_PULLBACK,intraday:VWAP_RECLAIM,"
         "scalping:EMA9X,scalping:STOCHRSI_EXTREME,scalping:MACD_MICRO,"
