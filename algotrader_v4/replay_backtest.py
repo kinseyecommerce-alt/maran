@@ -234,6 +234,12 @@ def replay(symbols: list[str], max_days: int | None = None,
                 snap = make_snapshot(sym, ind, df, bar_idx, ltp, bar_seconds=60 * tf_min)
                 if regime_keys:
                     _bs.set_current_regime(_regime_at(regime_keys, regime_tl, row.name))
+                # Stamp the historical trade date so date-aware gates (the
+                # expiry-day bench) see the replayed day, not the wall clock.
+                try:
+                    _bs.set_current_trade_date(ts.date())
+                except Exception:
+                    pass
                 # HONEST EXIT: run the agent's real should_exit_position (brain
                 # exits — supertrend/RSI/trend/ADX/breakeven) so the sim exits
                 # match live, not the simple SL/target the tracker used before.

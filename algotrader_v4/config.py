@@ -544,6 +544,13 @@ class Settings(BaseSettings):
         "BLACK_SWAN:swing,intraday,futures,momentum,pairs,mean_reversion"
     )
 
+    # Index weekly-expiry-day bench, applied on TOP of the regime matrix on
+    # days whose weekday appears in index_expiry_weekdays. 2026-07-14 live:
+    # regime flips re-enabled options mid-whipsaw (allowed in BULL labels) and
+    # 15 premium-buying entries lost ₹8.7k into the expiry pin. Bought premium
+    # on 0-DTE whipsaw is structurally the worst trade in the book.
+    expiry_day_blocked_agents: str = "options"
+
     # Phase 2/3: Position sizing
     use_atr_sizing: bool = True
     # Risk budget per trade as % of the agent's pool. 0.5% risked only ~₹1k on a

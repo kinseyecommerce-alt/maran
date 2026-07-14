@@ -172,6 +172,12 @@ def t_kill_list_runtime_mutation():
 run("kill-list: replay bleeders muted by default",  t_kill_list_defaults)
 run("kill-list: runtime settings mutation applies", t_kill_list_runtime_mutation)
 
+# Pin a fixed NON-expiry trade date so the expiry-day bench (weekday-based)
+# cannot make the suite's regime-gate expectations depend on the wall clock.
+import bot_state as _bs_pin
+from datetime import date as _date_pin
+_bs_pin.set_current_trade_date(_date_pin(2026, 7, 15))   # a Wednesday
+
 # ── Regime entry gate (settings.regime_blocked_agents → bot_state) ──────────
 
 def t_regime_gate_matrix():
@@ -203,6 +209,31 @@ def t_regime_gate_matrix():
         assert not bot_state.is_agent_allowed_in_regime("momentum")  # ~flat net — stays out
     finally:
         bot_state.set_current_regime("UNKNOWN")
+
+def t_expiry_day_bench():
+    """expiry_day_blocked_agents benches options on index-expiry weekdays
+    regardless of regime (2026-07-14: regime flips re-enabled options
+    mid-whipsaw and 15 premium buys bled ₹8.7k into the expiry pin)."""
+    import bot_state
+    from datetime import date
+    old = settings.expiry_day_blocked_agents
+    try:
+        settings.expiry_day_blocked_agents = "options"
+        bot_state.set_current_regime("BULL_TREND")       # regime that ALLOWS options
+        bot_state.set_current_trade_date(date(2026, 7, 14))   # Tuesday = NSE expiry
+        assert not bot_state.is_agent_allowed_in_regime("options"), "expiry bench must override BULL"
+        assert bot_state.is_agent_allowed_in_regime("intraday"), "bench is options-only"
+        bot_state.set_current_trade_date(date(2026, 7, 15))   # Wednesday
+        assert bot_state.is_agent_allowed_in_regime("options"), "non-expiry day unaffected"
+        settings.expiry_day_blocked_agents = ""
+        bot_state.set_current_trade_date(date(2026, 7, 14))
+        assert bot_state.is_agent_allowed_in_regime("options"), "empty bench disables feature"
+    finally:
+        settings.expiry_day_blocked_agents = old
+        bot_state.set_current_regime("UNKNOWN")
+        bot_state.set_current_trade_date(date(2026, 7, 15))
+
+run("regime: expiry-day bench overrides bull regimes", t_expiry_day_bench)
 
 def t_regime_gate_unknown_and_toggle():
     """UNKNOWN blocks only the always-off agents; gating flag disables all."""
@@ -1508,14 +1539,18 @@ run("conviction 2x: top-score signals get doubled slice", t_conviction_2x_slice)
 
 def t_mis_leverage_buying_power():
     """MIS equity agents get slice x mis_leverage buying power; swing (CNC)
-    and lot-based agents don't. Risk budget stays on the cash slice."""
-    from risk_manager import risk_manager as rm
+    and lot-based agents don't. Risk budget stays on the cash slice.
+    Calendar factor pinned to 1.0 — on real expiry Tuesdays the 0.6× size-down
+    made this wall-clock-dependent (first hit: 2026-07-14)."""
+    from unittest.mock import patch as _patch
+    from risk_manager import risk_manager as rm, RiskManager as _RM
     slice_ = rm.max_capital_for_agent("scalping")
     assert rm.buying_power_for_agent("scalping") == slice_ * settings.mis_leverage
     assert rm.buying_power_for_agent("swing") == rm.max_capital_for_agent("swing")
     # afford cap in ATR sizing now uses buying power: a tight-SL scalp is no
     # longer chopped to the cash slice
-    qty = rm.calculate_quantity_atr(1000.0, 10.0, agent="scalping", sl_dist=3.0)
+    with _patch.object(_RM, "calendar_size_factor", staticmethod(lambda: 1.0)):
+        qty = rm.calculate_quantity_atr(1000.0, 10.0, agent="scalping", sl_dist=3.0)
     risk_qty   = int(slice_ * settings.risk_per_trade_pct / 100 / 3.0)
     afford_qty = int(slice_ * settings.mis_leverage // 1000.0)
     maxpos_qty = int(settings.max_position_size // 1000.0)

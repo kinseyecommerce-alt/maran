@@ -121,13 +121,17 @@ REGIME_PLANS: dict[Regime, StrategyPlan] = {
         regime     = Regime.BEAR_VOLATILE,
     ),
     Regime.RANGING: StrategyPlan(
-        active     = ["scalping", "intraday", "pairs"],
-        paused     = ["swing", "options", "futures", "momentum", "mean_reversion"],
-        allocation = {"scalping":45, "options":35, "intraday":20, "swing":0},
+        active     = ["scalping", "intraday", "futures"],
+        paused     = ["swing", "options", "momentum", "mean_reversion", "pairs"],
+        allocation = {"scalping":40, "intraday":40, "futures":20, "swing":0},
         size_factor= 0.75,
-        reasoning  = "Market consolidating — the mean-reversion habitat. Replay: "
-                     "mean_reversion +9.8%, pairs +14.0% on range days while "
-                     "momentum -61.5%, options -46.7%, intraday -20.4% paused.",
+        reasoning  = "Market consolidating — defensive posture. The coarse range-day "
+                     "numbers once credited mean_reversion/pairs here, but the honest "
+                     "per-pattern re-tests refuted them (BB_MID_REVERT -42% gross, "
+                     "PRICE_ZSCORE -17% net; pairs -38% net over 62d, MeanRev -519% "
+                     "year-unlocked) — this row previously contradicted its own "
+                     "reasoning and mismatched the enforced matrix. Range days are "
+                     "for small size and patience, not a habitat play we don't have.",
         regime     = Regime.RANGING,
     ),
     Regime.HIGH_VOLATILE: StrategyPlan(
