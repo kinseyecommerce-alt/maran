@@ -551,6 +551,12 @@ class Settings(BaseSettings):
     # on 0-DTE whipsaw is structurally the worst trade in the book.
     expiry_day_blocked_agents: str = "options"
 
+    # Supertrend-flip exit: adverse-move gate (×ATR) for NON-trending tape
+    # (ADX≥20 keeps its own branch). 0.3 = current behavior; the 2-day live
+    # audit showed it collapses realized win:loss to 1:1 against a 3:1 target
+    # design on chop days. Change ONLY with year-replay validation.
+    st_flip_adverse_atr: float = 0.3
+
     # Phase 2/3: Position sizing
     use_atr_sizing: bool = True
     # Risk budget per trade as % of the agent's pool. 0.5% risked only ~₹1k on a

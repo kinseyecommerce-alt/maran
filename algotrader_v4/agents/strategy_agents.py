@@ -39,6 +39,19 @@ def _expiry_weekday(underlying: str) -> int:
     return 3 if underlying in ("SENSEX", "BANKEX") else 1
 
 
+def _st_flip_adverse() -> float:
+    """Adverse-move multiple (xATR) that lets a supertrend flip exit fire in a
+    non-trending tape (the ADX>=20 branch handles trends). 2-day live audit
+    (2026-07-13/14): with 0.3, the flip exit dominated chop-day outcomes —
+    scalping's realized win:loss collapsed to 1:1 against a 3:1 design (gross
+    +Rs442, costs Rs11.7k) and 42 of intraday's 69 exits were flips. Config
+    st_flip_adverse_atr; changes must be year-replay validated."""
+    try:
+        return float(getattr(settings, "st_flip_adverse_atr", 0.3) or 0.3)
+    except Exception:
+        return 0.3
+
+
 def _roll_off_holiday(d):
     """NSE rule: expiry falling on a holiday moves to the PREVIOUS working day.
     Weekday-walk expiry math never consulted the holiday calendar, emitting
@@ -801,7 +814,7 @@ class IntradayAgent(BaseAgent):
             # Require ADX≥20 (trend) OR price below entry by >0.3×ATR; else let
             # SL/target/TSL manage the trade.
             _adx = getattr(ind, "adx_14", 0) or 0
-            if ind.supertrend_dir == "DOWN" and (_adx >= 20 or ltp < entry - 0.3 * atr):
+            if ind.supertrend_dir == "DOWN" and (_adx >= 20 or ltp < entry - _st_flip_adverse() * atr):
                 return True, "Supertrend flip (DOWN) exit"
             # RSI-14 exhaustion — overbought signal on an intraday long
             if ind.rsi_14 >= 76:
@@ -825,7 +838,7 @@ class IntradayAgent(BaseAgent):
             # Supertrend flip against short — only in a confirmed trend or on a
             # real adverse move (see the long-side note above).
             _adx = getattr(ind, "adx_14", 0) or 0
-            if ind.supertrend_dir == "UP" and (_adx >= 20 or ltp > entry + 0.3 * atr):
+            if ind.supertrend_dir == "UP" and (_adx >= 20 or ltp > entry + _st_flip_adverse() * atr):
                 return True, "Supertrend flip (UP) exit"
             # RSI-14 exhaustion — oversold on an intraday short
             if ind.rsi_14 <= 24:
@@ -2991,7 +3004,7 @@ class SwingAgent(BaseAgent):
             # Supertrend flip — only honour in a confirmed trend (ADX≥20) or on a
             # real adverse move; in a range it whipsaws swing holds out at a loss.
             if ind.supertrend_dir in ("DOWN", "down") and (
-                    (getattr(ind, "adx_14", 0) or 0) >= 20 or ltp < entry - 0.3 * atr):
+                    (getattr(ind, "adx_14", 0) or 0) >= 20 or ltp < entry - _st_flip_adverse() * atr):
                 return True, "Supertrend flip (DOWN) exit"
             if ind.rsi_14 >= 78:
                 return True, f"RSI overbought {ind.rsi_14:.0f} exit"
@@ -3008,7 +3021,7 @@ class SwingAgent(BaseAgent):
             if ind.ema200 and ltp > ind.ema200 * 1.002:
                 return True, "EMA200 reclaim exit"
             if ind.supertrend_dir in ("UP", "up") and (
-                    (getattr(ind, "adx_14", 0) or 0) >= 20 or ltp > entry + 0.3 * atr):
+                    (getattr(ind, "adx_14", 0) or 0) >= 20 or ltp > entry + _st_flip_adverse() * atr):
                 return True, "Supertrend flip (UP) exit"
             if ind.rsi_14 <= 22:
                 return True, f"RSI oversold {ind.rsi_14:.0f} exit"
@@ -5615,7 +5628,7 @@ class MomentumAgent(BaseAgent):
                 return True, f"ADX fade {adx:.0f} — momentum gone"
             # Supertrend flip — only in a confirmed trend or on a real adverse
             # move; otherwise it whipsaws momentum trades out on range noise.
-            if ind.supertrend_dir in ("DOWN", "down") and (adx >= 20 or ltp < entry - 0.3 * atr):
+            if ind.supertrend_dir in ("DOWN", "down") and (adx >= 20 or ltp < entry - _st_flip_adverse() * atr):
                 return True, "Supertrend flip (DOWN) exit"
             if ind.rsi_14 >= 78 and ind.macd_hist < 0:
                 return True, f"RSI exhaustion {ind.rsi_14:.0f}"
@@ -5629,7 +5642,7 @@ class MomentumAgent(BaseAgent):
                 return True, f"Momentum TGT ₹{ltp:.2f}"
             if adx < 18 and ind.macd_hist > 0:
                 return True, f"ADX fade {adx:.0f} — momentum gone"
-            if ind.supertrend_dir in ("UP", "up") and (adx >= 20 or ltp > entry + 0.3 * atr):
+            if ind.supertrend_dir in ("UP", "up") and (adx >= 20 or ltp > entry + _st_flip_adverse() * atr):
                 return True, "Supertrend flip (UP) exit"
             if ind.rsi_14 <= 22 and ind.macd_hist > 0:
                 return True, f"RSI exhaustion {ind.rsi_14:.0f}"
