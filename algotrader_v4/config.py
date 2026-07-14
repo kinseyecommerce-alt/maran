@@ -203,9 +203,14 @@ class Settings(BaseSettings):
     # Intelligence layer — Claude Opus real-time market timing gate
     use_claude_trade_gate: bool = True    # per-trade Opus assessment before every order
     claude_gate_model: str = "claude-opus-4-8"   # Opus: deepest reasoning for trade timing
+    # Regime review fires every 60s ALL DAY — on Opus that burned an entire
+    # credit purchase overnight (2026-07-13/14, ~1,200 calls with the market
+    # closed). Sonnet is fully adequate for a summarize-and-direct job; Opus
+    # stays where depth pays: the per-trade gate above.
     claude_gate_threshold: int = 25       # min confidence to enter — low bar keeps good trades flowing
-    master_review_model: str = "claude-opus-4-8"   # regime review model
-    signal_engine_model: str = "claude-opus-4-8"   # signal generation model
+    master_review_model: str = "claude-sonnet-5"   # regime review: Sonnet (cost fix, see above)
+    master_review_when_closed: bool = False        # opt-in: off-hours review for offline GBM testing
+    signal_engine_model: str = "claude-sonnet-5"   # signal generation: Sonnet (cost fix)
     use_extended_thinking: bool = True             # extended thinking ON — Opus deep-reasons before every trade
     gate_thinking_budget: int = 5000               # thinking tokens per trade assessment (Opus with extended thinking)
     gate_api_timeout: float = 15.0                 # seconds — 15s accommodates Opus + extended thinking latency
@@ -347,6 +352,10 @@ class Settings(BaseSettings):
     #   futures  EMA200_BOUNCE +4.8, STOCHRSI_FUTURES +1.4,
     #            TRIPLE_EMA_PULLBACK +0.6, MACD_CROSS +0.2
     disabled_patterns: str = (
+        # v14 (HONEST-fills year, tf5 core-12, 2026-07-14): first kill under
+        # the wick-aware simulator — VWAP_EXT_RIDE −56% over 84 trades while
+        # BB_SQUEEZE_WALK (+707%) and KELTNER_RIDE (+597%) carry the agent.
+        "intraday:VWAP_EXT_RIDE,"
         # v1 (62d replay, pre-kill baseline)
         "intraday:VWAP_TREND,intraday:EMA_PULLBACK,intraday:VWAP_RECLAIM,"
         "scalping:EMA9X,scalping:STOCHRSI_EXTREME,scalping:MACD_MICRO,"
@@ -543,6 +552,19 @@ class Settings(BaseSettings):
         "HIGH_VOLATILE:momentum,mean_reversion,pairs,swing;"
         "BLACK_SWAN:swing,intraday,futures,momentum,pairs,mean_reversion"
     )
+
+    # Index weekly-expiry-day bench, applied on TOP of the regime matrix on
+    # days whose weekday appears in index_expiry_weekdays. 2026-07-14 live:
+    # regime flips re-enabled options mid-whipsaw (allowed in BULL labels) and
+    # 15 premium-buying entries lost ₹8.7k into the expiry pin. Bought premium
+    # on 0-DTE whipsaw is structurally the worst trade in the book.
+    expiry_day_blocked_agents: str = "options"
+
+    # Supertrend-flip exit: adverse-move gate (×ATR) for NON-trending tape
+    # (ADX≥20 keeps its own branch). 0.3 = current behavior; the 2-day live
+    # audit showed it collapses realized win:loss to 1:1 against a 3:1 target
+    # design on chop days. Change ONLY with year-replay validation.
+    st_flip_adverse_atr: float = 0.3
 
     # Phase 2/3: Position sizing
     use_atr_sizing: bool = True

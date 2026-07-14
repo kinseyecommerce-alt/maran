@@ -147,10 +147,55 @@ def _regime_blocks() -> dict[str, set[str]]:
     return _regime_block_map
 
 
+_current_trade_date = None   # date; replay stamps historical days, live uses IST clock
+
+
+def set_current_trade_date(d) -> None:
+    global _current_trade_date
+    _current_trade_date = d
+
+
+def _today():
+    if _current_trade_date is not None:
+        return _current_trade_date
+    from ist_clock import now_ist
+    return now_ist().date()
+
+
+def _expiry_day_blocks() -> set[str]:
+    """Extra agent bench on index weekly-expiry days, independent of regime.
+    2026-07-14 (Tuesday expiry): the whipsaw flipped the regime label all day
+    and every flip to a BULL label re-enabled options at the worst moments —
+    15 premium-buying entries bled ₹8.7k into gamma pinning. Regime hysteresis
+    cannot save an agent whose habitat is simply absent on expiry days."""
+    try:
+        from config import settings
+        raw = getattr(settings, "expiry_day_blocked_agents", "") or ""
+        if not raw:
+            return set()
+        wds: set[int] = set()
+        for part in (getattr(settings, "index_expiry_weekdays", "") or "").split(","):
+            if ":" in part:
+                try:
+                    wds.add(int(part.split(":", 1)[1]))
+                except ValueError:
+                    pass
+        if _today().weekday() in wds:
+            return {a.strip().lower() for a in raw.split(",") if a.strip()}
+    except Exception:
+        pass
+    return set()
+
+
 def is_agent_allowed_in_regime(agent: str) -> bool:
     """Entry gate: False when the current confirmed regime is one where the
-    62-day replay evidence says this agent loses. Open positions unaffected."""
-    return agent.lower() not in _regime_blocks().get(_current_regime, set())
+    62-day replay evidence says this agent loses, or when today is an index
+    expiry day and the agent is on the expiry-day bench. Open positions
+    are unaffected."""
+    a = agent.lower()
+    if a in _expiry_day_blocks():
+        return False
+    return a not in _regime_blocks().get(_current_regime, set())
 
 
 def is_pattern_enabled(agent: str, pattern: str) -> bool:

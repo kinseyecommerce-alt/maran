@@ -1580,10 +1580,34 @@ async def squareoff_position(symbol: str):
     stops_cancelled = _cancel_open_stops(symbol)
     risk_manager.position_closed()
     try:
-        from state_store import get_open_positions, close_position
+        from state_store import get_open_positions, close_position, record_trade_async
         for p in get_open_positions():
-            if p.get("symbol") == symbol:
+            if p.get("symbol") == symbol or p.get("tradingsymbol") == symbol:
                 close_position(p.get("order_id"))
+                # Ledger the exit — the 2026-07-14 JSWSTEEL squareoff (−₹6,048)
+                # vanished from the trades table because this path closed the
+                # position without recording the trade; the EOD scoreboard,
+                # learner, and daily loss ledger all under-reported the day.
+                try:
+                    _entry_px = float(p.get("entry_price") or 0)
+                    _exit_px  = float(pos.get("last_price") or pos.get("average_price") or 0)
+                    _q        = abs(qty)
+                    _side     = p.get("side", "BUY" if qty > 0 else "SELL")
+                    _gross    = (_exit_px - _entry_px) * _q if _side == "BUY" \
+                                else (_entry_px - _exit_px) * _q
+                    from risk_manager import compute_round_trip_cost
+                    _cost = compute_round_trip_cost(
+                        symbol, _q, (_entry_px + _exit_px) / 2 or _exit_px,
+                        product=pos.get("product", "MIS"))
+                    record_trade_async(
+                        symbol=symbol, strategy=p.get("strategy", "manual"),
+                        side=_side, entry_price=_entry_px, exit_price=_exit_px,
+                        quantity=_q, gross_pnl=_gross, net_pnl=_gross - _cost,
+                        cost=_cost, exit_reason="MANUAL_SQUAREOFF",
+                        pattern=p.get("pattern", ""),
+                    )
+                except Exception as _rexc:
+                    logger.warning("squareoff trade-record failed for {}: {}", symbol, _rexc)
     except Exception as exc:
         logger.warning("squareoff close-persist failed for {}: {}", symbol, exc)
     await broadcast({"event": "position_squared_off", "symbol": symbol, "order_id": oid})

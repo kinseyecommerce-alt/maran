@@ -284,6 +284,11 @@ def _setup_tsl_callbacks() -> None:
                 exit_price=_cost_exit_px, quantity=pos.quantity,
                 gross_pnl=pnl, net_pnl=pnl - cost, cost=cost,
                 exit_reason="SL_HIT",
+                # Pattern attribution: the ledger column existed but no caller
+                # filled it — 69/69 live trades landed pattern-less
+                # (2026-07-14 intraday audit), blinding the nightly learner
+                # and kill-list to live results.
+                pattern=(entry or {}).get("pattern", ""),
                 entry_time=__import__("datetime").datetime.utcfromtimestamp(
                     getattr(pos, "opened_at", 0) or 0
                 ).strftime("%Y-%m-%d %H:%M:%S"),
@@ -2192,6 +2197,7 @@ class BaseAgent(ABC):
                     exit_reason=reason,
                     regime=regime_detector.current_regime.value
                         if regime_detector.current_regime else "",
+                    pattern=(_sl_entry or {}).get("pattern", ""),
                 )
             except Exception:
                 pass

@@ -375,6 +375,27 @@ class AgentTracker:
         self._open[sym] = tr
         self.trades.append(tr)
 
+    def on_bar(self, sym: str, high: float, low: float, close: float, ts: datetime):
+        """Honest intra-bar fill resolution: process the bar's ADVERSE extreme
+        before the favorable one (stop-first tie-break). Close-only simulation
+        cannot see wicks — stops almost never fired and the year replay showed
+        ZERO negative days in 245 (impossible), inflating every absolute
+        number. Live trades die on wicks; the sim must too."""
+        tr = self._open.get(sym)
+        if not tr:
+            return
+        is_long = tr.action in ("BUY", "CE", "LONG")
+        if is_long:
+            self.on_price(sym, low, ts)     # adverse first: stop can fire
+            if sym in self._open:
+                self.on_price(sym, high, ts)  # then favorable: target
+        else:
+            self.on_price(sym, high, ts)
+            if sym in self._open:
+                self.on_price(sym, low, ts)
+        if sym in self._open:
+            self.on_price(sym, close, ts)     # settle trails on close
+
     def on_price(self, sym: str, ltp: float, ts: datetime):
         tr = self._open.get(sym)
         if not tr:

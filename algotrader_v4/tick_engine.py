@@ -1033,6 +1033,20 @@ class TickEngine:
                 kite_client.check_paper_triggers(_contract, _px)
             kite_client.check_paper_triggers(symbol, tick.ltp)
 
+        # Agent-independent TSL evaluation: the trailing-stop engine was driven
+        # only from each agent's tick loop, so PAUSING an agent silently
+        # orphaned its open positions' exit management (2026-07-14 live:
+        # JSWSTEEL CE bled −₹6k unmanaged after the options pause). on_tick is
+        # idempotent (atomic status check-and-set), so the extra caller is safe
+        # alongside running agents.
+        try:
+            from trailing_sl_engine import trailing_sl_engine as _tsl_eng
+            if _tsl_eng.has_active_for(symbol):
+                asyncio.create_task(
+                    _tsl_eng.on_tick(symbol, tick.ltp, ind.atr_14 or 0.0))
+        except Exception:
+            pass
+
         snap = MarketSnapshot(
             symbol=symbol, tick=tick, indicators=ind,
             candles_1min=self._bufs_1min[symbol].candles()[-200:],
