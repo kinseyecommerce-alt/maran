@@ -201,7 +201,12 @@ class Settings(BaseSettings):
     use_nifty100_watchlist: bool = False  # auto-use full Nifty 100 as watchlist
 
     # Intelligence layer — Claude Opus real-time market timing gate
-    use_claude_trade_gate: bool = True    # per-trade Opus assessment before every order
+    # Per-trade Claude assessment — OPT-IN. The system is designed to trade
+    # fully rule-based: min-score floors, cost gate, kill-list, regime matrix,
+    # expiry/calendar benches, caps/cooldowns, ATR+Kelly sizing, TSL/SL-M
+    # protection. Flip on (with API credits) to trial AI vetoes; measure its
+    # per-trade value in /gate/log before paying for it permanently.
+    use_claude_trade_gate: bool = False
     claude_gate_model: str = "claude-opus-4-8"   # Opus: deepest reasoning for trade timing
     # Regime review fires every 60s ALL DAY — on Opus that burned an entire
     # credit purchase overnight (2026-07-13/14, ~1,200 calls with the market
@@ -210,6 +215,11 @@ class Settings(BaseSettings):
     claude_gate_threshold: int = 25       # min confidence to enter — low bar keeps good trades flowing
     master_review_model: str = "claude-sonnet-5"   # regime review: Sonnet (cost fix, see above)
     master_review_when_closed: bool = False        # opt-in: off-hours review for offline GBM testing
+    # Per-minute Claude commentary on top of the rule-based regime plans —
+    # OPT-IN. The enforced matrix made every decision while this call was dead
+    # (2026-07-13/14); Claude spends credits only where value is measurable:
+    # the per-trade gate.
+    use_master_claude_review: bool = False
     signal_engine_model: str = "claude-sonnet-5"   # signal generation: Sonnet (cost fix)
     use_extended_thinking: bool = True             # extended thinking ON — Opus deep-reasons before every trade
     gate_thinking_budget: int = 5000               # thinking tokens per trade assessment (Opus with extended thinking)

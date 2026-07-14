@@ -471,6 +471,19 @@ class MasterAgent:
             "guard": order_guard.status(),
         }
 
+        # The per-minute Claude commentary is OPT-IN (default off): the enforced
+        # regime matrix + rule-based plans made every gating decision during the
+        # 2026-07-13/14 sessions while this call was erroring — its incremental
+        # value is unmeasured, its cost was the entire credit burn. The regime
+        # MATH above always runs; only the API commentary is skipped.
+        if not getattr(settings, "use_master_claude_review", False):
+            self.last_directives = {
+                "regime":            regime.value,
+                "regime_reasoning":  plan.reasoning,
+                "source":            "rule-based (Claude review disabled)",
+            }
+            return
+
         try:
             # The anthropic client is synchronous — run it in the default thread
             # executor so the 2-10s API round-trip never freezes the event loop
