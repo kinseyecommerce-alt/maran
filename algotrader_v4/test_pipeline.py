@@ -120,7 +120,6 @@ def t_kill_list_defaults():
                        ("scalping", "SUPERTREND_PULLBACK")]:
         assert not bot_state.is_pattern_enabled(agent, pat), f"{agent}:{pat} should be killed"
     # proven NET earners stay enabled — per-agent scoping intact
-    assert bot_state.is_pattern_enabled("intraday", "ORB_BREAK")
     assert bot_state.is_pattern_enabled("scalping", "BB_BAND_WALK")     # net +265.0
     assert bot_state.is_pattern_enabled("scalping", "SUPERTREND_FLIP")  # net +47.4
     assert bot_state.is_pattern_enabled("intraday", "BB_SQUEEZE_WALK")  # net +133.7
@@ -150,6 +149,10 @@ def t_kill_list_defaults():
     # VWAP_BREAKOUT killed (net -9.7% after costs @79tr).
     assert not bot_state.is_pattern_enabled("momentum", "VWAP_BREAKOUT")
     assert bot_state.is_pattern_enabled("momentum", "VOL_SURGE_TREND")   # net ~+56% @538tr
+    # v15 (honest-fills, tf15, all 122 symbols): ORB_BREAK negative in ALL 12
+    # months, -972% @2493tr — a structural bleeder invisible at core-12
+    # breadth, decisive at full-book breadth.
+    assert not bot_state.is_pattern_enabled("intraday", "ORB_BREAK")
     # v13 (1-YEAR replay): MACD_ZERO_CROSS killed — the 62d +33% was
     # small-sample; over 245 days it nets -19.4%. POWER_HOUR_OPT killed too
     # (negative at every cadence: -40.2% @5m, -43.7% @15m).
