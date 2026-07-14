@@ -201,7 +201,12 @@ class Settings(BaseSettings):
     use_nifty100_watchlist: bool = False  # auto-use full Nifty 100 as watchlist
 
     # Intelligence layer — Claude Opus real-time market timing gate
-    use_claude_trade_gate: bool = True    # per-trade Opus assessment before every order
+    # Per-trade Claude assessment — OPT-IN. The system is designed to trade
+    # fully rule-based: min-score floors, cost gate, kill-list, regime matrix,
+    # expiry/calendar benches, caps/cooldowns, ATR+Kelly sizing, TSL/SL-M
+    # protection. Flip on (with API credits) to trial AI vetoes; measure its
+    # per-trade value in /gate/log before paying for it permanently.
+    use_claude_trade_gate: bool = False
     claude_gate_model: str = "claude-opus-4-8"   # Opus: deepest reasoning for trade timing
     # Regime review fires every 60s ALL DAY — on Opus that burned an entire
     # credit purchase overnight (2026-07-13/14, ~1,200 calls with the market

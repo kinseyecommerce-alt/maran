@@ -2616,7 +2616,11 @@ def readiness():
         "kite_api_secret":      bool(settings.kite_api_secret),
         "kite_access_token":    bool(settings.kite_access_token),
         "kite_initialised":     bool(creds.get("kite_initialised")),
-        "anthropic_api_key":    bool(settings.anthropic_api_key),
+        # Anthropic key gates readiness ONLY when a Claude feature is enabled —
+        # the system is designed to trade fully rule-based without the API.
+        "anthropic_api_key":    bool(settings.anthropic_api_key)
+                                or not (settings.use_claude_trade_gate
+                                        or getattr(settings, "use_master_claude_review", False)),
         "jwt_secret_key":       bool(settings.jwt_secret_key),
         "telegram_bot":         bool(settings.telegram_bot_token and settings.telegram_chat_id),
         "auto_login_ready":     bool(settings.kite_user_id and settings.kite_password
@@ -3625,7 +3629,8 @@ async def on_startup():
 
     # Pre-warm the Claude gate connection so the first real trade doesn't pay
     # the cold-start TCP/TLS handshake cost (~300-500 ms).
-    asyncio.create_task(_prewarm_gate(), name="prewarm_gate").add_done_callback(_log_task_exc)
+    if settings.use_claude_trade_gate:
+        asyncio.create_task(_prewarm_gate(), name="prewarm_gate").add_done_callback(_log_task_exc)
     from platform_scheduler import platform_scheduler
     platform_scheduler.start()
 
