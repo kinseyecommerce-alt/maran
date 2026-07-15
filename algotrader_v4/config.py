@@ -378,6 +378,14 @@ class Settings(BaseSettings):
     #   futures  EMA200_BOUNCE +4.8, STOCHRSI_FUTURES +1.4,
     #            TRIPLE_EMA_PULLBACK +0.6, MACD_CROSS +0.2
     disabled_patterns: str = (
+        # v16 (HONEST-fills year, tf1 core-12, 2026-07-15): STOCHRSI_OPTIONS
+        # was kept alive at v4 as a "survivor" under the OLD close-only
+        # simulator (net-positive in both measurement rounds) — exactly the
+        # class of result the honest wick-aware simulator was built to
+        # correct. Under honest fills it's Options' worst pattern: -156.5%
+        # over 49 trades (~-3.2%/trade), a mean-reversion bounce signal that
+        # can't clear theta + spread before the bounce fizzles.
+        "options:STOCHRSI_OPTIONS,"
         # v15 (HONEST-fills year, tf15, all 122 symbols, 2026-07-14): ORB_BREAK
         # negative in ALL 12 months (−45% to −106% each), 2,493 trades, −972%
         # total — a structural bleeder invisible in the thin core-12 sample
