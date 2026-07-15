@@ -378,6 +378,15 @@ class Settings(BaseSettings):
     #   futures  EMA200_BOUNCE +4.8, STOCHRSI_FUTURES +1.4,
     #            TRIPLE_EMA_PULLBACK +0.6, MACD_CROSS +0.2
     disabled_patterns: str = (
+        # v17 (HONEST-fills 3mo, tf5 core-12, ungated, 2026-07-16 — first-ever
+        # real evaluation of PREV_DAY_HIGH/LOW, which read a nonexistent
+        # LiveIndicators field and never fired a single trade before this
+        # session's daily-bar rewrite): PREV_DAY_LOW is Swing's worst pattern
+        # once it can actually fire, -47.6% over 12 trades (~-4.0%/trade);
+        # its BUY-side sibling PREV_DAY_HIGH is also negative, -7.6% @7tr.
+        # Combined -55.2% @19tr clears the project's -2%/>=20tr kill bar.
+        # Fixing dead code doesn't obligate shipping what it reveals.
+        "swing:PREV_DAY_HIGH,swing:PREV_DAY_LOW,"
         # v16 (HONEST-fills year, tf1 core-12, 2026-07-15): STOCHRSI_OPTIONS
         # was kept alive at v4 as a "survivor" under the OLD close-only
         # simulator (net-positive in both measurement rounds) — exactly the
