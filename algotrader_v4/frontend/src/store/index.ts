@@ -67,7 +67,10 @@ export const useStore = create<AppStore>((set, get) => ({
   clearToken: () => { localStorage.removeItem('jwt_token'); set({ token: '' }) },
 
   apiKey:  localStorage.getItem('api_key') || '',
-  apiBase: localStorage.getItem('api_base') || import.meta.env.VITE_API_BASE_URL || 'http://localhost:8000',
+  // Same-origin by default (backend serves this SPA), so a fresh browser with
+  // no localStorage override works out of the box. VITE_API_BASE_URL/localStorage
+  // remain available for split-origin deployments (separately hosted frontend).
+  apiBase: localStorage.getItem('api_base') || import.meta.env.VITE_API_BASE_URL || window.location.origin,
   wsConnected: false,
   setApiKey:   (k) => { localStorage.setItem('api_key', k); set({ apiKey: k }) },
   setApiBase:  (b) => { localStorage.setItem('api_base', b); set({ apiBase: b }) },
