@@ -125,7 +125,11 @@ def t_kill_list_defaults():
     assert bot_state.is_pattern_enabled("intraday", "BB_SQUEEZE_WALK")  # net +133.7
     assert bot_state.is_pattern_enabled("intraday", "STOCHRSI_CROSS")   # net +36.5
     assert bot_state.is_pattern_enabled("options", "EXPIRY_SCALP")      # net-positive in both runs
-    assert bot_state.is_pattern_enabled("options", "STOCHRSI_OPTIONS")  # net-positive in both runs
+    # v16 (honest-fills, tf1 core-12): STOCHRSI_OPTIONS flips from v4's
+    # "net-positive in both runs" (close-only sim) to -156.5% @49tr under
+    # honest wick-aware fills — a mean-reversion bounce that can't clear
+    # theta + spread before the bounce fizzles.
+    assert not bot_state.is_pattern_enabled("options", "STOCHRSI_OPTIONS")
     # v7: futures = band-walk specialist; EMA200_BOUNCE killed (-33.9% @984tr
     # once stock futures let it overtrade)
     assert not bot_state.is_pattern_enabled("futures", "EMA200_BOUNCE")
