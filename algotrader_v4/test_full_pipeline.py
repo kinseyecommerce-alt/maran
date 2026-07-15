@@ -74,9 +74,16 @@ from agents.strategy_agents import (
 
 def _aged_swing():
     """SwingAgent with the 15-min restart warm-up guard pre-aged, so the E2E
-    entry check exercises the normal path (the guard itself is unit-tested)."""
+    entry check exercises the normal path (the guard itself is unit-tested).
+    SwingAgent now scores patterns against REAL daily-bar indicators (see
+    agents/strategy_agents.py SwingAgent._daily_indicators) rather than the
+    tick-level snap.indicators this test's mk() recipe hand-crafts — this
+    suite is exercising order-placement MECHANICS end-to-end, not pattern
+    selection (that's replay-backtest-validated separately), so short-circuit
+    the daily-bar lookup back to the recipe's own snap.indicators."""
     a = SwingAgent()
     a._warmup_start = -1e9
+    a._daily_indicators = lambda sym, snap: snap.indicators
     return a
 
 # ── Tiny test harness (mirrors test_sim_orders_flow.py) ───────────────────────

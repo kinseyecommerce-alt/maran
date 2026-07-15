@@ -9,9 +9,12 @@ import asyncio
 from datetime import datetime, time, timedelta
 from typing import Optional
 
+import pandas as pd
+from pathlib import Path
+
 from ist_clock import now_ist
 from agents.base_agent import BaseAgent
-from tick_engine import MarketSnapshot, LiveIndicators
+from tick_engine import MarketSnapshot, LiveIndicators, Tick, IndicatorCalc
 from risk_manager import risk_manager
 from config import settings
 
@@ -2630,6 +2633,21 @@ class SwingAgent(BaseAgent):
     """
     World-class swing trader (CNC) — 13 patterns, 6-factor ctx bonus, ATR-dynamic SL/TGT.
 
+    Pattern signals are evaluated against REAL DAILY bars (see
+    `_daily_indicators()`), not the 1-minute tick indicators every other
+    agent uses. A full honest-fills year backtest (2026-07) found EVERY one
+    of these 13 "swing"-named patterns (GOLDEN_CROSS, WEEKLY_VWAP_PULL,
+    ADX_TREND_CONFIRM, ...) losing money uniformly — 17.2% win rate,
+    -1,988% cumulative over 742 trades — because "EMA200"/"weekly
+    structure"/ATR were all being computed from 1-MINUTE bars (200 minutes
+    ≈ 3.3 hours, not 200 days; a "weekly" break used the last 50 *minutes*).
+    That's not a tunable parameter problem, it's the wrong data feeding
+    daily/weekly-scale pattern logic. `_daily_indicators()` builds a proper
+    daily OHLCV series per symbol (historical `logs/historical_data/{sym}/
+    1d.csv` + today's live-tick forming bar) and reuses
+    `LiveIndicators.compute()` — the same EMA/RSI/ATR/ADX/MACD/Supertrend/HMA
+    math tick_engine.py already uses, just fed daily instead of minute bars.
+
     Patterns (all evaluated, best score wins, 60s throttle):
       1.  EMA50_BOUNCE            — pullback to EMA50 in EMA200 uptrend (classic swing)
       2.  EMA50_SHORT             — rally to EMA50 in EMA200 downtrend (bearish)
@@ -2669,6 +2687,81 @@ class SwingAgent(BaseAgent):
         self._prev_ema50_above: dict[str, bool] = {}   # GOLDEN_CROSS event state
         self._warmup_start: float | None = None        # process-restart warm-up
         self._cool_ts: dict = {}   # sym → {"BUY": datetime, "SELL": datetime}
+        self._daily_cache: dict[str, tuple] = {}        # sym → (as_of_date, historical_df excl. today)
+        self._daily_ind:   dict[str, LiveIndicators] = {}  # sym → last computed REAL daily indicators
+        self._daily_anchor: dict[str, float] = {}       # sym → trailing 20-day volume-weighted price
+
+    def _load_daily_history(self, sym: str, upto_date) -> Optional["pd.DataFrame"]:
+        """Real daily OHLCV bars strictly BEFORE `upto_date` (today's row is
+        excluded — including it would leak the day's final close before the
+        day has actually finished, in both live and backtest use). Cached
+        per calendar day so this only re-reads the CSV once per symbol/day."""
+        cached = self._daily_cache.get(sym)
+        if cached is not None and cached[0] == upto_date:
+            return cached[1]
+        path = Path(f"logs/historical_data/{sym}/1d.csv")
+        if not path.exists():
+            return None
+        try:
+            df = pd.read_csv(path, parse_dates=["date"])
+        except Exception:
+            return None
+        if df.empty:
+            return None
+        d_col = df["date"].dt.date
+        df = df[d_col < upto_date].reset_index(drop=True)
+        if df.empty:
+            return None
+        self._daily_cache[sym] = (upto_date, df)
+        return df
+
+    def _daily_indicators(self, sym: str, snap: MarketSnapshot) -> Optional[LiveIndicators]:
+        """Build a LiveIndicators object computed from real daily bars: the
+        historical close/high/low/volume series (excl. today) plus today's
+        still-forming bar synthesized from the live tick's day_open/day_high/
+        day_low and current ltp. Returns None until enough daily history
+        exists for a real EMA200 (mirrors the backtest's MIN_INDICATOR_WARMUP
+        fix — same floor, same reasoning, now applied live too)."""
+        today = now_ist().date()
+        hist = self._load_daily_history(sym, today)
+        if hist is None or len(hist) < settings.swing_daily_history_days:
+            return None
+
+        ind      = snap.indicators
+        ltp      = snap.tick.ltp
+        day_open = ind.day_open or ltp
+        day_high = max(ind.day_high or ltp, ltp, day_open)
+        day_low  = min(ind.day_low or ltp, ltp, day_open) if (ind.day_low or 0) > 0 else min(ltp, day_open)
+        today_vol = 0
+        if snap.candles_1min:
+            today_vol = sum(c.volume for c in snap.candles_1min if c.ts.date() == today)
+
+        today_row = pd.DataFrame([{
+            "date": pd.Timestamp(today), "open": day_open, "high": day_high,
+            "low": day_low, "close": ltp, "volume": today_vol,
+        }])
+        daily_df = pd.concat([hist, today_row], ignore_index=True)
+
+        # Trailing 20-trading-day volume-weighted anchor — a real "value area"
+        # for WEEKLY_VWAP_PULL, replacing the old intraday session VWAP (which
+        # is meaningless as a multi-day pullback reference and, computed from
+        # a single synthetic daily bar, would collapse to ≈ ltp).
+        tail20 = daily_df.tail(20)
+        vol_sum = float(tail20["volume"].sum())
+        if vol_sum > 0:
+            typical = (tail20["high"] + tail20["low"] + tail20["close"]) / 3.0
+            self._daily_anchor[sym] = float((typical * tail20["volume"]).sum() / vol_sum)
+        else:
+            self._daily_anchor[sym] = float(tail20["close"].mean())
+
+        synth_tick = Tick(
+            symbol=sym, ltp=ltp, bid=snap.tick.bid, ask=snap.tick.ask,
+            volume=today_vol, change=0.0, change_pct=ind.change_pct,
+            high=day_high, low=day_low, open=day_open, timestamp=snap.tick.timestamp,
+        )
+        dind = IndicatorCalc.compute(sym, synth_tick, daily_df)
+        self._daily_ind[sym] = dind
+        return dind
 
     def evaluate_tick(self, snap: MarketSnapshot) -> tuple[str, Optional[dict]]:
         sym  = snap.symbol
@@ -2693,10 +2786,12 @@ class SwingAgent(BaseAgent):
             return "HOLD", None
         self._last_eval[sym] = now_s
 
-        ind = snap.indicators
         ltp = snap.tick.ltp
 
-        if not ind.ema200:
+        # Real daily-bar indicators drive every pattern below — NOT snap.indicators
+        # (1-minute tick scale). See _daily_indicators()/class docstring for why.
+        dind = self._daily_indicators(sym, snap)
+        if dind is None:
             return "HOLD", None
 
         best_score, best_action, best_pattern = -1, "", ""
@@ -2709,20 +2804,20 @@ class SwingAgent(BaseAgent):
             self._pat_ema21_pullback_swing, self._pat_macd_zero_turn_swing,
         ):
             try:
-                action, base, pname = pat_fn(sym, snap, ind, ltp)
+                action, base, pname = pat_fn(sym, snap, dind, ltp)
             except Exception:
                 continue
             if not action:
                 continue
-            total = base + self._ctx_bonus(action, sym, ind, ltp)
+            total = base + self._ctx_bonus(action, sym, dind, ltp)
             if total > best_score:
                 best_score, best_action, best_pattern = total, action, pname
 
-        self._prev_macd_hist[sym] = ind.macd_hist
+        self._prev_macd_hist[sym] = dind.macd_hist
         self._prev_ltp[sym]       = ltp
-        self._prev_rsi[sym]       = ind.rsi_14
-        self._prev_adx[sym]       = getattr(ind, 'adx_14', 0.0)
-        self._prev_hma_dir[sym]   = ind.hma_dir
+        self._prev_rsi[sym]       = dind.rsi_14
+        self._prev_adx[sym]       = getattr(dind, 'adx_14', 0.0)
+        self._prev_hma_dir[sym]   = dind.hma_dir
 
         if best_score < self.MIN_SCORE or not best_action:
             return "HOLD", None
@@ -2740,7 +2835,9 @@ class SwingAgent(BaseAgent):
             return "HOLD", None
         cools[best_action] = now_s
 
-        atr      = ind.atr_14 or ltp * 0.008
+        # Daily ATR — a real multi-day volatility measure, appropriately wide
+        # for a CNC hold (the old 1-min ATR produced stops a few rupees away).
+        atr      = dind.atr_14 or ltp * 0.008
         sl_dist  = max(atr * self.SL_ATR,  ltp * settings.sl_pct_swing  / 100)
         tgt_dist = max(atr * self.TGT_ATR, ltp * settings.tgt_pct_swing / 100)
         sf       = 1.0 if best_score >= 9 else (0.9 if best_score >= 7 else 0.75)
@@ -2762,7 +2859,7 @@ class SwingAgent(BaseAgent):
             "_gate_size_factor": sf,
             "trigger": (
                 f"SWING-{best_action} [{best_pattern}] score={best_score}/13 "
-                f"sf={sf} rsi={ind.rsi_14:.0f} atr={atr:.2f}"
+                f"sf={sf} rsi={dind.rsi_14:.0f} atr={atr:.2f}"
             ),
         }
 
@@ -2877,8 +2974,15 @@ class SwingAgent(BaseAgent):
     # ── Pattern 7 ─────────────────────────────────────────────────────────────
 
     def _pat_prev_day_high(self, sym, snap, ind, ltp):
-        pdh      = getattr(ind, "prev_day_high", 0)
-        pdl      = getattr(ind, "prev_day_low",  0)
+        # ind.symbol / self._daily_cache[sym] give the REAL previous trading
+        # day's high/low (that day's actual bar, not a nonexistent
+        # LiveIndicators field). getattr(ind, "prev_day_high", 0) always
+        # returned 0 before — this pattern never fired, ever, since inception.
+        cached = self._daily_cache.get(sym)
+        if cached is None or cached[1].empty:
+            return "", 0, ""
+        last_bar = cached[1].iloc[-1]
+        pdh, pdl = float(last_bar["high"]), float(last_bar["low"])
         prev_ltp = self._prev_ltp.get(sym, ltp)
         if pdh > 0 and prev_ltp <= pdh < ltp and ind.volume_ratio > 1.3:
             return "BUY",  4, "PREV_DAY_HIGH"
@@ -2889,8 +2993,12 @@ class SwingAgent(BaseAgent):
     # ── Pattern 8 ─────────────────────────────────────────────────────────────
 
     def _pat_weekly_vwap_pull(self, sym, snap, ind, ltp):
-        if (ind.vwap > 0 and ind.ema200 > 0
-                and abs(ltp - ind.vwap) / ind.vwap < 0.012
+        # Trailing 20-trading-day volume-weighted anchor (real "value area"),
+        # not the old intraday session VWAP — meaningless here since it would
+        # collapse to ≈ ltp when computed from a single synthetic daily bar.
+        anchor = self._daily_anchor.get(sym, 0.0)
+        if (anchor > 0 and ind.ema200 > 0
+                and abs(ltp - anchor) / anchor < 0.012
                 and 45 <= ind.rsi_14 <= 60 and ltp > ind.ema200):
             return "BUY", 3, "WEEKLY_VWAP_PULL"
         return "", 0, ""
@@ -2930,14 +3038,16 @@ class SwingAgent(BaseAgent):
     # ── Pattern 11: WEEKLY_STRUCTURE_BREAK ───────────────────────────────────
 
     def _pat_weekly_structure_break(self, sym, snap, ind, ltp):
-        n = 50
-        if len(snap.candles_1min) < n + 1:
+        # Real trailing 10-TRADING-DAY (~2 calendar weeks) high/low, not the
+        # old 50 one-minute bars (~50 minutes) — a genuine multi-day structure
+        # level instead of the last hour's noise.
+        n = 10
+        cached = self._daily_cache.get(sym)
+        if cached is None or len(cached[1]) < n:
             return "", 0, ""
-        # Exclude the live forming candle (contains the current tick) — with it
-        # included, ltp > n_high was impossible and the pattern never fired.
-        last_n   = snap.candles_1min[-(n + 1):-1]
-        n_high   = max(c.high for c in last_n)
-        n_low    = min(c.low  for c in last_n)
+        last_n   = cached[1].tail(n)
+        n_high   = float(last_n["high"].max())
+        n_low    = float(last_n["low"].min())
         prev_ltp = self._prev_ltp.get(sym, ltp)
         if (prev_ltp < n_high and ltp > n_high
                 and ind.volume_ratio >= 1.5 and ltp > ind.ema200):
@@ -3007,7 +3117,15 @@ class SwingAgent(BaseAgent):
         # sign of quantity (negative = short).
         side = "BUY" if pos.get("quantity", 0) > 0 else "SELL"
 
-        atr      = ind.atr_14 or entry * 0.008
+        # Discretionary exits (EMA200/supertrend/RSI/trend) must read the same
+        # daily-bar indicators the entry was scored against — the passed-in
+        # `ind` is the 1-minute tick snapshot, only its `.ltp` is live-price-
+        # accurate here. Falls back to `ind` itself if this symbol hasn't had
+        # an evaluate_tick() pass yet (e.g. right after a restart, before a
+        # position's owning tick has recomputed daily indicators).
+        dind = self._daily_ind.get(ind.symbol, ind)
+
+        atr      = dind.atr_14 or entry * 0.008
         sl_dist  = max(atr * self.SL_ATR,  entry * settings.sl_pct_swing  / 100)
         tgt_dist = max(atr * self.TGT_ATR, entry * settings.tgt_pct_swing / 100)
 
@@ -3019,16 +3137,16 @@ class SwingAgent(BaseAgent):
                 return True, f"Swing SL ₹{ltp:.2f}"
             if ltp >= entry + tgt_dist:
                 return True, f"Swing TGT ₹{ltp:.2f}"
-            if ind.ema200 and ltp < ind.ema200 * 0.998:
+            if dind.ema200 and ltp < dind.ema200 * 0.998:
                 return True, "EMA200 breakdown exit"
             # Supertrend flip — only honour in a confirmed trend (ADX≥20) or on a
             # real adverse move; in a range it whipsaws swing holds out at a loss.
-            if ind.supertrend_dir in ("DOWN", "down") and (
-                    (getattr(ind, "adx_14", 0) or 0) >= 20 or ltp < entry - _st_flip_adverse() * atr):
+            if dind.supertrend_dir in ("DOWN", "down") and (
+                    (getattr(dind, "adx_14", 0) or 0) >= 20 or ltp < entry - _st_flip_adverse() * atr):
                 return True, "Supertrend flip (DOWN) exit"
-            if ind.rsi_14 >= 78:
-                return True, f"RSI overbought {ind.rsi_14:.0f} exit"
-            if ind.trend == "DOWN" and ind.ema9 < ind.ema21:
+            if dind.rsi_14 >= 78:
+                return True, f"RSI overbought {dind.rsi_14:.0f} exit"
+            if dind.trend == "DOWN" and dind.ema9 < dind.ema21:
                 return True, "Trend breakdown exit"
         else:
             sl_price = entry + sl_dist
@@ -3038,14 +3156,14 @@ class SwingAgent(BaseAgent):
                 return True, f"Swing SL ₹{ltp:.2f}"
             if ltp <= entry - tgt_dist:
                 return True, f"Swing TGT ₹{ltp:.2f}"
-            if ind.ema200 and ltp > ind.ema200 * 1.002:
+            if dind.ema200 and ltp > dind.ema200 * 1.002:
                 return True, "EMA200 reclaim exit"
-            if ind.supertrend_dir in ("UP", "up") and (
-                    (getattr(ind, "adx_14", 0) or 0) >= 20 or ltp > entry + _st_flip_adverse() * atr):
+            if dind.supertrend_dir in ("UP", "up") and (
+                    (getattr(dind, "adx_14", 0) or 0) >= 20 or ltp > entry + _st_flip_adverse() * atr):
                 return True, "Supertrend flip (UP) exit"
-            if ind.rsi_14 <= 22:
-                return True, f"RSI oversold {ind.rsi_14:.0f} exit"
-            if ind.trend == "UP" and ind.ema9 > ind.ema21:
+            if dind.rsi_14 <= 22:
+                return True, f"RSI oversold {dind.rsi_14:.0f} exit"
+            if dind.trend == "UP" and dind.ema9 > dind.ema21:
                 return True, "Trend reversal exit"
 
         return False, ""
@@ -5364,6 +5482,16 @@ class MomentumAgent(BaseAgent):
         return "", 0, ""
 
     def _pat_vol_surge_trend(self, sym, snap, ind, ltp, t):
+        # Every sibling pattern in this agent gates on ADX (20-30) — this was
+        # the one exception, and it dominated trade count as a result: a full
+        # honest-fills year showed it firing 1,877 of Momentum's 1,902 trades
+        # (98.7%), gross +196% but net -89.6% after costs. A 2x volume spike
+        # with EMA alignment fires constantly in choppy no-trend tape; ADX>=25
+        # (matching HL_BREAKOUT/LL_BREAKDOWN) restricts it to real trends,
+        # cutting trade count so round-trip costs stop eating the entire edge.
+        adx = getattr(ind, "adx_14", 0)
+        if adx < 25:
+            return "", 0, ""
         if ind.volume_ratio >= 2.0 and ind.ema9 > ind.ema21 > ind.ema50 > 0 and ind.macd_hist > 0:
             return "BUY", 5, "VOL_SURGE_TREND"
         if (ind.volume_ratio >= 2.0 and ind.ema9 < ind.ema21
@@ -5721,6 +5849,8 @@ class PairsAgent(BaseAgent):
     SL_ATR        = 1.5
     TGT_ATR       = 2.5
 
+    DAILY_BASELINE_DAYS = 60   # trading days — a real cointegration-relationship window
+
     def __init__(self):
         super().__init__()
         from collections import deque
@@ -5730,6 +5860,57 @@ class PairsAgent(BaseAgent):
         self._zscores:      dict = {}
         self._cool_ts:      dict = {}
         self._entered_pair: dict = {}  # symbol → pair-tuple that triggered entry
+        self._daily_close_cache: dict = {}   # sym → (as_of_date, DataFrame[date,close])
+        self._pair_baseline:     dict = {}   # pair → (as_of_date, mean, std)
+
+    def _load_daily_close(self, sym: str, upto_date):
+        """Real daily closes strictly before `upto_date` — same source/cache
+        pattern as SwingAgent._load_daily_history."""
+        cached = self._daily_close_cache.get(sym)
+        if cached is not None and cached[0] == upto_date:
+            return cached[1]
+        path = Path(f"logs/historical_data/{sym}/1d.csv")
+        if not path.exists():
+            return None
+        try:
+            df = pd.read_csv(path, parse_dates=["date"])
+        except Exception:
+            return None
+        if df.empty:
+            return None
+        df = df[["date", "close"]].copy()
+        df["date"] = df["date"].dt.date
+        df = df[df["date"] < upto_date].reset_index(drop=True)
+        if df.empty:
+            return None
+        self._daily_close_cache[sym] = (upto_date, df)
+        return df
+
+    def _pair_daily_baseline(self, pair, today):
+        """(mean, std) of the a/b ratio over the trailing DAILY_BASELINE_DAYS
+        trading days — a real multi-month cointegration relationship,
+        replacing the old 50-*minute* intraday window. Rebuilding a fresh
+        "mean" every ~50 minutes just chased the ratio's own short-term
+        drift rather than testing for genuine relative mispricing against a
+        statistically established baseline; this is the same class of
+        timeframe mismatch found in SwingAgent."""
+        cached = self._pair_baseline.get(pair)
+        if cached is not None and cached[0] == today:
+            return cached[1], cached[2]
+        a, b = pair
+        da, db = self._load_daily_close(a, today), self._load_daily_close(b, today)
+        if da is None or db is None:
+            return None, None
+        merged = da.merge(db, on="date", suffixes=("_a", "_b")).tail(self.DAILY_BASELINE_DAYS)
+        if len(merged) < 20:
+            return None, None
+        ratios = (merged["close_a"] / merged["close_b"]).to_numpy()
+        mean = float(ratios.mean())
+        std  = float(ratios.std(ddof=1))
+        if std <= 1e-8:
+            return None, None
+        self._pair_baseline[pair] = (today, mean, std)
+        return mean, std
 
     def _ctx_bonus(self, action: str, ind: LiveIndicators, zscore: float) -> int:
         ctx    = 0
@@ -5794,11 +5975,9 @@ class PairsAgent(BaseAgent):
                 continue
 
             ratio = pa / pb
-            # Sample the ratio once per 1-min bar, not per tick: appending on
-            # every tick of EITHER leg filled the 50-slot window with ~25
-            # seconds of autocorrelated near-duplicates, deflating the std and
-            # inflating |z| — "2σ" entries were mostly tick noise. Bar-spaced
-            # samples make the window a real ~50-minute statistic.
+            # Sample the ratio once per 1-min bar, not per tick — kept purely
+            # as a liquidity/warm-up gate (both legs must be actively
+            # ticking) below, no longer the statistic itself.
             _bar = now_ist().replace(second=0, microsecond=0)
             if self._ratio_bar.get(pair) != _bar:
                 self._ratio_bar[pair] = _bar
@@ -5806,10 +5985,10 @@ class PairsAgent(BaseAgent):
             if len(self._ratios[pair]) < 20:
                 continue
 
-            ratios = list(self._ratios[pair])
-            mean   = sum(ratios) / len(ratios)
-            std    = (sum((r - mean) ** 2 for r in ratios) / (len(ratios) - 1)) ** 0.5
-            if std <= 1e-8:
+            # Mean/std come from DAILY closes over a real ~3-month window, not
+            # the last 50 minutes — see _pair_daily_baseline() docstring.
+            mean, std = self._pair_daily_baseline(pair, now.date())
+            if mean is None:
                 continue
 
             zscore = (ratio - mean) / std
@@ -5862,6 +6041,10 @@ class PairsAgent(BaseAgent):
                 best_signal = {
                     "side":          "LONG" if action == "BUY" else "SHORT",
                     "pair":          f"{a}/{b}",
+                    # Was missing entirely — every Pairs trade landed pattern-less
+                    # in the ledger ("?" in backtest/learner breakdowns), hiding
+                    # which specific pairs actually carry the edge.
+                    "pattern":       f"PAIRS_{a}_{b}",
                     "zscore":        round(zscore, 2),
                     "score":         total,
                     "size_factor":   sf,

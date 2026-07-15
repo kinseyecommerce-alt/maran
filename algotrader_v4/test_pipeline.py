@@ -10354,13 +10354,16 @@ def t_options_agent_kelly_sizing_min_one():
     assert "qty = lot_size" in src, "OptionsAgent entry qty must be exactly one whole lot"
 
 def t_pairs_agent_sample_std():
-    """PairsAgent must use sample std (divide by N-1) not population std (divide by N)."""
+    """PairsAgent must use sample std (divide by N-1) not population std (divide by N).
+    The z-score baseline moved from an inline 50-minute intraday window (in
+    evaluate_tick) into _pair_daily_baseline (a real ~3-month daily-close
+    window) — the sample-std requirement now lives there via ddof=1."""
     import inspect
     from agents.strategy_agents import PairsAgent
-    src = inspect.getsource(PairsAgent.evaluate_tick)
-    assert "len(ratios) - 1" in src, (
-        "PairsAgent z-score std must divide by (N-1) for sample std, "
-        "not N (population std) which inflates z-scores by ~2.6%"
+    src = inspect.getsource(PairsAgent._pair_daily_baseline)
+    assert "ddof=1" in src, (
+        "PairsAgent z-score std must use ddof=1 (sample std, N-1), "
+        "not the population std (N) default, which inflates z-scores by ~2.6%"
     )
 
 def t_pairs_agent_cooldown_deferred_to_after_min_score():
