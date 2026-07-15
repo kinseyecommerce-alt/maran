@@ -195,10 +195,19 @@ class Settings(BaseSettings):
     # Swing had NO re-entry cooldown at all (only a 60s scan throttle that
     # re-arms regardless of trade outcome) — a "hold for days" strategy could
     # re-enter the same symbol a minute after its own exit (2026-07-08 live:
-    # churned to the 25-trade daily cap TWICE in one session). 3600s (1h) is a
-    # conservative floor for a multi-day-hold strategy; tune with replay
-    # evidence once the honest-fills swing backtest exists.
-    cooldown_swing:          int = 3600
+    # churned to the 25-trade daily cap TWICE in one session). Now that Swing
+    # scores patterns off real DAILY bars (see SwingAgent._daily_indicators),
+    # the underlying thesis is constant all day — a 1h cooldown let a stopped-
+    # out position re-enter up to ~6x in one session against the same daily
+    # signal. One full trading day is the right floor for a genuine swing hold.
+    cooldown_swing:          int = 86400
+    # Minimum trading days of daily-bar history before SwingAgent will compute
+    # daily indicators at all (n>=200 is required for a real EMA200 to exist
+    # rather than sit at its 0.0 default and short-circuit every pattern's
+    # ltp > ind.ema200 check as vacuously true). 220 is the textbook floor for
+    # live trading, where Kite's daily historical API can supply years of
+    # data. Lower only for backtesting against a shorter fixture dataset.
+    swing_daily_history_days: int = 220
     cooldown_mean_reversion: int = 180
     cooldown_momentum:       int = 180
     cooldown_pairs:          int = 120
