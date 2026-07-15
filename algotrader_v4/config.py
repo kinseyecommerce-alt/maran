@@ -192,6 +192,13 @@ class Settings(BaseSettings):
     cooldown_scalping:       int = 180     # was 90 — fewer re-entries on the same symbol
     cooldown_options:        int = 120
     cooldown_futures:        int = 180
+    # Swing had NO re-entry cooldown at all (only a 60s scan throttle that
+    # re-arms regardless of trade outcome) — a "hold for days" strategy could
+    # re-enter the same symbol a minute after its own exit (2026-07-08 live:
+    # churned to the 25-trade daily cap TWICE in one session). 3600s (1h) is a
+    # conservative floor for a multi-day-hold strategy; tune with replay
+    # evidence once the honest-fills swing backtest exists.
+    cooldown_swing:          int = 3600
     cooldown_mean_reversion: int = 180
     cooldown_momentum:       int = 180
     cooldown_pairs:          int = 120
@@ -362,6 +369,11 @@ class Settings(BaseSettings):
     #   futures  EMA200_BOUNCE +4.8, STOCHRSI_FUTURES +1.4,
     #            TRIPLE_EMA_PULLBACK +0.6, MACD_CROSS +0.2
     disabled_patterns: str = (
+        # v15 (HONEST-fills year, tf15, all 122 symbols, 2026-07-14): ORB_BREAK
+        # negative in ALL 12 months (−45% to −106% each), 2,493 trades, −972%
+        # total — a structural bleeder invisible in the thin core-12 sample
+        # (it barely fires on the most liquid names) but decisive at breadth.
+        "intraday:ORB_BREAK,"
         # v14 (HONEST-fills year, tf5 core-12, 2026-07-14): first kill under
         # the wick-aware simulator — VWAP_EXT_RIDE −56% over 84 trades while
         # BB_SQUEEZE_WALK (+707%) and KELTNER_RIDE (+597%) carry the agent.

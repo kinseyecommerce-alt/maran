@@ -53,6 +53,14 @@ WATCHLIST = ["RELIANCE", "TCS", "HDFCBANK", "INFY", "ICICIBANK", "SBIN",
              "AXISBANK", "TITAN", "TATASTEEL", "WIPRO", "NIFTY", "BANKNIFTY"]
 DATA_DIR = Path("logs/historical_data")
 PRE_HISTORY_BARS = 120        # prev-day bars prepended for indicator warm-up
+# EMA200 (SwingAgent's hard entry gate: `if not ind.ema200: return HOLD`) never
+# computed a non-zero value in ANY backtest this project has run: the old
+# max(40, PRE_HISTORY_BARS // tf_min) floor gives 24-120 bars depending on tf,
+# a single prior day's tail — nowhere near the 200 periods a 200-EMA needs.
+# Swing has been silently, permanently blocked at every timeframe since this
+# harness existed (2026-07-14 finding). 220 bars, stitched from as many
+# TRAILING days as it takes (not just the single most recent one).
+MIN_INDICATOR_WARMUP_BARS = 220
 
 # Tracker name → ALL_AGENTS key (for the regime entry gate)
 AGENT_KEY = {"Intraday": "intraday", "Scalping": "scalping", "Options": "options",
@@ -203,11 +211,21 @@ def replay(symbols: list[str], max_days: int | None = None,
             if day not in days_map:
                 continue
             prev = None
-            prev_days = [d for d in days_map if d < day]
+            prev_days = sorted(d for d in days_map if d < day)
             if prev_days:
-                prev = days_map[max(prev_days)]
+                # Stitch enough TRAILING days (not just the single most recent
+                # one) to supply MIN_INDICATOR_WARMUP_BARS — a single day's
+                # tail can't reach 220 bars at 5/15/30-min resolution.
+                acc, total = [], 0
+                for d in reversed(prev_days):
+                    day_df = days_map[d]
+                    acc.insert(0, day_df)
+                    total += len(day_df)
+                    if total >= MIN_INDICATOR_WARMUP_BARS:
+                        break
+                prev = pd.concat(acc, ignore_index=False) if acc else None
             sessions[sym] = build_session_df(days_map[day], prev,
-                                             max(40, PRE_HISTORY_BARS // tf_min))
+                                             MIN_INDICATOR_WARMUP_BARS)
         if not sessions:
             continue
 

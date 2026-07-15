@@ -2668,11 +2668,18 @@ class SwingAgent(BaseAgent):
         self._prev_hma_dir:   dict[str, str]   = {}
         self._prev_ema50_above: dict[str, bool] = {}   # GOLDEN_CROSS event state
         self._warmup_start: float | None = None        # process-restart warm-up
+        self._cool_ts: dict = {}   # sym → {"BUY": datetime, "SELL": datetime}
 
     def evaluate_tick(self, snap: MarketSnapshot) -> tuple[str, Optional[dict]]:
-        import time as _time
         sym  = snap.symbol
-        now_s = _time.time()
+        # now_ist() (not time.time()) — it's the clock replay_backtest patches
+        # to simulated market time. Using wall-clock here meant the 15-minute
+        # warm-up guard below could never release within a single backtest
+        # process (each monthly chunk finishes in a few minutes of real CPU
+        # time): Swing has never completed a single successful backtest in
+        # this project's history, gated or ungated, honest or biased — every
+        # prior "Swing" result was silently empty for this exact reason.
+        now_s = now_ist().timestamp()
         # Restart warm-up guard: every deploy resets the prev-state dicts
         # above, and SUPERTREND_BOUNCE / EMA50_BOUNCE then fire on their first
         # evaluation across the whole book (2026-07-08 live: 25 junk trades,
@@ -2719,6 +2726,19 @@ class SwingAgent(BaseAgent):
 
         if best_score < self.MIN_SCORE or not best_action:
             return "HOLD", None
+
+        # Re-entry cooldown — swing had NONE (only the 60s scan throttle above,
+        # which re-arms every cycle regardless of trade outcome). A "hold for
+        # days" strategy with no post-signal cooldown on the same symbol is
+        # free to re-enter within a minute of its own exit; the 2026-07-08
+        # live bench note ("churned to its 25-trade daily cap TWICE in one
+        # session") is exactly this pattern. Mirrors intraday/options/
+        # scalping/futures, which all gate on settings.cooldown_<agent>.
+        cools = self._cool_ts.setdefault(sym, {})
+        last  = cools.get(best_action)
+        if last and (now_s - last) < settings.cooldown_swing:
+            return "HOLD", None
+        cools[best_action] = now_s
 
         atr      = ind.atr_14 or ltp * 0.008
         sl_dist  = max(atr * self.SL_ATR,  ltp * settings.sl_pct_swing  / 100)
