@@ -2631,48 +2631,75 @@ class OptionScalpingAgent(OptionsAgent):
 
 class SwingAgent(BaseAgent):
     """
-    Swing trader (CNC) — 4-pattern daily-bar book, rebuilt from scratch after
-    the old 13-pattern book was proven negative at real scale.
+    Swing trader (CNC) — 1-pattern daily-bar book, derived directly from
+    statistical analysis of this system's own 12-symbol daily-bar history
+    (~247 days/symbol, RELIANCE/ICICIBANK/SBIN/HDFCBANK/INFY/TCS/AXISBANK/
+    TATASTEEL/HINDALCO/BAJFINANCE/NIFTY/BANKNIFTY), not ported by analogy
+    from other agents/timeframes.
 
     History: pattern signals are evaluated against REAL DAILY bars (see
     `_daily_indicators()`), not the 1-minute tick indicators every other
-    agent uses — this fixed a timeframe mismatch where "EMA200"/"weekly
-    structure"/ATR were being computed from 1-MINUTE bars (200 minutes ≈ 3.3
-    hours, not 200 days). That fix was necessary but not sufficient: once
-    honestly testable, a 7-month replay (152 trades) showed the old 13
-    classic-swing patterns (EMA/RSI/MACD/Supertrend crossovers) losing
-    money almost across the board — SUPERTREND_BOUNCE alone was 73% of
-    volume at -104.2% cumulative. That's not a few miscalibrated patterns,
-    it's the whole pattern family lacking edge on daily bars for this
-    instrument set. Full rebuild (2026-07-16): the 4 patterns below replace
-    the old book entirely, each chosen either because the SAME underlying
-    concept is independently proven positive elsewhere in this system
-    (band-walk / Keltner-ride dominate Intraday's and Futures' honest
-    fullbook results) or because it targets a genuinely distinct setup
-    (volatility contraction) not covered by the others.
+    agent uses. That fix was necessary but not sufficient -- two further
+    rebuilds happened before this one, each caught by actually testing
+    against data instead of trusting the design on paper:
 
-    Patterns (best score wins, 60s throttle, real daily-bar structure):
-      1. DAILY_BB_SQUEEZE_WALK  — 3 daily closes outside the daily BB band,
-         same concept as Intraday's #1 honest-fullbook pattern (+12,383%
-         year, since BB_SQUEEZE_WALK's honest breakdown) and Futures'
-         BB_WALK_FUT (+3,245% since honest tf1) — ported to daily granularity.
-      2. DAILY_KELTNER_RIDE     — 3 daily closes beyond the daily Keltner
-         channel (BB midline ± 1.5×ATR), the volatility-normalised sibling
-         of the pattern above; also independently proven at Intraday/Futures.
-      3. TREND_PULLBACK_CONFIRMED — full daily EMA9>21>50>200 bull/bear
-         stack + RSI crosses back through 50 + volume/ADX confirmation.
-         Evolution of the old book's ONLY positive pattern (RSI_DIP_RELOAD,
-         +6.6% @3tr — too thin to trust alone, but the direction was real);
-         adds the volume/ADX confirmation the old version lacked.
-      4. VOLATILITY_CONTRACTION — daily ATR has been contracting well below
-         its 10-day range average (a coiled range) then breaks out with
-         trend + volume confirmation — a genuinely distinct "VCP-style"
-         setup, not a variant of the band-walk family above.
+    Rebuild 1 (ported concepts: band-walk, Keltner-ride, trend pullback,
+    volatility-contraction) improved win rate to 40.8% but stayed
+    net-negative (-32.7% / 7mo). Mining the daily-return data directly
+    showed why: forward 5-day returns bucketed by 20-day price z-score
+    show NO edge to buying already-extended strength (z>2 forward-5d ~
+    -0.03%) -- the band-walk/Keltner-ride thesis has no support here. The
+    BEST forward returns sit in the neutral zone (z -1..1 ~ +0.21%) -- a
+    shallow pullback within an already-established trend, not yet extended.
+    Extreme oversold (z<-2) shows real downside continuation (~-0.93%) but
+    is a SHORT signal -- not built as an entry: CNC is a cash-delivery
+    product, a naked SELL with no holdings would be rejected by the broker
+    live even though PAPER/backtest silently simulate it as filled.
 
-    Context bonus (0-6): EMA200 side, VWAP, RSI zone, volume ≥1.3×, MACD, ADX ≥25
-    Sizing: 5-6 → 0.75×  |  7-8 → 0.9×  |  9+ → 1.0×
-    SL/TGT: ATR-based — SL=1.8×ATR, TGT=3.5×ATR (settings % as floor)
-    Exits: breakeven lock 1×ATR, EMA200 breakdown, supertrend flip, RSI exhaustion
+    Rebuild 2 (this one) replaced the extension-chasers with
+    TREND_PULLBACK_CONFIRMED (the neutral-zone finding) and a second
+    pattern, WIDE_RANGE_BREAKOUT, built on a real but separate finding:
+    range_pct autocorrelates strongly at lag-1 across all 12 symbols
+    (+0.19 to +0.48 -- genuine volatility clustering). First backtest of
+    this pair came back WORSE than rebuild 1 (22% win, -106.6% / 7mo,
+    41 trades, ALL on WIDE_RANGE_BREAKOUT -- TREND_PULLBACK_CONFIRMED never
+    fired once). Root-caused, not assumed: (a) TREND_PULLBACK_CONFIRMED
+    required a literal ema9>21>50>200>0 stack, and ema200 only computes
+    once a symbol has >=200 real daily bars (tick_engine.py IndicatorCalc)
+    -- with ~247 days of fixture data total, that condition combined with
+    the RSI-cross/volume/ADX confluence never co-occurred even once across
+    all 12 symbols; the pattern was untestable by construction, not "rare".
+    (b) WIDE_RANGE_BREAKOUT read TODAY's still-forming intraday range
+    against the 10-day average -- i.e. it bought INTO an expansion day
+    already underway (often near an intraday high), not the day AFTER a
+    completed wide-range day as the tested finding actually described;
+    that's chasing exhaustion, not the tested setup.
+
+    Both were fixed and re-verified in isolation against the raw daily
+    bars before touching the agent again: TREND_PULLBACK_CONFIRMED redone
+    on the ACTUAL tested variable (a rolling 20-day z-score, not an EMA200
+    stack) fires 56 times across 2,652 stock-days with +1.27% avg forward
+    5-day return and 64.3% win rate -- a real, testable edge.
+    WIDE_RANGE_BREAKOUT, fixed to read the prior COMPLETED day's range
+    (not today's still-forming one), came back to -0.15% avg forward 5-day
+    return / 51.6% win rate -- a coin flip, no edge. Volatility clustering
+    is real (confirmed by the autocorrelation) but it predicts MORE
+    volatility, not a DIRECTION -- conflating the two was the mistake.
+    WIDE_RANGE_BREAKOUT is therefore dropped entirely rather than shipped
+    on a narrative with no measured edge; the honest book is one pattern.
+
+    Pattern (60s throttle, real daily-bar structure, BUY only):
+      TREND_PULLBACK_CONFIRMED -- price within +/-1 std of its own 20-day
+      mean (the neutral zone with the best forward returns in this data,
+      not yet extended either way) inside an established EMA9>21>50
+      uptrend, RSI in a moderate 40-65 band, ADX >=20 and volume >=1.2x --
+      a confirmed pullback, not a momentum chase and not a falling-knife
+      catch.
+
+    Context bonus (0-6): EMA200 side, VWAP, RSI zone, volume >=1.3x, MACD, ADX >=25
+    Sizing: 5-6 -> 0.75x  |  7-8 -> 0.9x  |  9+ -> 1.0x
+    SL/TGT: ATR-based -- SL=1.8xATR, TGT=3.5xATR (settings % as floor)
+    Exits: breakeven lock 1xATR, EMA200 breakdown, supertrend flip, RSI exhaustion
     """
     name    = "swing"
     product = "CNC"
@@ -2805,8 +2832,7 @@ class SwingAgent(BaseAgent):
 
         best_score, best_action, best_pattern = -1, "", ""
         for pat_fn in (
-            self._pat_daily_bb_squeeze_walk, self._pat_daily_keltner_ride,
-            self._pat_trend_pullback_confirmed, self._pat_volatility_contraction,
+            self._pat_trend_pullback_confirmed,
         ):
             try:
                 action, base, pname = pat_fn(sym, snap, dind, ltp)
@@ -2860,98 +2886,41 @@ class SwingAgent(BaseAgent):
             "pattern": best_pattern,
             "_gate_size_factor": sf,
             "trigger": (
-                f"SWING-{best_action} [{best_pattern}] score={best_score}/4 "
+                f"SWING-{best_action} [{best_pattern}] score={best_score} "
                 f"sf={sf} rsi={dind.rsi_14:.0f} atr={atr:.2f}"
             ),
         }
 
-    # ── Pattern 1: DAILY_BB_SQUEEZE_WALK ─────────────────────────────────────
-
-    def _pat_daily_bb_squeeze_walk(self, sym, snap, ind, ltp):
-        """Daily-bar port of Intraday's honest-fullbook #1 pattern
-        BB_SQUEEZE_WALK: 3 consecutive daily closes outside the daily BB
-        band = sustained breakout, measured in trading DAYS not minutes."""
-        cached = self._daily_cache.get(sym)
-        if cached is None or len(cached[1]) < 2:
-            return "", 0, ""
-        bb_u, bb_l = getattr(ind, "bb_upper", 0.0), getattr(ind, "bb_lower", 0.0)
-        if not (bb_u > 0 and bb_l > 0):
-            return "", 0, ""
-        last2 = cached[1]["close"].tail(2).tolist()
-        closes3 = last2 + [ltp]
-        if all(c >= bb_u for c in closes3) and ind.volume_ratio >= 1.3 and ind.macd_hist > 0:
-            return "BUY", 5, "DAILY_BB_SQUEEZE_WALK"
-        if all(c <= bb_l for c in closes3) and ind.volume_ratio >= 1.3 and ind.macd_hist < 0:
-            return "SELL", 5, "DAILY_BB_SQUEEZE_WALK"
-        return "", 0, ""
-
-    # ── Pattern 2: DAILY_KELTNER_RIDE ────────────────────────────────────────
-
-    def _pat_daily_keltner_ride(self, sym, snap, ind, ltp):
-        """Daily-bar port of Intraday's honest-fullbook #2 pattern
-        KELTNER_RIDE: 3 daily closes beyond the daily Keltner channel (BB
-        midline ± 1.5×ATR) — the volatility-normalised sibling of the band
-        walk above, independently proven at Intraday and Futures."""
-        cached = self._daily_cache.get(sym)
-        if cached is None or len(cached[1]) < 2:
-            return "", 0, ""
-        atr = getattr(ind, "atr_14", 0.0)
-        bb_u, bb_l = getattr(ind, "bb_upper", 0.0), getattr(ind, "bb_lower", 0.0)
-        if atr <= 0 or not (bb_u > 0 and bb_l > 0):
-            return "", 0, ""
-        mid = (bb_u + bb_l) / 2
-        kel_u, kel_l = mid + 1.5 * atr, mid - 1.5 * atr
-        last2 = cached[1]["close"].tail(2).tolist()
-        closes3 = last2 + [ltp]
-        if all(c >= kel_u for c in closes3) and ind.volume_ratio >= 1.2 and ind.rsi_14 < 78:
-            return "BUY", 5, "DAILY_KELTNER_RIDE"
-        if all(c <= kel_l for c in closes3) and ind.volume_ratio >= 1.2 and ind.rsi_14 > 22:
-            return "SELL", 5, "DAILY_KELTNER_RIDE"
-        return "", 0, ""
-
-    # ── Pattern 3: TREND_PULLBACK_CONFIRMED ──────────────────────────────────
+    # ── Pattern: TREND_PULLBACK_CONFIRMED ────────────────────────────────────
 
     def _pat_trend_pullback_confirmed(self, sym, snap, ind, ltp):
-        """Evolution of the old book's only positive pattern (RSI_DIP_RELOAD,
-        +6.6% @3tr — real direction, too thin to trust alone): full daily
-        EMA9>21>50>200 stack (not just 21>50) + RSI crosses back through 50
-        + volume/ADX confirmation, filtering the noise the unconfirmed
-        version likely let through."""
-        prev_rsi = self._prev_rsi.get(sym, ind.rsi_14)
-        adx = getattr(ind, "adx_14", 0.0)
-        if (ind.ema9 > ind.ema21 > ind.ema50 > ind.ema200 > 0
-                and prev_rsi < 50 <= ind.rsi_14
-                and ind.volume_ratio >= 1.2 and adx >= 20):
-            return "BUY", 5, "TREND_PULLBACK_CONFIRMED"
-        if (0 < ind.ema9 < ind.ema21 < ind.ema50 < ind.ema200
-                and prev_rsi > 50 >= ind.rsi_14
-                and ind.volume_ratio >= 1.2 and adx >= 20):
-            return "SELL", 5, "TREND_PULLBACK_CONFIRMED"
-        return "", 0, ""
-
-    # ── Pattern 4: VOLATILITY_CONTRACTION ────────────────────────────────────
-
-    def _pat_volatility_contraction(self, sym, snap, ind, ltp):
-        """VCP-style setup distinct from the band-walk family above: daily
-        ATR has contracted well below its trailing 10-day range average (a
-        coiled range), then price breaks out with trend + volume
-        confirmation."""
+        """Directly operationalizes the tested variable: pooled forward-5d
+        returns bucketed by a rolling 20-day price z-score peak in the
+        NEUTRAL zone (z -1..1, +1.27% avg / 64.3% win over 56 in-sample
+        fires) — better than either extension bucket. Uses the z-score
+        itself (not an EMA200 stack — ema200 needs >=200 daily bars to
+        compute at all, which this fixture data mostly can't supply, and a
+        prior version silently never fired because of it) inside a
+        confirmed but not-yet-extended EMA9>21>50 uptrend, moderate RSI
+        (not overbought), ADX and volume confirming real participation.
+        BUY only: the mirror SELL would need a fresh short, which CNC
+        delivery cannot open without existing holdings."""
         cached = self._daily_cache.get(sym)
-        if cached is None or len(cached[1]) < 10:
+        if cached is None or len(cached[1]) < 20:
             return "", 0, ""
-        atr = getattr(ind, "atr_14", 0.0)
-        if atr <= 0:
+        window = cached[1]["close"].tail(20).tolist()
+        mean = sum(window) / len(window)
+        var  = sum((c - mean) ** 2 for c in window) / (len(window) - 1)
+        std  = var ** 0.5
+        if std <= 0:
             return "", 0, ""
-        hist10 = cached[1].tail(10)
-        avg_range = float((hist10["high"] - hist10["low"]).abs().mean())
-        if avg_range <= 0 or atr >= avg_range * 0.75:
-            return "", 0, ""
-        if (ltp > ind.ema50 > 0 and ind.macd_hist > 0
-                and ind.volume_ratio >= 1.5 and ind.rsi_14 >= 50):
-            return "BUY", 5, "VOLATILITY_CONTRACTION"
-        if (0 < ind.ema50 and ltp < ind.ema50 and ind.macd_hist < 0
-                and ind.volume_ratio >= 1.5 and ind.rsi_14 <= 50):
-            return "SELL", 5, "VOLATILITY_CONTRACTION"
+        z = (ltp - mean) / std
+        adx = getattr(ind, "adx_14", 0.0)
+        if (-1.0 <= z <= 1.0
+                and ind.ema9 > ind.ema21 > ind.ema50 > 0
+                and adx >= 20 and ind.volume_ratio >= 1.2
+                and 40 <= ind.rsi_14 <= 65):
+            return "BUY", 5, "TREND_PULLBACK_CONFIRMED"
         return "", 0, ""
 
     # ── Context bonus (0-6) ───────────────────────────────────────────────────
