@@ -75,15 +75,23 @@ from agents.strategy_agents import (
 def _aged_swing():
     """SwingAgent with the 15-min restart warm-up guard pre-aged, so the E2E
     entry check exercises the normal path (the guard itself is unit-tested).
-    SwingAgent now scores patterns against REAL daily-bar indicators (see
-    agents/strategy_agents.py SwingAgent._daily_indicators) rather than the
-    tick-level snap.indicators this test's mk() recipe hand-crafts — this
-    suite is exercising order-placement MECHANICS end-to-end, not pattern
-    selection (that's replay-backtest-validated separately), so short-circuit
-    the daily-bar lookup back to the recipe's own snap.indicators."""
+    SwingAgent's rebuilt pattern book (2026-07-16) scores against REAL
+    daily-bar indicators (see agents/strategy_agents.py
+    SwingAgent._daily_indicators) and a real multi-day close-history cache —
+    neither of which this single-tick mechanics test can supply. This suite
+    exercises order-placement MECHANICS end-to-end, not pattern selection
+    (that's replay-backtest-validated separately), so short-circuit both the
+    daily-bar lookup and one pattern to an unconditional BUY."""
     a = SwingAgent()
     a._warmup_start = -1e9
-    a._daily_indicators = lambda sym, snap: snap.indicators
+
+    def _fake_daily_indicators(sym, snap):
+        # Real _daily_indicators() has a side effect (self._daily_ind[sym] =
+        # dind) that evaluate_tick() now depends on directly — replicate it.
+        a._daily_ind[sym] = snap.indicators
+        return snap.indicators
+    a._daily_indicators = _fake_daily_indicators
+    a._pat_trend_pullback_confirmed = lambda sym, snap, ind, ltp: ("BUY", 5, "TREND_PULLBACK_CONFIRMED")
     return a
 
 # ── Tiny test harness (mirrors test_sim_orders_flow.py) ───────────────────────
