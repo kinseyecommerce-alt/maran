@@ -2631,7 +2631,7 @@ class OptionScalpingAgent(OptionsAgent):
 
 class SwingAgent(BaseAgent):
     """
-    Swing trader (CNC) — 2-pattern daily-bar book, derived directly from
+    Swing trader (CNC) — 1-pattern daily-bar book, derived directly from
     statistical analysis of this system's own 12-symbol daily-bar history
     (~247 days/symbol, RELIANCE/ICICIBANK/SBIN/HDFCBANK/INFY/TCS/AXISBANK/
     TATASTEEL/HINDALCO/BAJFINANCE/NIFTY/BANKNIFTY), not ported by analogy
@@ -2639,55 +2639,67 @@ class SwingAgent(BaseAgent):
 
     History: pattern signals are evaluated against REAL DAILY bars (see
     `_daily_indicators()`), not the 1-minute tick indicators every other
-    agent uses — this fixed a timeframe mismatch where "EMA200"/"weekly
-    structure"/ATR were being computed from 1-MINUTE bars. That fix was
-    necessary but not sufficient: the first honestly-testable 4-pattern
-    book (2026-07-16, ported concepts: band-walk, Keltner-ride, trend
-    pullback, volatility-contraction breakout) improved win rate to 40.8%
-    but stayed net-negative (-32.7% / 7mo), with the two band-walk/
-    Keltner-ride patterns near-breakeven and dominating volume. Root cause,
-    found by actually mining the daily-return data instead of porting
-    concepts: forward 5-day returns conditional on a 20-day price z-score
-    show NO edge to buying already-extended strength (z>2 forward-5d ≈
-    -0.03%, z 1..2 ≈ +0.10% — both worse than the neutral zone) — i.e. the
-    band-walk/Keltner-ride thesis (buy strength, expect continuation) has
-    no support in this instrument set at the daily timeframe. The BEST
-    forward returns sit in the neutral zone (z -1..1 ≈ +0.21%), i.e. buying
-    a shallow pullback within an already-established trend that is NOT yet
-    extended. Extreme oversold (z<-2) shows further downside continuation
-    (forward-5d ≈ -0.93%) — a real edge, but only shortable via CNC if
-    shares are already held, so it is NOT built as a fresh-entry pattern
-    (CNC is a cash-delivery product; a naked SELL entry with no holdings
-    would be rejected by the broker in LIVE even though PAPER/backtest
-    simulate it as if it filled). Two more findings shaped what remains:
-    range_pct (daily high-low / prior close) autocorrelates strongly at
-    lag-1 (+0.19 to +0.48 across all 12 symbols — universal volatility
-    clustering), and days in the top quintile of range show a weak but
-    positive next-day continuation vs calm days — support for trading a
-    wide-range expansion day's breakout, sized with ATR stops wide enough
-    for the clustering to matter. Net result: BUY-only book (matches what
-    CNC can actually execute), the extension-chasing band-walk/Keltner-ride
-    patterns removed entirely (no data support), one pattern kept because
-    it directly matches the neutral-zone-pullback finding, one pattern
-    replaced (contraction/VCP → range-expansion breakout) to match the
-    actual volatility-clustering finding instead of an unconfirmed squeeze
-    thesis.
+    agent uses. That fix was necessary but not sufficient -- two further
+    rebuilds happened before this one, each caught by actually testing
+    against data instead of trusting the design on paper:
 
-    Patterns (best score wins, 60s throttle, real daily-bar structure, BUY only):
-      1. TREND_PULLBACK_CONFIRMED — full daily EMA9>21>50>200 bull stack +
-         RSI crosses back through 50 (not yet extended) + volume/ADX
-         confirmation. Directly matches the neutral-zone (z -1..1) forward-
-         return finding, the strongest positive signature in the data.
-      2. WIDE_RANGE_BREAKOUT — today's daily range is ≥1.3× its trailing
-         10-day average (a genuine expansion day, not noise) with a strong
-         bullish close, trend and volume confirmation — matches the
-         range/ATR autocorrelation (volatility clustering) and the weak
-         positive next-day continuation on wide-range days.
+    Rebuild 1 (ported concepts: band-walk, Keltner-ride, trend pullback,
+    volatility-contraction) improved win rate to 40.8% but stayed
+    net-negative (-32.7% / 7mo). Mining the daily-return data directly
+    showed why: forward 5-day returns bucketed by 20-day price z-score
+    show NO edge to buying already-extended strength (z>2 forward-5d ~
+    -0.03%) -- the band-walk/Keltner-ride thesis has no support here. The
+    BEST forward returns sit in the neutral zone (z -1..1 ~ +0.21%) -- a
+    shallow pullback within an already-established trend, not yet extended.
+    Extreme oversold (z<-2) shows real downside continuation (~-0.93%) but
+    is a SHORT signal -- not built as an entry: CNC is a cash-delivery
+    product, a naked SELL with no holdings would be rejected by the broker
+    live even though PAPER/backtest silently simulate it as filled.
 
-    Context bonus (0-6): EMA200 side, VWAP, RSI zone, volume ≥1.3×, MACD, ADX ≥25
-    Sizing: 5-6 → 0.75×  |  7-8 → 0.9×  |  9+ → 1.0×
-    SL/TGT: ATR-based — SL=1.8×ATR, TGT=3.5×ATR (settings % as floor)
-    Exits: breakeven lock 1×ATR, EMA200 breakdown, supertrend flip, RSI exhaustion
+    Rebuild 2 (this one) replaced the extension-chasers with
+    TREND_PULLBACK_CONFIRMED (the neutral-zone finding) and a second
+    pattern, WIDE_RANGE_BREAKOUT, built on a real but separate finding:
+    range_pct autocorrelates strongly at lag-1 across all 12 symbols
+    (+0.19 to +0.48 -- genuine volatility clustering). First backtest of
+    this pair came back WORSE than rebuild 1 (22% win, -106.6% / 7mo,
+    41 trades, ALL on WIDE_RANGE_BREAKOUT -- TREND_PULLBACK_CONFIRMED never
+    fired once). Root-caused, not assumed: (a) TREND_PULLBACK_CONFIRMED
+    required a literal ema9>21>50>200>0 stack, and ema200 only computes
+    once a symbol has >=200 real daily bars (tick_engine.py IndicatorCalc)
+    -- with ~247 days of fixture data total, that condition combined with
+    the RSI-cross/volume/ADX confluence never co-occurred even once across
+    all 12 symbols; the pattern was untestable by construction, not "rare".
+    (b) WIDE_RANGE_BREAKOUT read TODAY's still-forming intraday range
+    against the 10-day average -- i.e. it bought INTO an expansion day
+    already underway (often near an intraday high), not the day AFTER a
+    completed wide-range day as the tested finding actually described;
+    that's chasing exhaustion, not the tested setup.
+
+    Both were fixed and re-verified in isolation against the raw daily
+    bars before touching the agent again: TREND_PULLBACK_CONFIRMED redone
+    on the ACTUAL tested variable (a rolling 20-day z-score, not an EMA200
+    stack) fires 56 times across 2,652 stock-days with +1.27% avg forward
+    5-day return and 64.3% win rate -- a real, testable edge.
+    WIDE_RANGE_BREAKOUT, fixed to read the prior COMPLETED day's range
+    (not today's still-forming one), came back to -0.15% avg forward 5-day
+    return / 51.6% win rate -- a coin flip, no edge. Volatility clustering
+    is real (confirmed by the autocorrelation) but it predicts MORE
+    volatility, not a DIRECTION -- conflating the two was the mistake.
+    WIDE_RANGE_BREAKOUT is therefore dropped entirely rather than shipped
+    on a narrative with no measured edge; the honest book is one pattern.
+
+    Pattern (60s throttle, real daily-bar structure, BUY only):
+      TREND_PULLBACK_CONFIRMED -- price within +/-1 std of its own 20-day
+      mean (the neutral zone with the best forward returns in this data,
+      not yet extended either way) inside an established EMA9>21>50
+      uptrend, RSI in a moderate 40-65 band, ADX >=20 and volume >=1.2x --
+      a confirmed pullback, not a momentum chase and not a falling-knife
+      catch.
+
+    Context bonus (0-6): EMA200 side, VWAP, RSI zone, volume >=1.3x, MACD, ADX >=25
+    Sizing: 5-6 -> 0.75x  |  7-8 -> 0.9x  |  9+ -> 1.0x
+    SL/TGT: ATR-based -- SL=1.8xATR, TGT=3.5xATR (settings % as floor)
+    Exits: breakeven lock 1xATR, EMA200 breakdown, supertrend flip, RSI exhaustion
     """
     name    = "swing"
     product = "CNC"
@@ -2820,7 +2832,7 @@ class SwingAgent(BaseAgent):
 
         best_score, best_action, best_pattern = -1, "", ""
         for pat_fn in (
-            self._pat_trend_pullback_confirmed, self._pat_wide_range_breakout,
+            self._pat_trend_pullback_confirmed,
         ):
             try:
                 action, base, pname = pat_fn(sym, snap, dind, ltp)
@@ -2874,59 +2886,41 @@ class SwingAgent(BaseAgent):
             "pattern": best_pattern,
             "_gate_size_factor": sf,
             "trigger": (
-                f"SWING-{best_action} [{best_pattern}] score={best_score}/2 "
+                f"SWING-{best_action} [{best_pattern}] score={best_score} "
                 f"sf={sf} rsi={dind.rsi_14:.0f} atr={atr:.2f}"
             ),
         }
 
-    # ── Pattern 1: TREND_PULLBACK_CONFIRMED ──────────────────────────────────
+    # ── Pattern: TREND_PULLBACK_CONFIRMED ────────────────────────────────────
 
     def _pat_trend_pullback_confirmed(self, sym, snap, ind, ltp):
-        """Directly matches the strongest data finding: pooled forward-5d
-        returns bucketed by 20d price z-score peak in the NEUTRAL zone
-        (z -1..1, ≈+0.21%) — better than both extension buckets (z>2
-        ≈-0.03%, z 1..2 ≈+0.10%). A full EMA9>21>50>200 uptrend stack with
-        RSI just crossing back above 50 is exactly a "not yet extended,
-        trend intact" entry — the z-neutral setup, not a momentum chase.
-        BUY only: the mirror SELL (bear stack + RSI crossing below 50)
-        would need a fresh short, which CNC delivery cannot open."""
-        prev_rsi = self._prev_rsi.get(sym, ind.rsi_14)
-        adx = getattr(ind, "adx_14", 0.0)
-        if (ind.ema9 > ind.ema21 > ind.ema50 > ind.ema200 > 0
-                and prev_rsi < 50 <= ind.rsi_14
-                and ind.volume_ratio >= 1.2 and adx >= 20):
-            return "BUY", 5, "TREND_PULLBACK_CONFIRMED"
-        return "", 0, ""
-
-    # ── Pattern 2: WIDE_RANGE_BREAKOUT ───────────────────────────────────────
-
-    def _pat_wide_range_breakout(self, sym, snap, ind, ltp):
-        """Matches two data findings: (1) daily range_pct (high-low / prior
-        close) autocorrelates strongly at lag-1 across all 12 core symbols
-        (+0.19 to +0.48) — a wide-range day is followed by more volatility,
-        not a reversion to calm; (2) days in the top range quintile show a
-        weak but positive next-day continuation vs calm days. Requires
-        today's range to meaningfully exceed its own trailing 10-day
-        average (a real expansion, not just noise), a strong bullish close
-        (near the day's high, not a doji), and trend/volume confirmation —
-        the ATR-based stop then sizes correctly for the clustering (the
-        stop needs to be wide since tomorrow is likely volatile too)."""
+        """Directly operationalizes the tested variable: pooled forward-5d
+        returns bucketed by a rolling 20-day price z-score peak in the
+        NEUTRAL zone (z -1..1, +1.27% avg / 64.3% win over 56 in-sample
+        fires) — better than either extension bucket. Uses the z-score
+        itself (not an EMA200 stack — ema200 needs >=200 daily bars to
+        compute at all, which this fixture data mostly can't supply, and a
+        prior version silently never fired because of it) inside a
+        confirmed but not-yet-extended EMA9>21>50 uptrend, moderate RSI
+        (not overbought), ADX and volume confirming real participation.
+        BUY only: the mirror SELL would need a fresh short, which CNC
+        delivery cannot open without existing holdings."""
         cached = self._daily_cache.get(sym)
-        if cached is None or len(cached[1]) < 10:
+        if cached is None or len(cached[1]) < 20:
             return "", 0, ""
-        hist10 = cached[1].tail(10)
-        avg_range = float((hist10["high"] - hist10["low"]).abs().mean())
-        day_high = max(ind.day_high or ltp, ltp)
-        day_low  = min(ind.day_low or ltp, ltp) if (ind.day_low or 0) > 0 else ltp
-        today_range = day_high - day_low
-        if avg_range <= 0 or today_range < avg_range * 1.3:
+        window = cached[1]["close"].tail(20).tolist()
+        mean = sum(window) / len(window)
+        var  = sum((c - mean) ** 2 for c in window) / (len(window) - 1)
+        std  = var ** 0.5
+        if std <= 0:
             return "", 0, ""
-        # Strong bullish close: LTP in the upper 30% of today's range so far.
-        if today_range > 0 and (ltp - day_low) / today_range < 0.7:
-            return "", 0, ""
-        if (ind.ema9 > ind.ema21 > 0 and ind.macd_hist > 0
-                and ind.volume_ratio >= 1.5 and ind.rsi_14 >= 50):
-            return "BUY", 5, "WIDE_RANGE_BREAKOUT"
+        z = (ltp - mean) / std
+        adx = getattr(ind, "adx_14", 0.0)
+        if (-1.0 <= z <= 1.0
+                and ind.ema9 > ind.ema21 > ind.ema50 > 0
+                and adx >= 20 and ind.volume_ratio >= 1.2
+                and 40 <= ind.rsi_14 <= 65):
+            return "BUY", 5, "TREND_PULLBACK_CONFIRMED"
         return "", 0, ""
 
     # ── Context bonus (0-6) ───────────────────────────────────────────────────
