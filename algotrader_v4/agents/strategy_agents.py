@@ -2733,9 +2733,17 @@ class SwingAgent(BaseAgent):
         day_open = ind.day_open or ltp
         day_high = max(ind.day_high or ltp, ltp, day_open)
         day_low  = min(ind.day_low or ltp, ltp, day_open) if (ind.day_low or 0) > 0 else min(ltp, day_open)
+        # Filter to bars at/before the current tick's timestamp, not just
+        # same-date: nse_day_simulation.make_snapshot() builds candles_1min
+        # from the tail of the FULL session regardless of the replay's
+        # current bar_idx, so same-date alone would leak the day's future
+        # (even end-of-day) volume into "today's volume so far" at every
+        # timestamp during backtests.
         today_vol = 0
         if snap.candles_1min:
-            today_vol = sum(c.volume for c in snap.candles_1min if c.ts.date() == today)
+            now_ts = snap.tick.timestamp
+            today_vol = sum(c.volume for c in snap.candles_1min
+                             if c.ts.date() == today and c.ts <= now_ts)
 
         today_row = pd.DataFrame([{
             "date": pd.Timestamp(today), "open": day_open, "high": day_high,
@@ -2754,6 +2762,19 @@ class SwingAgent(BaseAgent):
 
     def evaluate_tick(self, snap: MarketSnapshot) -> tuple[str, Optional[dict]]:
         sym  = snap.symbol
+        ltp  = snap.tick.ltp
+
+        # Refresh daily indicators UNCONDITIONALLY, before the entry warm-up/
+        # throttle guards below — should_exit_position() reads self._daily_ind
+        # for any symbol with an open position, including right after a
+        # restart. Gating this behind the 15-minute entry guard meant a
+        # restart with an open position fell back to should_exit_position's
+        # 1-minute-tick `ind` for up to 15 minutes: wrong-scale ATR/EMA200/
+        # supertrend/RSI, which could both mis-price the SL/target distance
+        # and misfire the discretionary exits for a position that was sized
+        # and scored entirely off daily bars.
+        self._daily_indicators(sym, snap)
+
         # now_ist() (not time.time()) — it's the clock replay_backtest patches
         # to simulated market time. Using wall-clock here meant the 15-minute
         # warm-up guard below could never release within a single backtest
@@ -2765,8 +2786,9 @@ class SwingAgent(BaseAgent):
         # Restart warm-up guard: every deploy resets the prev-state dicts
         # above, and SUPERTREND_BOUNCE / EMA50_BOUNCE then fire on their first
         # evaluation across the whole book (2026-07-08 live: 25 junk trades,
-        # -Rs 2,251 after 5 restarts). No swing entries until the indicator
-        # state has been rebuilt from live ticks for 15 minutes.
+        # -Rs 2,251 after 5 restarts). No swing ENTRIES until the indicator
+        # state has been rebuilt from live ticks for 15 minutes (exits above
+        # are not gated on this).
         if self._warmup_start is None:
             self._warmup_start = now_s
         if now_s - self._warmup_start < 15 * 60:
@@ -2775,11 +2797,9 @@ class SwingAgent(BaseAgent):
             return "HOLD", None
         self._last_eval[sym] = now_s
 
-        ltp = snap.tick.ltp
-
         # Real daily-bar indicators drive every pattern below — NOT snap.indicators
         # (1-minute tick scale). See _daily_indicators()/class docstring for why.
-        dind = self._daily_indicators(sym, snap)
+        dind = self._daily_ind.get(sym)
         if dind is None:
             return "HOLD", None
 

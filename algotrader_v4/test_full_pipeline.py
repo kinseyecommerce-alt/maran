@@ -84,7 +84,13 @@ def _aged_swing():
     daily-bar lookup and one pattern to an unconditional BUY."""
     a = SwingAgent()
     a._warmup_start = -1e9
-    a._daily_indicators = lambda sym, snap: snap.indicators
+
+    def _fake_daily_indicators(sym, snap):
+        # Real _daily_indicators() has a side effect (self._daily_ind[sym] =
+        # dind) that evaluate_tick() now depends on directly — replicate it.
+        a._daily_ind[sym] = snap.indicators
+        return snap.indicators
+    a._daily_indicators = _fake_daily_indicators
     a._pat_trend_pullback_confirmed = lambda sym, snap, ind, ltp: ("BUY", 5, "TREND_PULLBACK_CONFIRMED")
     return a
 
