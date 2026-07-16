@@ -14214,20 +14214,6 @@ def t_options_ctx_bonus_theta_uses_snap_symbol():
                 f"OptionsAgent._ctx_bonus theta call must use snap.symbol: {line.strip()}"
 
 
-def t_swing_fii_pattern_uses_float_directly():
-    """BUG FIX: SwingAgent._pat_fii_swing called .get('fii_net_score') on the float
-    returned by get_fii_sentiment() → AttributeError silently caught → FII_SWING
-    pattern NEVER fires. Fix: use the returned float directly."""
-    import agents.strategy_agents as _sa
-    src = _inspect29.getsource(_sa.SwingAgent._pat_fii_swing)
-    # The dict-access form must not be present
-    assert "fii_net_score" not in src, \
-        "SwingAgent._pat_fii_swing must not call .get('fii_net_score') on a float"
-    # Bearish threshold must be negative (get_fii_sentiment returns [-1.0, 1.0])
-    assert "fii < -" in src, \
-        "SwingAgent._pat_fii_swing bearish check must use 'fii < -<threshold>' (float API)"
-
-
 def t_momentum_fii_pattern_uses_float_directly():
     """BUG FIX: MomentumAgent._pat_fii_momentum called .get('fii_net_score') on the
     float returned by get_fii_sentiment() → AttributeError silently caught → FII_MOMENTUM
@@ -14256,7 +14242,6 @@ def t_fii_sentiment_return_type_is_float():
 
 
 run("strategy_agents: OptionsAgent._ctx_bonus uses snap.symbol for theta efficiency",  t_options_ctx_bonus_theta_uses_snap_symbol)
-run("strategy_agents: SwingAgent._pat_fii_swing uses float API (no .get dict call)",   t_swing_fii_pattern_uses_float_directly)
 run("strategy_agents: MomentumAgent._pat_fii_momentum uses float API (no .get call)",  t_momentum_fii_pattern_uses_float_directly)
 run("strategy_agents: get_fii_sentiment() returns float confirming dict callers broke", t_fii_sentiment_return_type_is_float)
 

@@ -2631,37 +2631,43 @@ class OptionScalpingAgent(OptionsAgent):
 
 class SwingAgent(BaseAgent):
     """
-    World-class swing trader (CNC) — 13 patterns, 6-factor ctx bonus, ATR-dynamic SL/TGT.
+    Swing trader (CNC) — 4-pattern daily-bar book, rebuilt from scratch after
+    the old 13-pattern book was proven negative at real scale.
 
-    Pattern signals are evaluated against REAL DAILY bars (see
+    History: pattern signals are evaluated against REAL DAILY bars (see
     `_daily_indicators()`), not the 1-minute tick indicators every other
-    agent uses. A full honest-fills year backtest (2026-07) found EVERY one
-    of these 13 "swing"-named patterns (GOLDEN_CROSS, WEEKLY_VWAP_PULL,
-    ADX_TREND_CONFIRM, ...) losing money uniformly — 17.2% win rate,
-    -1,988% cumulative over 742 trades — because "EMA200"/"weekly
-    structure"/ATR were all being computed from 1-MINUTE bars (200 minutes
-    ≈ 3.3 hours, not 200 days; a "weekly" break used the last 50 *minutes*).
-    That's not a tunable parameter problem, it's the wrong data feeding
-    daily/weekly-scale pattern logic. `_daily_indicators()` builds a proper
-    daily OHLCV series per symbol (historical `logs/historical_data/{sym}/
-    1d.csv` + today's live-tick forming bar) and reuses
-    `LiveIndicators.compute()` — the same EMA/RSI/ATR/ADX/MACD/Supertrend/HMA
-    math tick_engine.py already uses, just fed daily instead of minute bars.
+    agent uses — this fixed a timeframe mismatch where "EMA200"/"weekly
+    structure"/ATR were being computed from 1-MINUTE bars (200 minutes ≈ 3.3
+    hours, not 200 days). That fix was necessary but not sufficient: once
+    honestly testable, a 7-month replay (152 trades) showed the old 13
+    classic-swing patterns (EMA/RSI/MACD/Supertrend crossovers) losing
+    money almost across the board — SUPERTREND_BOUNCE alone was 73% of
+    volume at -104.2% cumulative. That's not a few miscalibrated patterns,
+    it's the whole pattern family lacking edge on daily bars for this
+    instrument set. Full rebuild (2026-07-16): the 4 patterns below replace
+    the old book entirely, each chosen either because the SAME underlying
+    concept is independently proven positive elsewhere in this system
+    (band-walk / Keltner-ride dominate Intraday's and Futures' honest
+    fullbook results) or because it targets a genuinely distinct setup
+    (volatility contraction) not covered by the others.
 
-    Patterns (all evaluated, best score wins, 60s throttle):
-      1.  EMA50_BOUNCE            — pullback to EMA50 in EMA200 uptrend (classic swing)
-      2.  EMA50_SHORT             — rally to EMA50 in EMA200 downtrend (bearish)
-      3.  MACD_SWING              — MACD histogram zero-cross + EMA200 alignment
-      4.  SUPERTREND_BOUNCE       — Supertrend + EMA21 + RSI 40-62
-      5.  GOLDEN_CROSS/DEATH_CROSS— EMA50/EMA200 cross within 0.5% (rare, high conviction)
-      6.  RSI_DIP_RELOAD          — RSI bounces through 50 in trend (dip-and-resume)
-      7.  PREV_DAY_HIGH           — prev-day high/low break + volume ≥1.3×
-      8.  WEEKLY_VWAP_PULL        — within 1.2% of VWAP + EMA200 trend + RSI 45-60
-      9.  ADX_TREND_CONFIRM       — ADX rising through 25 + full EMA stack + VWAP + MACD
-      10. FII_SWING               — strong FII flow >0.65 + EMA200 trend + ADX ≥20
-      11. WEEKLY_STRUCTURE_BREAK  — 50-bar high/low break + volume ≥1.5× + EMA200
-      12. EMA200_RETEST           — within 1% of EMA200 (major dynamic S/R) + bounce
-      13. HMA_SWING               — HMA direction flip + EMA200 trend + volume
+    Patterns (best score wins, 60s throttle, real daily-bar structure):
+      1. DAILY_BB_SQUEEZE_WALK  — 3 daily closes outside the daily BB band,
+         same concept as Intraday's #1 honest-fullbook pattern (+12,383%
+         year, since BB_SQUEEZE_WALK's honest breakdown) and Futures'
+         BB_WALK_FUT (+3,245% since honest tf1) — ported to daily granularity.
+      2. DAILY_KELTNER_RIDE     — 3 daily closes beyond the daily Keltner
+         channel (BB midline ± 1.5×ATR), the volatility-normalised sibling
+         of the pattern above; also independently proven at Intraday/Futures.
+      3. TREND_PULLBACK_CONFIRMED — full daily EMA9>21>50>200 bull/bear
+         stack + RSI crosses back through 50 + volume/ADX confirmation.
+         Evolution of the old book's ONLY positive pattern (RSI_DIP_RELOAD,
+         +6.6% @3tr — too thin to trust alone, but the direction was real);
+         adds the volume/ADX confirmation the old version lacked.
+      4. VOLATILITY_CONTRACTION — daily ATR has been contracting well below
+         its 10-day range average (a coiled range) then breaks out with
+         trend + volume confirmation — a genuinely distinct "VCP-style"
+         setup, not a variant of the band-walk family above.
 
     Context bonus (0-6): EMA200 side, VWAP, RSI zone, volume ≥1.3×, MACD, ADX ≥25
     Sizing: 5-6 → 0.75×  |  7-8 → 0.9×  |  9+ → 1.0×
@@ -2679,17 +2685,12 @@ class SwingAgent(BaseAgent):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
         self._last_eval:      dict[str, float] = {}
-        self._prev_macd_hist: dict[str, float] = {}
         self._prev_ltp:       dict[str, float] = {}
         self._prev_rsi:       dict[str, float] = {}
-        self._prev_adx:       dict[str, float] = {}
-        self._prev_hma_dir:   dict[str, str]   = {}
-        self._prev_ema50_above: dict[str, bool] = {}   # GOLDEN_CROSS event state
         self._warmup_start: float | None = None        # process-restart warm-up
         self._cool_ts: dict = {}   # sym → {"BUY": datetime, "SELL": datetime}
         self._daily_cache: dict[str, tuple] = {}        # sym → (as_of_date, historical_df excl. today)
         self._daily_ind:   dict[str, LiveIndicators] = {}  # sym → last computed REAL daily indicators
-        self._daily_anchor: dict[str, float] = {}       # sym → trailing 20-day volume-weighted price
 
     def _load_daily_history(self, sym: str, upto_date) -> Optional["pd.DataFrame"]:
         """Real daily OHLCV bars strictly BEFORE `upto_date` (today's row is
@@ -2742,18 +2743,6 @@ class SwingAgent(BaseAgent):
         }])
         daily_df = pd.concat([hist, today_row], ignore_index=True)
 
-        # Trailing 20-trading-day volume-weighted anchor — a real "value area"
-        # for WEEKLY_VWAP_PULL, replacing the old intraday session VWAP (which
-        # is meaningless as a multi-day pullback reference and, computed from
-        # a single synthetic daily bar, would collapse to ≈ ltp).
-        tail20 = daily_df.tail(20)
-        vol_sum = float(tail20["volume"].sum())
-        if vol_sum > 0:
-            typical = (tail20["high"] + tail20["low"] + tail20["close"]) / 3.0
-            self._daily_anchor[sym] = float((typical * tail20["volume"]).sum() / vol_sum)
-        else:
-            self._daily_anchor[sym] = float(tail20["close"].mean())
-
         synth_tick = Tick(
             symbol=sym, ltp=ltp, bid=snap.tick.bid, ask=snap.tick.ask,
             volume=today_vol, change=0.0, change_pct=ind.change_pct,
@@ -2796,12 +2785,8 @@ class SwingAgent(BaseAgent):
 
         best_score, best_action, best_pattern = -1, "", ""
         for pat_fn in (
-            self._pat_ema50_bounce, self._pat_ema50_short, self._pat_macd_swing,
-            self._pat_supertrend_bounce, self._pat_golden_cross, self._pat_rsi_dip_reload,
-            self._pat_prev_day_high, self._pat_weekly_vwap_pull,
-            self._pat_adx_trend_confirm, self._pat_fii_swing,
-            self._pat_weekly_structure_break, self._pat_ema200_retest, self._pat_hma_swing,
-            self._pat_ema21_pullback_swing, self._pat_macd_zero_turn_swing,
+            self._pat_daily_bb_squeeze_walk, self._pat_daily_keltner_ride,
+            self._pat_trend_pullback_confirmed, self._pat_volatility_contraction,
         ):
             try:
                 action, base, pname = pat_fn(sym, snap, dind, ltp)
@@ -2813,11 +2798,8 @@ class SwingAgent(BaseAgent):
             if total > best_score:
                 best_score, best_action, best_pattern = total, action, pname
 
-        self._prev_macd_hist[sym] = dind.macd_hist
-        self._prev_ltp[sym]       = ltp
-        self._prev_rsi[sym]       = dind.rsi_14
-        self._prev_adx[sym]       = getattr(dind, 'adx_14', 0.0)
-        self._prev_hma_dir[sym]   = dind.hma_dir
+        self._prev_ltp[sym] = ltp
+        self._prev_rsi[sym] = dind.rsi_14
 
         if best_score < self.MIN_SCORE or not best_action:
             return "HOLD", None
@@ -2858,233 +2840,98 @@ class SwingAgent(BaseAgent):
             "pattern": best_pattern,
             "_gate_size_factor": sf,
             "trigger": (
-                f"SWING-{best_action} [{best_pattern}] score={best_score}/13 "
+                f"SWING-{best_action} [{best_pattern}] score={best_score}/4 "
                 f"sf={sf} rsi={dind.rsi_14:.0f} atr={atr:.2f}"
             ),
         }
 
-    # ── Pattern 1 ─────────────────────────────────────────────────────────────
+    # ── Pattern 1: DAILY_BB_SQUEEZE_WALK ─────────────────────────────────────
 
-    def _pat_ema50_bounce(self, sym, snap, ind, ltp):
-        if (ltp > ind.ema200 and ind.ema50 > 0
-                and abs(ltp - ind.ema50) / ind.ema50 < 0.015
-                and ind.ema21 > ind.ema50 and 40 < ind.rsi_14 < 60
-                and ind.volatility != "HIGH"):
-            return "BUY", 4, "EMA50_BOUNCE"
-        return "", 0, ""
-
-    def _pat_ema21_pullback_swing(self, sym, snap, ind, ltp):
-        """Shallow pullback to EMA21 inside a full bull stack — enters the
-        strongest trends on their first rest instead of waiting for the
-        (deeper, rarer) EMA50 tag."""
-        import bot_state
-        if not bot_state.is_pattern_enabled("swing", "EMA21_PULLBACK_SWING"):
+    def _pat_daily_bb_squeeze_walk(self, sym, snap, ind, ltp):
+        """Daily-bar port of Intraday's honest-fullbook #1 pattern
+        BB_SQUEEZE_WALK: 3 consecutive daily closes outside the daily BB
+        band = sustained breakout, measured in trading DAYS not minutes."""
+        cached = self._daily_cache.get(sym)
+        if cached is None or len(cached[1]) < 2:
             return "", 0, ""
-        if (ind.ema21 > 0 and ind.ema9 > ind.ema21 > ind.ema50 > ind.ema200 > 0
-                and abs(ltp - ind.ema21) / ind.ema21 < 0.008
-                and 40 < ind.rsi_14 < 62 and ind.macd_hist > 0):
-            return "BUY", 4, "EMA21_PULLBACK_SWING"
-        return "", 0, ""
-
-    def _pat_macd_zero_turn_swing(self, sym, snap, ind, ltp):
-        """MACD histogram turning positive while the long-term stack is
-        bullish — momentum re-igniting inside an existing uptrend (mirror
-        short in a bear stack)."""
-        import bot_state
-        if not bot_state.is_pattern_enabled("swing", "MACD_ZERO_TURN_SWING"):
+        bb_u, bb_l = getattr(ind, "bb_upper", 0.0), getattr(ind, "bb_lower", 0.0)
+        if not (bb_u > 0 and bb_l > 0):
             return "", 0, ""
-        if (ind.ema50 > ind.ema200 > 0 and 0 < ind.macd_hist
-                and ltp > ind.ema50 and 45 < ind.rsi_14 < 68
-                and ind.volume_ratio >= 1.1):
-            return "BUY", 3, "MACD_ZERO_TURN_SWING"
-        if (0 < ind.ema50 < ind.ema200 and ind.macd_hist < 0
-                and ltp < ind.ema50 and 32 < ind.rsi_14 < 55
-                and ind.volume_ratio >= 1.1):
-            return "SELL", 3, "MACD_ZERO_TURN_SWING"
+        last2 = cached[1]["close"].tail(2).tolist()
+        closes3 = last2 + [ltp]
+        if all(c >= bb_u for c in closes3) and ind.volume_ratio >= 1.3 and ind.macd_hist > 0:
+            return "BUY", 5, "DAILY_BB_SQUEEZE_WALK"
+        if all(c <= bb_l for c in closes3) and ind.volume_ratio >= 1.3 and ind.macd_hist < 0:
+            return "SELL", 5, "DAILY_BB_SQUEEZE_WALK"
         return "", 0, ""
 
-    # ── Pattern 2 ─────────────────────────────────────────────────────────────
+    # ── Pattern 2: DAILY_KELTNER_RIDE ────────────────────────────────────────
 
-    def _pat_ema50_short(self, sym, snap, ind, ltp):
-        # Short the rally INTO EMA50 resistance — but only with rejection
-        # evidence. Proximity alone (the old test) shorted rallies that kept
-        # rising: 0/2 in the 3-seed diagnosis, the only net-negative swing
-        # pattern. Require bearish momentum (MACD histogram). A Supertrend!=UP
-        # clause was tried and killed ALL entries in A/B — a rally into
-        # resistance has recent upward movement by definition, so Supertrend
-        # is nearly always UP at exactly that moment.
-        if (ltp < ind.ema200 and ind.ema50 > 0
-                and abs(ltp - ind.ema50) / ind.ema50 < 0.015
-                and ind.ema21 < ind.ema50 and 40 < ind.rsi_14 < 60
-                and ind.macd_hist < 0
-                and ind.volatility != "HIGH"):
-            return "SELL", 4, "EMA50_SHORT"
-        return "", 0, ""
-
-    # ── Pattern 3 ─────────────────────────────────────────────────────────────
-
-    def _pat_macd_swing(self, sym, snap, ind, ltp):
-        prev_hist = self._prev_macd_hist.get(sym, ind.macd_hist)
-        if prev_hist <= 0 < ind.macd_hist and ltp > ind.ema200:
-            return "BUY",  4, "MACD_SWING"
-        if prev_hist >= 0 > ind.macd_hist and ltp < ind.ema200:
-            return "SELL", 4, "MACD_SWING"
-        return "", 0, ""
-
-    # ── Pattern 4 ─────────────────────────────────────────────────────────────
-
-    def _pat_supertrend_bounce(self, sym, snap, ind, ltp):
-        st = ind.supertrend_dir
-        if (st in ("UP", "up") and ltp > ind.ema21 > 0
-                and 40 <= ind.rsi_14 <= 62 and ind.ema21 > ind.ema50 > 0):
-            return "BUY", 4, "SUPERTREND_BOUNCE"
-        if (st in ("DOWN", "down") and ind.ema21 > 0
-                and ind.ema21 < ind.ema50 > 0 and 38 <= ind.rsi_14 <= 60):
-            return "SELL", 4, "SUPERTREND_BOUNCE"
-        return "", 0, ""
-
-    # ── Pattern 5 ─────────────────────────────────────────────────────────────
-
-    def _pat_golden_cross(self, sym, snap, ind, ltp):
-        """Fires on the actual EMA50/EMA200 cross EVENT. The old proximity test
-        (|ema50-ema200| < 0.5%) is a persistent STATE that can hold for hours
-        on 1-min bars — combined with SwingAgent's 60s evaluation cadence and
-        score 5 > MIN_SCORE it re-signalled every minute after each exit."""
-        if not ind.ema200 or ind.ema200 <= 0 or not ind.ema50 or ind.ema50 <= 0:
+    def _pat_daily_keltner_ride(self, sym, snap, ind, ltp):
+        """Daily-bar port of Intraday's honest-fullbook #2 pattern
+        KELTNER_RIDE: 3 daily closes beyond the daily Keltner channel (BB
+        midline ± 1.5×ATR) — the volatility-normalised sibling of the band
+        walk above, independently proven at Intraday and Futures."""
+        cached = self._daily_cache.get(sym)
+        if cached is None or len(cached[1]) < 2:
             return "", 0, ""
-        above      = ind.ema50 > ind.ema200
-        prev_above = self._prev_ema50_above.get(sym)
-        self._prev_ema50_above[sym] = above
-        if prev_above is None or prev_above == above:
+        atr = getattr(ind, "atr_14", 0.0)
+        bb_u, bb_l = getattr(ind, "bb_upper", 0.0), getattr(ind, "bb_lower", 0.0)
+        if atr <= 0 or not (bb_u > 0 and bb_l > 0):
             return "", 0, ""
-        return ("BUY", 5, "GOLDEN_CROSS") if above else ("SELL", 5, "DEATH_CROSS")
+        mid = (bb_u + bb_l) / 2
+        kel_u, kel_l = mid + 1.5 * atr, mid - 1.5 * atr
+        last2 = cached[1]["close"].tail(2).tolist()
+        closes3 = last2 + [ltp]
+        if all(c >= kel_u for c in closes3) and ind.volume_ratio >= 1.2 and ind.rsi_14 < 78:
+            return "BUY", 5, "DAILY_KELTNER_RIDE"
+        if all(c <= kel_l for c in closes3) and ind.volume_ratio >= 1.2 and ind.rsi_14 > 22:
+            return "SELL", 5, "DAILY_KELTNER_RIDE"
+        return "", 0, ""
 
-    # ── Pattern 6 ─────────────────────────────────────────────────────────────
+    # ── Pattern 3: TREND_PULLBACK_CONFIRMED ──────────────────────────────────
 
-    def _pat_rsi_dip_reload(self, sym, snap, ind, ltp):
+    def _pat_trend_pullback_confirmed(self, sym, snap, ind, ltp):
+        """Evolution of the old book's only positive pattern (RSI_DIP_RELOAD,
+        +6.6% @3tr — real direction, too thin to trust alone): full daily
+        EMA9>21>50>200 stack (not just 21>50) + RSI crosses back through 50
+        + volume/ADX confirmation, filtering the noise the unconfirmed
+        version likely let through."""
         prev_rsi = self._prev_rsi.get(sym, ind.rsi_14)
-        if (ltp > ind.ema200 > 0 and ind.ema21 > ind.ema50 > 0
-                and prev_rsi < 50 and ind.rsi_14 >= 50):
-            return "BUY", 4, "RSI_DIP_RELOAD"
-        if (ltp < ind.ema200 > 0 and ind.ema21 < ind.ema50 > 0
-                and prev_rsi > 50 and ind.rsi_14 <= 50):
-            return "SELL", 4, "RSI_DIP_RELOAD"
+        adx = getattr(ind, "adx_14", 0.0)
+        if (ind.ema9 > ind.ema21 > ind.ema50 > ind.ema200 > 0
+                and prev_rsi < 50 <= ind.rsi_14
+                and ind.volume_ratio >= 1.2 and adx >= 20):
+            return "BUY", 5, "TREND_PULLBACK_CONFIRMED"
+        if (0 < ind.ema9 < ind.ema21 < ind.ema50 < ind.ema200
+                and prev_rsi > 50 >= ind.rsi_14
+                and ind.volume_ratio >= 1.2 and adx >= 20):
+            return "SELL", 5, "TREND_PULLBACK_CONFIRMED"
         return "", 0, ""
 
-    # ── Pattern 7 ─────────────────────────────────────────────────────────────
+    # ── Pattern 4: VOLATILITY_CONTRACTION ────────────────────────────────────
 
-    def _pat_prev_day_high(self, sym, snap, ind, ltp):
-        # ind.symbol / self._daily_cache[sym] give the REAL previous trading
-        # day's high/low (that day's actual bar, not a nonexistent
-        # LiveIndicators field). getattr(ind, "prev_day_high", 0) always
-        # returned 0 before — this pattern never fired, ever, since inception.
+    def _pat_volatility_contraction(self, sym, snap, ind, ltp):
+        """VCP-style setup distinct from the band-walk family above: daily
+        ATR has contracted well below its trailing 10-day range average (a
+        coiled range), then price breaks out with trend + volume
+        confirmation."""
         cached = self._daily_cache.get(sym)
-        if cached is None or cached[1].empty:
+        if cached is None or len(cached[1]) < 10:
             return "", 0, ""
-        last_bar = cached[1].iloc[-1]
-        pdh, pdl = float(last_bar["high"]), float(last_bar["low"])
-        prev_ltp = self._prev_ltp.get(sym, ltp)
-        if pdh > 0 and prev_ltp <= pdh < ltp and ind.volume_ratio > 1.3:
-            return "BUY",  4, "PREV_DAY_HIGH"
-        if pdl > 0 and prev_ltp >= pdl > ltp and ind.volume_ratio > 1.3:
-            return "SELL", 4, "PREV_DAY_LOW"
-        return "", 0, ""
-
-    # ── Pattern 8 ─────────────────────────────────────────────────────────────
-
-    def _pat_weekly_vwap_pull(self, sym, snap, ind, ltp):
-        # Trailing 20-trading-day volume-weighted anchor (real "value area"),
-        # not the old intraday session VWAP — meaningless here since it would
-        # collapse to ≈ ltp when computed from a single synthetic daily bar.
-        anchor = self._daily_anchor.get(sym, 0.0)
-        if (anchor > 0 and ind.ema200 > 0
-                and abs(ltp - anchor) / anchor < 0.012
-                and 45 <= ind.rsi_14 <= 60 and ltp > ind.ema200):
-            return "BUY", 3, "WEEKLY_VWAP_PULL"
-        return "", 0, ""
-
-    # ── Pattern 9: ADX_TREND_CONFIRM ─────────────────────────────────────────
-
-    def _pat_adx_trend_confirm(self, sym, snap, ind, ltp):
-        adx      = getattr(ind, 'adx_14', 0.0)
-        prev_adx = self._prev_adx.get(sym, adx)
-        if adx < 25 or prev_adx >= adx:
+        atr = getattr(ind, "atr_14", 0.0)
+        if atr <= 0:
             return "", 0, ""
-        bull = (ind.ema9 > ind.ema21 > 0 and ind.ema21 > ind.ema50 > 0
-                and ltp > ind.ema200 and ind.vwap and ltp > ind.vwap and ind.macd_hist > 0)
-        bear = (ind.ema9 < ind.ema21 > 0 and ind.ema21 < ind.ema50 > 0
-                and ltp < ind.ema200 and ind.vwap and ltp < ind.vwap and ind.macd_hist < 0)
-        if bull: return "BUY",  5, "ADX_TREND_CONFIRM"
-        if bear: return "SELL", 5, "ADX_TREND_CONFIRM"
-        return "", 0, ""
-
-    # ── Pattern 10: FII_SWING ─────────────────────────────────────────────────
-
-    def _pat_fii_swing(self, sym, snap, ind, ltp):
-        try:
-            from alt_data import alt_data_engine
-            fii = alt_data_engine.get_fii_sentiment()  # float in [-1.0, 1.0]
-            adx = getattr(ind, 'adx_14', 0.0)
-            if (fii > 0.65 and ltp > ind.ema200 > 0
-                    and ind.ema21 > ind.ema50 > 0 and adx >= 20 and 45 <= ind.rsi_14 <= 65):
-                return "BUY", 5, "FII_SWING"
-            if (fii < -0.35 and ltp < ind.ema200 > 0
-                    and ind.ema21 < ind.ema50 > 0 and adx >= 20 and 35 <= ind.rsi_14 <= 55):
-                return "SELL", 5, "FII_SWING"
-        except Exception:
-            pass
-        return "", 0, ""
-
-    # ── Pattern 11: WEEKLY_STRUCTURE_BREAK ───────────────────────────────────
-
-    def _pat_weekly_structure_break(self, sym, snap, ind, ltp):
-        # Real trailing 10-TRADING-DAY (~2 calendar weeks) high/low, not the
-        # old 50 one-minute bars (~50 minutes) — a genuine multi-day structure
-        # level instead of the last hour's noise.
-        n = 10
-        cached = self._daily_cache.get(sym)
-        if cached is None or len(cached[1]) < n:
+        hist10 = cached[1].tail(10)
+        avg_range = float((hist10["high"] - hist10["low"]).abs().mean())
+        if avg_range <= 0 or atr >= avg_range * 0.75:
             return "", 0, ""
-        last_n   = cached[1].tail(n)
-        n_high   = float(last_n["high"].max())
-        n_low    = float(last_n["low"].min())
-        prev_ltp = self._prev_ltp.get(sym, ltp)
-        if (prev_ltp < n_high and ltp > n_high
-                and ind.volume_ratio >= 1.5 and ltp > ind.ema200):
-            return "BUY",  5, "WEEKLY_STRUCTURE_BREAK"
-        if (prev_ltp > n_low and ltp < n_low
-                and ind.volume_ratio >= 1.5 and ltp < ind.ema200):
-            return "SELL", 5, "WEEKLY_STRUCTURE_BREAK"
-        return "", 0, ""
-
-    # ── Pattern 12: EMA200_RETEST ─────────────────────────────────────────────
-
-    def _pat_ema200_retest(self, sym, snap, ind, ltp):
-        if not ind.ema200 or ind.ema200 <= 0:
-            return "", 0, ""
-        if abs(ltp - ind.ema200) / ind.ema200 > 0.01:
-            return "", 0, ""
-        prev_ltp = self._prev_ltp.get(sym, ltp)
-        bull = (ltp > ind.ema200 and prev_ltp >= ind.ema200 and ind.ema50 > ind.ema200
-                and 40 <= ind.rsi_14 <= 60 and ind.volume_ratio >= 1.2)
-        bear = (ltp < ind.ema200 and prev_ltp <= ind.ema200 and ind.ema50 < ind.ema200
-                and 40 <= ind.rsi_14 <= 60 and ind.volume_ratio >= 1.2)
-        if bull: return "BUY",  5, "EMA200_RETEST"
-        if bear: return "SELL", 5, "EMA200_RETEST"
-        return "", 0, ""
-
-    # ── Pattern 13: HMA_SWING ─────────────────────────────────────────────────
-
-    def _pat_hma_swing(self, sym, snap, ind, ltp):
-        if not ind.hma or ind.hma <= 0:
-            return "", 0, ""
-        prev_hma = self._prev_hma_dir.get(sym, ind.hma_dir)
-        if (prev_hma != "UP" and ind.hma_dir == "UP"
-                and ltp > ind.ema200 > 0 and ind.volume_ratio >= 1.2):
-            return "BUY", 4, "HMA_SWING"
-        if (prev_hma != "DOWN" and ind.hma_dir == "DOWN"
-                and ltp < ind.ema200 > 0 and ind.volume_ratio >= 1.2):
-            return "SELL", 4, "HMA_SWING"
+        if (ltp > ind.ema50 > 0 and ind.macd_hist > 0
+                and ind.volume_ratio >= 1.5 and ind.rsi_14 >= 50):
+            return "BUY", 5, "VOLATILITY_CONTRACTION"
+        if (0 < ind.ema50 and ltp < ind.ema50 and ind.macd_hist < 0
+                and ind.volume_ratio >= 1.5 and ind.rsi_14 <= 50):
+            return "SELL", 5, "VOLATILITY_CONTRACTION"
         return "", 0, ""
 
     # ── Context bonus (0-6) ───────────────────────────────────────────────────
