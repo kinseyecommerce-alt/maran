@@ -280,6 +280,14 @@ class Settings(BaseSettings):
     # Active broker selection
     active_broker: Literal["zerodha", "upstox", "kotak"] = "zerodha"
 
+    # DigitalOcean (admin-only OAuth — view this app's own App Platform
+    # deployment status; not a trading broker)
+    digitalocean_client_id:     str = ""   # from Register a new OAuth Application
+    digitalocean_client_secret: str = ""   # shown once at registration — save it
+    digitalocean_redirect_url:  str = ""   # must match the app's Callback URL exactly
+    digitalocean_access_token:  str = ""   # set after OAuth callback exchange
+    digitalocean_app_id:        str = ""   # optional — narrows status to one App Platform app
+
     # Phase 1: Transaction cost / slippage model
     bt_slippage_bps_intraday: int = 10
     bt_slippage_bps_scalping: int = 5

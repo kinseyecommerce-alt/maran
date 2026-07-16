@@ -855,6 +855,72 @@ def kotak_set_token(req: KotakTokenRequest):
     return {"status": "ok", "token_set": True}
 
 
+# ── DigitalOcean Admin (view this app's own App Platform status — NOT a broker) ──
+
+@app.get("/auth/digitalocean/status", tags=["Auth"])
+def digitalocean_status():
+    """Check whether a valid DigitalOcean OAuth token is loaded and report app status."""
+    if not settings.digitalocean_access_token:
+        return {"connected": False, "message": "No DigitalOcean token. Use Authorize with DigitalOcean."}
+    try:
+        import digitalocean_admin
+        return digitalocean_admin.get_app_status()
+    except Exception as e:
+        logger.error("DigitalOcean status error: {}", e)
+        return {"connected": bool(settings.digitalocean_access_token), "token_loaded": True, "message": str(e)}
+
+
+@app.get("/auth/digitalocean/login-url", tags=["Auth"])
+def digitalocean_login_url():
+    """Return the DigitalOcean OAuth2 authorize URL."""
+    import digitalocean_admin
+    return {"login_url": digitalocean_admin.login_url()}
+
+
+@app.get("/auth/digitalocean/callback", tags=["Auth"], include_in_schema=False)
+async def digitalocean_callback(code: str = Query(...)):
+    """DigitalOcean redirects here after OAuth with auth code. Exchanges code for access token."""
+    if not code:
+        return HTMLResponse(
+            "<html><head><meta http-equiv='refresh' content='3;url=/dashboard'></head>"
+            "<body style='font-family:sans-serif;background:#0d1117;color:#e6edf3;"
+            "display:flex;align-items:center;justify-content:center;height:100vh'>"
+            "<div style='text-align:center'><div style='font-size:2.5rem'>❌</div>"
+            "<h2 style='color:#f85149'>DigitalOcean login failed.</h2>"
+            "<p style='color:#8b949e'>Redirecting to dashboard…</p></div></body></html>",
+            status_code=400,
+        )
+    try:
+        import digitalocean_admin
+        digitalocean_admin.exchange_code(code)
+        return HTMLResponse("""
+        <html><head><title>DigitalOcean Connected</title>
+        <meta http-equiv='refresh' content='2;url=/dashboard'>
+        </head>
+        <body style="font-family:sans-serif;background:#0d1117;color:#e6edf3;
+                     display:flex;align-items:center;justify-content:center;height:100vh">
+          <div style="text-align:center">
+            <div style="font-size:3rem">✅</div>
+            <h2 style="color:#3fb950">DigitalOcean Connected!</h2>
+            <p style="color:#8b949e">Redirecting to dashboard…</p>
+          </div>
+        </body></html>
+        """)
+    except Exception as e:
+        # Detail goes to server logs only — never render exception text into HTML (XSS)
+        logger.error("DigitalOcean callback error: {}", e)
+        return HTMLResponse(
+            "<html><head><meta http-equiv='refresh' content='3;url=/dashboard'></head>"
+            "<body style='font-family:sans-serif;background:#0d1117;color:#e6edf3;"
+            "display:flex;align-items:center;justify-content:center;height:100vh'>"
+            "<div style='text-align:center'><div style='font-size:2.5rem'>❌</div>"
+            "<h2 style='color:#f85149'>Token exchange failed.</h2>"
+            "<p style='color:#8b949e'>Token exchange failed — check server logs.</p>"
+            "<p style='color:#8b949e'>Redirecting to dashboard…</p></div></body></html>",
+            status_code=500,
+        )
+
+
 @app.post("/auth/kite/refresh", tags=["Auth"])
 async def kite_token_refresh():
     """Manually trigger Kite auto-login via Playwright (same as 08:50 IST scheduler job).
@@ -3483,6 +3549,14 @@ async def on_startup():
             logger.info("[startup] Kite access token restored from state_store")
         except Exception as _tok_exc:
             logger.warning("[startup] Kite token restore failed (fresh login needed): {}", _tok_exc)
+
+    # Restore DigitalOcean OAuth token (admin deployment-status integration) —
+    # container filesystem is ephemeral, .env has no slot for OAuth-issued tokens.
+    if not settings.digitalocean_access_token:
+        saved_do_token = get_kv("digitalocean_access_token", "")
+        if saved_do_token:
+            settings.digitalocean_access_token = saved_do_token
+            logger.info("[startup] DigitalOcean access token restored from state_store")
 
     # Restore the pre-learned approved-symbols file from state_store — it
     # gates filter_watchlist() when SKIP_STARTUP_BACKTEST=true, and the
