@@ -15903,14 +15903,16 @@ def t_every_agent_constructs_and_reports_status():
 run("agents: every agent constructs and serves get_status()",           t_every_agent_constructs_and_reports_status)
 
 def t_option_scalping_agent_registered_and_scoped():
-    """New OptionScalpingAgent: registered, index-only, focused pattern book."""
+    """OptionScalpingAgent: registered, index-only, single non-directional
+    ATM_STRADDLE pattern (inherited from OptionsAgent) — the 4 original
+    directional patterns all tested net-negative over a full 1yr replay
+    (-804% cumulative, 15.8% win rate) and were removed."""
     from agents.strategy_agents import ALL_AGENTS, OptionScalpingAgent
     a = ALL_AGENTS.get("option_scalping")
     assert isinstance(a, OptionScalpingAgent)
     fns = a._buy_pattern_fns()
     names = [f.__name__ for f in fns]
-    assert names == ["_pat_expiry_gamma_scalp", "_pat_vol_spike_scalp",
-                     "_pat_trend_walk_scalp", "_pat_range_fade_scalp"], names
+    assert names == ["_pat_atm_straddle"], names
     assert a._sell_pattern_fns() == []
     # index-only guard: non-index symbols must HOLD without touching patterns
     from types import SimpleNamespace

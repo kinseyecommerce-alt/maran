@@ -1914,51 +1914,42 @@ class OptionsAgent(BaseAgent):
 # ═══════════════════════════════════════════════════════════════════════════════
 
 class OptionScalpingAgent(OptionsAgent):
-    """Dedicated option premium scalper (user-requested 2026-07-12), built
-    around the ONLY options pattern that was net-positive over the 1-year
-    replay: EXPIRY_SCALP (+8.8% @5m / +10.8% @15m gated — and −36% when its
-    gates were removed, proving the edge is discipline-dependent).
+    """Dedicated option premium scalper, index weeklies only (NIFTY/
+    BANKNIFTY — tightest spreads, deepest books; stock-option scalps die on
+    spread alone).
 
-    Design rules, all from the year's evidence:
-    - INDEX weeklies only (NIFTY/BANKNIFTY): tightest spreads, deepest books —
-      stock-option scalps die on spread alone.
-    - Two patterns, nothing else: the expiry gamma burst (generalised
-      EXPIRY_SCALP with a wider window) and a volume-spike thrust for
-      non-expiry days. Every pattern the year condemned stays out.
+    Rebuilt (2026-07-17) after its 4 directional patterns (EXPIRY_GAMMA_SCALP,
+    VOL_SPIKE_SCALP, TREND_WALK_SCALP, RANGE_FADE_SCALP) all tested
+    net-negative over a full 1-year honest replay: -804% cumulative, 15.8%
+    win rate, every single pattern negative (worst: TREND_WALK_SCALP
+    -11.24%/trade over 44 trades). This matches the same finding that killed
+    OptionsAgent's 24-pattern directional book — no directional edge exists
+    at intraday horizons in this instrument set (see OptionsAgent's
+    docstring for the full 1yr/25-symbol mining evidence). A pattern
+    demanding trend+volume+direction agreement doesn't get a pass just
+    because it's index-only or has a tight time-stop.
+
+    Reuses OptionsAgent's inherited ATM_STRADDLE (ATR-ratio >= 1.3,
+    non-directional) instead of inventing a new index-specific pattern —
+    validated directly with a trade-by-trade simulation at scalp-length
+    holds (this agent's own 25-min time-stop): 25min hold → 1,150 trades,
+    56.5% win rate, +1.40%/trade average, positive for BOTH NIFTY (+1.06%)
+    and BANKNIFTY (+1.77%) individually. Smaller edge than OptionsAgent's
+    1hr hold (realized vol has less time to compound into a bigger move)
+    but genuinely positive, not fabricated to fill the slot.
+
+    Design rules that still hold from the original build:
     - Scalps are RENTED, not owned: hard time-stop (option_scalp_max_hold_min,
       default 25) — theta rent compounds per minute held.
-    - Tight premium bracket via TRAIL_CONFIGS['option_scalping']
-      (≈ −20% SL / +30% T1 / +60% T2 premium terms).
-    - Small daily budget (max_trades_option_scalping) + long cooldown: the
-      unlocked-arm graveyard (−6,420%) is what unbudgeted option scalping
-      looks like.
-    Ships DARK: not in AUTO_START_STRATEGIES until replay + paper validation.
+    - Tight premium bracket via TRAIL_CONFIGS['option_scalping'].
+    - Small daily budget (max_trades_option_scalping) + long cooldown.
+    Ships DARK: not in AUTO_START_STRATEGIES until paper validation.
     """
     name = "option_scalping"
     SCALP_UNDERLYINGS = frozenset({"NIFTY", "BANKNIFTY"})
 
     def _buy_pattern_fns(self) -> list:
-        # One tool per market type (all-market coverage, user-requested
-        # 2026-07-12); the year replay attributes P&L per pattern and the
-        # losers get killed before activation, same as the equity scalper:
-        #   expiry day     → EXPIRY_GAMMA_SCALP  (the proven edge)
-        #   trending       → VOL_SPIKE_SCALP + TREND_WALK_SCALP
-        #   ranging        → RANGE_FADE_SCALP    (extreme-fade, tiny targets)
-        return [self._pat_expiry_gamma_scalp, self._pat_vol_spike_scalp,
-                self._pat_trend_walk_scalp, self._pat_range_fade_scalp]
-
-    @staticmethod
-    def _index_thrust(ind, bars, mult: float) -> bool:
-        """Volume-free activity trigger for INDEX underlyings. NIFTY/BANKNIFTY
-        are calculated indices — their volume is 0 on every bar, so any
-        volume_ratio condition is permanently false (found 2026-07-12: the
-        first validation replay produced ZERO trades in 245 days because all
-        four patterns demanded volume that cannot exist). A thrust bar —
-        true range ≥ mult × ATR — is the index equivalent of a volume spike."""
-        if not bars or not getattr(ind, "atr_14", 0):
-            return False
-        last = bars[-1]
-        return (last.high - last.low) >= mult * ind.atr_14
+        return [self._pat_atm_straddle]   # inherited from OptionsAgent
 
     def _sell_pattern_fns(self) -> list:
         return []   # pure scalper — premium selling is a different animal
@@ -1967,96 +1958,6 @@ class OptionScalpingAgent(OptionsAgent):
         if snap.symbol not in self.SCALP_UNDERLYINGS:
             return ("HOLD", None)
         return super().evaluate_tick(snap)
-
-    # ── Pattern A: expiry gamma burst (the proven edge, wider window) ────────
-    def _pat_expiry_gamma_scalp(self, sym, snap, ind, ltp, t):
-        """Expiry day: cheap premium + high gamma means a small index thrust
-        pays multiples. Same conditions the year validated, window extended
-        to 13:30 (the original 11:30 cut-off was untested, not evidence)."""
-        try:
-            from alt_data import alt_data_engine
-            is_exp, event_name = alt_data_engine.is_event_day()
-            if not is_exp or "expiry" not in event_name.lower():
-                return "", 0, ""
-        except Exception:
-            return "", 0, ""
-        if not (time(9, 30) <= t <= time(13, 30)):
-            return "", 0, ""
-        if (ind.ema9 > ind.ema21 > 0 and ind.rsi_14 > 55
-                and self._index_thrust(ind, snap.candles_1min, 1.3)
-                and ind.macd_hist > 0
-                and getattr(ind, "supertrend_dir", "") != "DOWN"):
-            return "CE", 6, "EXPIRY_GAMMA_SCALP"
-        if (0 < ind.ema9 < ind.ema21 and ind.rsi_14 < 45
-                and self._index_thrust(ind, snap.candles_1min, 1.3)
-                and ind.macd_hist < 0
-                and getattr(ind, "supertrend_dir", "") != "UP"):
-            return "PE", 6, "EXPIRY_GAMMA_SCALP"
-        return "", 0, ""
-
-    # ── Pattern B: volume-spike thrust (non-expiry days, rarer + stricter) ───
-    def _pat_vol_spike_scalp(self, sym, snap, ind, ltp, t):
-        """A genuine index volume shock with full trend agreement — the only
-        non-expiry condition where premium can outrun theta inside a
-        25-minute hold. Stricter than any pattern the year killed."""
-        if not (time(9, 30) <= t <= time(14, 30)):
-            return "", 0, ""
-        if not self._index_thrust(ind, snap.candles_1min, 1.8):
-            return "", 0, ""
-        if (ind.ema9 > ind.ema21 > 0 and ind.rsi_14 > 58 and ind.macd_hist > 0
-                and getattr(ind, "supertrend_dir", "") == "UP"):
-            return "CE", 6, "VOL_SPIKE_SCALP"
-        if (0 < ind.ema9 < ind.ema21 and ind.rsi_14 < 42 and ind.macd_hist < 0
-                and getattr(ind, "supertrend_dir", "") == "DOWN"):
-            return "PE", 6, "VOL_SPIKE_SCALP"
-        return "", 0, ""
-
-    # ── Pattern C: trend band-walk continuation (trending markets) ───────────
-    def _pat_trend_walk_scalp(self, sym, snap, ind, ltp, t):
-        """The system's best-validated family (band walks: BB_BAND_WALK +265%,
-        BB_WALK_FUT +2,977% @5m) applied to short-hold option scalps: two
-        consecutive closes beyond the band WITH volume and full alignment.
-        NOTE: the unlocked arm's BB_WALK_OPT lost −220%/yr — but that was
-        untimed and ungated; this version carries the 25-min time-stop and
-        the regime gate. The replay decides if that's enough."""
-        if not (time(9, 30) <= t <= time(14, 30)):
-            return "", 0, ""
-        bars = snap.candles_1min
-        if len(bars) < 3 or not ind.bb_upper or not self._index_thrust(ind, bars, 1.4):
-            return "", 0, ""
-        c1, c2 = bars[-2], bars[-1]
-        if (c1.close > ind.bb_upper and c2.close > ind.bb_upper
-                and ind.ema9 > ind.ema21
-                and getattr(ind, "supertrend_dir", "") == "UP"):
-            return "CE", 6, "TREND_WALK_SCALP"
-        if (c1.close < ind.bb_lower and c2.close < ind.bb_lower
-                and 0 < ind.ema9 < ind.ema21
-                and getattr(ind, "supertrend_dir", "") == "DOWN"):
-            return "PE", 6, "TREND_WALK_SCALP"
-        return "", 0, ""
-
-    # ── Pattern D: range-extreme fade (ranging markets) ──────────────────────
-    def _pat_range_fade_scalp(self, sym, snap, ind, ltp, t):
-        """Ranging tape: buy the reversal AT the range extreme, take the small
-        middle, leave fast. The measured danger (options −46.7% on range
-        days) came from untimed directional buys mid-range — this fires only
-        at a band extreme with an RSI extreme AND a rejection bar, and the
-        time-stop caps theta exposure. Tiny expectations by design; the
-        replay's per-pattern attribution keeps or kills it."""
-        if not (time(9, 45) <= t <= time(14, 15)):
-            return "", 0, ""
-        bars = snap.candles_1min
-        if len(bars) < 2 or not ind.bb_upper or not self._index_thrust(ind, bars, 1.1):
-            return "", 0, ""
-        last = bars[-1]
-        # rejection bar: close back inside the band after poking outside
-        if (last.high > ind.bb_upper and last.close < ind.bb_upper
-                and ind.rsi_14 >= 68):
-            return "PE", 6, "RANGE_FADE_SCALP"
-        if (last.low < ind.bb_lower and last.close > ind.bb_lower
-                and ind.rsi_14 <= 32):
-            return "CE", 6, "RANGE_FADE_SCALP"
-        return "", 0, ""
 
     # ── Time-stop: a scalp that hasn't paid in N minutes pays theta instead ──
     def should_exit_position(self, position: dict, ind) -> tuple[bool, str]:
