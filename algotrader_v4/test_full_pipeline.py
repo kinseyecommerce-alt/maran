@@ -141,7 +141,7 @@ MKT = datetime(2026, 5, 29, 10, 30, 0)   # Friday, mid-session IST
 
 def mk(symbol, ltp, *, rsi=55.0, trend="UP", vwap=None, macd_hist=1.5,
        volume_ratio=1.8, n_candles=30, ema9=None, ema21=None, ema50=None,
-       ema200=None, spread=0.6, bar_seconds=60):
+       ema200=None, spread=0.6, bar_seconds=60, atr=15.0):
     vwap   = vwap   if vwap   is not None else ltp - 10
     ema9   = ema9   if ema9   is not None else ltp + 10
     ema21  = ema21  if ema21  is not None else ltp - 5
@@ -157,7 +157,7 @@ def mk(symbol, ltp, *, rsi=55.0, trend="UP", vwap=None, macd_hist=1.5,
         vwap=vwap, rsi_14=rsi, rsi_7=rsi - 2,
         macd=2.5, macd_signal=1.5, macd_hist=macd_hist,
         bb_upper=ltp + 50, bb_lower=ltp - 50, bb_mid=ltp,
-        atr_14=15.0, volume_ratio=volume_ratio, obv=1e6,
+        atr_14=atr, volume_ratio=volume_ratio, obv=1e6,
         day_high=ltp + 50, day_low=ltp - 50, day_open=ltp - 20, change_pct=0.5,
         trend=trend, momentum="UP", volatility="NORMAL", computed_at=MKT,
     )
@@ -187,11 +187,19 @@ def recipes():
                volume_ratio=1.5, ema9=1705, ema21=1700, ema50=1690,
                ema200=1600, n_candles=210),
         ]),
+        # ATM_STRADDLE fires on ATR-ratio (current ATR% vs its own trailing
+        # 20-tick average) >= 1.3 — the sole data-validated pattern left
+        # (see OptionsAgent docstring). Warm up 20 ticks at a baseline ATR,
+        # then one elevated-ATR tick (25/15 ≈ 1.67x) to trigger.
         "options": (OptionsAgent(), "INFY", [
             mk("INFY", 1620, rsi=50, vwap=1612, macd_hist=0.5, volume_ratio=1.6,
-               ema9=1615, ema21=1618, ema50=1610, ema200=1500, n_candles=30),
+               ema9=1615, ema21=1618, ema50=1610, ema200=1500, n_candles=30,
+               atr=15.0)
+            for _ in range(20)
+        ] + [
             mk("INFY", 1626, rsi=58, vwap=1612, macd_hist=1.4, volume_ratio=1.9,
-               ema9=1624, ema21=1618, ema50=1612, ema200=1500, n_candles=30),
+               ema9=1624, ema21=1618, ema50=1612, ema200=1500, n_candles=30,
+               atr=25.0),
         ]),
         # FuturesAgent only trades INDEX futures (in LOT_SIZES); stock futures like
         # SBIN are rejected at evaluate_tick's index-only guard. NIFTY now trades on

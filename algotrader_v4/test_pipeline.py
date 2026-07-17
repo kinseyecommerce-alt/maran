@@ -1594,39 +1594,11 @@ def t_swing_restart_warmup():
 
 run("swing restart warm-up: 15 min no-entry guard", t_swing_restart_warmup)
 
-def t_aggression_sleeve():
-    """Sleeve fires only when flag on + bull/volatile regime + full trend
-    stack; respects the daily cap; silent when disabled (default)."""
-    import bot_state
-    from datetime import time as _time
-    agent = OptionsAgent()
-    snap = _make_snap(n_candles=30, rsi=60.0, volume_ratio=2.0,
-                      ema9=2810.0, ema21=2795.0, vwap=2790.0, trend="UP")
-    ind = snap.indicators
-    ind.supertrend_dir = "UP"
-    ind.adx_14 = 30.0
-    t_ok = _time(11, 0)
-    old_flag = settings.aggression_sleeve_enabled
-    try:
-        # disabled (default) → never fires
-        settings.aggression_sleeve_enabled = False
-        assert agent._pat_sleeve_consensus("RELIANCE", snap, ind, 2812.0, t_ok)[2] == ""
-        # enabled + wrong regime → no fire
-        settings.aggression_sleeve_enabled = True
-        bot_state.set_current_regime("RANGING")
-        assert agent._pat_sleeve_consensus("RELIANCE", snap, ind, 2812.0, t_ok)[2] == ""
-        # enabled + BULL_TREND + trend stack → fires CE
-        bot_state.set_current_regime("BULL_TREND")
-        r = agent._pat_sleeve_consensus("RELIANCE", snap, ind, 2812.0, t_ok)
-        assert r == ("CE", 9, "SLEEVE_CONSENSUS"), f"got {r}"
-        # daily cap
-        agent._sleeve_count = settings.sleeve_max_trades_day
-        assert agent._pat_sleeve_consensus("RELIANCE", snap, ind, 2812.0, t_ok)[2] == ""
-    finally:
-        settings.aggression_sleeve_enabled = old_flag
-        bot_state.set_current_regime("UNKNOWN")
 
-run("aggression sleeve: flag+regime+trend-stack gated, daily cap", t_aggression_sleeve)
+# NOTE: SLEEVE_CONSENSUS (and the whole 24-pattern directional Options book)
+# was removed after a 1yr/25-symbol data-mining pass found no directional
+# edge at intraday horizons — see OptionsAgent's class docstring. The
+# aggression-sleeve test above tested a pattern that no longer exists.
 run("should_exit_position returns (bool, str)",  t_exit_position_type)
 run("exit: long position on overbought RSI",     t_exit_overbought_long)
 run("exit: short position on oversold RSI",      t_exit_short_oversold)
@@ -2636,107 +2608,6 @@ def t_fno_ctx_bonus_bear():
     bonus = a._ctx_bonus("PE", snap, ind, 21850.0, 20.0, None, None, None, None)
     assert bonus >= 3, f"Bear PE bonus {bonus} < 3"
 
-def t_fno_pat_ema_cross_ce():
-    from unittest.mock import MagicMock
-    a = OptionsAgent()
-    # Prime prev state: EMA9 was BELOW EMA21 (bearish) — crossing above is the event
-    a._prev_ema9_opt["NIFTY"]  = 21990.0   # was below ema21=22000
-    a._prev_ema21_opt["NIFTY"] = 22000.0
-    ind = MagicMock()
-    ind.ema9 = 22100.0; ind.ema21 = 22000.0; ind.ema50 = 21900.0; ind.rsi_14 = 60.0
-    opt, base, pname = a._pat_ema_cross("NIFTY", None, ind, 22150.0, time(10, 0))
-    assert opt == "CE" and base == 5 and pname == "EMA_CROSS"
-
-def t_fno_pat_ema_cross_pe():
-    from unittest.mock import MagicMock
-    a = OptionsAgent()
-    # Prime prev state: EMA9 was ABOVE EMA21 (bullish) — crossing below is the event
-    a._prev_ema9_opt["NIFTY"]  = 22010.0   # was above ema21=22000
-    a._prev_ema21_opt["NIFTY"] = 22000.0
-    ind = MagicMock()
-    ind.ema9 = 21900.0; ind.ema21 = 22000.0; ind.ema50 = 22100.0; ind.rsi_14 = 40.0
-    opt, base, pname = a._pat_ema_cross("NIFTY", None, ind, 21850.0, time(10, 0))
-    assert opt == "PE" and base == 5
-
-def t_fno_pat_rsi_extreme_ce():
-    from unittest.mock import MagicMock
-    a = OptionsAgent()
-    ind = MagicMock()
-    # RSI_MOMENTUM fires CE at 58-70 (momentum, not overbought exhaustion)
-    ind.rsi_14 = 64.0; ind.macd_hist = 0.8; ind.volume_ratio = 1.6
-    opt, base, pname = a._pat_rsi_extreme("NIFTY", None, ind, 22000.0, time(10, 0))
-    assert opt == "CE" and pname == "RSI_MOMENTUM"
-
-def t_fno_pat_rsi_extreme_pe():
-    from unittest.mock import MagicMock
-    a = OptionsAgent()
-    ind = MagicMock()
-    # RSI_MOMENTUM fires PE at 30-42 (strong downtrend, not oversold bounce)
-    ind.rsi_14 = 36.0; ind.macd_hist = -0.8; ind.volume_ratio = 1.5
-    opt, base, pname = a._pat_rsi_extreme("NIFTY", None, ind, 22000.0, time(10, 0))
-    assert opt == "PE" and pname == "RSI_MOMENTUM"
-
-def t_fno_pat_vwap_reclaim_ce():
-    from unittest.mock import MagicMock
-    a = OptionsAgent()
-    a._prev_above_vwap["NIFTY"] = False   # was below
-    ind = MagicMock()
-    ind.vwap = 21900.0; ind.volume_ratio = 1.5
-    opt, base, pname = a._pat_vwap_reclaim("NIFTY", None, ind, 21950.0, time(10, 0))
-    assert opt == "CE" and pname == "VWAP_RECLAIM"
-
-def t_fno_pat_vwap_reclaim_no_cross():
-    from unittest.mock import MagicMock
-    a = OptionsAgent()
-    a._prev_above_vwap["NIFTY"] = True    # was already above
-    ind = MagicMock()
-    ind.vwap = 21900.0; ind.volume_ratio = 1.5
-    opt, base, pname = a._pat_vwap_reclaim("NIFTY", None, ind, 21950.0, time(10, 0))
-    assert opt == ""    # no cross = no signal
-
-def t_fno_pat_orb_ce():
-    a = OptionsAgent()
-    a._orb_high["NIFTY"] = 22050.0
-    a._orb_low["NIFTY"]  = 21950.0
-    a._orb_fired["NIFTY"] = False
-    a._prev_ltp["NIFTY"]  = 22045.0   # was just below ORB high
-    from unittest.mock import MagicMock
-    ind = MagicMock()
-    # ltp breaks above ORB high
-    opt, base, pname = a._pat_orb("NIFTY", None, ind, 22075.0, time(9, 35))
-    assert opt == "CE" and pname == "ORB"
-
-def t_fno_pat_orb_outside_window():
-    a = OptionsAgent()
-    a._orb_high["NIFTY"] = 22050.0; a._orb_low["NIFTY"] = 21950.0
-    a._orb_fired["NIFTY"] = False; a._prev_ltp["NIFTY"] = 22045.0
-    from unittest.mock import MagicMock
-    ind = MagicMock()
-    opt, _, _ = a._pat_orb("NIFTY", None, ind, 22075.0, time(11, 0))  # after window
-    assert opt == ""
-
-def t_fno_pat_surge_ce():
-    from unittest.mock import MagicMock
-    a = OptionsAgent()
-    snap = MagicMock()
-    candle = MagicMock()
-    candle.open = 22000.0; candle.close = 22110.0  # +0.5% body
-    candle.ts = datetime.now()
-    snap.candles_1min = [MagicMock(), candle]
-    ind = MagicMock(); ind.volume_ratio = 2.2
-    opt, base, pname = a._pat_surge("NIFTY", snap, ind, 22110.0, time(10, 0))
-    assert opt == "CE" and pname == "SURGE"
-
-def t_fno_trend_pull_ce():
-    from unittest.mock import MagicMock
-    a = OptionsAgent()
-    a._prev_rsi["NIFTY"] = 66.0   # was extended
-    ind = MagicMock()
-    ind.ema9 = 22100.0; ind.ema21 = 22000.0; ind.ema50 = 21900.0
-    ind.rsi_14 = 54.0   # cooled to 48-60 range
-    opt, base, pname = a._pat_trend_pull("NIFTY", None, ind, 22050.0, time(10, 0))
-    assert opt == "CE" and pname == "TREND_PULL"
-
 def t_fno_sl_tgt_cheap_iv():
     a = OptionsAgent()
     sl, tgt = a._iv_sl_tgt(20.0)
@@ -2801,16 +2672,6 @@ def t_fno_cooldown_per_direction():
 run("OptionsAgent instantiates with name=fno",                   t_fno_agent_instantiates)
 run("ctx_bonus bullish CE >= 3",                             t_fno_ctx_bonus_bull)
 run("ctx_bonus bearish PE >= 3",                             t_fno_ctx_bonus_bear)
-run("EMA_CROSS pattern → CE on bull",                        t_fno_pat_ema_cross_ce)
-run("EMA_CROSS pattern → PE on bear",                        t_fno_pat_ema_cross_pe)
-run("RSI_EXTREME → CE on RSI>72",                            t_fno_pat_rsi_extreme_ce)
-run("RSI_EXTREME → PE on RSI<28",                            t_fno_pat_rsi_extreme_pe)
-run("VWAP_RECLAIM → CE on upside cross",                    t_fno_pat_vwap_reclaim_ce)
-run("VWAP_RECLAIM → no signal when already above",          t_fno_pat_vwap_reclaim_no_cross)
-run("ORB → CE on break above ORB high",                      t_fno_pat_orb_ce)
-run("ORB → no signal outside 9:30-10:00 window",             t_fno_pat_orb_outside_window)
-run("SURGE → CE on big up candle + heavy volume",            t_fno_pat_surge_ce)
-run("TREND_PULL → CE on RSI pullback in uptrend",           t_fno_trend_pull_ce)
 run("IV<25% → SL=35% TGT=100%",                             t_fno_sl_tgt_cheap_iv)
 run("IV>70% → SL=20% TGT=35%",                             t_fno_sl_tgt_expensive_iv)
 run("_pick_strike CE is above spot",                         t_fno_pick_strike_ce_above)
@@ -16042,14 +15903,16 @@ def t_every_agent_constructs_and_reports_status():
 run("agents: every agent constructs and serves get_status()",           t_every_agent_constructs_and_reports_status)
 
 def t_option_scalping_agent_registered_and_scoped():
-    """New OptionScalpingAgent: registered, index-only, focused pattern book."""
+    """OptionScalpingAgent: registered, index-only, single non-directional
+    ATM_STRADDLE pattern (inherited from OptionsAgent) — the 4 original
+    directional patterns all tested net-negative over a full 1yr replay
+    (-804% cumulative, 15.8% win rate) and were removed."""
     from agents.strategy_agents import ALL_AGENTS, OptionScalpingAgent
     a = ALL_AGENTS.get("option_scalping")
     assert isinstance(a, OptionScalpingAgent)
     fns = a._buy_pattern_fns()
     names = [f.__name__ for f in fns]
-    assert names == ["_pat_expiry_gamma_scalp", "_pat_vol_spike_scalp",
-                     "_pat_trend_walk_scalp", "_pat_range_fade_scalp"], names
+    assert names == ["_pat_atm_straddle"], names
     assert a._sell_pattern_fns() == []
     # index-only guard: non-index symbols must HOLD without touching patterns
     from types import SimpleNamespace

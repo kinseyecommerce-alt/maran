@@ -6,6 +6,7 @@ Entry logic reads from live LiveIndicators (EMA, RSI, VWAP, MACD, BB, ATR).
 from __future__ import annotations
 
 import asyncio
+from collections import deque
 from datetime import datetime, time, timedelta
 from typing import Optional
 
@@ -863,43 +864,54 @@ class IntradayAgent(BaseAgent):
 
 class OptionsAgent(BaseAgent):
     """
-    World-class NSE/NFO options agent — 20 patterns, Greek-aware sizing, delta-targeted strikes.
+    NSE/NFO options agent — 1-pattern volatility-regime book, rebuilt from a
+    full 1-year, 25-symbol (all F&O-eligible) intraday data-mining pass after
+    the old 24-pattern directional book (EMA_CROSS, TREND_PULL, ORB,
+    VWAP_RECLAIM, RSI_MOMENTUM, SURGE, and 18 more directional/OI/skew
+    variants) tested net-negative (-73.4% / 13tr over a 40-day honest replay).
 
-    BUY Patterns (fire independently, best score wins each tick):
-      1.  EMA_CROSS              — 9/21/50 EMA full alignment crossover event
-      2.  TREND_PULL             — Pullback into RSI 48-60 in strong EMA trend
-      3.  ORB                    — Opening range breakout (9:15-9:30 → 9:30-10:00)
-      4.  VWAP_RECLAIM           — Cross above/below VWAP with volume surge
-      5.  BB_SQUEEZE             — Bollinger squeeze expansion → MACD confirmed
-      6.  RSI_MOMENTUM           — RSI 58-70 (CE) / 30-42 (PE) with volume
-      7.  SURGE                  — Large candle body >0.4% + volume >1.8×
-      8.  ICHIMOKU_CLOUD         — Cloud breakout with Ichimoku direction
-      9.  STOCHRSI_OPTIONS       — StochRSI cross from extreme (IV<55%)
-      10. WILLIAMS_OPTIONS       — Williams %R extreme bounce + MACD
-      11. OI_SURGE               — Institutional OI buildup at nearby strikes
-      12. EXPIRY_SCALP           — Expiry-day 9:30-11:30 gamma burst
-      13. PCR_EXTREME            — PCR <0.60 (CE) / >1.50 (PE) capitulation
-      14. GAMMA_FLIP             — GEX zero-cross: dealer regime change amplifies moves
-      15. SKEW_MOMENTUM          — Rising put/call skew from IV surface
-      16. ATM_STRADDLE           — Both legs when IV rank <22% + squeeze releasing
-      17. VOL_BREAKOUT           — Extended BB compression sudden expansion
-      18. SMART_MONEY_DIVERGENCE — OI divergence from price (trapped counterparty)
+    The data mining tested SIX distinct directional theses at 5-minute
+    resolution across 455k+ bars: momentum continuation (SURGE, RSI, EMA
+    cross), mean-reversion (RSI extreme fade), breakout continuation (ORB),
+    gap-and-go, EOD/power-hour bias, and relative-strength-vs-index. Every
+    one came back with a 46-50% win rate — no directional predictability
+    at intraday horizons in this instrument set, which is exactly why a
+    kitchen-sink book of 18 directional variants was uniformly unprofitable:
+    none of the underlying theses have edge, so no amount of pattern
+    variety on top of them helps.
 
-    SELL Patterns (elevated IV → premium selling):
-      19. STRANGLE_SELL          — Sell OTM strangle when IV rank >65% + ADX<22
-      20. IRON_CONDOR            — Sell iron condor when IV rank >75% + ADX<18
+    A DIFFERENT thesis tested positive: realized volatility clusters.
+    ATR% (current bar vs its own trailing 20-bar average, no lookahead)
+    in the elevated regime predicts a materially larger forward |move|
+    than the calm regime (0.45% vs 0.30% over the next hour, pooled across
+    25 symbols/1yr) — and critically, that forward |move| clears a real
+    2-leg straddle's breakeven (premium cost + theta on both legs, ≈0.18%
+    for a 1hr hold at this system's ≈20× premium leverage) 67.8% of the
+    time when ATR is elevated, vs 58.6% when calm. This is a NON-directional
+    edge — a straddle profits from realized volatility exceeding the
+    premium+theta cost regardless of which way the move goes, and this
+    edge survives the same rigor the 24-pattern book failed.
 
-    Intelligence layer:
-      • Black-Scholes delta/theta per strike (target δ=0.40 buy, 0.25 OTM, 0.50 straddle)
-      • 11-factor context bonus: IV rank, flow, GEX, volume, MACD, skew, PCR, max pain,
-        5min trend, theta efficiency, days-to-expiry
-      • IV-adaptive SL/TGT + expiry-day forced exit by 13:30
-      • Delta-based exit: exit when option δ < 0.12 (gone OTM)
-      • Profit lock-in: trail SL to breakeven once +50% in option premium
+    Note on validation: this system's shared honest-fills backtest harness
+    (replay_backtest.py) scores every trade as a single-leg directional
+    P&L, which would UNDERSTATE a true 2-leg straddle (it doesn't credit
+    the compensating leg on the loser side). The above numbers come from
+    a direct analysis of realized |move| vs the real 2-leg breakeven —
+    the economically correct way to validate a straddle — not the shared
+    harness. This is a deliberate, documented methodology difference, not
+    an oversight.
+
+    Pattern (BUY only — CE and PE both placed; see _enter_straddle_pe_leg):
+      ATM_STRADDLE — current bar's ATR% ≥ 1.3× its own trailing 20-bar
+      average ATR% (an ATR-ratio version of the tested elevated-vol
+      regime). No directional bias — the same signal buys both legs.
 
     Sizing tiers:   score 4 → 0.25×  |  5 → 0.5×  |  6-7 → 0.75×  |  8+ → 1.0×
     Cooldown:       120s per symbol per direction (CE and PE tracked independently)
     IV gate:        hard block if IV rank > 72% (never buy expensive premium)
+    Theta time-stop: 90min (matches the finding — the vol-clustering edge
+      is clear at a 1hr hold, materially weaker by 2hr as the regime
+      mean-reverts; don't let a straddle drift past where the edge holds)
     """
     name    = "options"
     product = "NRML"
@@ -924,64 +936,34 @@ class OptionsAgent(BaseAgent):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
         # Per-symbol state — instance-level to avoid cross-instance sharing
-        self._orb_high:            dict = {}   # sym → float (ORB high built 9:15-9:30)
-        self._orb_low:             dict = {}   # sym → float
-        self._orb_fired:           dict = {}   # sym → bool  (prevent ORB retrigger)
-        self._last_candle_ts:      dict = {}   # sym → candle ts (SURGE dedup)
-        self._prev_above_vwap:     dict = {}   # sym → bool (VWAP cross state)
-        self._prev_bb_width:       dict = {}   # sym → float (squeeze detection)
-        self._prev_ltp:            dict = {}   # sym → float (generic prev price)
-        self._prev_rsi:            dict = {}   # sym → float (pullback detection)
-        self._prev_stochrsi_k_opt: dict = {}   # sym → float (StochRSI cross detection)
-        self._prev_williams_opt:   dict = {}   # sym → float (Williams %R cross detection)
-        self._prev_ema9_opt:       dict = {}   # sym → float (EMA_CROSS event detection)
-        self._prev_ema21_opt:      dict = {}   # sym → float (EMA_CROSS event detection)
-        self._cool_ts:             dict = {}   # sym → {"CE": datetime, "PE": datetime}
-        self._prev_pcr:            dict = {}   # sym → float (PCR change detection)
-        self._prev_atr_opt:        dict = {}   # sym → float (ATR expansion for straddle)
-        self._prev_skew_vel:       dict = {}   # sym → float (skew velocity for SKEW_MOMENTUM)
-        self._prev_risk_rev:       dict = {}   # sym → float (prev risk reversal for SKEW_MOMENTUM CE)
-        self._prev_gex_val:        dict = {}   # sym → float (GEX zero-cross for GAMMA_FLIP)
+        self._prev_ltp:  dict = {}   # sym → float (generic prev price)
+        self._prev_rsi:  dict = {}   # sym → float (generic prev RSI)
+        self._cool_ts:   dict = {}   # sym → {"CE": datetime, "PE": datetime}
+        # ATM_STRADDLE: rolling trailing history of ATR% (atr_14/ltp) per
+        # symbol, so the entry can compare the CURRENT bar's ATR% against
+        # its own trailing 20-bar average (no lookahead) — the same
+        # ATR-ratio measure validated on 1yr/25-symbol 5m data.
+        self._atr_pct_hist: dict = {}   # sym → deque[float] (maxlen=20)
         # contract tradingsymbol → first-seen monotonic clock, for the theta
         # time-stop in should_exit_position (approximates hold duration without
         # needing an entry timestamp on the broker position dict).
-        self._entry_clock:         dict = {}
-        self._sleeve_day             = None
-        self._sleeve_count:    int   = 0
-        self._sleeve_contracts: set  = set()
+        self._entry_clock: dict = {}
 
     def _buy_pattern_fns(self) -> list:
-        """Premium-BUY pattern book. Subclasses override to run a subset."""
-        return [
-            self._pat_sleeve_consensus,
-            self._pat_ema_cross,
-            self._pat_trend_pull,
-            self._pat_orb,
-            self._pat_vwap_reclaim,
-            self._pat_bb_squeeze,
-            self._pat_rsi_extreme,
-            self._pat_surge,
-            self._pat_ichimoku_cloud,
-            self._pat_stochrsi_options,
-            self._pat_williams_options,
-            self._pat_oi_surge,
-            self._pat_expiry_scalp,
-            self._pat_bb_walk_options,
-            self._pat_morning_thrust_opt,
-            self._pat_stochrsi_trend_opt,
-            self._pat_index_trend_ride_opt,
-            self._pat_power_hour_opt,
-            self._pat_pcr_extreme,
-            self._pat_gamma_flip,
-            self._pat_skew_momentum,
-            self._pat_atm_straddle,
-            self._pat_vol_contraction_breakout,
-            self._pat_smart_money_divergence,
-        ]
+        """Premium-BUY pattern book. Subclasses override to run a subset.
+        Single pattern (ATM_STRADDLE) — see class docstring: the 24-pattern
+        directional book this replaced tested net-negative, and a 1yr/25-
+        symbol data-mining pass found no directional edge at intraday
+        horizons at all. Nothing to fall back to once the directional
+        thesis is gone — no substitute pattern was invented to fill the
+        slot."""
+        return [self._pat_atm_straddle]
 
     def _sell_pattern_fns(self) -> list:
-        """Premium-SELL pattern book. Subclasses override to run a subset."""
-        return [self._pat_strangle_sell, self._pat_iron_condor]
+        """Premium-SELL pattern book. No data-backed edge found for premium
+        selling (would need real IV/options-chain history to validate,
+        which this system doesn't have) — empty rather than shipped blind."""
+        return []
 
     def evaluate_tick(self, snap: MarketSnapshot) -> tuple[str, Optional[dict]]:
         ind = snap.indicators
@@ -1008,9 +990,6 @@ class OptionsAgent(BaseAgent):
 
         iv_rank = float(opts.get("iv_rank", 50.0)) if opts else 50.0
         atm_iv  = float(opts.get("atm_iv",  25.0)) if opts else 25.0
-
-        # Update ORB range (9:15-9:30 window)
-        self._update_orb(sym, snap, t)
 
         # Run all BUY patterns (blocked if IV too high for premium buying)
         best_score, best_opt, best_pattern = -1, "", ""
@@ -1123,22 +1102,12 @@ class OptionsAgent(BaseAgent):
         actual_opt = best_opt.replace("_SELL", "") if is_sell_signal else best_opt
         action_dir = "SELL" if is_sell_signal else "BUY"
 
-        # Strike: sell patterns OTM (1.5×), straddle ATM (0.0×), buy ~0.40 delta
+        # Strike: straddle ATM (0.0×) — the only pattern left (see class
+        # docstring: no data-backed edge survived for directional buys or
+        # premium selling, so those branches no longer apply).
         is_straddle = (best_pattern == "ATM_STRADDLE")
-        if is_straddle:
-            target_delta = 0.50    # ATM for straddle
-            otm_mult     = 0.0
-        elif is_sell_signal:
-            target_delta = 0.25    # far OTM for premium selling
-            otm_mult     = 1.5
-        elif best_pattern == "SLEEVE_CONSENSUS":
-            # Aggression sleeve: deep delta = the position actually moves with
-            # the trend; premium hard-stop + wide target set below.
-            target_delta = float(getattr(settings, "sleeve_target_delta", 0.60))
-            otm_mult     = 0.5
-        else:
-            target_delta = 0.40    # near-ATM for directional buys
-            otm_mult     = 1.0
+        target_delta = 0.50 if is_straddle else 0.40
+        otm_mult     = 0.0 if is_straddle else 1.0
 
         dte = self._days_to_expiry(sym)
         strike  = self._target_delta_strike(ltp, actual_opt, atm_iv, target_delta, dte)
@@ -1168,14 +1137,6 @@ class OptionsAgent(BaseAgent):
         # left from an earlier position in the same contract.
         import time as _t_mono
         self._entry_clock[opt_sym] = _t_mono.monotonic()
-        if best_pattern == "SLEEVE_CONSENSUS":
-            # Premium-based bracket: hard stop -40%, wide target +90%; exempt
-            # from the 90-min theta stop (trend rides need the afternoon) but
-            # NOT from the 14:30 hard flatten.
-            sl_pct  = float(getattr(settings, "sleeve_premium_sl_pct", 40.0))
-            tgt_pct = float(getattr(settings, "sleeve_premium_tgt_pct", 90.0))
-            self._sleeve_count += 1
-            self._sleeve_contracts.add(opt_sym)
 
         return action_dir, {
             "exchange":           "NFO",
@@ -1207,494 +1168,32 @@ class OptionsAgent(BaseAgent):
 
     # ── Pattern 1: EMA_CROSS — detect the crossover event (not persistent state) ─
 
-    def _pat_ema_cross(self, sym, snap, ind, ltp, t):
-        import bot_state
-        if not bot_state.is_pattern_enabled("options", "EMA_CROSS"): return "", 0, ""
-        if ind.ema21 <= 0 or ind.ema50 <= 0: return "", 0, ""
-        prev9  = self._prev_ema9_opt.get(sym, ind.ema9)
-        prev21 = self._prev_ema21_opt.get(sym, ind.ema21)
-        # Fire ONLY on the bar EMA9 crosses EMA21 — not on every aligned bar
-        cross_up   = prev9 <= prev21 and ind.ema9 > ind.ema21 and ind.ema21 > ind.ema50 and ind.rsi_14 > 52
-        cross_down = prev9 >= prev21 and ind.ema9 < ind.ema21 and ind.ema21 < ind.ema50 and ind.rsi_14 < 48
-        if cross_up:   return "CE", 5, "EMA_CROSS"
-        if cross_down: return "PE", 5, "EMA_CROSS"
-        return "", 0, ""
-
-    # ── Pattern 2: TREND_PULL — pullback entry in strong trend ───────────────
-
-    def _pat_trend_pull(self, sym, snap, ind, ltp, t):
-        prev_rsi = self._prev_rsi.get(sym, ind.rsi_14)
-        ema_bull  = ind.ema9 > ind.ema21 > 0 and ind.ema21 > ind.ema50 > 0
-        ema_bear  = ind.ema9 < ind.ema21 > 0 and ind.ema21 < ind.ema50 > 0
-        # Pullback: was extended (>62), now cooled to 48-60 → re-entry
-        if ema_bull and prev_rsi > 60 and 48 <= ind.rsi_14 <= 60:
-            return "CE", 5, "TREND_PULL"
-        # Pullback: was oversold (<38), now recovered to 40-52 → re-short
-        if ema_bear and prev_rsi < 40 and 40 <= ind.rsi_14 <= 52:
-            return "PE", 5, "TREND_PULL"
-        return "", 0, ""
-
-    # ── Pattern 3: ORB — opening range breakout ───────────────────────────────
-
-    def _pat_orb(self, sym, snap, ind, ltp, t):
-        if not (time(9, 30) <= t <= time(10, 0)):
-            return "", 0, ""
-        orb_h = self._orb_high.get(sym)
-        orb_l = self._orb_low.get(sym)
-        if not (orb_h and orb_l and orb_h > orb_l):
-            return "", 0, ""
-        if self._orb_fired.get(sym):
-            return "", 0, ""
-        prev = self._prev_ltp.get(sym, ltp)
-        # Break above ORB high
-        if prev <= orb_h and ltp > orb_h * 1.001:
-            self._orb_fired[sym] = True
-            return "CE", 5, "ORB"
-        # Break below ORB low
-        if prev >= orb_l and ltp < orb_l * 0.999:
-            self._orb_fired[sym] = True
-            return "PE", 5, "ORB"
-        return "", 0, ""
-
-    # ── Pattern 4: VWAP_RECLAIM — cross above/below VWAP with volume ─────────
-
-    def _pat_vwap_reclaim(self, sym, snap, ind, ltp, t):
-        if not ind.vwap or ind.vwap <= 0:
-            return "", 0, ""
-        was_above = self._prev_above_vwap.get(sym, ltp >= ind.vwap)
-        now_above = ltp > ind.vwap
-        if was_above == now_above:
-            return "", 0, ""
-        if ind.volume_ratio < 1.2:
-            return "", 0, ""
-        if now_above:   # crossed above → CE
-            return "CE", 3, "VWAP_RECLAIM"
-        return "PE", 3, "VWAP_RECLAIM"    # crossed below → PE
-
-    # ── Pattern 5: BB_SQUEEZE — Bollinger squeeze breakout ───────────────────
-
-    def _pat_bb_squeeze(self, sym, snap, ind, ltp, t):
-        if not (ind.bb_upper and ind.bb_lower and ind.bb_mid and ind.bb_mid > 0):
-            return "", 0, ""
-        bw = (ind.bb_upper - ind.bb_lower) / ind.bb_mid * 100
-        prev_bw = self._prev_bb_width.get(sym, bw)
-        # Squeeze was tight and is now expanding — require MACD to confirm direction
-        if prev_bw < 1.8 and bw > prev_bw * 1.15:
-            if ind.macd_hist > 0 and ltp > ind.bb_mid:
-                return "CE", 3, "BB_SQUEEZE"
-            if ind.macd_hist < 0 and ltp < ind.bb_mid:
-                return "PE", 3, "BB_SQUEEZE"
-        return "", 0, ""
-
-    # ── Pattern 6: RSI_MOMENTUM — strong momentum, not at exhaustion ────────────
-
-    def _pat_rsi_extreme(self, sym, snap, ind, ltp, t):
-        # Enter CE when RSI is in strong-but-not-exhausted range (58-70) with vol
-        # Avoids chasing overbought peaks (RSI>72) that are more likely to reverse
-        if 58 <= ind.rsi_14 <= 70 and ind.macd_hist > 0 and ind.volume_ratio > 1.3:
-            return "CE", 3, "RSI_MOMENTUM"
-        # Enter PE when RSI is in strong-downtrend range (30-42), not oversold bounce
-        if 30 <= ind.rsi_14 <= 42 and ind.macd_hist < 0 and ind.volume_ratio > 1.3:
-            return "PE", 3, "RSI_MOMENTUM"
-        return "", 0, ""
-
-    # ── Pattern 7: SURGE — large candle body + volume ─────────────────────────
-
-    def _pat_sleeve_consensus(self, sym, snap, ind, ltp, t):
-        """AGGRESSION SLEEVE — high-delta trend ride. Fires only when the
-        full trend stack agrees in a bull/volatile regime: ADX>=25, EMA9>21,
-        price above VWAP, supertrend UP, real volume. Max
-        settings.sleeve_max_trades_day per day; delta/exit overrides applied
-        at contract selection. Flag-gated: aggression_sleeve_enabled."""
-        if not getattr(settings, "aggression_sleeve_enabled", False):
-            return "", 0, ""
-        import bot_state as _bs
-        if getattr(_bs, "_current_regime", "UNKNOWN") not in (
-                "BULL_TREND", "BULL_VOLATILE", "HIGH_VOLATILE"):
-            return "", 0, ""
-        today = t and now_ist().date()
-        if self._sleeve_day != today:
-            self._sleeve_day, self._sleeve_count = today, 0
-        if self._sleeve_count >= int(getattr(settings, "sleeve_max_trades_day", 2)):
-            return "", 0, ""
-        if not (time(10, 15) <= t <= time(13, 30)):   # trend must be established, time to ride
-            return "", 0, ""
-        adx = getattr(ind, "adx_14", 0.0) or 0.0
-        if (adx >= 25 and ind.ema9 > ind.ema21 > 0 and ind.vwap and ltp > ind.vwap
-                and ind.supertrend_dir == "UP" and ind.volume_ratio >= 1.5):
-            return "CE", 9, "SLEEVE_CONSENSUS"
-        return "", 0, ""
-
-    def _pat_surge(self, sym, snap, ind, ltp, t):
-        if len(snap.candles_1min) < 2:
-            return "", 0, ""
-        last_c = snap.candles_1min[-1]
-        c_ts   = getattr(last_c, "ts", None)
-        if not c_ts or c_ts == self._last_candle_ts.get(sym):
-            return "", 0, ""
-        if last_c.open <= 0:
-            return "", 0, ""
-        body_pct = abs(last_c.close - last_c.open) / last_c.open
-        if body_pct > 0.004 and ind.volume_ratio > 1.8:
-            self._last_candle_ts[sym] = c_ts
-            direction = "CE" if last_c.close > last_c.open else "PE"
-            return direction, 3, "SURGE"
-        return "", 0, ""
-
-    # ── Pattern 8: ICHIMOKU_CLOUD — price breaks through cloud ───────────────
-
-    def _pat_ichimoku_cloud(self, sym, snap, ind, ltp, t):
-        import bot_state
-        if not bot_state.is_pattern_enabled("options", "ICHIMOKU_CLOUD"):
-            return "", 0, ""
-        if ind.ichimoku_cloud_dir == "NEUTRAL" or ind.ichimoku_senkou_a <= 0:
-            return "", 0, ""
-        cloud_top = max(ind.ichimoku_senkou_a, ind.ichimoku_senkou_b)
-        cloud_bot = min(ind.ichimoku_senkou_a, ind.ichimoku_senkou_b)
-        prev = self._prev_ltp.get(sym, ltp)
-        if prev < cloud_top and ltp > cloud_top and ind.ichimoku_cloud_dir == "UP":
-            return "CE", 5, "ICHIMOKU_CLOUD"
-        if prev > cloud_bot and ltp < cloud_bot and ind.ichimoku_cloud_dir == "DOWN":
-            return "PE", 5, "ICHIMOKU_CLOUD"
-        return "", 0, ""
-
-    # ── Pattern 9: STOCHRSI_OPTIONS — StochRSI cross from extreme ────────────
-
-    def _pat_stochrsi_options(self, sym, snap, ind, ltp, t):
-        import bot_state
-        if not bot_state.is_pattern_enabled("options", "STOCHRSI_OPTIONS"):
-            return "", 0, ""
-        from options_intelligence import get_cached
-        opts    = get_cached(sym)
-        iv_rank = float(opts.get("iv_rank", 50.0)) if opts else 50.0
-        if iv_rank > 55:
-            return "", 0, ""
-        prev_k = self._prev_stochrsi_k_opt.get(sym, ind.stoch_rsi_k)
-        # Require MACD direction alignment AND volume confirmation — the
-        # weakest options pattern in the 3-seed diagnosis (43% win) fired
-        # oversold bounces with no participation behind them.
-        if (prev_k < 15 and ind.stoch_rsi_k > ind.stoch_rsi_d
-                and ind.macd_hist > 0 and ind.volume_ratio >= 1.2):
-            return "CE", 4, "STOCHRSI_OPTIONS"
-        if (prev_k > 85 and ind.stoch_rsi_k < ind.stoch_rsi_d
-                and ind.macd_hist < 0 and ind.volume_ratio >= 1.2):
-            return "PE", 4, "STOCHRSI_OPTIONS"
-        return "", 0, ""
-
-    # ── Pattern 10: WILLIAMS_OPTIONS — Williams %R extreme bounce ─────────────
-
-    def _pat_williams_options(self, sym, snap, ind, ltp, t):
-        import bot_state
-        if not bot_state.is_pattern_enabled("options", "WILLIAMS_OPTIONS"):
-            return "", 0, ""
-        prev_w = self._prev_williams_opt.get(sym, ind.williams_r)
-        if (prev_w < -80 and ind.williams_r > -70
-                and ind.macd_hist > 0 and ind.volume_ratio >= 1.3):
-            return "CE", 4, "WILLIAMS_OPTIONS"
-        if (prev_w > -20 and ind.williams_r < -30
-                and ind.macd_hist < 0 and ind.volume_ratio >= 1.3):
-            return "PE", 4, "WILLIAMS_OPTIONS"
-        return "", 0, ""
-
-    # ── Pattern 11: OI_SURGE — institutional OI buildup at nearby strikes ────
-
-    def _pat_oi_surge(self, sym, snap, ind, ltp, t):
-        """Large OI accumulation at nearby strikes reveals institutional conviction."""
-        from options_intelligence import get_cached
-        opts = get_cached(sym)
-        if not opts:
-            return "", 0, ""
-        oi_buildup = opts.get("oi_buildup", [])
-        if not oi_buildup:
-            return "", 0, ""
-        for item in oi_buildup[:2]:
-            strike  = item.get("strike", 0)
-            side    = item.get("side", "")
-            oi_chg  = item.get("oi_change", 0)
-            if not strike or abs(oi_chg) < 50000:
-                continue
-            # Heavy call writing above spot → resistance wall → PE entry
-            if side == "CE" and strike > ltp * 1.005 and oi_chg > 0:
-                if ind.ema9 < ind.ema21 > 0 or ind.rsi_14 < 55:
-                    return "PE", 4, "OI_SURGE"
-            # Heavy put writing below spot → support floor → CE entry
-            if side == "PE" and strike < ltp * 0.995 and oi_chg > 0:
-                if ind.ema9 > ind.ema21 > 0 or ind.rsi_14 > 45:
-                    return "CE", 4, "OI_SURGE"
-        return "", 0, ""
-
-    # ── Pattern 12: EXPIRY_SCALP — expiry-Thursday momentum burst ────────────
-
-    def _pat_expiry_scalp(self, sym, snap, ind, ltp, t):
-        """On F&O expiry day, theta decay accelerates — ride sharp 9:30-11:00 move."""
-        try:
-            from alt_data import alt_data_engine
-            is_exp, event_name = alt_data_engine.is_event_day()
-            if not is_exp or "expiry" not in event_name.lower():
-                return "", 0, ""
-        except Exception:
-            return "", 0, ""
-        if not (time(9, 30) <= t <= time(11, 30)):
-            return "", 0, ""
-        if (ind.ema9 > ind.ema21 > 0 and ind.rsi_14 > 55
-                and ind.volume_ratio >= 1.5 and ind.macd_hist > 0):
-            return "CE", 5, "EXPIRY_SCALP"
-        if (ind.ema9 < ind.ema21 > 0 and ind.rsi_14 < 45
-                and ind.volume_ratio >= 1.5 and ind.macd_hist < 0):
-            return "PE", 5, "EXPIRY_SCALP"
-        return "", 0, ""
-
-    def _pat_bb_walk_options(self, sym, snap, ind, ltp, t):
-        """BB band-walk on the underlying → directional CE/PE. Port of the
-        system's best-validated pattern family (scalping BB_BAND_WALK +265%
-        net, intraday BB_SQUEEZE_WALK +330% net over the 62-day replay):
-        3 consecutive closes outside the band + volume + MACD alignment.
-        A sustained underlying breakout is the ideal long-premium setup —
-        delta gains outrun theta while the walk lasts."""
-        import bot_state
-        if not bot_state.is_pattern_enabled("options", "BB_WALK_OPT"):
-            return "", 0, ""
-        if len(snap.candles_1min) < 3:
-            return "", 0, ""
-        bb_u = getattr(ind, 'bb_upper', 0.0)
-        bb_l = getattr(ind, 'bb_lower', 0.0)
-        if not (bb_u > 0 and bb_l > 0):
-            return "", 0, ""
-        last3 = snap.candles_1min[-3:]
-        if (all(c.close >= bb_u for c in last3)
-                and ind.volume_ratio >= 1.3 and ind.macd_hist > 0):
-            return "CE", 5, "BB_WALK_OPT"
-        if (all(c.close <= bb_l for c in last3)
-                and ind.volume_ratio >= 1.3 and ind.macd_hist < 0):
-            return "PE", 5, "BB_WALK_OPT"
-        return "", 0, ""
-
-    def _pat_morning_thrust_opt(self, sym, snap, ind, ltp, t):
-        """Morning thrust: >=0.5% impulse off the open by 9:35-10:15 with
-        volume and MACD alignment → directional premium while theta is
-        cheapest (whole day of runway)."""
-        import bot_state
-        if not bot_state.is_pattern_enabled("options", "MORNING_THRUST_OPT"):
-            return "", 0, ""
-        if not (time(9, 35) <= t <= time(10, 15)):
-            return "", 0, ""
-        if not ind.day_open or ind.day_open <= 0:
-            return "", 0, ""
-        run = (ltp - ind.day_open) / ind.day_open * 100
-        if run >= 0.5 and ind.volume_ratio >= 1.5 and ind.macd_hist > 0 and ind.ema9 > ind.ema21:
-            return "CE", 5, "MORNING_THRUST_OPT"
-        if run <= -0.5 and ind.volume_ratio >= 1.5 and ind.macd_hist < 0 and ind.ema9 < ind.ema21:
-            return "PE", 5, "MORNING_THRUST_OPT"
-        return "", 0, ""
-
-    def _pat_stochrsi_trend_opt(self, sym, snap, ind, ltp, t):
-        """Trend-filtered StochRSI: the proven STOCHRSI_OPTIONS cross, taken
-        ONLY with full EMA alignment — buys dips inside trends instead of
-        counter-trend knife-catches."""
-        import bot_state
-        if not bot_state.is_pattern_enabled("options", "STOCHRSI_TREND_OPT"):
-            return "", 0, ""
-        if (ind.ema9 > ind.ema21 > ind.ema50 > 0
-                and ind.stoch_rsi_k > ind.stoch_rsi_d and ind.stoch_rsi_k < 40
-                and ind.volume_ratio >= 1.2):
-            return "CE", 5, "STOCHRSI_TREND_OPT"
-        if (0 < ind.ema9 < ind.ema21 < ind.ema50
-                and ind.stoch_rsi_k < ind.stoch_rsi_d and ind.stoch_rsi_k > 60
-                and ind.volume_ratio >= 1.2):
-            return "PE", 5, "STOCHRSI_TREND_OPT"
-        return "", 0, ""
-
-    def _pat_index_trend_ride_opt(self, sym, snap, ind, ltp, t):
-        """Afternoon trend-day ride: after 11:30 the day is one-sided
-        (>=0.6% from open, price beyond VWAP, MACD aligned) → premium in the
-        trend direction into the close-side push. Entries still respect the
-        14:00 theta cutoff upstream."""
-        import bot_state
-        if not bot_state.is_pattern_enabled("options", "INDEX_TREND_RIDE_OPT"):
-            return "", 0, ""
-        if t < time(11, 30) or not ind.day_open or ind.day_open <= 0 or not ind.vwap:
-            return "", 0, ""
-        run = (ltp - ind.day_open) / ind.day_open * 100
-        if run >= 0.6 and ltp > ind.vwap and ind.macd_hist > 0:
-            return "CE", 4, "INDEX_TREND_RIDE_OPT"
-        if run <= -0.6 and ltp < ind.vwap and ind.macd_hist < 0:
-            return "PE", 4, "INDEX_TREND_RIDE_OPT"
-        return "", 0, ""
-
-    def _pat_power_hour_opt(self, sym, snap, ind, ltp, t):
-        """Pre-cutoff power move: 13:15-13:55 three same-direction closes
-        with volume — catches the 14:00-15:15 institutional push just before
-        the entry cutoff."""
-        import bot_state
-        if not bot_state.is_pattern_enabled("options", "POWER_HOUR_OPT"):
-            return "", 0, ""
-        if not (time(13, 15) <= t <= time(13, 55)) or len(snap.candles_1min) < 3:
-            return "", 0, ""
-        last3 = snap.candles_1min[-3:]
-        if (all(c.close > c.open for c in last3) and ind.volume_ratio >= 1.4
-                and ind.macd_hist > 0):
-            return "CE", 4, "POWER_HOUR_OPT"
-        if (all(c.close < c.open for c in last3) and ind.volume_ratio >= 1.4
-                and ind.macd_hist < 0):
-            return "PE", 4, "POWER_HOUR_OPT"
-        return "", 0, ""
-
-    def _pat_strangle_sell(self, sym, snap, ind, ltp, t):
-        """Sell OTM options when IV rank is elevated (>65%) and market is range-bound.
-        Returns the cheaper OTM leg to sell first (higher strike for CE, lower for PE)."""
-        from options_intelligence import get_cached as _get_opts
-        opts = _get_opts(sym)
-        iv_rank = float(opts.get("iv_rank", 0)) if opts else 0
-        if iv_rank < 65:
-            return "", 0, ""
-        # Range-bound condition: ADX < 22 (no strong trend to run against sold options)
-        if ind.adx_14 > 22:
-            return "", 0, ""
-        # Sell the leg with less directional momentum (the safer side)
-        if ind.macd_hist < 0 and ind.rsi_14 < 50:
-            # Bearish bias: sell the call (CE) further OTM
-            return "CE_SELL", 5, "STRANGLE_SELL"
-        if ind.macd_hist > 0 and ind.rsi_14 > 50:
-            # Bullish bias: sell the put (PE) further OTM
-            return "PE_SELL", 5, "STRANGLE_SELL"
-        return "", 0, ""
-
-    def _pat_iron_condor(self, sym, snap, ind, ltp, t):
-        """Iron condor setup: IV rank > 75%, strong range-bound, sell wings far OTM.
-        Returns the closest-to-delta-neutral leg to reduce margin requirement."""
-        from options_intelligence import get_cached as _get_opts
-        opts = _get_opts(sym)
-        iv_rank = float(opts.get("iv_rank", 0)) if opts else 0
-        if iv_rank < 75:
-            return "", 0, ""
-        if ind.adx_14 > 18:
-            return "", 0, ""
-        # Both legs OTM — fire as two separate signals; pick the higher-IV leg first
-        # High VIX = both legs elevated, but call skew usually higher: start with CE_SELL
-        return "CE_SELL", 6, "IRON_CONDOR"
-
-    # ── Pattern 13: PCR_EXTREME — Put-Call Ratio capitulation signal ─────────
-
-    def _pat_pcr_extreme(self, sym, snap, ind, ltp, t):
-        """PCR <0.60 = put holders capitulating (bullish CE). PCR >1.50 = call writers swamped (bearish PE)."""
-        from options_intelligence import get_cached
-        opts = get_cached(sym)
-        if not opts:
-            return "", 0, ""
-        pcr      = float(opts.get("pcr", 1.0))
-        prev_pcr = self._prev_pcr.get(sym, pcr)
-        # Extreme put unwinding → strong CE signal
-        if pcr < 0.60 and prev_pcr >= 0.65 and ind.rsi_14 > 50 and ind.ema9 > ind.ema21 > 0:
-            return "CE", 5, "PCR_EXTREME"
-        # Extreme call writer build-up → strong PE signal
-        if pcr > 1.50 and prev_pcr <= 1.45 and ind.rsi_14 < 50 and ind.ema9 < ind.ema21 > 0:
-            return "PE", 5, "PCR_EXTREME"
-        return "", 0, ""
-
-    # ── Pattern 14: GAMMA_FLIP — GEX zero-cross dealer regime change ─────────
-
-    def _pat_gamma_flip(self, sym, snap, ind, ltp, t):
-        """Dealers cross from short-gamma to long-gamma (or vice versa) — explosive directional move."""
-        import gamma_scalp as _gc
-        gex = _gc.get_cached_gex(sym)
-        if not gex or gex.net_gex is None:
-            return "", 0, ""
-        prev_gex = self._prev_gex_val.get(sym, gex.net_gex)
-        # GEX flipping from negative (amplified) to positive (dampened) + bullish confirmation
-        if prev_gex < 0 and gex.net_gex >= 0 and ind.ema9 > ind.ema21 > 0 and ind.rsi_14 > 50:
-            return "CE", 4, "GAMMA_FLIP"
-        # GEX flipping from positive to negative + bearish confirmation
-        if prev_gex > 0 and gex.net_gex <= 0 and ind.ema9 < ind.ema21 > 0 and ind.rsi_14 < 50:
-            return "PE", 4, "GAMMA_FLIP"
-        return "", 0, ""
-
-    # ── Pattern 15: SKEW_MOMENTUM — IV surface skew acceleration ────────────
-
-    def _pat_skew_momentum(self, sym, snap, ind, ltp, t):
-        """Rapidly rising put skew = fear premium building (PE). Rising call skew = upside hedging (CE)."""
-        import iv_surface as _ivs
-        surf = _ivs.get_surface(sym)
-        if not surf:
-            return "", 0, ""
-        prev_sk  = self._prev_skew_vel.get(sym, surf.put_skew if surf else 0.0)
-        cur_sk   = surf.put_skew if surf else 0.0
-        prev_rr  = self._prev_risk_rev.get(sym, surf.risk_reversal if surf else 0.0)
-        # Put skew spiking → institutions hedging downside → PE momentum.
-        # Additive rise: the old multiplicative test (cur > prev × 1.15) was
-        # trivially true whenever prev ≤ 0 — a "spike" with no actual movement.
-        if cur_sk > prev_sk + 0.002 and cur_sk > 0.008 and ind.rsi_14 < 52:
-            return "PE", 4, "SKEW_MOMENTUM"
-        # Rising risk reversal = call skew building → CE momentum. Compare the
-        # risk reversal against its OWN previous value — the old test compared
-        # it against the negated put skew (a different quantity), reducing the
-        # "rising" check to a static threshold.
-        if surf.risk_reversal > 0.004 and surf.risk_reversal > prev_rr + 0.002 and ind.rsi_14 > 48:
-            return "CE", 4, "SKEW_MOMENTUM"
-        return "", 0, ""
-
-    # ── Pattern 16: ATM_STRADDLE — buy both legs when vol is cheap ───────────
+    # ── Pattern: ATM_STRADDLE (volatility-regime, non-directional) ──────────
 
     def _pat_atm_straddle(self, sym, snap, ind, ltp, t):
-        """Long vega play: IV rank <22% + BB squeeze releasing. Profit from any large move."""
-        from options_intelligence import get_cached
-        opts = get_cached(sym)
-        if not opts:
+        """Buy both legs (CE placed here, PE auto-placed by _try_enter —
+        see is_straddle handling) when the CURRENT bar's ATR% is elevated
+        relative to its own trailing 20-bar average. Matches the validated
+        finding directly: ATR-ratio >= 1.3 predicts forward |move| clearing
+        a real 2-leg straddle breakeven 67.8% of the time (1hr hold) vs
+        58.6% in the calm regime, pooled across 25 F&O symbols / 1yr of
+        5-minute bars. No directional bias — same signal for both legs."""
+        atr = getattr(ind, "atr_14", 0.0) or 0.0
+        if atr <= 0 or ltp <= 0:
             return "", 0, ""
-        iv_rank = float(opts.get("iv_rank", 50.0))
-        if iv_rank > 22:
+        atr_pct = atr / ltp
+        hist = self._atr_pct_hist.setdefault(sym, deque(maxlen=20))
+        if len(hist) < 20:
+            hist.append(atr_pct)
             return "", 0, ""
-        # ATR must be expanding (breakout brewing — not dead calm)
-        prev_atr = self._prev_atr_opt.get(sym, ind.atr_14)
-        if prev_atr > 0 and ind.atr_14 < prev_atr * 1.02:
+        avg = sum(hist) / len(hist)
+        hist.append(atr_pct)
+        if avg <= 0:
             return "", 0, ""
-        # BB squeeze must be ending (band expansion after compression)
-        if not (ind.bb_upper and ind.bb_lower and ind.bb_mid and ind.bb_mid > 0):
-            return "", 0, ""
-        bw = (ind.bb_upper - ind.bb_lower) / ind.bb_mid * 100
-        prev_bw = self._prev_bb_width.get(sym, bw)
-        if prev_bw < 2.5 and bw > prev_bw * 1.10:
+        if atr_pct / avg >= 1.3:
             return "CE", 4, "ATM_STRADDLE"   # CE leg; _try_enter also places PE leg
         return "", 0, ""
 
-    # ── Pattern 17: VOL_BREAKOUT — extended squeeze → explosive expansion ─────
-
-    def _pat_vol_contraction_breakout(self, sym, snap, ind, ltp, t):
-        """Long compression (BB width <1.5%) + sudden 25% expansion + volume surge → directional burst."""
-        if not (ind.bb_upper and ind.bb_lower and ind.bb_mid and ind.bb_mid > 0):
-            return "", 0, ""
-        bw      = (ind.bb_upper - ind.bb_lower) / ind.bb_mid * 100
-        prev_bw = self._prev_bb_width.get(sym, bw)
-        if prev_bw < 1.5 and bw > prev_bw * 1.25 and ind.volume_ratio > 2.0:
-            if ltp > ind.bb_mid and ind.macd_hist > 0:
-                return "CE", 5, "VOL_BREAKOUT"
-            if ltp < ind.bb_mid and ind.macd_hist < 0:
-                return "PE", 5, "VOL_BREAKOUT"
-        return "", 0, ""
-
-    # ── Pattern 18: SMART_MONEY_DIVERGENCE — OI vs price divergence ──────────
-
-    def _pat_smart_money_divergence(self, sym, snap, ind, ltp, t):
-        """PE OI rising while price rises = put writers squeezed → trapped shorts → CE signal.
-        CE OI rising while price falls = call writers trapped → forced covering → PE signal."""
-        from options_intelligence import get_cached
-        opts = get_cached(sym)
-        if not opts:
-            return "", 0, ""
-        oi_buildup = opts.get("oi_buildup", [])
-        if not oi_buildup:
-            return "", 0, ""
-        pe_oi_rising = any(i.get("side") == "PE" and i.get("oi_change", 0) > 80_000
-                           for i in oi_buildup[:3])
-        ce_oi_rising = any(i.get("side") == "CE" and i.get("oi_change", 0) > 80_000
-                           for i in oi_buildup[:3])
-        prev = self._prev_ltp.get(sym, ltp)
-        # Price rising into PE OI wall → trapped shorts covering → CE entry
-        if pe_oi_rising and ltp > prev * 1.001 and ind.rsi_14 > 52:
-            return "CE", 5, "SMART_MONEY_DIVERGENCE"
-        # Price falling into CE OI wall → trapped longs exiting → PE entry
-        if ce_oi_rising and ltp < prev * 0.999 and ind.rsi_14 < 48:
-            return "PE", 5, "SMART_MONEY_DIVERGENCE"
-        return "", 0, ""
 
     # ── Context bonus (+0 to +11 points added to every pattern) ──────────────
 
@@ -1848,58 +1347,11 @@ class OptionsAgent(BaseAgent):
                 best_diff, best_k = diff, K
         return best_k
 
-    # ── ORB builder (called every tick 9:15-9:30) ─────────────────────────────
-
-    def _update_orb(self, sym: str, snap: MarketSnapshot, t: time) -> None:
-        if not (time(9, 15) <= t <= time(9, 30)):
-            return
-        if sym not in self._orb_high:
-            self._orb_high[sym] = snap.tick.ltp
-            self._orb_low[sym]  = snap.tick.ltp
-            self._orb_fired[sym] = False
-        for c in snap.candles_1min:
-            c_t = getattr(c, "ts", None)
-            if c_t and time(9, 15) <= c_t.time() <= time(9, 30):
-                self._orb_high[sym] = max(self._orb_high[sym], c.high)
-                self._orb_low[sym]  = min(self._orb_low[sym],  c.low)
-
     # ── State updater (called at end of every tick) ───────────────────────────
 
     def _update_state(self, sym: str, ind: LiveIndicators, ltp: float) -> None:
-        if ind.vwap and ind.vwap > 0:
-            self._prev_above_vwap[sym] = ltp > ind.vwap
-        if ind.bb_upper and ind.bb_lower and ind.bb_mid and ind.bb_mid > 0:
-            self._prev_bb_width[sym] = (ind.bb_upper - ind.bb_lower) / ind.bb_mid * 100
         self._prev_ltp[sym] = ltp
         self._prev_rsi[sym] = ind.rsi_14
-        self._prev_stochrsi_k_opt[sym] = ind.stoch_rsi_k
-        self._prev_williams_opt[sym]   = ind.williams_r
-        self._prev_ema9_opt[sym]       = ind.ema9
-        self._prev_ema21_opt[sym]      = ind.ema21
-        self._prev_atr_opt[sym]        = ind.atr_14
-        # PCR, skew, GEX — fetched lazily to avoid overhead when not needed
-        try:
-            from options_intelligence import get_cached as _oc
-            opts = _oc(sym)
-            if opts:
-                self._prev_pcr[sym] = float(opts.get("pcr", 1.0))
-        except Exception:
-            pass
-        try:
-            import iv_surface as _ivs
-            surf = _ivs.get_surface(sym)
-            if surf:
-                self._prev_skew_vel[sym] = surf.put_skew
-                self._prev_risk_rev[sym] = surf.risk_reversal
-        except Exception:
-            pass
-        try:
-            import gamma_scalp as _gc
-            gex = _gc.get_cached_gex(sym)
-            if gex and gex.net_gex is not None:
-                self._prev_gex_val[sym] = gex.net_gex
-        except Exception:
-            pass
 
     # ── IV-adaptive SL / TGT ─────────────────────────────────────────────────
 
@@ -2462,51 +1914,42 @@ class OptionsAgent(BaseAgent):
 # ═══════════════════════════════════════════════════════════════════════════════
 
 class OptionScalpingAgent(OptionsAgent):
-    """Dedicated option premium scalper (user-requested 2026-07-12), built
-    around the ONLY options pattern that was net-positive over the 1-year
-    replay: EXPIRY_SCALP (+8.8% @5m / +10.8% @15m gated — and −36% when its
-    gates were removed, proving the edge is discipline-dependent).
+    """Dedicated option premium scalper, index weeklies only (NIFTY/
+    BANKNIFTY — tightest spreads, deepest books; stock-option scalps die on
+    spread alone).
 
-    Design rules, all from the year's evidence:
-    - INDEX weeklies only (NIFTY/BANKNIFTY): tightest spreads, deepest books —
-      stock-option scalps die on spread alone.
-    - Two patterns, nothing else: the expiry gamma burst (generalised
-      EXPIRY_SCALP with a wider window) and a volume-spike thrust for
-      non-expiry days. Every pattern the year condemned stays out.
+    Rebuilt (2026-07-17) after its 4 directional patterns (EXPIRY_GAMMA_SCALP,
+    VOL_SPIKE_SCALP, TREND_WALK_SCALP, RANGE_FADE_SCALP) all tested
+    net-negative over a full 1-year honest replay: -804% cumulative, 15.8%
+    win rate, every single pattern negative (worst: TREND_WALK_SCALP
+    -11.24%/trade over 44 trades). This matches the same finding that killed
+    OptionsAgent's 24-pattern directional book — no directional edge exists
+    at intraday horizons in this instrument set (see OptionsAgent's
+    docstring for the full 1yr/25-symbol mining evidence). A pattern
+    demanding trend+volume+direction agreement doesn't get a pass just
+    because it's index-only or has a tight time-stop.
+
+    Reuses OptionsAgent's inherited ATM_STRADDLE (ATR-ratio >= 1.3,
+    non-directional) instead of inventing a new index-specific pattern —
+    validated directly with a trade-by-trade simulation at scalp-length
+    holds (this agent's own 25-min time-stop): 25min hold → 1,150 trades,
+    56.5% win rate, +1.40%/trade average, positive for BOTH NIFTY (+1.06%)
+    and BANKNIFTY (+1.77%) individually. Smaller edge than OptionsAgent's
+    1hr hold (realized vol has less time to compound into a bigger move)
+    but genuinely positive, not fabricated to fill the slot.
+
+    Design rules that still hold from the original build:
     - Scalps are RENTED, not owned: hard time-stop (option_scalp_max_hold_min,
       default 25) — theta rent compounds per minute held.
-    - Tight premium bracket via TRAIL_CONFIGS['option_scalping']
-      (≈ −20% SL / +30% T1 / +60% T2 premium terms).
-    - Small daily budget (max_trades_option_scalping) + long cooldown: the
-      unlocked-arm graveyard (−6,420%) is what unbudgeted option scalping
-      looks like.
-    Ships DARK: not in AUTO_START_STRATEGIES until replay + paper validation.
+    - Tight premium bracket via TRAIL_CONFIGS['option_scalping'].
+    - Small daily budget (max_trades_option_scalping) + long cooldown.
+    Ships DARK: not in AUTO_START_STRATEGIES until paper validation.
     """
     name = "option_scalping"
     SCALP_UNDERLYINGS = frozenset({"NIFTY", "BANKNIFTY"})
 
     def _buy_pattern_fns(self) -> list:
-        # One tool per market type (all-market coverage, user-requested
-        # 2026-07-12); the year replay attributes P&L per pattern and the
-        # losers get killed before activation, same as the equity scalper:
-        #   expiry day     → EXPIRY_GAMMA_SCALP  (the proven edge)
-        #   trending       → VOL_SPIKE_SCALP + TREND_WALK_SCALP
-        #   ranging        → RANGE_FADE_SCALP    (extreme-fade, tiny targets)
-        return [self._pat_expiry_gamma_scalp, self._pat_vol_spike_scalp,
-                self._pat_trend_walk_scalp, self._pat_range_fade_scalp]
-
-    @staticmethod
-    def _index_thrust(ind, bars, mult: float) -> bool:
-        """Volume-free activity trigger for INDEX underlyings. NIFTY/BANKNIFTY
-        are calculated indices — their volume is 0 on every bar, so any
-        volume_ratio condition is permanently false (found 2026-07-12: the
-        first validation replay produced ZERO trades in 245 days because all
-        four patterns demanded volume that cannot exist). A thrust bar —
-        true range ≥ mult × ATR — is the index equivalent of a volume spike."""
-        if not bars or not getattr(ind, "atr_14", 0):
-            return False
-        last = bars[-1]
-        return (last.high - last.low) >= mult * ind.atr_14
+        return [self._pat_atm_straddle]   # inherited from OptionsAgent
 
     def _sell_pattern_fns(self) -> list:
         return []   # pure scalper — premium selling is a different animal
@@ -2515,96 +1958,6 @@ class OptionScalpingAgent(OptionsAgent):
         if snap.symbol not in self.SCALP_UNDERLYINGS:
             return ("HOLD", None)
         return super().evaluate_tick(snap)
-
-    # ── Pattern A: expiry gamma burst (the proven edge, wider window) ────────
-    def _pat_expiry_gamma_scalp(self, sym, snap, ind, ltp, t):
-        """Expiry day: cheap premium + high gamma means a small index thrust
-        pays multiples. Same conditions the year validated, window extended
-        to 13:30 (the original 11:30 cut-off was untested, not evidence)."""
-        try:
-            from alt_data import alt_data_engine
-            is_exp, event_name = alt_data_engine.is_event_day()
-            if not is_exp or "expiry" not in event_name.lower():
-                return "", 0, ""
-        except Exception:
-            return "", 0, ""
-        if not (time(9, 30) <= t <= time(13, 30)):
-            return "", 0, ""
-        if (ind.ema9 > ind.ema21 > 0 and ind.rsi_14 > 55
-                and self._index_thrust(ind, snap.candles_1min, 1.3)
-                and ind.macd_hist > 0
-                and getattr(ind, "supertrend_dir", "") != "DOWN"):
-            return "CE", 6, "EXPIRY_GAMMA_SCALP"
-        if (0 < ind.ema9 < ind.ema21 and ind.rsi_14 < 45
-                and self._index_thrust(ind, snap.candles_1min, 1.3)
-                and ind.macd_hist < 0
-                and getattr(ind, "supertrend_dir", "") != "UP"):
-            return "PE", 6, "EXPIRY_GAMMA_SCALP"
-        return "", 0, ""
-
-    # ── Pattern B: volume-spike thrust (non-expiry days, rarer + stricter) ───
-    def _pat_vol_spike_scalp(self, sym, snap, ind, ltp, t):
-        """A genuine index volume shock with full trend agreement — the only
-        non-expiry condition where premium can outrun theta inside a
-        25-minute hold. Stricter than any pattern the year killed."""
-        if not (time(9, 30) <= t <= time(14, 30)):
-            return "", 0, ""
-        if not self._index_thrust(ind, snap.candles_1min, 1.8):
-            return "", 0, ""
-        if (ind.ema9 > ind.ema21 > 0 and ind.rsi_14 > 58 and ind.macd_hist > 0
-                and getattr(ind, "supertrend_dir", "") == "UP"):
-            return "CE", 6, "VOL_SPIKE_SCALP"
-        if (0 < ind.ema9 < ind.ema21 and ind.rsi_14 < 42 and ind.macd_hist < 0
-                and getattr(ind, "supertrend_dir", "") == "DOWN"):
-            return "PE", 6, "VOL_SPIKE_SCALP"
-        return "", 0, ""
-
-    # ── Pattern C: trend band-walk continuation (trending markets) ───────────
-    def _pat_trend_walk_scalp(self, sym, snap, ind, ltp, t):
-        """The system's best-validated family (band walks: BB_BAND_WALK +265%,
-        BB_WALK_FUT +2,977% @5m) applied to short-hold option scalps: two
-        consecutive closes beyond the band WITH volume and full alignment.
-        NOTE: the unlocked arm's BB_WALK_OPT lost −220%/yr — but that was
-        untimed and ungated; this version carries the 25-min time-stop and
-        the regime gate. The replay decides if that's enough."""
-        if not (time(9, 30) <= t <= time(14, 30)):
-            return "", 0, ""
-        bars = snap.candles_1min
-        if len(bars) < 3 or not ind.bb_upper or not self._index_thrust(ind, bars, 1.4):
-            return "", 0, ""
-        c1, c2 = bars[-2], bars[-1]
-        if (c1.close > ind.bb_upper and c2.close > ind.bb_upper
-                and ind.ema9 > ind.ema21
-                and getattr(ind, "supertrend_dir", "") == "UP"):
-            return "CE", 6, "TREND_WALK_SCALP"
-        if (c1.close < ind.bb_lower and c2.close < ind.bb_lower
-                and 0 < ind.ema9 < ind.ema21
-                and getattr(ind, "supertrend_dir", "") == "DOWN"):
-            return "PE", 6, "TREND_WALK_SCALP"
-        return "", 0, ""
-
-    # ── Pattern D: range-extreme fade (ranging markets) ──────────────────────
-    def _pat_range_fade_scalp(self, sym, snap, ind, ltp, t):
-        """Ranging tape: buy the reversal AT the range extreme, take the small
-        middle, leave fast. The measured danger (options −46.7% on range
-        days) came from untimed directional buys mid-range — this fires only
-        at a band extreme with an RSI extreme AND a rejection bar, and the
-        time-stop caps theta exposure. Tiny expectations by design; the
-        replay's per-pattern attribution keeps or kills it."""
-        if not (time(9, 45) <= t <= time(14, 15)):
-            return "", 0, ""
-        bars = snap.candles_1min
-        if len(bars) < 2 or not ind.bb_upper or not self._index_thrust(ind, bars, 1.1):
-            return "", 0, ""
-        last = bars[-1]
-        # rejection bar: close back inside the band after poking outside
-        if (last.high > ind.bb_upper and last.close < ind.bb_upper
-                and ind.rsi_14 >= 68):
-            return "PE", 6, "RANGE_FADE_SCALP"
-        if (last.low < ind.bb_lower and last.close > ind.bb_lower
-                and ind.rsi_14 <= 32):
-            return "CE", 6, "RANGE_FADE_SCALP"
-        return "", 0, ""
 
     # ── Time-stop: a scalp that hasn't paid in N minutes pays theta instead ──
     def should_exit_position(self, position: dict, ind) -> tuple[bool, str]:
