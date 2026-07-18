@@ -125,6 +125,43 @@ def build_regime_timeline(nifty_df: pd.DataFrame | None) -> dict:
     return timeline
 
 
+CACHE_DIR = DATA_DIR.parent / "replay_cache"
+
+
+def _load_symbol_days(sym: str, tf_min: int) -> dict | None:
+    """Load one symbol's {date: day_df} dict, using a pickle cache keyed by
+    the source CSV's mtime so repeated replay_backtest.py invocations (the
+    resumable chunked sweep calls this fresh per chunk) skip the expensive
+    parse+resample+groupby after the first call instead of repeating it."""
+    f = DATA_DIR / sym / "1m.csv"
+    if not f.exists():
+        return None
+    src_mtime = f.stat().st_mtime
+    cache_f = CACHE_DIR / f"{sym}_tf{tf_min}.pkl"
+    if cache_f.exists() and cache_f.stat().st_mtime >= src_mtime:
+        try:
+            return pd.read_pickle(cache_f)
+        except Exception:
+            pass  # fall through and rebuild on any cache read failure
+    df = pd.read_csv(f, parse_dates=["date"], date_format="ISO8601")
+    df["date"] = df["date"].dt.tz_localize(None) if df["date"].dt.tz is not None else df["date"]
+    df = df.sort_values("date").reset_index(drop=True)
+    if tf_min > 1:
+        df = (df.set_index("date")
+                .resample(f"{tf_min}min", label="left", closed="left")
+                .agg({"open": "first", "high": "max", "low": "min",
+                      "close": "last", "volume": "sum"})
+                .dropna(subset=["open"]).reset_index())
+    df["day"] = df["date"].dt.date
+    by_day = {d: g.reset_index(drop=True) for d, g in df.groupby("day")}
+    CACHE_DIR.mkdir(parents=True, exist_ok=True)
+    try:
+        pd.to_pickle(by_day, cache_f)
+    except Exception:
+        pass  # cache is a pure speed optimization — never fail the run over it
+    return by_day
+
+
 def load_days(symbols: list[str], tf_min: int = 1) -> tuple[list, dict]:
     """Return (sorted trading dates, {sym: {date: day_df}}) from the 1m CSVs.
     tf_min > 1 resamples to that bar size (5 → 5-minute bars, etc.) so the
@@ -132,22 +169,12 @@ def load_days(symbols: list[str], tf_min: int = 1) -> tuple[list, dict]:
     per_sym: dict = {}
     all_dates: set = set()
     for sym in symbols:
-        f = DATA_DIR / sym / "1m.csv"
-        if not f.exists():
+        by_day = _load_symbol_days(sym, tf_min)
+        if by_day is None:
             print(f"  ! no 1m data for {sym} — skipped")
             continue
-        df = pd.read_csv(f, parse_dates=["date"])
-        df["date"] = df["date"].dt.tz_localize(None) if df["date"].dt.tz is not None else df["date"]
-        df = df.sort_values("date").reset_index(drop=True)
-        if tf_min > 1:
-            df = (df.set_index("date")
-                    .resample(f"{tf_min}min", label="left", closed="left")
-                    .agg({"open": "first", "high": "max", "low": "min",
-                          "close": "last", "volume": "sum"})
-                    .dropna(subset=["open"]).reset_index())
-        df["day"] = df["date"].dt.date
-        per_sym[sym] = {d: g.reset_index(drop=True) for d, g in df.groupby("day")}
-        all_dates.update(per_sym[sym].keys())
+        per_sym[sym] = by_day
+        all_dates.update(by_day.keys())
     return sorted(all_dates), per_sym
 
 
