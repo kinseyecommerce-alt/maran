@@ -472,8 +472,14 @@ if __name__ == "__main__":
     ap.add_argument("--tag", default="")
     ap.add_argument("--regime-gating", action="store_true",
                     help="apply the evidence-based regime entry gate (causal NIFTY detector)")
-    ap.add_argument("--tf", type=int, default=1, choices=[1, 5, 15, 30],
+    ap.add_argument("--tf", type=int, default=1,
+                    choices=[1, 3, 5, 10, 15, 30, 60],
                     help="bar timeframe in minutes (resampled from 1m data)")
+    ap.add_argument("--agents", default=None,
+                    help="comma-separated subset of agent names to run "
+                         "(e.g. 'Intraday'); default = all. Filters the "
+                         "tracked/reported agents; indicator cost is shared "
+                         "so this mainly narrows the output, not the runtime.")
     ap.add_argument("--capital", type=float, default=100_000.0,
                     help="capital pool per agent (₹); equity agents split it "
                          "across max concurrent positions, F&O deploy the full pool")
@@ -482,6 +488,12 @@ if __name__ == "__main__":
                          "should_exit_position (live-faithful but ~20ms/call — "
                          "use on small samples only until perf-optimised)")
     args = ap.parse_args()
+    if args.agents:
+        want = {a.strip().lower() for a in args.agents.split(",") if a.strip()}
+        AGENT_CLASSES = [(n, c) for n, c in AGENT_CLASSES if n.lower() in want]
+        if not AGENT_CLASSES:
+            raise SystemExit(f"--agents matched nothing; valid: "
+                             f"{[n for n,_ in list(sim.AGENT_CLASSES)]}")
     if args.real_exit:
         _REAL_EXIT_AGENTS = set(_REAL_EXIT_AGENTS_ALL)
     replay([s.strip().upper() for s in args.symbols.split(",") if s.strip()],
