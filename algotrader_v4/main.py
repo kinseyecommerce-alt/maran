@@ -1375,19 +1375,57 @@ def _maybe_start_cadence_shadow() -> None:
     _cadence_shadow_started = True
 
     async def _run() -> None:
+        global _cadence_shadow_started
         try:
             import cadence_shadow
             from agents.strategy_agents import IntradayAgent
             rec = cadence_shadow.CadenceShadowRecorder(lambda: IntradayAgent())
             sq = tick_engine.add_subscriber("cadence_shadow")
             logger.info("[cadence_shadow] recorder started (read-only, cadences 1/5/10)")
-            while True:
+            while getattr(settings, "enable_cadence_shadow", False):
                 snap = await sq.get()
                 rec.on_snapshot(snap)
+            logger.info("[cadence_shadow] recorder stopped (disabled)")
         except Exception as e:                       # pragma: no cover - safety
             logger.warning("[cadence_shadow] recorder stopped: {}", e)
+        finally:
+            tick_engine._subscribers.pop("cadence_shadow", None)
+            _cadence_shadow_started = False
 
-    asyncio.create_task(_run(), name="cadence_shadow").add_done_callback(_log_exc)
+    def _done(task) -> None:
+        if task.cancelled():
+            return
+        exc = task.exception()
+        if exc:
+            logger.warning("[cadence_shadow] task ended: {}", exc)
+
+    asyncio.create_task(_run(), name="cadence_shadow").add_done_callback(_done)
+
+
+@app.post("/cadence-shadow/toggle", tags=["Cadence Shadow"])
+async def toggle_cadence_shadow(enable: bool = Query(...)):
+    """Turn the read-only cadence-shadow recorder on/off at runtime — no
+    redeploy needed. When enabled it shadow-evaluates the Intraday pattern book
+    on 1/5/10-min views of the live stream and logs realised forward P&L per
+    cadence (it never places orders). Answers 'which bar cadence works best?'
+    from real data."""
+    settings.enable_cadence_shadow = bool(enable)
+    if enable:
+        _maybe_start_cadence_shadow()   # starts now if the tick loop is live
+    return {"enabled": settings.enable_cadence_shadow,
+            "running": _cadence_shadow_started}
+
+
+@app.get("/cadence-shadow/report", tags=["Cadence Shadow"])
+def cadence_shadow_report():
+    """Per-cadence real-forward-data edge report from the shadow log:
+    {cadence: {trades, win_rate, mean_net, median_net, sum_net}}. Higher
+    mean/median net = the cadence that actually works on live data."""
+    import cadence_shadow
+    report = cadence_shadow.score_cadence_shadow()
+    return {"enabled": getattr(settings, "enable_cadence_shadow", False),
+            "running": _cadence_shadow_started,
+            "cadences": report}
 
 
 # ── Backtest ────────────────────────────────────────────────────────────────────
