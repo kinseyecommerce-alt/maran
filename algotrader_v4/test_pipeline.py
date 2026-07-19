@@ -1527,6 +1527,34 @@ def t_add_symbols_paper_promotes():
 
 run("add_symbols: PAPER promotes scanner picks, dedups", t_add_symbols_paper_promotes)
 
+
+def t_add_symbols_live_chase_movers():
+    """LIVE symbol promotion respects settings.live_chase_movers:
+    ON  → a fresh mover not in the overnight approved book is still promoted;
+    OFF → only names already in the learner-approved book are accepted."""
+    import json as _json
+    from pathlib import Path as _P
+    from config import settings as _s
+    _P("logs").mkdir(exist_ok=True)
+    _P("logs/approved_symbols.json").write_text(_json.dumps({"intraday": ["RELIANCE"]}))
+    old_mode, old_chase = _s.trading_mode, getattr(_s, "live_chase_movers", True)
+    try:
+        _s.trading_mode = "LIVE"
+        # chase ON → fresh mover accepted
+        _s.live_chase_movers = True
+        a = ScalpingAgent(); a._approved = set(); a.state.approved_symbols = []
+        assert a.add_symbols(["FRESHMOVER"]) == 1, "chase ON must promote a fresh mover"
+        # chase OFF → fresh mover rejected, pre-vetted name still accepted
+        _s.live_chase_movers = False
+        b = ScalpingAgent(); b._approved = set(); b.state.approved_symbols = []
+        assert b.add_symbols(["FRESHMOVER"]) == 0, "chase OFF must reject an unvetted mover"
+        assert b.add_symbols(["RELIANCE"]) == 1, "chase OFF still accepts a pre-vetted name"
+    finally:
+        _s.trading_mode, _s.live_chase_movers = old_mode, old_chase
+        _P("logs/approved_symbols.json").write_text("{}")
+
+run("add_symbols: LIVE chase-movers flag gates unvetted promotions", t_add_symbols_live_chase_movers)
+
 def t_conviction_2x_slice():
     """Top-conviction signals (gate size-factor >= 1.0) get a doubled slice;
     lower-conviction ones don't; kill-switch flag disables the boost."""

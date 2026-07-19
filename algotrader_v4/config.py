@@ -145,6 +145,16 @@ class Settings(BaseSettings):
     cooldown_after_loss_sec:   int = 300
     post_exit_cooldown_sec:    int = 5      # minimum cooldown after ANY exit (incl. winners)
 
+    # LIVE-mode symbol promotion: when true, the 10-min intraday movers scan can
+    # add a fresh top-scoring mover to an agent's LIVE book even if it is not in
+    # the overnight learner-approved list — i.e. live trades the day's trenders,
+    # not only pre-vetted names. The mover still must clear the scanner's quality
+    # filters (liquidity/ATR/RSI/ADX/trend), the per-agent book cap, and every
+    # live safety layer (risk sizing, order guard, SEBI, SL/target). Set False to
+    # restore the conservative behaviour (LIVE trades only pre-approved names).
+    # No effect in PAPER (which already approves movers immediately).
+    live_chase_movers: bool = True
+
     # Cadence-shadow recorder: read-only, no orders. When true, shadow-evaluates
     # the Intraday pattern book on 1/5/10-min views of the live tick stream and
     # logs realised forward P&L per cadence to logs/cadence_shadow.jsonl, so
