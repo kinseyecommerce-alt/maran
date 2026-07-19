@@ -220,6 +220,16 @@ def replay(symbols: list[str], max_days: int | None = None,
         dates = [d for d in dates if str(d) <= end]
     if max_days:
         dates = dates[-max_days:]
+    if not dates:
+        # All-holiday window (e.g. a chunk spanning only a market holiday +
+        # weekend) — nothing to replay. Write an empty-but-valid result so a
+        # chunked sweep records the chunk as done instead of crashing/retrying.
+        print(f"No trading days in window (start={start} end={end}) — "
+              f"empty result.")
+        empty = {"days": [], "symbols": list(per_sym), "agents": {}}
+        out = Path(f"logs/replay_backtest_result{('_' + tag) if tag else ''}.json")
+        out.write_text(json.dumps(empty, indent=2))
+        return empty
     print(f"Replaying {len(dates)} real trading days × {len(per_sym)} symbols "
           f"({dates[0]} → {dates[-1]})\n")
 
