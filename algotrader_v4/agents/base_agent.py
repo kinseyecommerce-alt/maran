@@ -657,10 +657,16 @@ class BaseAgent(ABC):
 
         PAPER: approve immediately (same philosophy as the startup top-up —
         paper is where untested symbols earn their evidence).
-        LIVE: only accept symbols already in the learner's approved book;
-        never widen live risk to an unvetted name mid-session."""
+        LIVE: by default only accept symbols already in the learner's approved
+        book (never widen live risk to an unvetted name mid-session). When
+        settings.live_chase_movers is true, LIVE instead accepts the scanner's
+        fresh picks too — these already passed the scanner's quality filters
+        (liquidity/ATR/RSI/ADX/trend), and every live safety layer (risk sizing,
+        order guard, SEBI, SL/target) still applies — so the book can chase the
+        day's movers, still capped at max_symbols_per_agent."""
         live_ok: set[str] | None = None
-        if settings.trading_mode == "LIVE":
+        if settings.trading_mode == "LIVE" and not getattr(
+                settings, "live_chase_movers", False):
             try:
                 import json as _json
                 from pathlib import Path as _Path
