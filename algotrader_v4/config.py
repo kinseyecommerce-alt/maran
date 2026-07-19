@@ -145,6 +145,13 @@ class Settings(BaseSettings):
     cooldown_after_loss_sec:   int = 300
     post_exit_cooldown_sec:    int = 5      # minimum cooldown after ANY exit (incl. winners)
 
+    # Cadence-shadow recorder: read-only, no orders. When true, shadow-evaluates
+    # the Intraday pattern book on 1/5/10-min views of the live tick stream and
+    # logs realised forward P&L per cadence to logs/cadence_shadow.jsonl, so
+    # "which bar cadence works best" can be answered from real data. Off by
+    # default; see cadence_shadow.py.
+    enable_cadence_shadow: bool = False
+
     # Per-agent stop-loss % (intraday/scalping/futures/swing = price %; options = premium %)
     sl_pct_intraday:       float = 1.5
     sl_pct_scalping:       float = 0.3

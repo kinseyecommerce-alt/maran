@@ -1358,7 +1358,36 @@ async def resume_agent(name: str):
 
     q = tick_engine.add_subscriber(f"agent_{name}")
     a.start(q)
+    _maybe_start_cadence_shadow()
     return {"status": "resumed", "symbols": [w["symbol"] for w in wl]}
+
+
+_cadence_shadow_started = False
+
+
+def _maybe_start_cadence_shadow() -> None:
+    """Start the read-only cadence-shadow recorder once, if enabled. It only
+    consumes snapshots and writes a log — it never places orders — and its own
+    loop swallows errors, so it cannot affect live trading."""
+    global _cadence_shadow_started
+    if _cadence_shadow_started or not getattr(settings, "enable_cadence_shadow", False):
+        return
+    _cadence_shadow_started = True
+
+    async def _run() -> None:
+        try:
+            import cadence_shadow
+            from agents.strategy_agents import IntradayAgent
+            rec = cadence_shadow.CadenceShadowRecorder(lambda: IntradayAgent())
+            sq = tick_engine.add_subscriber("cadence_shadow")
+            logger.info("[cadence_shadow] recorder started (read-only, cadences 1/5/10)")
+            while True:
+                snap = await sq.get()
+                rec.on_snapshot(snap)
+        except Exception as e:                       # pragma: no cover - safety
+            logger.warning("[cadence_shadow] recorder stopped: {}", e)
+
+    asyncio.create_task(_run(), name="cadence_shadow").add_done_callback(_log_exc)
 
 
 # ── Backtest ────────────────────────────────────────────────────────────────────
