@@ -37,7 +37,7 @@ class EMAPullbackConfig:
     rsi_period: int = 14
     rsi_support: float = 40.0        # BUY: RSI support level
     rsi_resistance: float = 60.0     # SELL: RSI resistance level
-    rsi_band: float = 5.0            # how far past the level counts as a "test"
+    rsi_band: float = 2.0            # width of the "support AT 40" test zone (spec: at 40)
     ema_touch_tol_pct: float = 0.10  # % of price: a candle within this of an EMA "touches" it
     sl_buffer_pct: float = 0.05      # % of price added beyond the focus candle for the SL
     max_risk_pct: float = 1.0        # skip trade if (entry→SL) exceeds this % of entry
