@@ -653,10 +653,18 @@ class KiteClient:
             label="cancel_order",
         )
 
-    def squareoff_all_positions(self) -> list[str]:
+    def squareoff_all_positions(self, only_exchanges: set | None = None,
+                                skip_exchanges: set | None = None) -> list[str]:
+        """Square off open positions. Optionally restrict to `only_exchanges`
+        or exclude `skip_exchanges` (e.g. keep MCX open past the equity close)."""
         order_ids: list[str] = []
         for pos in self.positions().get("net", []):
             if pos.get("quantity", 0) == 0:
+                continue
+            _exch = pos.get("exchange", "NSE")
+            if only_exchanges is not None and _exch not in only_exchanges:
+                continue
+            if skip_exchanges is not None and _exch in skip_exchanges:
                 continue
             side = "SELL" if pos["quantity"] > 0 else "BUY"
             qty  = abs(pos["quantity"])

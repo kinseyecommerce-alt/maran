@@ -258,6 +258,13 @@ class MasterAgent:
         self._scheduler.add_job(self._auto_squareoff,  "cron", hour=sq_h, minute=sq_m,
                                  day_of_week="mon-fri", id="squareoff", replace_existing=True,
                                  misfire_grace_time=600)
+        # MCX commodities trade past the equity close — square them off in the
+        # evening instead of at the 15:20 equity square-off.
+        if getattr(settings, "mcx_extended_hours", True):
+            _mh, _mm = [int(x) for x in getattr(settings, "mcx_squareoff_time", "23:15").split(":")]
+            self._scheduler.add_job(self._auto_squareoff_mcx, "cron", hour=_mh, minute=_mm,
+                                     day_of_week="mon-fri", id="squareoff_mcx",
+                                     replace_existing=True, misfire_grace_time=600)
         self._scheduler.add_job(self._daily_reset,     "cron", hour=9, minute=15,
                                  day_of_week="mon-fri", id="daily_reset", replace_existing=True,
                                  misfire_grace_time=600)
@@ -587,13 +594,27 @@ class MasterAgent:
         except Exception as exc:
             logger.debug("[master] Sharpe check error: {}", exc)
 
+    async def _auto_squareoff_mcx(self) -> None:
+        """Evening square-off for MCX commodity positions only (~23:15 IST)."""
+        from ist_clock import is_nse_holiday, now_ist
+        if is_nse_holiday(now_ist().date()):
+            return
+        ids = await asyncio.to_thread(
+            lambda: kite_client.squareoff_all_positions(only_exchanges={"MCX"}))
+        if ids:
+            logger.info("[master] MCX evening square-off — {} positions closed", len(ids))
+            await send_telegram(f"<b>MCX square-off</b>\n{len(ids)} commodity positions closed")
+
     async def _auto_squareoff(self) -> None:
         from ist_clock import is_nse_holiday, now_ist
         if is_nse_holiday(now_ist().date()):
             logger.info("[master] NSE holiday — squareoff skipped")
             return
 
-        ids = await asyncio.to_thread(kite_client.squareoff_all_positions)
+        # Equity/NFO square-off — keep MCX open (it squares off in the evening).
+        _skip = {"MCX"} if getattr(settings, "mcx_extended_hours", True) else None
+        ids = await asyncio.to_thread(
+            lambda: kite_client.squareoff_all_positions(skip_exchanges=_skip))
         if ids:
             await send_telegram(f"<b>Auto square-off</b>\n{len(ids)} positions closed")
             from n8n_bridge import notify as _n8n

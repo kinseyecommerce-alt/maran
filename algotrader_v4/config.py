@@ -305,6 +305,11 @@ class Settings(BaseSettings):
     route_index_to_options: bool = True
     option_premium_sl_pct: float = 25.0          # option SL as % of entry premium
     option_premium_target_pct: float = 75.0      # option target as % of entry premium (1:3)
+    # MCX commodities trade a longer session than NSE equity (≈09:00–23:30 IST).
+    mcx_extended_hours: bool = True
+    mcx_open_time: str = "09:00"
+    mcx_close_time: str = "23:30"
+    mcx_squareoff_time: str = "23:15"            # square off MCX positions here, not 15:20
     # Download N months of multi-timeframe Kite history into the CSV cache at
     # startup (containers are ephemeral). 0 = disabled.
     auto_download_history_months: int = 0

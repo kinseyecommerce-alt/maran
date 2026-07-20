@@ -59,6 +59,39 @@ def is_market_open() -> bool:
     return _MARKET_OPEN <= t <= _MARKET_CLOSE
 
 
+def _parse_hhmm(s: str, default: dtime) -> dtime:
+    try:
+        h, m = [int(x) for x in s.split(":")]
+        return dtime(h, m)
+    except Exception:
+        return default
+
+
+def is_mcx_open() -> bool:
+    """True if the MCX commodity session is open now (Mon–Fri, ~09:00–23:30 IST,
+    configurable via settings; NSE holiday calendar reused as an approximation)."""
+    try:
+        from config import settings
+        if not getattr(settings, "mcx_extended_hours", True):
+            return is_market_open()
+        o = _parse_hhmm(getattr(settings, "mcx_open_time", "09:00"), dtime(9, 0))
+        c = _parse_hhmm(getattr(settings, "mcx_close_time", "23:30"), dtime(23, 30))
+    except Exception:
+        o, c = dtime(9, 0), dtime(23, 30)
+    n = now_ist()
+    if n.weekday() >= 5:
+        return False
+    if n.date() in NSE_HOLIDAYS:
+        return False
+    t = n.time().replace(tzinfo=None)
+    return o <= t <= c
+
+
+def is_any_market_open() -> bool:
+    """True if EITHER the NSE equity or the MCX commodity session is open."""
+    return is_market_open() or is_mcx_open()
+
+
 def minutes_since_open() -> int:
     """Minutes elapsed since 09:15 IST today (0 if before open)."""
     t = ist_time()
