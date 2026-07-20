@@ -698,7 +698,8 @@ class TickEngine:
     def __init__(self) -> None:
         self._running        = False
         self._symbols:  list[str]       = []
-        self._exchange: dict[str, str]  = {}   # symbol → NSE/BSE
+        self._exchange: dict[str, str]  = {}   # symbol → NSE/BSE/MCX
+        self._mcx_contract: dict[str, str] = {}  # MCX underlying → near-month FUT tradingsymbol
 
         self._bufs_1min: dict[str, TickBuffer] = {}
         self._bufs_5min: dict[str, TickBuffer] = {}
@@ -766,6 +767,13 @@ class TickEngine:
         return bool(getattr(settings, "paper_use_live_data", False)
                     and settings.kite_access_token)
 
+    def _quote_name(self, sym: str) -> str:
+        """Kite quote/WS instrument name for a symbol. MCX commodities quote
+        their near-month FUT contract (no spot exists); everything else uses the
+        Kite instrument name (indices need "NIFTY 50" etc.)."""
+        c = self._mcx_contract.get(sym)
+        return c if c else kite_client.kite_name(sym)
+
     def subscribe(self, watchlist: list[dict]) -> None:
         _new_syms: list[str] = []
         for item in watchlist:
@@ -782,6 +790,20 @@ class TickEngine:
             self._bufs_5min[sym] = TickBuffer(300, maxlen=200)
             self._bufs_3min[sym] = TickBuffer(180, maxlen=700)
             _new_syms.append(sym)
+
+        # MCX commodities have no spot instrument — resolve each to its near-month
+        # FUT tradingsymbol so REST quotes / WS use the actual contract, while the
+        # buffers and strategy keep keying on the underlying (e.g. CRUDEOIL).
+        _mcx_syms = [s for s in _new_syms if self._exchange.get(s) == "MCX"]
+        if _mcx_syms:
+            try:
+                for u, info in kite_client.mcx_near_month_map(_mcx_syms).items():
+                    if info.get("tradingsymbol"):
+                        self._mcx_contract[u] = info["tradingsymbol"]
+                if self._mcx_contract:
+                    logger.info("TickEngine: MCX contracts → {}", self._mcx_contract)
+            except Exception as _mcx_exc:
+                logger.warning("TickEngine: MCX contract resolve failed: {}", _mcx_exc)
 
         # Seed the GBM simulator only when NOT using the live feed.
         # TrueData → Kite WebSocket are used when credentials are present.
@@ -1235,7 +1257,7 @@ class TickEngine:
         # quote keys — the fourth and final key-construction site (the other
         # three were fixed earlier; this poll loop was missed, so equities got
         # real REST quotes while indices silently got nothing).
-        instruments = [f"{self._exchange.get(s, 'NSE')}:{kite_client.kite_name(s)}"
+        instruments = [f"{self._exchange.get(s, 'NSE')}:{self._quote_name(s)}"
                        for s in pending]
         try:
             raw = await asyncio.get_running_loop().run_in_executor(
@@ -1246,7 +1268,7 @@ class TickEngine:
             return
         for sym in pending:
             exch = self._exchange.get(sym, "NSE")
-            key  = f"{exch}:{kite_client.kite_name(sym)}"
+            key  = f"{exch}:{self._quote_name(sym)}"
             data = raw.get(key)
             if not data:
                 continue
