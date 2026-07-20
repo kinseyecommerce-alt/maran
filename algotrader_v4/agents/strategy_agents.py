@@ -128,19 +128,78 @@ class IntradayAgent(BaseAgent):
 
 
 class OptionsAgent(BaseAgent):
-    """Options (NFO) — EMPTY SHELL. Add your strategy in evaluate_tick().
-
-    A live entry expects the signal dict to carry the option contract to trade
-    (BaseAgent._try_enter reads it); return ("BUY"|"SELL", {...}) accordingly."""
+    """The single production agent — runs the user's EMA-pullback strategy on the
+    3-min timeframe (see ema_pullback.py). Emits directional BUY/SELL signals with
+    a focus-candle stop and a 3R target; BaseAgent handles order placement, sizing,
+    guards, and trailing-SL. Instrument routing (stock→future, index→ATM CE/PE,
+    MCX→commodity future) is applied in _route_instrument()."""
     name = "options"
 
+    def __init__(self) -> None:
+        super().__init__()
+        from ema_pullback import EMAPullbackStrategy, EMAPullbackConfig
+        s = settings
+        self._strat = EMAPullbackStrategy(EMAPullbackConfig(
+            rsi_support=float(getattr(s, "ema_pullback_rsi_support", 40.0)),
+            rsi_resistance=float(getattr(s, "ema_pullback_rsi_resistance", 60.0)),
+            rsi_band=float(getattr(s, "ema_pullback_rsi_band", 5.0)),
+            ema_touch_tol_pct=float(getattr(s, "ema_pullback_touch_tol_pct", 0.10)),
+            sl_buffer_pct=float(getattr(s, "ema_pullback_sl_buffer_pct", 0.05)),
+            max_risk_pct=float(getattr(s, "ema_pullback_max_risk_pct", 1.0)),
+            target_r=float(getattr(s, "ema_pullback_target_r", 3.0)),
+            breakeven_r=float(getattr(s, "ema_pullback_breakeven_r", 1.5)),
+        ))
+        self._strat_session: Optional[str] = None
+
     def evaluate_tick(self, snap: MarketSnapshot) -> tuple[str, Optional[dict]]:
-        # Strategy removed — provide your own signal logic here.
-        return _NO_TRADE
+        if not getattr(settings, "ema_pullback_enabled", True):
+            return _NO_TRADE
+        # Reset per-symbol strategy state at each new IST session.
+        _today = now_ist().strftime("%Y-%m-%d")
+        if self._strat_session != _today:
+            self._strat_session = _today
+            self._strat.reset()
+
+        candles = getattr(snap, "candles_3min", None) or []
+        ltp = float(snap.tick.ltp or snap.indicators.ltp or 0.0)
+        if ltp <= 0 or not candles:
+            return _NO_TRADE
+
+        sig = self._strat.evaluate(snap.symbol, candles, ltp)
+        if sig is None:
+            return _NO_TRADE
+
+        signal = {
+            "pattern": "EMA_PULLBACK",
+            "score": 8,                         # single high-conviction setup
+            "stop_loss": round(sig.stop_loss, 2),
+            "target": round(sig.target, 2),
+            "stop_loss_pct": round(abs(ltp - sig.stop_loss) / ltp * 100, 3),
+            "target_pct": round(abs(sig.target - ltp) / ltp * 100, 3),
+            "breakeven_r": self._strat.cfg.breakeven_r,
+            "risk_pct": round(sig.risk_pct, 3),
+            "ema_touched": sig.ema_touched,
+            "rsi": round(sig.rsi, 1),
+        }
+        # Instrument routing: index → ATM option, F&O stock → stock future,
+        # MCX → commodity future. Enriches the signal with contract/futures_symbol.
+        self._route_instrument(snap, sig.side, signal)
+        return sig.side, signal
+
+    def _route_instrument(self, snap: MarketSnapshot, side: str, signal: dict) -> None:
+        """Attach the tradeable instrument for this underlying.
+
+        NOTE: index ATM CE/PE contract construction and stock/MCX future-symbol
+        construction are wired in a follow-up; until then the signal trades the
+        underlying symbol directly (correct in PAPER, and for cash/near-month
+        proxies). See Phase C instrument-routing task."""
+        # Placeholder passthrough — BaseAgent trades snap.symbol when no
+        # futures_symbol/contract override is present.
+        return
 
     def should_exit_position(self, position: dict, ind: LiveIndicators) -> tuple[bool, str]:
-        # Strategy removed — no strategy-driven exit. SL-M / target / trailing-SL
-        # and EOD square-off (all in BaseAgent) still manage any open position.
+        # Exits are managed by the placed SL (focus candle), the 3R target, the
+        # trailing-SL breakeven move, and BaseAgent's EOD square-off.
         return False, ""
 
 

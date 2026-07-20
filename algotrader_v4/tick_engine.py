@@ -172,6 +172,7 @@ class MarketSnapshot:
     indicators:        LiveIndicators
     candles_1min:      list[Candle] = field(default_factory=list)
     candles_5min:      list[Candle] = field(default_factory=list)
+    candles_3min:      list[Candle] = field(default_factory=list)  # EMA-pullback strategy timeframe
     bar_seconds:       int  = 60       # 60 = 1m, 300 = 5m, 900 = 15m
     black_swan_active: bool = False    # True when market_regime == BLACK_SWAN
     black_swan_phase:  str  = ""       # "FALLING" | "STABILIZING" | "RECOVERING" | ""
@@ -701,6 +702,10 @@ class TickEngine:
 
         self._bufs_1min: dict[str, TickBuffer] = {}
         self._bufs_5min: dict[str, TickBuffer] = {}
+        # 3-min buffer feeds the EMA-pullback strategy (EMA55/89/144/233 on
+        # 3-min needs ~700 bars ≈ 5 sessions of history — hence the large maxlen
+        # and multi-day seed in _backfill_bufs).
+        self._bufs_3min: dict[str, TickBuffer] = {}
 
         self._latest_tick: dict[str, Tick]            = {}
         self._latest_ind:  dict[str, LiveIndicators]  = {}
@@ -775,6 +780,7 @@ class TickEngine:
             self._exchange[sym]  = exch
             self._bufs_1min[sym] = TickBuffer(60,  maxlen=400)
             self._bufs_5min[sym] = TickBuffer(300, maxlen=200)
+            self._bufs_3min[sym] = TickBuffer(180, maxlen=700)
             _new_syms.append(sym)
 
         # Seed the GBM simulator only when NOT using the live feed.
@@ -933,6 +939,8 @@ class TickEngine:
                 buf.reset()
             for buf in self._bufs_5min.values():
                 buf.reset()
+            for buf in self._bufs_3min.values():
+                buf.reset()
             self._last_tick_ltp.clear()
             self._last_tick_ts.clear()
             self._dedup_pending_vol.clear()
@@ -958,6 +966,9 @@ class TickEngine:
         _vol = tick.volume + self._dedup_pending_vol.pop(symbol, 0)
         self._bufs_1min[symbol].push(tick.ltp, _vol, tick.timestamp)
         self._bufs_5min[symbol].push(tick.ltp, _vol, tick.timestamp)
+        _b3 = self._bufs_3min.get(symbol)
+        if _b3 is not None:
+            _b3.push(tick.ltp, _vol, tick.timestamp)
 
         df = self._bufs_1min[symbol].as_dataframe()
 
@@ -1051,6 +1062,8 @@ class TickEngine:
             symbol=symbol, tick=tick, indicators=ind,
             candles_1min=self._bufs_1min[symbol].candles()[-200:],
             candles_5min=self._bufs_5min[symbol].candles()[-30:],
+            candles_3min=(self._bufs_3min[symbol].candles()[-400:]
+                          if symbol in self._bufs_3min else []),
         )
 
         # Black swan phase — evaluated once per NIFTY tick; shared across all symbol snapshots
@@ -1361,6 +1374,7 @@ class TickEngine:
         for sym in syms:
             buf1 = self._bufs_1min.get(sym)
             buf5 = self._bufs_5min.get(sym)
+            buf3 = self._bufs_3min.get(sym)
             if buf1 is None:
                 continue
             # Skip if buffer already has substantial history (mid-day restart).
@@ -1387,6 +1401,7 @@ class TickEngine:
                 # so the buffers are no longer reset (resetting before the
                 # awaited fetch dropped live bars, then re-added the same
                 # minutes from history, double-counting volume).
+                df_full = df                       # keep 10d for the 3-min seed
                 df = df.tail(200)
                 _five: dict = {}   # 5-min bucket ts → [o, h, l, c, vol, first_ts]
                 for row in df.itertuples(index=False):
@@ -1424,6 +1439,37 @@ class TickEngine:
                 if buf5:
                     for _b, (o, h, l, c, vol, ts) in _five.items():
                         buf5.seed_candle(o, h, l, c, vol, ts)
+                # 3-min buffer: aggregate the last ~2100 1-min rows (≈5.5
+                # sessions) into 3-min bars so EMA55/89/144/233 on 3-min are
+                # well-converged from the session open. seed_candle dedups vs
+                # any live ticks that raced ahead.
+                if buf3 is not None:
+                    from ist_clock import _IST as _ist_tz
+                    _three: dict = {}   # 3-min bucket ts → [o, h, l, c, vol]
+                    for row in df_full.tail(2100).itertuples(index=False):
+                        ts = row.date
+                        if hasattr(ts, "to_pydatetime"):
+                            ts = ts.to_pydatetime()
+                        if getattr(ts, "tzinfo", None) is None:
+                            ts = ts.replace(tzinfo=_ist_tz)
+                        o = float(getattr(row, "open",  row.close))
+                        h = float(getattr(row, "high",  row.close))
+                        l = float(getattr(row, "low",   row.close))
+                        c = float(row.close)
+                        vol = int(getattr(row, "volume", 0))
+                        _secs = (ts.hour * 3600 + ts.minute * 60) // 180 * 180
+                        _b = datetime(ts.year, ts.month, ts.day,
+                                      tzinfo=ts.tzinfo) + timedelta(seconds=_secs)
+                        agg = _three.get(_b)
+                        if agg is None:
+                            _three[_b] = [o, h, l, c, vol]
+                        else:
+                            agg[1] = max(agg[1], h)
+                            agg[2] = min(agg[2], l)
+                            agg[3] = c
+                            agg[4] += vol
+                    for _b, (o, h, l, c, vol) in _three.items():
+                        buf3.seed_candle(o, h, l, c, vol, _b)
                 seeded += 1
             except Exception as exc:
                 logger.debug("TickEngine: backfill failed for {}: {}", sym, exc)
