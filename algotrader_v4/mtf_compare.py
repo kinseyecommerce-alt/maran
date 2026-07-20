@@ -97,7 +97,10 @@ def simulate(sig_at, min1_by_sym, dates, sl_pct, tgt_pct, cost=0.15):
             pos = None            # (side, entry_px, sl, tgt)
             for i in range(len(df)):
                 row = df.iloc[i]
-                ts = row.name.to_pydatetime() if hasattr(row.name, "to_pydatetime") else row.name
+                # min1 day frames carry `date` as a column (int index), whereas
+                # gen_signals keys off the datetime-indexed session frame — align.
+                tsv = row["date"] if "date" in df.columns else row.name
+                ts = tsv.to_pydatetime() if hasattr(tsv, "to_pydatetime") else tsv
                 hi, lo, cl = float(row.high), float(row.low), float(row.close)
                 if pos is not None:
                     side, ep, slx, tgx = pos
