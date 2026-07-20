@@ -273,6 +273,45 @@ class KiteClient:
             logger.info("[kite] F&O lot sizes loaded for {} underlyings", len(out))
         return out
 
+    def mcx_near_month_map(self, commodities: list[str]) -> dict[str, dict]:
+        """{underlying → {'tradingsymbol', 'token', 'expiry'}} for the nearest
+        non-expired MCX FUT contract of each commodity. MCX has no spot instrument,
+        so this is what the feed must actually quote/subscribe. Logs a diagnostic
+        (similar FUT names) for any commodity that can't be resolved."""
+        from datetime import date
+        today = date.today()
+        insts = self.get_instruments("MCX")
+        by_name: dict[str, list] = {}
+        for inst in insts:
+            if inst.get("instrument_type") == "FUT":
+                by_name.setdefault((inst.get("name") or "").strip().upper(), []).append(inst)
+        out: dict[str, dict] = {}
+        for c in commodities:
+            cu = c.strip().upper()
+            best = None
+            for inst in by_name.get(cu, []):
+                exp = inst.get("expiry")
+                ed = exp if hasattr(exp, "year") else None
+                if ed is None:
+                    try:
+                        ed = date.fromisoformat(str(exp)[:10])
+                    except Exception:
+                        continue
+                if hasattr(ed, "date"):
+                    ed = ed.date()
+                if ed < today:
+                    continue
+                if best is None or ed < best[0]:
+                    best = (ed, inst)
+            if best:
+                inst = best[1]
+                out[cu] = {"tradingsymbol": inst.get("tradingsymbol"),
+                           "token": int(inst["instrument_token"]), "expiry": best[0]}
+            elif insts:
+                similar = [n for n in by_name if n and (cu[:4] in n or n[:4] in cu)][:10]
+                logger.warning("[kite] MCX no near-month FUT for {} — similar names: {}", cu, similar)
+        return out
+
     def get_instrument_tokens(self, symbols: list[str], exchange: str = "NSE") -> dict[str, int]:
         """Return {symbol: instrument_token} for the given symbols."""
         instruments = self.get_instruments(exchange)
