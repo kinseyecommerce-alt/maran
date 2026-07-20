@@ -142,6 +142,13 @@ class EMAPullbackStrategy:
         if len(closed) < cfg.min_bars:
             return None
 
+        # Cheap early-out: the decision inputs only change when a NEW 3-min bar
+        # closes. Skip the O(n) EMA/RSI recompute on every intra-bar tick — at
+        # 200 symbols this is the difference between trivial and pathological CPU.
+        last_closed_ts = _candle_ohlc(closed[-1])[4]
+        if last_closed_ts is not None and self._last_ts.get(symbol) == last_closed_ts:
+            return None
+
         # Full indicator series (computed once), indexed per bar below.
         closes = [_candle_ohlc(c)[3] for c in closed]
         ema_series = {p: ema(closes, p) for p in cfg.ema_periods}

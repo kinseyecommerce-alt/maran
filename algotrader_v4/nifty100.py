@@ -119,6 +119,12 @@ NIFTY_NEXT_400 = [
 
 NIFTY_500 = NIFTY_100 + NIFTY_NEXT_400
 
+# Nifty 200 ≈ Nifty 100 + the next 100 largest names. (The official index is
+# Nifty 100 + Nifty Midcap 100; NIFTY_NEXT_400 isn't market-cap ranked, so this
+# is a close large/mid-cap approximation — swap in an exact constituents list if
+# precise membership is required.)
+NIFTY_200 = NIFTY_100 + NIFTY_NEXT_400[:100]
+
 # Strategy-suitability hints (used to pre-filter per-strategy watchlists)
 # All cash-equity strategies now scan the full Nifty 500 — the historical_learner
 # backtest gate (per-symbol win rate/sharpe) is what actually prunes illiquid or
@@ -127,7 +133,7 @@ NIFTY_500 = NIFTY_100 + NIFTY_NEXT_400
 # names have no listed futures/options contract at all.
 SCALPING_UNIVERSE = NIFTY_500
 
-FNO_UNIVERSE = NIFTY_50  # Only Nifty 50 stocks have liquid F&O
+FNO_UNIVERSE = NIFTY_200  # Single production agent trades the Nifty 200 universe
 
 SWING_UNIVERSE = NIFTY_500  # Full Nifty 500 for swing (hold overnight)
 
