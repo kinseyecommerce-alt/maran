@@ -855,7 +855,7 @@ function TradingConfigPanel({ addToast }: { addToast: (msg: string, type?: any) 
   })
   const [intelSaving, setIntelSaving] = useState(false)
 
-  const [enables, setEnables] = useState({ intraday: true, fno: true, swing: true, scalping: true })
+  const [enables, setEnables] = useState<Record<string, boolean>>({ options: true })
   const [enasBusy, setEnasBusy] = useState(false)
 
   useEffect(() => {
@@ -1010,14 +1010,6 @@ function TradingConfigPanel({ addToast }: { addToast: (msg: string, type?: any) 
       {/* Intelligence */}
       <div className="space-y-3">
         <SectionLabel>AI Intelligence</SectionLabel>
-        <Toggle label="Claude Trade Gate" hint="LLM review before every order"
-          checked={intel.use_claude_trade_gate}
-          onChange={v => setIntel(p => ({ ...p, use_claude_trade_gate: v }))} />
-        {intel.use_claude_trade_gate && (
-          <NumInput label="Gate Threshold" value={intel.claude_gate_threshold} min={40} max={90}
-            hint="Min Claude confidence to allow trade"
-            onChange={v => setIntel(p => ({ ...p, claude_gate_threshold: v }))} />
-        )}
         <Toggle label="Multi-Timeframe" hint="Require 5m + 15m alignment"
           checked={intel.use_multi_timeframe}
           onChange={v => setIntel(p => ({ ...p, use_multi_timeframe: v }))} />
@@ -1033,8 +1025,8 @@ function TradingConfigPanel({ addToast }: { addToast: (msg: string, type?: any) 
 
       {/* Agent Enables */}
       <div className="space-y-3">
-        <SectionLabel>Agent Enables</SectionLabel>
-        {(['intraday', 'fno', 'swing', 'scalping'] as const).map(k => (
+        <SectionLabel>Agent Enable</SectionLabel>
+        {(['options'] as const).map(k => (
           <FieldRow key={k} label={k.toUpperCase()}>
             <button onClick={() => setEnables(p => ({ ...p, [k]: !p[k] }))}
               className={`relative w-10 h-5 rounded-full transition-colors ${enables[k] ? 'bg-emerald-600' : 'bg-slate-700'}`}>
@@ -1090,7 +1082,7 @@ function RiskLimitsPanel({ addToast }: { addToast: (msg: string, type?: any) => 
     finally { setAgentSaving(false) }
   }
 
-  const agents = ['intraday', 'scalping', 'options', 'futures', 'swing'] as const
+  const agents = ['options'] as const
 
   return (
     <div className="space-y-6">
