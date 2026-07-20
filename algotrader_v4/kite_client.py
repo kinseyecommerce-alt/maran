@@ -250,6 +250,29 @@ class KiteClient:
         """Map an internal symbol to Kite's instrument/tradingsymbol name."""
         return cls._INDEX_KITE_NAMES.get(symbol.upper(), symbol.upper())
 
+    def fno_lot_sizes(self) -> dict[str, int]:
+        """{underlying → lot_size} for all NFO stock/index futures, from the live
+        Kite instrument master (authoritative + always current). Cached for the
+        process. Returns {} when instruments are unavailable (PAPER without live
+        data / no token) so callers fall back to the static table."""
+        cached = getattr(self, "_fno_lots_cache", None)
+        if cached is not None:
+            return cached
+        out: dict[str, int] = {}
+        try:
+            for inst in self.get_instruments("NFO"):
+                if inst.get("instrument_type") == "FUT":
+                    name = (inst.get("name") or "").strip().upper()
+                    lot = int(inst.get("lot_size") or 0)
+                    if name and lot > 0:
+                        out[name] = lot   # same across a symbol's expiries
+        except Exception as exc:
+            logger.debug("[kite] fno_lot_sizes build failed: {}", exc)
+        if out:
+            self._fno_lots_cache = out
+            logger.info("[kite] F&O lot sizes loaded for {} underlyings", len(out))
+        return out
+
     def get_instrument_tokens(self, symbols: list[str], exchange: str = "NSE") -> dict[str, int]:
         """Return {symbol: instrument_token} for the given symbols."""
         instruments = self.get_instruments(exchange)
