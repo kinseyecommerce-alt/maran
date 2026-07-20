@@ -1237,15 +1237,14 @@ async def option_chain(symbol: str):
 
 @app.get("/market/candles/{symbol}", tags=["Market"])
 def market_candles(symbol: str, tf: str = "1min"):
-    """Return OHLCV candles for a symbol. tf=1min (default) or 5min.
+    """Return OHLCV candles for a symbol. tf=1min (default), 3min or 5min.
     Each bar: {time (Unix sec), open, high, low, close, volume}.
     Used by the TradingView Lightweight Charts panel in the dashboard."""
     symbol = _clean_symbol(symbol)
-    tf = tf if tf in ("1min", "5min") else "1min"
-    if tf == "1min":
-        bufs = tick_engine._bufs_1min
-    else:
-        bufs = tick_engine._bufs_5min
+    tf = tf if tf in ("1min", "3min", "5min") else "1min"
+    bufs = {"1min": tick_engine._bufs_1min,
+            "3min": tick_engine._bufs_3min,
+            "5min": tick_engine._bufs_5min}[tf]
     buf = bufs.get(symbol)
     if buf is None:
         raise HTTPException(404, f"No candle data for {symbol} — add it to a watchlist first")
@@ -1262,6 +1261,51 @@ def market_candles(symbol: str, tf: str = "1min"):
         for c in candles
     ]
     return {"symbol": symbol, "tf": tf, "bars": bars}
+
+
+@app.get("/market/chart/{symbol}", tags=["Market"])
+def market_chart(symbol: str):
+    """EMA-pullback strategy chart data: 3-min OHLCV bars + the four strategy
+    EMAs (55/89/144/233) + RSI-14 + previous-day high/low. Computed on the live
+    3-min buffer (same data the agent decides on), reusing the strategy's own
+    indicator helpers so the chart matches the engine exactly."""
+    symbol = _clean_symbol(symbol)
+    buf = tick_engine._bufs_3min.get(symbol)
+    if buf is None:
+        raise HTTPException(404, f"No 3-min data for {symbol} — add it to a watchlist first")
+    candles = buf.candles()
+    from ema_pullback import ema as _ema, rsi as _rsi
+    times  = [int(c.ts.timestamp()) for c in candles]
+    closes = [float(c.close) for c in candles]
+    bars = [{"time": t, "open": round(c.open, 2), "high": round(c.high, 2),
+             "low": round(c.low, 2), "close": round(c.close, 2), "volume": c.volume}
+            for t, c in zip(times, candles)]
+
+    def _line(vals):
+        return [{"time": t, "value": round(v, 2)} for t, v in zip(times, vals)]
+
+    emas = {p: _line(_ema(closes, p)) for p in (55, 89, 144, 233)} if closes else {}
+    rsi_line = _line(_rsi(closes, 14)) if closes else []
+
+    # Prev-day high/low = high/low of the most recent date before the last bar's.
+    pdh = pdl = None
+    if candles:
+        by_day: dict = {}
+        for c in candles:
+            d = c.ts.date()
+            hi, lo = by_day.get(d, (c.high, c.low))
+            by_day[d] = (max(hi, c.high), min(lo, c.low))
+        last_d = candles[-1].ts.date()
+        prior = [d for d in by_day if d < last_d]
+        if prior:
+            pdh, pdl = by_day[max(prior)]
+
+    return {"symbol": symbol, "bars": bars,
+            "ema55": emas.get(55, []), "ema89": emas.get(89, []),
+            "ema144": emas.get(144, []), "ema233": emas.get(233, []),
+            "rsi": rsi_line,
+            "pdh": round(pdh, 2) if pdh else None,
+            "pdl": round(pdl, 2) if pdl else None}
 
 @app.get("/market/depth/{symbol}", tags=["Market"])
 def market_depth(symbol: str):
