@@ -144,6 +144,21 @@ class Settings(BaseSettings):
     max_trades_swing:          int = 25    # position trades, low turnover
     cooldown_after_loss_sec:   int = 300
     post_exit_cooldown_sec:    int = 5      # minimum cooldown after ANY exit (incl. winners)
+    # Per-SYMBOL cooldown after a LOSING exit — the anti-whipsaw gate. A symbol
+    # that just stopped you out is usually chopping; blocking re-entry on it for
+    # a while stops death-by-a-thousand-cuts (e.g. 20-Jul live: HINDPETRO 0W/3L,
+    # INTELLECT 1W/3L — repeated stops on the same name under the old 30s gate).
+    post_loss_symbol_cooldown_sec: int = 900   # 15 min
+
+    # LIVE-mode symbol promotion: when true, the 10-min intraday movers scan can
+    # add a fresh top-scoring mover to an agent's LIVE book even if it is not in
+    # the overnight learner-approved list — i.e. live trades the day's trenders,
+    # not only pre-vetted names. The mover still must clear the scanner's quality
+    # filters (liquidity/ATR/RSI/ADX/trend), the per-agent book cap, and every
+    # live safety layer (risk sizing, order guard, SEBI, SL/target). Set False to
+    # restore the conservative behaviour (LIVE trades only pre-approved names).
+    # No effect in PAPER (which already approves movers immediately).
+    live_chase_movers: bool = True
 
     # LIVE-mode symbol promotion: when true, the 10-min intraday movers scan can
     # add a fresh top-scoring mover to an agent's LIVE book even if it is not in

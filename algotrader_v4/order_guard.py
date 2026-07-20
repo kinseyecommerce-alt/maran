@@ -219,10 +219,14 @@ class OrderGuard:
                 self._symbol_owner.pop(symbol, None)
             # Per-symbol cooldown: always apply a minimum gap after any exit so the
             # next tick doesn't immediately re-enter on stale indicator state.
-            # Losing trades get a longer 30s cooldown to prevent whipsaw re-entries.
+            # A LOSING exit gets a much longer per-symbol cooldown (anti-whipsaw):
+            # a name that just stopped you out is usually chopping, so blocking
+            # re-entry on it prevents death-by-a-thousand-cuts.
             _min_sec = settings.post_exit_cooldown_sec
-            if _min_sec > 0:
-                min_cooldown = time.time() + (30 if pnl < 0 else _min_sec)
+            _loss_sec = getattr(settings, "post_loss_symbol_cooldown_sec", 900)
+            if _min_sec > 0 or (pnl < 0 and _loss_sec > 0):
+                gap = _loss_sec if pnl < 0 else _min_sec
+                min_cooldown = time.time() + gap
                 self._symbol_cooldown[symbol] = max(self._symbol_cooldown.get(symbol, 0), min_cooldown)
             # Per-strategy loss cooldown
             if pnl < 0 and settings.cooldown_after_loss_sec > 0:

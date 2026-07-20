@@ -4211,6 +4211,27 @@ def t_order_guard_register_order_exists():
         _s.post_exit_cooldown_sec = _orig
         order_guard.release_claim("RECON_TEST", "intraday", "BUY")
 
+
+def t_order_guard_post_loss_symbol_cooldown():
+    """A losing exit blocks re-entry on that symbol for
+    post_loss_symbol_cooldown_sec (anti-whipsaw); a winning exit only applies
+    the short post_exit_cooldown_sec."""
+    import time as _t
+    from order_guard import order_guard
+    from config import settings as _s
+    # loss → long block
+    order_guard.release_order("WHIP_LOSS", "intraday", "BUY", pnl=-500)
+    rem = order_guard._symbol_cooldown["WHIP_LOSS"] - _t.time()
+    assert rem > _s.post_loss_symbol_cooldown_sec - 30, f"loss cooldown too short: {rem:.0f}s"
+    ok, _r = order_guard.can_place("WHIP_LOSS", "intraday", "BUY")
+    assert not ok, "a symbol that just stopped you out must be blocked"
+    # win → only the short post-exit gap
+    order_guard.release_order("WHIP_WIN", "intraday", "BUY", pnl=+500)
+    rem_w = order_guard._symbol_cooldown["WHIP_WIN"] - _t.time()
+    assert rem_w <= _s.post_exit_cooldown_sec + 2, f"winner over-penalised: {rem_w:.0f}s"
+
+run("order_guard: losing exit triggers long anti-whipsaw symbol cooldown", t_order_guard_post_loss_symbol_cooldown)
+
 # ── T-9: TSL register accepts initial_sl kwarg ────────────────────────────
 def t_tsl_register_accepts_initial_sl():
     from trailing_sl_engine import trailing_sl_engine
