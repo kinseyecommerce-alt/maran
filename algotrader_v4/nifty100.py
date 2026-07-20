@@ -133,7 +133,18 @@ NIFTY_200 = NIFTY_100 + NIFTY_NEXT_400[:100]
 # names have no listed futures/options contract at all.
 SCALPING_UNIVERSE = NIFTY_500
 
-FNO_UNIVERSE = NIFTY_200  # Single production agent trades the Nifty 200 universe
+FNO_UNIVERSE = NIFTY_500  # Single production agent — full Nifty 500 stock universe
+
+# MCX commodities traded by the single agent (routed to commodity futures).
+# Real MCX data feed + extended hours are still pending; in PAPER these run on
+# the GBM sim during equity hours.
+MCX_COMMODITIES = [
+    {"symbol": "CRUDEOIL",   "exchange": "MCX"},
+    {"symbol": "COPPER",     "exchange": "MCX"},
+    {"symbol": "NATURALGAS", "exchange": "MCX"},
+    {"symbol": "SILVERM",    "exchange": "MCX"},
+    {"symbol": "GOLDM",      "exchange": "MCX"},
+]
 
 SWING_UNIVERSE = NIFTY_500  # Full Nifty 500 for swing (hold overnight)
 
@@ -150,10 +161,15 @@ def as_watchlist(symbols: list[str], exchange: str = "NSE") -> list[dict]:
     return [{"symbol": s, "exchange": exchange} for s in symbols]
 
 def get_strategy_watchlist(strategy: str) -> list[dict]:
+    if strategy == "options":
+        # The single production agent trades: NIFTY/BANKNIFTY (→ ATM options),
+        # the 5 MCX commodities (→ commodity futures) and the full Nifty 500
+        # stock universe (→ stock future / cash). Indices + commodities lead so
+        # they always survive the per-agent symbol cap.
+        return INDEX_SYMBOLS + MCX_COMMODITIES + as_watchlist(FNO_UNIVERSE)
     mapping = {
         "intraday":  INTRADAY_UNIVERSE,
         "scalping":  SCALPING_UNIVERSE,
-        "options":       FNO_UNIVERSE,
         "swing":     SWING_UNIVERSE,
     }
     return as_watchlist(mapping.get(strategy, NIFTY_500))
