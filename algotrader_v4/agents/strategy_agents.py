@@ -181,25 +181,46 @@ class OptionsAgent(BaseAgent):
             "ema_touched": sig.ema_touched,
             "rsi": round(sig.rsi, 1),
         }
-        # Instrument routing: index → ATM option, F&O stock → stock future,
-        # MCX → commodity future. Enriches the signal with contract/futures_symbol.
-        self._route_instrument(snap, sig.side, signal)
-        return sig.side, signal
+        # Instrument routing: index → ATM option (buy CE/PE), F&O stock → stock
+        # future, MCX → commodity future. Returns the ACTUAL order action.
+        action = self._route_instrument(snap, sig.side, ltp, signal)
+        return action, signal
 
-    def _route_instrument(self, snap: MarketSnapshot, side: str, signal: dict) -> None:
-        """Attach the tradeable instrument for this underlying.
+    def _route_instrument(self, snap: MarketSnapshot, side: str, ltp: float,
+                          signal: dict) -> str:
+        """Attach the tradeable instrument to the signal and return the order
+        action (BUY/SELL). Index options are always BOUGHT with premium-% SL/target;
+        futures (stock/MCX) trade directionally with the underlying's absolute levels."""
+        import instrument_router as ir
+        r = ir.route(snap.symbol, side, ltp)
+        signal["exchange"] = r.get("exchange", "NSE")
+        if r.get("option_symbol"):
+            signal["option_symbol"] = r["option_symbol"]
+            signal["lot_size"] = r.get("lot_size", 1)
+            signal["strike"] = r.get("strike")
+            signal["opt_type"] = r.get("opt_type")
+            signal["underlying"] = snap.symbol
+        elif r.get("futures_symbol"):
+            signal["futures_symbol"] = r["futures_symbol"]
+            signal["lot_size"] = r.get("lot_size", 1)
+            signal["underlying"] = snap.symbol
+        if r.get("premium_option"):
+            # SL/target on an option are premium percentages, not underlying prices.
+            signal["stop_loss"] = 0.0
+            signal["target"] = 0.0
+            signal["stop_loss_pct"] = float(getattr(settings, "option_premium_sl_pct", 25.0))
+            signal["target_pct"] = float(getattr(settings, "option_premium_target_pct", 75.0))
+        return r.get("order_action", side)
 
-        NOTE: index ATM CE/PE contract construction and stock/MCX future-symbol
-        construction are wired in a follow-up; until then the signal trades the
-        underlying symbol directly (correct in PAPER, and for cash/near-month
-        proxies). See Phase C instrument-routing task."""
-        # Placeholder passthrough — BaseAgent trades snap.symbol when no
-        # futures_symbol/contract override is present.
-        return
+    def _pos_matches_sym(self, pos: dict, snap_sym: str) -> bool:
+        # F&O positions are contract symbols (e.g. NIFTY2672124800CE,
+        # RELIANCE26JULFUT) that START with the underlying we tick on.
+        ts = pos.get("tradingsymbol", "")
+        return ts == snap_sym or ts.startswith(snap_sym)
 
     def should_exit_position(self, position: dict, ind: LiveIndicators) -> tuple[bool, str]:
-        # Exits are managed by the placed SL (focus candle), the 3R target, the
-        # trailing-SL breakeven move, and BaseAgent's EOD square-off.
+        # Exits are managed by the placed SL (focus candle / premium %), the 3R
+        # target, the trailing-SL breakeven move, and BaseAgent's EOD square-off.
         return False, ""
 
 

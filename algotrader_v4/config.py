@@ -299,6 +299,12 @@ class Settings(BaseSettings):
     ema_pullback_max_risk_pct: float = 1.0       # skip if entry→SL risk > this % of price
     ema_pullback_target_r: float = 3.0           # profit target (R multiples)
     ema_pullback_breakeven_r: float = 1.5        # move SL to cost at this R
+    # Instrument routing (index→ATM option, stock/MCX→future). Options are
+    # bought (CE bullish / PE bearish); SL/target apply to the PREMIUM as % (the
+    # underlying's absolute levels are meaningless on an option), preserving 1:3.
+    route_index_to_options: bool = True
+    option_premium_sl_pct: float = 25.0          # option SL as % of entry premium
+    option_premium_target_pct: float = 75.0      # option target as % of entry premium (1:3)
     # Download N months of multi-timeframe Kite history into the CSV cache at
     # startup (containers are ephemeral). 0 = disabled.
     auto_download_history_months: int = 0
