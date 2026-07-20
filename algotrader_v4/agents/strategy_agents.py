@@ -177,6 +177,7 @@ class OptionsAgent(BaseAgent):
             "stop_loss_pct": round(abs(ltp - sig.stop_loss) / ltp * 100, 3),
             "target_pct": round(abs(sig.target - ltp) / ltp * 100, 3),
             "breakeven_r": self._strat.cfg.breakeven_r,
+            "disable_trail": True,          # SL → cost at 1.5R, then hold to 3R (no trailing)
             "risk_pct": round(sig.risk_pct, 3),
             "ema_touched": sig.ema_touched,
             "rsi": round(sig.rsi, 1),
