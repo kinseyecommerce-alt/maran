@@ -65,6 +65,24 @@ def _nse_monthly_expiry(y: int, m: int) -> date:
     return _roll_off_holiday(last)
 
 
+def fno_lot(underlying: str):
+    """Lot size for an F&O underlying — live Kite instrument master first
+    (authoritative, covers the full F&O list), static table as fallback.
+    Returns None if the symbol has no listed futures."""
+    try:
+        from kite_client import kite_client as _kc
+        live = _kc.fno_lot_sizes()
+        if underlying in live:
+            return live[underlying]
+    except Exception:
+        pass
+    return _FON_LOT_SIZES.get(underlying)
+
+
+def is_fno_stock(underlying: str) -> bool:
+    return fno_lot(underlying) is not None
+
+
 def atm_strike(spot: float, step: int) -> int:
     return int(round(spot / step) * step)
 
@@ -132,7 +150,7 @@ def route(underlying: str, side: str, spot: float, today: date | None = None) ->
             "order_action": "BUY",
             "option_symbol": nfo_option_symbol(u, strike, opt, today),
             "exchange": "NFO",
-            "lot_size": _FON_LOT_SIZES.get(u, 1),
+            "lot_size": fno_lot(u) or _FON_LOT_SIZES.get(u, 1),
             "premium_option": True,
             "strike": strike, "opt_type": opt,
         }
@@ -147,13 +165,15 @@ def route(underlying: str, side: str, spot: float, today: date | None = None) ->
             "premium_option": False,
         }
 
-    # 3) F&O stock → stock future
-    if u in _FON_LOT_SIZES and u not in INDEX_UNDERLYINGS:
+    # 3) F&O stock → stock future (membership + lot from the live Kite master,
+    #    covering the full NSE F&O list; static table as fallback)
+    _lot = fno_lot(u)
+    if _lot and u not in INDEX_UNDERLYINGS:
         return {
             "order_action": "BUY" if is_buy else "SELL",
             "futures_symbol": futures_symbol(u, "NFO", today),
             "exchange": "NFO",
-            "lot_size": _FON_LOT_SIZES[u],
+            "lot_size": _lot,
             "premium_option": False,
         }
 
