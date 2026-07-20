@@ -58,8 +58,9 @@ export const api = {
   marketLive:       () => ax().get('/market/live'),
   marketLiveSymbol: (symbol: string) => ax().get(`/market/live/${symbol}`),
   marketStatus:     () => ax().get('/market/status'),
-  marketCandles:    (symbol: string, tf: '1min' | '5min' = '1min') =>
+  marketCandles:    (symbol: string, tf: '1min' | '3min' | '5min' = '1min') =>
                       ax().get(`/market/candles/${symbol}`, { params: { tf } }),
+  marketChart:      (symbol: string) => ax().get(`/market/chart/${symbol}`),
   marketDepth:      (symbol: string) => ax().get(`/market/depth/${symbol}`),
   optionChain:      (symbol: string) => ax().get(`/market/option-chain/${symbol}`),
 
