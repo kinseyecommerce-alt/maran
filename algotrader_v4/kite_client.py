@@ -284,6 +284,41 @@ class KiteClient:
             if sym in want:
                 token_map[want[sym]] = int(inst["instrument_token"])
         missing = set(symbols) - set(token_map)
+
+        # MCX commodities have no spot instrument — the tradeable/quoteable is the
+        # near-month FUT contract. Resolve each missing symbol to its nearest
+        # non-expired FUT (matched by `name`), keyed back to the underlying so the
+        # strategy and buffers see e.g. "CRUDEOIL" fed by CRUDEOIL<near>FUT.
+        if missing and exchange == "MCX":
+            from datetime import date
+            today = date.today()
+            best: dict[str, tuple] = {}   # underlying → (expiry_date, token)
+            for inst in instruments:
+                if inst.get("instrument_type") != "FUT":
+                    continue
+                nm = (inst.get("name") or "").strip().upper()
+                if nm not in missing:
+                    continue
+                exp = inst.get("expiry")
+                if hasattr(exp, "year"):
+                    ed = exp if not hasattr(exp, "date") else exp.date() if hasattr(exp, "hour") else exp
+                else:
+                    try:
+                        ed = date.fromisoformat(str(exp)[:10])
+                    except Exception:
+                        continue
+                if ed < today:
+                    continue
+                cur = best.get(nm)
+                if cur is None or ed < cur[0]:
+                    best[nm] = (ed, int(inst["instrument_token"]))
+            for nm, (ed, tok) in best.items():
+                token_map[nm] = tok
+            if best:
+                logger.info("[kite] MCX near-month resolved: {}",
+                            {k: v[0].isoformat() for k, v in best.items()})
+            missing = set(symbols) - set(token_map)
+
         if missing:
             logger.warning("[kite] No instrument tokens found for: {}", missing)
         return token_map
