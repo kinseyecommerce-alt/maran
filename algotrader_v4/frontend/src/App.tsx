@@ -13,6 +13,7 @@ import RiskTab from './components/tabs/RiskTab'
 import AgentsTab from './components/tabs/AgentsTab'
 import SebiTab from './components/tabs/SebiTab'
 import TradeHistoryTab from './components/tabs/TradeHistoryTab'
+import ChartsTab from './components/tabs/ChartsTab'
 import { connectWS } from './ws/websocket'
 import { useStore } from './store'
 import { api } from './api/client'
@@ -33,6 +34,7 @@ const TAB_COMPONENTS: Record<string, React.ComponentType> = {
   agents:    AgentsTab,
   sebi:      SebiTab,
   history:   TradeHistoryTab,
+  charts:    ChartsTab,
 }
 
 const SIDEBAR_NAV: { id: PageId; label: string; Icon: React.ComponentType<{ className?: string }> }[] = [
@@ -41,6 +43,7 @@ const SIDEBAR_NAV: { id: PageId; label: string; Icon: React.ComponentType<{ clas
   { id: 'orders',    label: 'Orders',        Icon: ClipboardList   },
   { id: 'brackets',  label: 'Brackets',      Icon: Target          },
   { id: 'risk',      label: 'Risk',          Icon: ShieldCheck     },
+  { id: 'charts',    label: 'Charts',        Icon: BarChart3       },
   { id: 'agents',    label: 'Agents',        Icon: Cpu             },
   { id: 'sebi',      label: 'SEBI',          Icon: Scale           },
   { id: 'history',   label: 'Trade History', Icon: History         },
