@@ -16,10 +16,7 @@ function fmtLastSignal(s: unknown): string {
 }
 
 const AGENT_META: Record<string, { emoji: string; name: string; desc: string }> = {
-  intraday: { emoji: '⚡', name: 'INTRADAY',  desc: 'VWAP+EMA momentum · MIS · 8 trades/day' },
-  fno:      { emoji: '📊', name: 'F&O',        desc: 'Options CE/PE · NRML · 4 trades/day' },
-  swing:    { emoji: '🌊', name: 'SWING',      desc: 'EMA200 trend · CNC · 3 trades/day' },
-  scalping: { emoji: '🎯', name: 'SCALPING',   desc: 'Micro EMA cross · MIS · 20 trades/day' },
+  options: { emoji: '📈', name: 'EMA PULLBACK', desc: 'EMA 55/89/144/233 pullback · 3-min · focus+confirmation entry' },
 }
 
 type EnableMap = Record<string, boolean>

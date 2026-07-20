@@ -3,7 +3,7 @@ import {
   Activity, Terminal, Cpu, WifiOff, ShieldCheck,
   TrendingUp, TrendingDown, BarChart3,
   Zap, Play, Square, Database, Crosshair,
-  LayoutDashboard, ClipboardList, Target, Scale, History, Brain,
+  LayoutDashboard, ClipboardList, Target, Scale, History,
 } from 'lucide-react'
 import Header from './components/Header'
 import PositionsTab from './components/tabs/PositionsTab'
@@ -13,7 +13,6 @@ import RiskTab from './components/tabs/RiskTab'
 import AgentsTab from './components/tabs/AgentsTab'
 import SebiTab from './components/tabs/SebiTab'
 import TradeHistoryTab from './components/tabs/TradeHistoryTab'
-import ClaudeGateTab from './components/tabs/ClaudeGateTab'
 import { connectWS } from './ws/websocket'
 import { useStore } from './store'
 import { api } from './api/client'
@@ -22,16 +21,9 @@ import type { TabId } from './types'
 type PageId = TabId | 'dashboard'
 
 const AGENT_META: Record<string, { strategy: string; displayName: string; id: string }> = {
-  intraday:      { strategy: 'VWAP Breakout',      displayName: 'INTRADAY',  id: 'AGN-01' },
-  options:       { strategy: 'Options CE/PE',       displayName: 'F&O',       id: 'AGN-02' },
-  swing:         { strategy: 'Multi-TF Trend',      displayName: 'SWING',     id: 'AGN-03' },
-  scalping:      { strategy: 'Orderbook Imbalance', displayName: 'SCALPING',  id: 'AGN-04' },
-  futures:       { strategy: 'Futures Momentum',    displayName: 'FUTURES',   id: 'AGN-05' },
-  momentum:      { strategy: 'Price Momentum',      displayName: 'MOMENTUM',  id: 'AGN-06' },
-  mean_reversion:{ strategy: 'Mean Reversion',      displayName: 'MEAN REV',  id: 'AGN-07' },
-  pairs:         { strategy: 'Statistical Arb',     displayName: 'PAIRS ARB', id: 'AGN-08' },
+  options: { strategy: 'EMA Pullback · 3-min', displayName: 'EMA PULLBACK', id: 'AGN-01' },
 }
-const AGENT_ORDER = ['intraday', 'options', 'swing', 'scalping', 'futures', 'momentum', 'mean_reversion', 'pairs']
+const AGENT_ORDER = ['options']
 
 const TAB_COMPONENTS: Record<string, React.ComponentType> = {
   positions: PositionsTab,
@@ -41,7 +33,6 @@ const TAB_COMPONENTS: Record<string, React.ComponentType> = {
   agents:    AgentsTab,
   sebi:      SebiTab,
   history:   TradeHistoryTab,
-  gate:      ClaudeGateTab,
 }
 
 const SIDEBAR_NAV: { id: PageId; label: string; Icon: React.ComponentType<{ className?: string }> }[] = [
@@ -53,7 +44,6 @@ const SIDEBAR_NAV: { id: PageId; label: string; Icon: React.ComponentType<{ clas
   { id: 'agents',    label: 'Agents',        Icon: Cpu             },
   { id: 'sebi',      label: 'SEBI',          Icon: Scale           },
   { id: 'history',   label: 'Trade History', Icon: History         },
-  { id: 'gate',      label: 'Claude Gate',   Icon: Brain           },
 ]
 
 function Toasts() {
