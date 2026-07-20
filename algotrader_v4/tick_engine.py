@@ -1161,9 +1161,16 @@ class TickEngine:
 
             # Real-feed modes (LIVE, or paper-live) only have data during market
             # hours; the GBM simulator runs any time for offline paper testing.
+            # Keep the feed alive through the MCX evening session when any MCX
+            # commodity is subscribed (they trade until ~23:30 IST).
             if not is_market_open() and self._live_data_enabled():
-                await asyncio.sleep(30)
-                continue
+                _mcx_live = False
+                if any(e == "MCX" for e in self._exchange.values()):
+                    from ist_clock import is_mcx_open
+                    _mcx_live = is_mcx_open()
+                if not _mcx_live:
+                    await asyncio.sleep(30)
+                    continue
 
             # ── WS health check: fall back to REST if WS disconnected > 3s ──
             if self._use_ws and self._kite_ticker is not None:

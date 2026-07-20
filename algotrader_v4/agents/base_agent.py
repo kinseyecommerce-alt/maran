@@ -842,6 +842,16 @@ class BaseAgent(ABC):
                     # Session filter: high-noise or close session requires stronger signals
                     # Only applies in LIVE mode — PAPER/simulation runs at any time
                     _bucket, _extra = session_bucket()
+                    # MCX commodities trade an extended session (~09:00–23:30),
+                    # so the NSE close/after-market gate must not block them.
+                    if getattr(settings, "mcx_extended_hours", True):
+                        try:
+                            from instrument_router import MCX_LOT_SIZES
+                            if snap.symbol.upper() in MCX_LOT_SIZES:
+                                from ist_clock import is_mcx_open
+                                _bucket, _extra = ("MCX_OPEN", 0) if is_mcx_open() else ("MCX_CLOSED", 99)
+                        except Exception:
+                            pass
                     signal["session"] = _bucket
                     if settings.trading_mode == "LIVE":
                         _sig_score = signal.get("score", 0)
@@ -1417,7 +1427,18 @@ class BaseAgent(ABC):
         # Hard market-hours gate — second check in case this is called directly.
         if settings.trading_mode == "LIVE":
             _final_bucket, _final_extra = session_bucket()
-            if _final_extra >= 99:
+            _is_mcx = False
+            if getattr(settings, "mcx_extended_hours", True):
+                try:
+                    from instrument_router import MCX_LOT_SIZES
+                    _is_mcx = sym.upper() in MCX_LOT_SIZES
+                except Exception:
+                    pass
+            if _is_mcx:
+                from ist_clock import is_mcx_open
+                if not is_mcx_open():
+                    raise RuntimeError("market_closed:MCX")
+            elif _final_extra >= 99:
                 raise RuntimeError(f"market_closed:{_final_bucket}")
 
         claimed, _ = order_guard.try_claim(sym, self.name, action)
