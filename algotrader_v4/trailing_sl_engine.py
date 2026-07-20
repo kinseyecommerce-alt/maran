@@ -222,6 +222,12 @@ class PositionSL:
     # (underlying move) × qty × pnl_scale ≈ premium move × qty.
     pnl_scale:      float = 1.0
 
+    # R-based exit override (EMA-pullback strategy): move SL to cost at
+    # breakeven_r × initial risk, and optionally hold (no continuous trail).
+    initial_sl:     float = 0.0   # the entry stop distance defines 1R
+    breakeven_r:    float = 0.0   # >0 → move to cost at this R (else use cfg.breakeven_pct)
+    disable_trail:  bool  = False # True → SL→cost then hold (no % trailing)
+
     @property
     def closing_side(self) -> str:
         """Transaction side that flattens this position on the instrument."""
@@ -327,6 +333,8 @@ class TrailingSLEngine:
         on_partial_exit: Optional[Callable] = None,
         exit_side:   str = "",
         pnl_scale:   float = 1.0,
+        breakeven_r: float = 0.0,
+        disable_trail: bool = False,
     ) -> PositionSL:
         """
         Register a new open position for trailing SL monitoring.
@@ -356,6 +364,7 @@ class TrailingSLEngine:
             best_price=entry_price, atr=atr, atr_at_entry=atr,
             quantity_remaining=quantity,
             exit_side=exit_side, pnl_scale=pnl_scale,
+            initial_sl=init_sl, breakeven_r=breakeven_r, disable_trail=disable_trail,
             _on_sl_hit=on_sl_hit,
             _on_target_hit=on_target_hit,
             _on_sl_moved=on_sl_moved,
@@ -532,7 +541,7 @@ class TrailingSLEngine:
             return
 
         # ── 3. Target 2 hit ────────────────────────────────────────────
-        if not pos.target2_hit:
+        if not pos.disable_trail and not pos.target2_hit:
             t2 = (cfg.target2_pct / 100)
             t2_price = pos.entry_price * (1 + t2 if pos.side == "BUY" else 1 - t2)
             if (pos.side == "BUY" and ltp >= t2_price) or \
@@ -549,7 +558,10 @@ class TrailingSLEngine:
                         )
 
         # ── 4. Target 1 hit → partial scale-out + tighten trail ──────
-        if not pos.target1_hit:
+        # Strategy-managed exits (EMA-pullback): the 3R target is a resting order,
+        # so the engine must NOT run its own T1/T2 partial scale-outs or trail —
+        # only SL-hit detection and the R-based move-to-cost apply.
+        if not pos.disable_trail and not pos.target1_hit:
             t1 = (cfg.target1_pct / 100)
             t1_price = pos.entry_price * (1 + t1 if pos.side == "BUY" else 1 - t1)
             if (pos.side == "BUY" and ltp >= t1_price) or \
@@ -606,7 +618,14 @@ class TrailingSLEngine:
                         )
 
         # ── 5. Breakeven ───────────────────────────────────────────────
-        if not pos.breakeven_hit and profit_pct >= cfg.breakeven_pct:
+        # R-based override (EMA-pullback): move SL to cost at breakeven_r × the
+        # entry risk distance (1R), not the strategy config's fixed %.
+        _be_trigger = cfg.breakeven_pct
+        if pos.breakeven_r > 0 and pos.initial_sl > 0 and pos.entry_price > 0:
+            _risk_pct = abs(pos.entry_price - pos.initial_sl) / pos.entry_price * 100.0
+            if _risk_pct > 0:
+                _be_trigger = pos.breakeven_r * _risk_pct
+        if not pos.breakeven_hit and profit_pct >= _be_trigger:
             be_sl = pos.entry_price  # exactly entry = breakeven
             if pos.side == "BUY" and be_sl > pos.current_sl:
                 pos.current_sl   = round(be_sl, 2)
@@ -624,6 +643,11 @@ class TrailingSLEngine:
                     await cb_sl_moved(pos, old_sl, "BREAKEVEN")
 
         # ── 6. Activate trailing ───────────────────────────────────────
+        # disable_trail (EMA-pullback): after SL→cost, hold to the 3R target/SL
+        # instead of trailing continuously.
+        if pos.disable_trail:
+            pos.last_updated = time.time()
+            return
         if not pos.trail_active and profit_pct >= cfg.activation_pct:
             pos.trail_active = True
             logger.info("🔄 Trailing SL activated: {} profit={:.1f}%", pos.symbol, profit_pct)

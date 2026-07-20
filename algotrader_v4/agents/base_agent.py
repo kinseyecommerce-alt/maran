@@ -1864,10 +1864,19 @@ class BaseAgent(ABC):
             except Exception:
                 pass
 
+        # Strategy R-based exit override (EMA-pullback): move SL to cost at
+        # breakeven_r × the real entry risk, seed the engine with the actual
+        # focus-candle stop, and hold (no continuous trail) — matching the spec.
+        _be_r = float(signal.get("breakeven_r", 0.0) or 0.0)
+        _sl_abs = signal.get("stop_loss") or 0.0
+        _init_sl = float(_sl_abs) if _be_r > 0 and _sl_abs else None
         trailing_sl_engine.register(
             symbol=sym, strategy=self.name, side=action,
             entry_price=ltp, quantity=qty, order_id=order_id,
             atr=snap.indicators.atr_14,
+            initial_sl=_init_sl,
+            breakeven_r=_be_r,
+            disable_trail=bool(signal.get("disable_trail", False)),
             on_sl_hit=trailing_sl_engine.on_sl_hit,
             on_target_hit=trailing_sl_engine.on_target_hit,
             on_sl_moved=trailing_sl_engine.on_sl_moved,
