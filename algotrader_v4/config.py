@@ -288,6 +288,17 @@ class Settings(BaseSettings):
     # the regime review can still resize (size_factor) but never pauses agents.
     # For per-agent performance evaluation where all strategies must stay live.
     force_all_agents: bool = False
+
+    # ── EMA-pullback strategy (the single production strategy, 3-min TF) ──
+    ema_pullback_enabled: bool = True
+    ema_pullback_rsi_support: float = 40.0       # BUY: RSI support level
+    ema_pullback_rsi_resistance: float = 60.0    # SELL: RSI resistance level
+    ema_pullback_rsi_band: float = 5.0
+    ema_pullback_touch_tol_pct: float = 0.10     # EMA-touch tolerance (% of price)
+    ema_pullback_sl_buffer_pct: float = 0.05     # buffer beyond focus candle for SL
+    ema_pullback_max_risk_pct: float = 1.0       # skip if entry→SL risk > this % of price
+    ema_pullback_target_r: float = 3.0           # profit target (R multiples)
+    ema_pullback_breakeven_r: float = 1.5        # move SL to cost at this R
     # Download N months of multi-timeframe Kite history into the CSV cache at
     # startup (containers are ephemeral). 0 = disabled.
     auto_download_history_months: int = 0
