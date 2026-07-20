@@ -293,7 +293,7 @@ class Settings(BaseSettings):
     ema_pullback_enabled: bool = True
     ema_pullback_rsi_support: float = 40.0       # BUY: RSI support level
     ema_pullback_rsi_resistance: float = 60.0    # SELL: RSI resistance level
-    ema_pullback_rsi_band: float = 5.0
+    ema_pullback_rsi_band: float = 2.0           # width of the "support AT 40" test zone
     ema_pullback_touch_tol_pct: float = 0.10     # EMA-touch tolerance (% of price)
     ema_pullback_sl_buffer_pct: float = 0.05     # buffer beyond focus candle for SL
     ema_pullback_max_risk_pct: float = 1.0       # skip if entry→SL risk > this % of price
