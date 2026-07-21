@@ -15,8 +15,15 @@ Examples
   # paper-trading session (simulated broker) over Kite historical JSON
   python scripts/algo.py paper --json data/INFY.json --symbol INFY --slippage-bps 5
 
-Safety: this tool only ever runs BACKTEST or PAPER (simulated). It never connects to
-a broker and never places a real order.
+  # tick-by-tick over the Kite WebSocket — PAPER execution (live data, simulated fills)
+  python scripts/algo.py live --symbol NIFTY24JUNFUT --token 256265 --lot-size 50
+
+  # LIVE (REAL orders) — requires BOTH the flag AND the environment switch
+  ALLOW_LIVE_TRADING=true python scripts/algo.py live --symbol ... --token ... --live
+
+Safety: `backtest` / `paper` never touch a broker. `live` streams Kite ticks and, by
+default, still executes on the PAPER broker (no real orders). Real orders are placed
+only when `--live` is passed AND `ALLOW_LIVE_TRADING=true` — both gates required.
 """
 
 from __future__ import annotations
@@ -105,9 +112,61 @@ def cmd_paper(args) -> int:
     return 0
 
 
+def cmd_live(args) -> int:
+    """Tick-by-tick session over Kite's WebSocket. Execution defaults to the paper
+    broker (live data, simulated fills). Real orders require BOTH --live AND
+    ALLOW_LIVE_TRADING=true in the environment."""
+    import os
+
+    from app.brokers.paper_broker import PaperBrokerAdapter
+    from app.brokers.zerodha_broker import ZerodhaBrokerAdapter
+    from app.market_data.zerodha_market_data import ZerodhaMarketDataAdapter
+    from app.services.live_trader import TickDrivenSession
+
+    api_key = args.api_key or os.environ.get("ZERODHA_API_KEY", "")
+    access_token = args.access_token or os.environ.get("ZERODHA_ACCESS_TOKEN", "")
+    if not (api_key and access_token):
+        print("ZERODHA_API_KEY and ZERODHA_ACCESS_TOKEN required (env or flags)", file=sys.stderr)
+        return 2
+
+    symbols = [s.strip() for s in args.symbol.split(",") if s.strip()]
+    tokens = [int(t) for t in args.token.split(",") if t.strip()]
+    if len(symbols) != len(tokens):
+        print("--symbol and --token counts must match", file=sys.stderr)
+        return 2
+    symbol_to_token = dict(zip(symbols, tokens, strict=True))
+
+    cfg = _config(args)
+    live_ok = args.live and os.environ.get("ALLOW_LIVE_TRADING", "").lower() == "true"
+    if args.live and not live_ok:
+        print("--live ignored: set ALLOW_LIVE_TRADING=true to permit real orders", file=sys.stderr)
+    broker = (
+        ZerodhaBrokerAdapter(api_key=api_key, access_token=access_token, allow_live=True)
+        if live_ok
+        else PaperBrokerAdapter()
+    )
+    mode = "LIVE (REAL ORDERS)" if live_ok else "PAPER (simulated fills, live data)"
+    print(f"■ mode: {mode}  ·  symbols: {', '.join(symbols)}")
+
+    adapter = ZerodhaMarketDataAdapter(
+        api_key=api_key, access_token=access_token, symbol_to_token=symbol_to_token
+    )
+    adapter.subscribe(symbols)
+    sess = TickDrivenSession(
+        broker,
+        cfg,
+        capital=Decimal(str(args.capital)),
+        tick_size=Decimal(str(args.tick_size)),
+        lot_size=int(args.lot_size),
+    )
+    print("connecting to Kite WebSocket… (Ctrl-C to stop)")
+    sess.run_stream(adapter)  # blocks on the websocket
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
-        prog="algo", description="EMA RSI Intraday Algo runner (BACKTEST / PAPER only)"
+        prog="algo", description="EMA RSI Intraday Algo runner (BACKTEST / PAPER / LIVE-gated)"
     )
     sub = p.add_subparsers(dest="cmd", required=True)
     for name, fn in (("backtest", cmd_backtest), ("paper", cmd_paper)):
@@ -128,6 +187,26 @@ def build_parser() -> argparse.ArgumentParser:
         else:
             sp.add_argument("--slippage-bps", default="0", help="paper fill slippage (bps)")
         sp.set_defaults(func=fn)
+
+    # live: tick-by-tick over Kite WebSocket (paper execution unless explicitly gated)
+    lp = sub.add_parser("live", help="tick-by-tick over Kite WebSocket (paper unless --live + env)")
+    lp.add_argument("--symbol", required=True, help="comma-separated tradingsymbols")
+    lp.add_argument(
+        "--token", required=True, help="comma-separated instrument tokens (match --symbol)"
+    )
+    lp.add_argument("--api-key", help="Kite API key (or env ZERODHA_API_KEY)")
+    lp.add_argument("--access-token", help="Kite access token (or env ZERODHA_ACCESS_TOKEN)")
+    lp.add_argument("--lot-size", default="1", help="lot size for sizing")
+    lp.add_argument("--tick-size", default="0.05", help="instrument tick size")
+    lp.add_argument("--capital", default="1000000", help="starting capital")
+    lp.add_argument("--config", help="strategy YAML (defaults to built-in defaults)")
+    lp.add_argument("--no-shorts", action="store_true", help="disable SELL side")
+    lp.add_argument(
+        "--live",
+        action="store_true",
+        help="place REAL orders (also requires ALLOW_LIVE_TRADING=true)",
+    )
+    lp.set_defaults(func=cmd_live)
     return p
 
 

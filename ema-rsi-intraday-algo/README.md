@@ -82,6 +82,33 @@ Supported inputs: CSV (flexible headers, ISO / `YYYY-MM-DD HH:MM:SS` / epoch tim
 and Kite historical JSON. Loaders carry OHLCV only — indicators are computed by the
 engine, identically across every mode.
 
+## Tick-by-tick over the Kite WebSocket
+
+The `live` command streams **Kite ticks**, builds 3-minute candles tick-by-tick, and runs the
+**same** strategy + risk + exit engine, placing orders through the OMS. Execution defaults to the
+**paper broker** (live data, simulated fills). Real Kite orders require **two** gates:
+`--live` **and** `ALLOW_LIVE_TRADING=true`.
+
+```bash
+cd ema-rsi-intraday-algo/backend
+export ZERODHA_API_KEY=... ZERODHA_ACCESS_TOKEN=...
+
+# PAPER over the live tick feed (no real orders)
+python scripts/algo.py live --symbol NIFTY24JUNFUT --token 256265 --lot-size 50
+
+# LIVE (real orders) — both gates required
+ALLOW_LIVE_TRADING=true python scripts/algo.py live --symbol ... --token ... --live
+```
+
+Under the hood: `ZerodhaMarketDataAdapter` (KiteTicker) → `ThreeMinuteCandleBuilder` →
+`SignalEngine` → sizing + risk gate → `OrderManager` → broker (`PaperBrokerAdapter` or the
+LIVE-gated `ZerodhaBrokerAdapter`). Entry executes at the first tick of the next interval (the real
+next-candle open). The tick-driven path is verified to reproduce the backtester's trades exactly.
+
+> **Access token** expires daily — generate it via the Kite login flow and pass it in. The
+> `ZerodhaBrokerAdapter` refuses to place any order unless `allow_live=True`, so wiring it up
+> never fires a live order by itself.
+
 ## Quick start — Phase 1 (strategy core + tests)
 
 Phase 1 needs only three runtime packages and pytest — no database or broker required.
