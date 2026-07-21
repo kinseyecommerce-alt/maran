@@ -217,6 +217,32 @@ class LiveService:
                 )
         return out
 
+    def historical_ohlc(self, symbol: str, days: int = 12) -> dict:
+        """Raw Kite 3-min OHLC for one symbol (read-only), for offline analysis. IST
+        timestamps. Returns {"error": ...} if the adapter isn't authenticated."""
+        adapter = self._adapter
+        if adapter is None or not getattr(adapter, "_symbol_to_token", None):
+            return {"error": "not authenticated — no Kite adapter / instrument tokens"}
+        try:
+            cs = adapter.get_historical_candles(symbol, "3m", days)
+        except Exception as exc:
+            return {"error": f"{type(exc).__name__}: {exc}"}
+        return {
+            "symbol": symbol,
+            "count": len(cs),
+            "candles": [
+                {
+                    "t": c.timestamp.isoformat(),
+                    "o": float(c.open),
+                    "h": float(c.high),
+                    "l": float(c.low),
+                    "c": float(c.close),
+                    "v": c.volume,
+                }
+                for c in cs
+            ],
+        }
+
     def run_historical_backtest(
         self, days: int = 7, symbol_limit: int = 60, shorts: bool | None = None
     ) -> dict:

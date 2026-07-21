@@ -93,6 +93,12 @@ def rejections() -> dict:
     return {"rejections": dict(r.rejections) if r else {}}
 
 
+@app.get("/candles/{symbol}", tags=["testing"])
+def candles(symbol: str, days: int = 12) -> dict:
+    """Raw Kite 3-min OHLC for one symbol (read-only) for offline analysis."""
+    return _svc().historical_ohlc(symbol.upper(), days=max(1, min(days, 60)))
+
+
 @app.get("/backtest", tags=["testing"])
 def backtest(days: int = 7, symbols: int = 60, shorts: str | None = None) -> dict:
     """Backtest the CURRENT strategy on real Kite history for the live universe.

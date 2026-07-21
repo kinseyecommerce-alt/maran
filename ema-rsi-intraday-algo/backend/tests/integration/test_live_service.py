@@ -74,6 +74,17 @@ def test_run_historical_backtest_needs_auth():
     assert "error" in out
 
 
+def test_historical_ohlc_shape():
+    cfg = wide_session_config()
+    candles = build_buy_scenario("target_3R", cfg)["RELIANCE"]
+    svc = LiveService(Settings(), cfg, adapter=_FakeHistAdapter(candles))
+    out = svc.historical_ohlc("RELIANCE", days=7)
+    assert out["symbol"] == "RELIANCE" and out["count"] == len(candles)
+    row = out["candles"][0]
+    assert set(row) == {"t", "o", "h", "l", "c", "v"}
+    assert LiveService(Settings(), cfg).historical_ohlc("X").get("error")
+
+
 def test_restart_for_new_day_reauths_and_reruns():
     svc = _service_over_scenario()
     assert svc.start() is True
