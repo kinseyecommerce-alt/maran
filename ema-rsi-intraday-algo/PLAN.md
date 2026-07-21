@@ -29,8 +29,8 @@ gate passes _and_ the operator explicitly enables it (`ALLOW_LIVE_TRADING=true`
 | Phase | Scope | Status |
 |-------|-------|--------|
 | **1** | Config system, enums, domain models, indicator engine, previous-day levels, exact BUY + SELL rules, signal state machine, unit tests | **✅ done** |
-| **2** | Risk engine, position sizing, event-driven backtester, cost/slippage model, stop/break-even/partial/trailing/target managers, backtest reports, integration tests | **✅ this delivery** |
-| 3 | Market replay, paper broker, order-management system, position manager, reconciliation, restart recovery, E2E tests | ⏳ planned |
+| **2** | Risk engine, position sizing, event-driven backtester, cost/slippage model, stop/break-even/partial/trailing/target managers, backtest reports, integration tests | **✅ done** |
+| **3** | Market-data interfaces + candle builder + replay/mock adapters, paper broker, order-management system, reconciliation, restart recovery, paper-trading session, E2E tests | **✅ this delivery** |
 | 4 | FastAPI, auth, REST + WebSocket endpoints, React/TS dashboard, strategy/risk settings UI, backtest UI, logs/alerts | ⏳ planned |
 | 5 | Zerodha auth, market data, instrument mapping, order adapter, order updates, reconciliation, manual connection guide | ⏳ planned |
 | 6 | Docker/Compose, health checks, production logging, security review, full suite, README, deployment, safety checklist | ⏳ planned |
