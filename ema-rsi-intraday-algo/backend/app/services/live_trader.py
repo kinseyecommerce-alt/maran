@@ -158,7 +158,11 @@ class TickDrivenSession:
                 candle,
                 prev_candle=prev,
                 atr=self._atr_last(st.completed),
-                is_square_off=at.time() >= self._square_off,
+                # Square-off keys off the just-closed candle's OWN interval time (as the
+                # backtester does), not the triggering tick's time — otherwise the live
+                # loop would force-exit one candle early. `at` (next interval's first tick)
+                # still gates entries below, matching the backtester's entry-window check.
+                is_square_off=candle.timestamp.time() >= self._square_off,
                 policy=self.cfg.intrabar_policy,
             )
             self._mirror_exits(st)
