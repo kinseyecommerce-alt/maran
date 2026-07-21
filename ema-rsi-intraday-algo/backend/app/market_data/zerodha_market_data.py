@@ -99,15 +99,27 @@ class ZerodhaMarketDataAdapter(MarketDataAdapter):
         self._subscribed.difference_update(symbols)
 
     # ── data ──
-    def get_historical_candles(self, symbol: str, timeframe: str = "3m") -> list[Candle]:
+    def get_historical_candles(
+        self, symbol: str, timeframe: str = "3m", days: int = 7
+    ) -> list[Candle]:
         token = self._symbol_to_token.get(symbol)
         if token is None:
             return []
-        # interval string per Kite: "3minute"
-        raw = self.kite.historical_data(token, from_date=None, to_date=None, interval="3minute")
+        from datetime import timedelta
+
+        interval = {"3m": "3minute", "5m": "5minute", "1m": "minute"}.get(timeframe, "3minute")
+        to_date = datetime.now()
+        from_date = to_date - timedelta(days=days)
+        raw = self.kite.historical_data(
+            token, from_date=from_date, to_date=to_date, interval=interval
+        )
         out = []
         for r in raw:
             ts = r["date"]
+            # Kite returns tz-aware IST datetimes; drop tzinfo so it matches the
+            # naive IST wall-clock the engine's session logic expects.
+            if ts.tzinfo is not None:
+                ts = ts.replace(tzinfo=None)
             out.append(
                 candle_from_ohlc(
                     symbol,

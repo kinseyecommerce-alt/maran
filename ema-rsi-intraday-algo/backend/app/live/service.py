@@ -216,6 +216,64 @@ class LiveService:
                 )
         return out
 
+    def run_historical_backtest(self, days: int = 7, symbol_limit: int = 60) -> dict:
+        """Backtest the CURRENT strategy config on real Kite 3-min history for the live
+        universe, using the service's own authenticated adapter (the token lives here).
+        Read-only; simulated. Returns the aggregate metrics."""
+        import time as _time
+
+        from app.services.runner import run_backtest
+
+        adapter = self._adapter
+        tok_map = getattr(adapter, "_symbol_to_token", None) if adapter is not None else None
+        if not tok_map:
+            return {"error": "not authenticated — no Kite adapter / instrument tokens"}
+
+        data: dict = {}
+        for sym in list(tok_map)[:symbol_limit]:
+            try:
+                candles = adapter.get_historical_candles(sym, "3m", days)
+            except Exception as exc:  # skip a bad symbol, keep going
+                logger.warning("history fetch failed for %s: %s", sym, exc)
+                candles = []
+            if len(candles) > self.cfg.min_history + 5:
+                data[sym] = candles
+            _time.sleep(0.34)  # respect Kite's ~3 req/s historical limit
+        if not data:
+            return {"error": "no historical data returned"}
+
+        _, m = run_backtest(data, self.cfg, capital=Decimal(str(self.settings.default_capital)))
+
+        def _f(v: object) -> float:
+            try:
+                f = float(v)
+                return f if f == f and f not in (float("inf"), float("-inf")) else 0.0
+            except (TypeError, ValueError):
+                return 0.0
+
+        return {
+            "days": days,
+            "symbols_tested": len(data),
+            "trades": m["total_trades"],
+            "wins": m["winning_trades"],
+            "losses": m["losing_trades"],
+            "win_rate": _f(m["win_rate"]),
+            "net_pnl": _f(m["net_profit"]),
+            "net_pct": _f(m["net_profit_pct"]),
+            "profit_factor": _f(m["profit_factor"]),
+            "expectancy_R": _f(m["expectancy_R"]),
+            "max_drawdown_pct": _f(m["max_drawdown_pct"]),
+            "long": {
+                "trades": m["long_performance"]["trades"],
+                "net": _f(m["long_performance"]["net"]),
+            },
+            "short": {
+                "trades": m["short_performance"]["trades"],
+                "net": _f(m["short_performance"]["net"]),
+            },
+            "by_exit_reason": {k: v["trades"] for k, v in m.get("by_exit_reason", {}).items()},
+        }
+
     def trades(self) -> list[dict]:
         r = self.session.result if self.session else None
         if not r:
