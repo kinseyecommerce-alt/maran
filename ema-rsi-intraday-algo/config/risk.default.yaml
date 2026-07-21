@@ -1,0 +1,34 @@
+# Default risk configuration. All values overridable via the API (Phase 4).
+capital:
+  default_capital: 1000000
+  maximum_capital_utilisation_percentage: 100
+  maximum_margin_utilisation_percentage: 70
+
+per_trade:
+  risk_per_trade_percentage: 0.50
+  maximum_stop_percentage: 1.0
+  fixed_lot_mode: false          # testing only; MUST stay false in LIVE
+  fixed_lots: 1
+
+portfolio:
+  maximum_total_open_risk_percentage: 1.50
+  maximum_simultaneous_positions: 3
+  maximum_symbol_exposure_percentage: 25
+
+daily_limits:
+  maximum_daily_loss_percentage: 1.50
+  maximum_daily_combined_loss_percentage: 2.00   # realised + unrealised
+  maximum_trades_per_day: 5
+  maximum_consecutive_losses: 3
+  maximum_symbol_trades_per_day: 2
+  maximum_order_rejections: 3
+  maximum_order_retries: 3
+
+data_guards:
+  stale_price_seconds: 5
+  maximum_allowed_slippage_bps: 30
+  maximum_spread_bps: 50
+
+locks:
+  auto_reset_daily: true         # ordinary daily locks reset next session
+  reconciliation_lock_requires_manual_reset: true
