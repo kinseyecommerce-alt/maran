@@ -39,6 +39,20 @@ def test_live_service_reports_not_ready_without_kite():
     assert r["ready"] is False
     assert r["places_real_orders"] is False
     assert "token" in r["reason"].lower()
+    # diagnostics surface WHY auth is unavailable
+    assert r["can_auto_login"] is False
+    assert r["last_auth_error"] is not None and "missing" in r["last_auth_error"]
+
+
+def test_restart_for_new_day_reauths_and_reruns():
+    svc = _service_over_scenario()
+    assert svc.start() is True
+    first = svc.status()["trades"]
+    assert first == 1
+    # a fresh trading day: re-login + fresh session (injected adapter is reused)
+    assert svc.restart_for_new_day() is True
+    assert svc.running is True
+    assert svc.status()["trades"] == 1  # new session replays the same scenario
 
 
 def test_capital_flows_from_settings():

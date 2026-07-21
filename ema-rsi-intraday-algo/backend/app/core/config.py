@@ -65,6 +65,9 @@ class Settings(BaseSettings):
     # Live service — HTTP port and the tradable symbol universe (CSV; blank ⇒ default set).
     port: int = 8080
     trading_symbols: str = ""
+    # Daily pre-market Kite re-login (IST) and how often to retry auth when not ready.
+    premarket_login_time: str = "08:50"
+    auth_retry_seconds: int = 300
 
     # Capital / risk (mirrors risk.default.yaml; env overrides win at runtime)
     default_capital: float = 1_000_000
