@@ -169,6 +169,7 @@ class LiveService:
             "can_auto_login": can_auto_login(s),
             "auth_day": self._auth_day.isoformat() if self._auth_day else None,
             "last_auth_error": self.last_auth_error,
+            "shorts_enabled": self.cfg.short_enabled,
             "symbols_requested": len(self.symbols),
         }
 
@@ -216,9 +217,12 @@ class LiveService:
                 )
         return out
 
-    def run_historical_backtest(self, days: int = 7, symbol_limit: int = 60) -> dict:
+    def run_historical_backtest(
+        self, days: int = 7, symbol_limit: int = 60, shorts: bool | None = None
+    ) -> dict:
         """Backtest the CURRENT strategy config on real Kite 3-min history for the live
         universe, using the service's own authenticated adapter (the token lives here).
+        `shorts` overrides the short side for this run (None = the deployed config).
         Read-only; simulated. Returns the aggregate metrics."""
         import time as _time
 
@@ -229,6 +233,8 @@ class LiveService:
         if not tok_map:
             return {"error": "not authenticated — no Kite adapter / instrument tokens"}
 
+        cfg = self.cfg if shorts is None else self.cfg.model_copy(update={"short_enabled": shorts})
+
         data: dict = {}
         for sym in list(tok_map)[:symbol_limit]:
             try:
@@ -236,13 +242,13 @@ class LiveService:
             except Exception as exc:  # skip a bad symbol, keep going
                 logger.warning("history fetch failed for %s: %s", sym, exc)
                 candles = []
-            if len(candles) > self.cfg.min_history + 5:
+            if len(candles) > cfg.min_history + 5:
                 data[sym] = candles
             _time.sleep(0.34)  # respect Kite's ~3 req/s historical limit
         if not data:
             return {"error": "no historical data returned"}
 
-        _, m = run_backtest(data, self.cfg, capital=Decimal(str(self.settings.default_capital)))
+        _, m = run_backtest(data, cfg, capital=Decimal(str(self.settings.default_capital)))
 
         def _f(v: object) -> float:
             try:

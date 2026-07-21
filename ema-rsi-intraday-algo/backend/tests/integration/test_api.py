@@ -14,6 +14,17 @@ def _client_with_service(svc):
     return TestClient(server.app)
 
 
+def test_enable_shorts_switch_flows_to_config(monkeypatch):
+    from app.core import config as cfg_mod
+
+    cfg_mod.get_settings.cache_clear()
+    monkeypatch.setenv("ENABLE_SHORTS", "false")
+    svc = server.build_service()
+    assert svc.cfg.short_enabled is False
+    assert svc.readiness()["shorts_enabled"] is False
+    cfg_mod.get_settings.cache_clear()
+
+
 def test_health_always_ok():
     c = _client_with_service(LiveService(Settings(), wide_session_config()))
     r = c.get("/health")

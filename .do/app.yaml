@@ -32,6 +32,9 @@ services:
       - key: ALLOWED_ORIGINS
         value: https://squid-app-qlx35.ondigitalocean.app
         scope: RUN_TIME
+      - key: ENABLE_SHORTS
+        value: "false"
+        scope: RUN_TIME
 
 databases:
   - name: dev-db-667063

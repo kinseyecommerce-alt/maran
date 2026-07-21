@@ -30,6 +30,8 @@ def build_service() -> LiveService:
     except Exception as exc:  # fall back to typed defaults if the YAML is missing
         logger.warning("strategy config load failed (%s); using defaults", exc)
         cfg = StrategyConfig()
+    # apply the short-side switch (long-only unless ENABLE_SHORTS=true)
+    cfg = cfg.model_copy(update={"short_enabled": settings.enable_shorts})
     return LiveService(settings, cfg)
 
 
@@ -92,7 +94,11 @@ def rejections() -> dict:
 
 
 @app.get("/backtest", tags=["testing"])
-def backtest(days: int = 7, symbols: int = 60) -> dict:
+def backtest(days: int = 7, symbols: int = 60, shorts: str | None = None) -> dict:
     """Backtest the CURRENT strategy on real Kite history for the live universe.
-    Read-only / simulated. May take ~20s (Kite historical rate limits)."""
-    return _svc().run_historical_backtest(days=max(1, min(days, 60)), symbol_limit=max(1, symbols))
+    `shorts=on|off` overrides the short side for this run (default = deployed config).
+    Read-only / simulated. May take ~20s+ (Kite historical rate limits)."""
+    override = {"on": True, "off": False}.get((shorts or "").lower())
+    return _svc().run_historical_backtest(
+        days=max(1, min(days, 60)), symbol_limit=max(1, symbols), shorts=override
+    )

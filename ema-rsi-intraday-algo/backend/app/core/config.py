@@ -68,6 +68,9 @@ class Settings(BaseSettings):
     # Daily pre-market Kite re-login (IST) and how often to retry auth when not ready.
     premarket_login_time: str = "08:50"
     auth_retry_seconds: int = 300
+    # Trade the short side? Evidence shows the short side is negatively predictive, so the
+    # deployment runs long-only by default; flip ENABLE_SHORTS=true to re-enable both sides.
+    enable_shorts: bool = True
 
     # Capital / risk (mirrors risk.default.yaml; env overrides win at runtime)
     default_capital: float = 1_000_000
