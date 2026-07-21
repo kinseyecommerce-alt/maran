@@ -35,8 +35,12 @@ def can_auto_login(settings: Settings) -> bool:
     return all(getattr(settings, f, "") for f in _AUTO_LOGIN_FIELDS)
 
 
-def resolve_access_token(settings: Settings) -> str | None:
-    """Return a usable Kite access token, or None if none can be obtained."""
+def resolve_access_token(settings: Settings, *, errors: list[str] | None = None) -> str | None:
+    """Return a usable Kite access token, or None if none can be obtained.
+
+    Any failure reason is appended to `errors` (when provided) so callers can surface it
+    on the readiness endpoint without re-running the flow.
+    """
     if settings.zerodha_access_token:
         return settings.zerodha_access_token
     if can_auto_login(settings):
@@ -44,7 +48,12 @@ def resolve_access_token(settings: Settings) -> str | None:
             return auto_login(settings)
         except Exception as exc:  # never let a login failure crash the web process
             logger.warning("kite auto-login failed: %s", exc)
+            if errors is not None:
+                errors.append(str(exc))
             return None
+    if errors is not None:
+        missing = [f for f in _AUTO_LOGIN_FIELDS if not getattr(settings, f, "")]
+        errors.append(f"no access token and auto-login incomplete (missing: {', '.join(missing)})")
     return None
 
 

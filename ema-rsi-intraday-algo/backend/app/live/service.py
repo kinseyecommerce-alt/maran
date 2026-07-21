@@ -14,11 +14,12 @@ import threading
 from datetime import datetime
 from decimal import Decimal
 
-from app.brokers.kite_auth import resolve_access_token
+from app.brokers.kite_auth import can_auto_login, resolve_access_token
 from app.brokers.paper_broker import PaperBrokerAdapter
 from app.core.config import Settings
 from app.core.enums import TradingMode
 from app.live.instruments import build_token_maps
+from app.live.schedule import ist_now, parse_hhmm, should_attempt, should_reauth
 from app.live.universe import resolve_symbols
 from app.market_data.interfaces import MarketDataAdapter
 from app.risk.daily_limits import RiskLimits
@@ -49,7 +50,12 @@ class LiveService:
         self.ready = False
         self.status_reason = "not started"
         self.started_at: str | None = None
+        self.last_auth_error: str | None = None
+        self._adapter_injected = adapter is not None
+        self._auth_day = None
+        self._last_attempt: datetime | None = None
         self._lock = threading.Lock()
+        self._stop_event = threading.Event()
 
     # ── lifecycle ──
     def start(self) -> bool:
@@ -75,6 +81,7 @@ class LiveService:
                 self.ready = True
                 self.status_reason = "streaming"
                 self.started_at = datetime.utcnow().isoformat()
+                self._auth_day = ist_now(datetime.utcnow()).date()
                 logger.info("LiveService started on %d symbols (paper)", len(self.symbols))
                 return True
             except Exception as exc:  # never crash the web process on a data-side failure
@@ -83,10 +90,13 @@ class LiveService:
                 return False
 
     def _build_zerodha_adapter(self) -> MarketDataAdapter | None:
-        token = resolve_access_token(self.settings)
+        errors: list[str] = []
+        token = resolve_access_token(self.settings, errors=errors)
         if not token:
+            self.last_auth_error = errors[-1] if errors else None
             self.status_reason = "no kite access token (set ZERODHA_ACCESS_TOKEN or TOTP creds)"
             return None
+        self.last_auth_error = None
         from app.market_data.zerodha_market_data import ZerodhaMarketDataAdapter
 
         adapter = ZerodhaMarketDataAdapter(
@@ -113,6 +123,36 @@ class LiveService:
             self.ready = False
             self.status_reason = "stopped"
 
+    def restart_for_new_day(self) -> bool:
+        """Fresh login + fresh session for a new trading day. A rebuilt Kite adapter re-runs
+        auto-login for a new token; an injected (test) adapter is reused."""
+        self.stop()
+        if not self._adapter_injected:
+            self._adapter = None
+        self.session = None
+        logger.info("LiveService re-authenticating for a new trading day")
+        return self.start()
+
+    def supervise(self, poll_seconds: float = 60.0) -> None:
+        """Blocking supervisor loop (run in a daemon thread). Attempts start until running,
+        rate-limited by `auth_retry_seconds`, then re-logs-in each new trading day at the
+        pre-market time. Returns when `stop_supervisor()` is called."""
+        premarket = parse_hhmm(self.settings.premarket_login_time)
+        retry = self.settings.auth_retry_seconds
+        while not self._stop_event.is_set():
+            now = datetime.utcnow()
+            if self.running:
+                if should_reauth(ist_now(now), self._auth_day, premarket):
+                    self.restart_for_new_day()
+            elif should_attempt(now, self._last_attempt, retry):
+                self._last_attempt = now
+                self.start()
+            self._stop_event.wait(poll_seconds)
+
+    def stop_supervisor(self) -> None:
+        self._stop_event.set()
+        self.stop()
+
     # ── introspection (for the API) ──
     def readiness(self) -> dict:
         s = self.settings
@@ -126,6 +166,9 @@ class LiveService:
             "allow_live_trading": s.allow_live_trading,
             "places_real_orders": self._places_real_orders(),
             "kite_credentials": bool(s.zerodha_api_key),
+            "can_auto_login": can_auto_login(s),
+            "auth_day": self._auth_day.isoformat() if self._auth_day else None,
+            "last_auth_error": self.last_auth_error,
             "symbols_requested": len(self.symbols),
         }
 

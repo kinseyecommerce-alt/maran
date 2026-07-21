@@ -37,13 +37,14 @@ def build_service() -> LiveService:
 async def lifespan(app: FastAPI):
     global _service
     _service = build_service()
-    # start the live loop off the event loop so boot/health never blocks on Kite
-    threading.Thread(target=_service.start, name="live-start", daemon=True).start()
+    # run the supervisor off the event loop so boot/health never blocks on Kite; it
+    # retries auth until streaming and re-logs-in each new trading day (pre-market).
+    threading.Thread(target=_service.supervise, name="live-supervisor", daemon=True).start()
     try:
         yield
     finally:
         if _service is not None:
-            _service.stop()
+            _service.stop_supervisor()
 
 
 app = FastAPI(title="EMA-RSI Intraday Algo — live (paper)", lifespan=lifespan)
