@@ -1,6 +1,0 @@
-<svg width="160" height="40" viewBox="0 0 160 40" fill="none" xmlns="http://www.w3.org/2000/svg">
-  <rect x="0" y="4" width="32" height="32" rx="8" fill="#4F46E5"></rect>
-  <path d="M25 20h-3l-2.25 6.75L15.25 13l-2.25 6.75H10" stroke="#fff" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"></path>
-  <text x="42" y="19" font-family="Inter, sans-serif" font-size="14" font-weight="700" fill="#0F172A">AlgoTrader Pro</text>
-  <text x="42" y="32" font-family="Inter, sans-serif" font-size="11" font-weight="400" fill="#64748B">Nirma Trade v4</text>
-</svg>

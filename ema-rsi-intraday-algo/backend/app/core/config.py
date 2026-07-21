@@ -12,6 +12,7 @@ from pathlib import Path
 from typing import Any
 
 import yaml
+from pydantic import AliasChoices, Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 from app.core.enums import TradingMode
@@ -37,12 +38,33 @@ class Settings(BaseSettings):
     trading_mode: TradingMode = TradingMode.SIMULATION
     allow_live_trading: bool = False
 
-    # Broker (never defaulted to real values)
-    zerodha_api_key: str = ""
-    zerodha_api_secret: str = ""
-    zerodha_access_token: str = ""
-    zerodha_redirect_url: str = ""
-    zerodha_user_id: str = ""
+    # Broker (never defaulted to real values). `KITE_*` aliases let this service reuse
+    # the existing deployment's Kite secrets without renaming any environment variable.
+    zerodha_api_key: str = Field(
+        "", validation_alias=AliasChoices("zerodha_api_key", "kite_api_key")
+    )
+    zerodha_api_secret: str = Field(
+        "", validation_alias=AliasChoices("zerodha_api_secret", "kite_api_secret")
+    )
+    zerodha_access_token: str = Field(
+        "", validation_alias=AliasChoices("zerodha_access_token", "kite_access_token")
+    )
+    zerodha_redirect_url: str = Field(
+        "", validation_alias=AliasChoices("zerodha_redirect_url", "kite_redirect_url")
+    )
+    zerodha_user_id: str = Field(
+        "", validation_alias=AliasChoices("zerodha_user_id", "kite_user_id")
+    )
+    zerodha_password: str = Field(
+        "", validation_alias=AliasChoices("zerodha_password", "kite_password")
+    )
+    zerodha_totp_secret: str = Field(
+        "", validation_alias=AliasChoices("zerodha_totp_secret", "kite_totp_secret")
+    )
+
+    # Live service — HTTP port and the tradable symbol universe (CSV; blank ⇒ default set).
+    port: int = 8080
+    trading_symbols: str = ""
 
     # Capital / risk (mirrors risk.default.yaml; env overrides win at runtime)
     default_capital: float = 1_000_000

@@ -109,6 +109,34 @@ next-candle open). The tick-driven path is verified to reproduce the backtester'
 > `ZerodhaBrokerAdapter` refuses to place any order unless `allow_live=True`, so wiring it up
 > never fires a live order by itself.
 
+## Deployed live service (paper) — `app.api.server:app`
+
+This repo deploys a single FastAPI service that streams the **live Kite feed** and runs the
+strategy in **PAPER** mode (real market data, simulated fills — no real orders). It is the
+only trading system in this repo; the previous multi-agent platform has been removed.
+
+```bash
+cd ema-rsi-intraday-algo/backend
+uvicorn app.api.server:app --host 0.0.0.0 --port 8080
+```
+
+- **Boot is resilient:** `/health` and `/readiness` always answer, even before Kite auth —
+  the tick loop starts in the background and reports status, so a missing token or browser
+  never takes the web process down.
+- **Kite auth:** set `ZERODHA_ACCESS_TOKEN` (or the legacy `KITE_ACCESS_TOKEN`) for the
+  simple daily token, or provide the full set (`ZERODHA_USER_ID`, `ZERODHA_PASSWORD`,
+  `ZERODHA_TOTP_SECRET`, `ZERODHA_API_KEY`, `ZERODHA_API_SECRET`, `ZERODHA_REDIRECT_URL`)
+  for headless TOTP auto-login. All `KITE_*` names are accepted as aliases so existing
+  deployment secrets carry over unchanged.
+- **Universe:** defaults to the NIFTY-50 constituents + index underlyings; override with
+  `TRADING_SYMBOLS` (comma-separated).
+- **Endpoints:** `/health`, `/readiness`, `/status`, `/trades`, `/positions`, `/rejections`.
+- **Never places a real order:** execution is always the PaperBroker here; real orders would
+  require the LIVE-gated `ZerodhaBrokerAdapter`, which this service does not wire up.
+
+Deployment builds from the root `Dockerfile` (DigitalOcean App Platform); `Procfile`,
+`railway.toml` and `nixpacks.toml` point at the same entrypoint.
+
 ## Quick start — Phase 1 (strategy core + tests)
 
 Phase 1 needs only three runtime packages and pytest — no database or broker required.
