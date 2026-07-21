@@ -84,3 +84,46 @@ def test_protective_stop_request_is_slm_on_opposite_side():
     assert req.transaction is Side.SELL  # opposite of a long
     assert req.order_type is OrderType.PROTECTIVE_STOP
     assert req.trigger_price == pos.current_stop
+
+
+def test_forced_square_off_fires_on_the_correct_candle():
+    """Regression: the live loop must square off on the candle whose OWN interval time
+    reaches the square-off cutoff — the same candle the backtester uses — not one candle
+    early. Before the fix the live path keyed square-off off the triggering tick's time
+    (the next interval), forcing the exit a candle sooner at a different price."""
+    from datetime import timedelta
+
+    from app.backtesting.engine import Backtester
+    from app.core.enums import ExitReason
+    from tests.fixtures.scenarios import _append, _base, wide_session_config
+
+    cfg = wide_session_config()
+    cfg.trade_management.partial_exit_enabled = False
+    setup, sig = _base(cfg, "BUY")
+    candles = list(setup.candles)
+    entry = float(sig.entry)
+    entry_open = float(setup.forming_open)
+    ts = candles[-1].timestamp + timedelta(minutes=3)
+
+    # entry candle (flat), then two flat candles that never touch stop/target
+    _append(candles, "RELIANCE", ts, entry_open, entry_open + 0.2, entry_open - 0.2, entry_open + 0.1)
+    ts += timedelta(minutes=3)
+    _append(candles, "RELIANCE", ts, entry, entry + 0.3, entry - 0.3, entry + 0.15)  # candle F
+    sq_off_candle = candles[-1]
+    ts += timedelta(minutes=3)
+    _append(candles, "RELIANCE", ts, entry, entry + 0.3, entry - 0.3, entry + 0.2)  # candle G (successor)
+
+    # square off exactly on candle F's interval time
+    cfg.session.forced_square_off = sq_off_candle.timestamp.strftime("%H:%M")
+    data = {"RELIANCE": candles}
+
+    bt = Backtester(cfg, starting_capital=CAP).run(data)
+    sess = TickDrivenSession(PaperBrokerAdapter(), cfg, starting_capital=CAP)
+    res = sess.run_stream(TickListAdapter(candles_to_ticks(candles)))
+
+    assert len(bt.trades) == 1 and len(res.trades) == 1
+    assert bt.trades[0].exit_reason is ExitReason.FORCED_SQUARE_OFF
+    assert res.trades[0].exit_reason is ExitReason.FORCED_SQUARE_OFF
+    # both exit on candle F at its close → identical P&L (would differ if live exited early)
+    assert res.trades[0].net_pnl == bt.trades[0].net_pnl
+    assert res.reconciled_flat
