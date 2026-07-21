@@ -1,0 +1,28 @@
+[project]
+name = "ema-rsi-intraday-algo-backend"
+version = "0.1.0"
+description = "Broker-neutral EMA/RSI intraday trading automation — backend"
+requires-python = ">=3.11"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = ["test_*.py"]
+addopts = "-ra -q"
+filterwarnings = ["ignore::DeprecationWarning"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "SIM"]
+# E501: line length handled by the formatter.
+# UP042: we keep a small custom `StrEnum(str, Enum)` base with an explicit __str__
+#        for consistent JSON/DB serialisation behaviour across 3.11/3.12.
+ignore = ["E501", "UP042"]
+
+[tool.mypy]
+python_version = "3.11"
+warn_unused_ignores = true
+disallow_untyped_defs = false
+ignore_missing_imports = true

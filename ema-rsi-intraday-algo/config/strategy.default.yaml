@@ -1,0 +1,102 @@
+# Default strategy configuration — EMA RSI Intraday.
+# Every value here is overridable per strategy instance via the API (Phase 4).
+strategy_name: EMA RSI Intraday
+timeframe: 3m
+long_enabled: true
+short_enabled: true
+
+ema_periods:
+  fast: 55
+  medium_fast: 89
+  medium_slow: 144
+  slow: 233
+ema_minimum_separation_percentage: 0.0   # >0 rejects tightly compressed EMAs
+
+trailing_ema_periods:                     # optional, trailing only
+  - 9
+  - 20
+
+rsi:
+  period: 14
+  buy_mode: support_zone_rejection        # strict_cross | support_zone_rejection | below_recovery | pivot_rejection
+  buy_zone_min: 38
+  buy_zone_max: 42
+  buy_confirmation_min: 40
+  sell_mode: resistance_zone_rejection
+  sell_zone_min: 58
+  sell_zone_max: 62
+  sell_confirmation_max: 60
+  pivot_min_points: 3.0                    # used by pivot_rejection mode
+  recovery_lookback: 5                     # used by below_recovery mode
+
+atr:
+  period: 14
+
+breakout:
+  buy_mode: confirmation_close_above_previous_day_high   # A(close) | B(high) | C(whole candle) | D(focus+confirmation)
+  sell_mode: confirmation_close_below_previous_day_low
+
+price_above_emas:
+  lookback: 5                              # ≥1 completed candle in last N closed above/below all EMAs
+  strict: false                            # true = every breakout-phase candle must stay above/below all EMAs
+
+ema_touch:
+  mode: percentage                         # percentage | points | ticks | atr
+  value: 0.10
+  priority:                                # primary-touched-EMA selection order
+    - 55
+    - 89
+    - 144
+    - 233
+  selection: priority                      # priority | nearest
+
+focus_candle:
+  reject_doji: true
+  minimum_body_percentage_of_range: 0.0    # >0 enables body/range filter
+
+confirmation_candle:
+  minimum_body_percentage_of_range: 0.0    # optional filters, all disabled by default
+  maximum_range_percentage: 0.0
+  minimum_volume: 0
+  volume_greater_than_focus: false
+
+stop:
+  buffer_mode: atr                         # points | percentage | ticks | atr
+  buffer_value: 0.10
+  maximum_stop_percentage: 1.0
+
+entry:
+  order_type: MARKET                       # MARKET | LIMIT | MARKET_PROTECTED | SL_LIMIT
+  slippage_bps: 0.0                        # backtest/paper next-open slippage
+  entry_delay_tolerance_seconds: 5
+
+trade_management:
+  break_even_trigger_R: 1.5
+  break_even_mode: entry_plus_one_tick     # exact_entry | entry_plus_points | entry_plus_ticks | entry_plus_cost
+  break_even_buffer_value: 1               # ticks/points depending on mode
+  partial_exit_enabled: true
+  partial_exit_R: 2.0
+  partial_exit_percentage: 50
+  trailing_enabled: true
+  trailing_start_R: 2.0
+  trailing_method: previous_completed_candle  # previous_completed_candle | r_step | ema | atr | percentage
+  trailing_buffer_value: 0.0
+  trailing_ema_period: 20
+  trailing_atr_multiplier: 2.0
+  trailing_percentage: 1.0
+  final_target_enabled: true
+  final_target_R: 3.0
+
+session:
+  market_open: "09:15"
+  entry_start: "09:21"
+  entry_cutoff: "14:45"
+  forced_square_off: "15:15"
+  final_square_off: "15:25"
+
+instrument_defaults:
+  tick_size: 0.05
+  lot_size: 1
+
+intrabar_policy: CONSERVATIVE              # CONSERVATIVE | OPTIMISTIC | LOWER_TIMEFRAME_REPLAY | PATH_SIMULATION
+default_mode: SIMULATION

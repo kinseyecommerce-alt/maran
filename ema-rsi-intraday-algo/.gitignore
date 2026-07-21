@@ -1,0 +1,45 @@
+# Secrets — never commit
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+secrets/
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+.venv/
+venv/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+htmlcov/
+.coverage
+.coverage.*
+dist/
+build/
+
+# Node / frontend
+node_modules/
+frontend/dist/
+frontend/.vite/
+*.local
+
+# Data / logs / db
+*.log
+*.sqlite
+*.sqlite3
+data/
+logs/
+*.csv.gz
+
+# IDE / OS
+.idea/
+.vscode/
+.DS_Store
+
+# tooling caches
+.claude-flow/
