@@ -18,11 +18,14 @@ trailing_ema_periods:                     # optional, trailing only
 
 rsi:
   period: 14
-  buy_mode: support_zone_rejection        # strict_cross | support_zone_rejection | below_recovery | pivot_rejection
+  # default = full spec reading: RSI takes support AT 40 (zone) OR dipped below 40
+  # then recovered to/above 40. Other modes: strict_cross | support_zone_rejection |
+  # below_recovery | pivot_rejection.
+  buy_mode: support_zone_or_recovery
   buy_zone_min: 38
   buy_zone_max: 42
   buy_confirmation_min: 40
-  sell_mode: resistance_zone_rejection
+  sell_mode: resistance_zone_or_reversal
   sell_zone_min: 58
   sell_zone_max: 62
   sell_confirmation_max: 60

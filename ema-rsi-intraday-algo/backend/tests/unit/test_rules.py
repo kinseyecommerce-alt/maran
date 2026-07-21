@@ -380,3 +380,86 @@ def test_risk_exceeds_max():
 def test_risk_within_max_ok():
     r, risk = rules.check_risk(side=Side.BUY, entry=D(1530), stop=D(1520), max_stop_percentage=D(1))
     assert r is None and risk == D(10)
+
+
+# ── combined default RSI mode: support-at-40 zone OR below-40 recovery ──
+def test_rsi_buy_combined_zone_case_passes():
+    cfg = _rsi_cfg(buy_mode=RsiMode.SUPPORT_ZONE_OR_RECOVERY)
+    # RSI took support inside the 38-42 zone, confirmation rising ≥40
+    assert (
+        rules.check_rsi(
+            side=Side.BUY,
+            cfg=cfg,
+            focus_rsi=D(41),
+            confirmation_rsi=D(43),
+            recent_rsis=[D(44), D(41)],
+        )
+        is None
+    )
+
+
+def test_rsi_buy_combined_recovery_case_passes():
+    cfg = _rsi_cfg(buy_mode=RsiMode.SUPPORT_ZONE_OR_RECOVERY)
+    # RSI dipped BELOW 40 (focus 36, outside the zone) then confirmation recovered ≥40
+    assert (
+        rules.check_rsi(
+            side=Side.BUY,
+            cfg=cfg,
+            focus_rsi=D(36),
+            confirmation_rsi=D(41),
+            recent_rsis=[D(45), D(36)],
+        )
+        is None
+    )
+
+
+def test_rsi_buy_combined_rejects_when_neither():
+    cfg = _rsi_cfg(buy_mode=RsiMode.SUPPORT_ZONE_OR_RECOVERY)
+    # never near 40 and confirmation below 40 → neither branch holds
+    assert (
+        rules.check_rsi(
+            side=Side.BUY,
+            cfg=cfg,
+            focus_rsi=D(55),
+            confirmation_rsi=D(38),
+            recent_rsis=[D(56), D(55)],
+        )
+        is not None
+    )
+
+
+def test_rsi_sell_combined_zone_and_reversal():
+    cfg = _rsi_cfg(sell_mode=RsiMode.RESISTANCE_ZONE_OR_REVERSAL)
+    # resistance zone case
+    assert (
+        rules.check_rsi(
+            side=Side.SELL,
+            cfg=cfg,
+            focus_rsi=D(59),
+            confirmation_rsi=D(57),
+            recent_rsis=[D(58), D(59)],
+        )
+        is None
+    )
+    # spiked-above-60 then reversal case
+    assert (
+        rules.check_rsi(
+            side=Side.SELL,
+            cfg=cfg,
+            focus_rsi=D(64),
+            confirmation_rsi=D(59),
+            recent_rsis=[D(55), D(64)],
+        )
+        is None
+    )
+    # neither → reject
+    assert (
+        rules.check_rsi(
+            side=Side.SELL,
+            cfg=cfg,
+            focus_rsi=D(45),
+            confirmation_rsi=D(62),
+            recent_rsis=[D(44), D(45)],
+        )
+        is not None
+    )

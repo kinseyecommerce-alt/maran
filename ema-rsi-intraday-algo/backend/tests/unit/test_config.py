@@ -11,7 +11,9 @@ def test_defaults_match_spec():
     cfg = StrategyConfig()
     assert cfg.default_mode is TradingMode.SIMULATION  # safe default
     assert cfg.ema_periods.ordered() == [55, 89, 144, 233]
-    assert cfg.rsi.buy_mode is RsiMode.SUPPORT_ZONE_REJECTION
+    # default RSI reads the full spec: support AT 40 OR below-40-then-recovery
+    assert cfg.rsi.buy_mode is RsiMode.SUPPORT_ZONE_OR_RECOVERY
+    assert cfg.rsi.sell_mode is RsiMode.RESISTANCE_ZONE_OR_REVERSAL
     assert cfg.rsi.buy_zone_min == 38.0 and cfg.rsi.buy_zone_max == 42.0
     assert cfg.trade_management.break_even_trigger_R == Decimal("1.5")
     assert cfg.trade_management.partial_exit_R == Decimal("2.0")

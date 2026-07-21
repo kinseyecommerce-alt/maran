@@ -126,6 +126,10 @@ class RsiMode(StrEnum):
     BELOW_RECOVERY = "below_recovery"  # BUY: dipped <40 then closed back above
     ABOVE_REJECTION = "above_rejection"  # SELL: spiked >60 then closed back below
     PIVOT_REJECTION = "pivot_rejection"
+    # Combined defaults — the full spec reading: "support AT 40" (zone) OR
+    # "dipped below 40 then recovered to/above 40" (recovery). SELL is the mirror.
+    SUPPORT_ZONE_OR_RECOVERY = "support_zone_or_recovery"
+    RESISTANCE_ZONE_OR_REVERSAL = "resistance_zone_or_reversal"
 
 
 class BreakoutMode(StrEnum):
