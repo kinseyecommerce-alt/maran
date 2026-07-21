@@ -89,3 +89,10 @@ def rejections() -> dict:
     svc = _svc()
     r = svc.session.result if svc.session else None
     return {"rejections": dict(r.rejections) if r else {}}
+
+
+@app.get("/backtest", tags=["testing"])
+def backtest(days: int = 7, symbols: int = 60) -> dict:
+    """Backtest the CURRENT strategy on real Kite history for the live universe.
+    Read-only / simulated. May take ~20s (Kite historical rate limits)."""
+    return _svc().run_historical_backtest(days=max(1, min(days, 60)), symbol_limit=max(1, symbols))

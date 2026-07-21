@@ -44,6 +44,36 @@ def test_live_service_reports_not_ready_without_kite():
     assert r["last_auth_error"] is not None and "missing" in r["last_auth_error"]
 
 
+class _FakeHistAdapter(TickListAdapter):
+    def __init__(self, candles):
+        super().__init__([])
+        self._candles = candles
+        self._symbol_to_token = {"RELIANCE": 1}
+
+    def get_historical_candles(self, symbol, timeframe="3m", days=7):
+        return self._candles if symbol == "RELIANCE" else []
+
+
+def test_run_historical_backtest_on_current_strategy():
+    cfg = wide_session_config()
+    cfg.trade_management.partial_exit_enabled = False
+    candles = build_buy_scenario("target_3R", cfg)["RELIANCE"]
+    svc = LiveService(
+        Settings(), cfg, broker=PaperBrokerAdapter(), adapter=_FakeHistAdapter(candles)
+    )
+    out = svc.run_historical_backtest(days=7, symbol_limit=5)
+    assert out["symbols_tested"] == 1
+    assert out["trades"] == 1
+    assert out["by_exit_reason"].get("FINAL_TARGET") == 1
+    assert isinstance(out["net_pnl"], float) and isinstance(out["profit_factor"], float)
+
+
+def test_run_historical_backtest_needs_auth():
+    svc = LiveService(Settings(), wide_session_config())
+    out = svc.run_historical_backtest()
+    assert "error" in out
+
+
 def test_restart_for_new_day_reauths_and_reruns():
     svc = _service_over_scenario()
     assert svc.start() is True
