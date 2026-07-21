@@ -79,7 +79,12 @@ def test_buy_rejected_when_stop_exceeds_max_percentage():
 
 
 def test_buy_rejected_when_rsi_fails():
+    from app.core.enums import RsiMode
+
     cfg = StrategyConfig()
+    # pin the single-branch zone mode so the impossible confirmation floor deterministically
+    # blocks the entry (the combined default would also accept a below-40 recovery)
+    cfg.rsi.buy_mode = RsiMode.SUPPORT_ZONE_REJECTION
     cfg.rsi.buy_confirmation_min = 99.0  # confirmation RSI can never reach 99
     setup = build_buy_setup(cfg)
     eng, sig = _run(cfg, setup)

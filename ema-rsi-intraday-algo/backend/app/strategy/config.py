@@ -35,11 +35,11 @@ class EmaPeriods(BaseModel):
 
 class RsiConfig(BaseModel):
     period: int = 14
-    buy_mode: RsiMode = RsiMode.SUPPORT_ZONE_REJECTION
+    buy_mode: RsiMode = RsiMode.SUPPORT_ZONE_OR_RECOVERY
     buy_zone_min: float = 38.0
     buy_zone_max: float = 42.0
     buy_confirmation_min: float = 40.0
-    sell_mode: RsiMode = RsiMode.RESISTANCE_ZONE_REJECTION
+    sell_mode: RsiMode = RsiMode.RESISTANCE_ZONE_OR_REVERSAL
     sell_zone_min: float = 58.0
     sell_zone_max: float = 62.0
     sell_confirmation_max: float = 60.0

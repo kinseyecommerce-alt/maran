@@ -258,42 +258,51 @@ def check_rsi(
     f, c = focus_rsi, confirmation_rsi
     if side is Side.BUY:
         mode = r.buy_mode
+        # sub-predicates (reused by the combined default)
+        zone_ok = (
+            (D(r.buy_zone_min) <= f <= D(r.buy_zone_max))
+            and c > f
+            and c >= D(r.buy_confirmation_min)
+        )
+        dipped = (
+            any(x < D(40) for x in recent_rsis[-r.recovery_lookback :])
+            if recent_rsis
+            else f < D(40)
+        )
+        recovery_ok = dipped and c >= D(40)
         if mode is RsiMode.STRICT_CROSS:
             ok = f < D(40) and c >= D(40)
         elif mode is RsiMode.SUPPORT_ZONE_REJECTION:
-            ok = (
-                (D(r.buy_zone_min) <= f <= D(r.buy_zone_max))
-                and c > f
-                and c >= D(r.buy_confirmation_min)
-            )
+            ok = zone_ok
         elif mode is RsiMode.BELOW_RECOVERY:
-            dipped = (
-                any(x < D(40) for x in recent_rsis[-r.recovery_lookback :])
-                if recent_rsis
-                else f < D(40)
-            )
-            ok = dipped and c >= D(40)
+            ok = recovery_ok
+        elif mode is RsiMode.SUPPORT_ZONE_OR_RECOVERY:
+            ok = zone_ok or recovery_ok  # "support at 40" OR "below 40 then recover to 40"
         elif mode is RsiMode.PIVOT_REJECTION:
             ok = abs(f - D(40)) <= D(r.buy_zone_max) - D(40) and (c - f) >= D(r.pivot_min_points)
         else:
             ok = False
     else:
         mode = r.sell_mode
+        zone_ok = (
+            (D(r.sell_zone_min) <= f <= D(r.sell_zone_max))
+            and c < f
+            and c <= D(r.sell_confirmation_max)
+        )
+        spiked = (
+            any(x > D(60) for x in recent_rsis[-r.recovery_lookback :])
+            if recent_rsis
+            else f > D(60)
+        )
+        reversal_ok = spiked and c <= D(60)
         if mode is RsiMode.STRICT_CROSS:
             ok = f > D(60) and c <= D(60)
         elif mode is RsiMode.RESISTANCE_ZONE_REJECTION:
-            ok = (
-                (D(r.sell_zone_min) <= f <= D(r.sell_zone_max))
-                and c < f
-                and c <= D(r.sell_confirmation_max)
-            )
+            ok = zone_ok
         elif mode is RsiMode.ABOVE_REJECTION:
-            spiked = (
-                any(x > D(60) for x in recent_rsis[-r.recovery_lookback :])
-                if recent_rsis
-                else f > D(60)
-            )
-            ok = spiked and c <= D(60)
+            ok = reversal_ok
+        elif mode is RsiMode.RESISTANCE_ZONE_OR_REVERSAL:
+            ok = zone_ok or reversal_ok  # "resistance at 60" OR "above 60 then reverse to 60"
         elif mode is RsiMode.PIVOT_REJECTION:
             ok = abs(f - D(60)) <= D(60) - D(r.sell_zone_min) and (f - c) >= D(r.pivot_min_points)
         else:
