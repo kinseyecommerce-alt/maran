@@ -106,12 +106,16 @@ def test_forced_square_off_fires_on_the_correct_candle():
     ts = candles[-1].timestamp + timedelta(minutes=3)
 
     # entry candle (flat), then two flat candles that never touch stop/target
-    _append(candles, "RELIANCE", ts, entry_open, entry_open + 0.2, entry_open - 0.2, entry_open + 0.1)
+    _append(
+        candles, "RELIANCE", ts, entry_open, entry_open + 0.2, entry_open - 0.2, entry_open + 0.1
+    )
     ts += timedelta(minutes=3)
     _append(candles, "RELIANCE", ts, entry, entry + 0.3, entry - 0.3, entry + 0.15)  # candle F
     sq_off_candle = candles[-1]
     ts += timedelta(minutes=3)
-    _append(candles, "RELIANCE", ts, entry, entry + 0.3, entry - 0.3, entry + 0.2)  # candle G (successor)
+    _append(
+        candles, "RELIANCE", ts, entry, entry + 0.3, entry - 0.3, entry + 0.2
+    )  # candle G (successor)
 
     # square off exactly on candle F's interval time
     cfg.session.forced_square_off = sq_off_candle.timestamp.strftime("%H:%M")

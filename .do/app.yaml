@@ -8,7 +8,7 @@ services:
       branch: main
       deploy_on_push: true
     source_dir: /
-    run_command: cd algotrader_v4 && uvicorn main:app --host 0.0.0.0 --port $PORT --workers 1 --loop uvloop --http httptools --log-level warning --access-log
+    run_command: cd ema-rsi-intraday-algo/backend && uvicorn app.api.server:app --host 0.0.0.0 --port $PORT --workers 1 --loop uvloop --http httptools --log-level warning --access-log
     http_port: 8080
     instance_size_slug: apps-d-1vcpu-4gb
     instance_count: 1

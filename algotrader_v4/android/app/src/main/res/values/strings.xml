@@ -1,6 +1,0 @@
-<?xml version="1.0" encoding="utf-8"?>
-<resources>
-    <string name="app_name">AlgoTrader Pro</string>
-    <string name="title_settings">Server Settings</string>
-    <string name="pref_server_url">server_url</string>
-</resources>

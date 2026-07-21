@@ -20,6 +20,10 @@ argon2-cffi>=23.1
 python-jose[cryptography]>=3.3
 kiteconnect>=5.0
 
+# ── Live service (Kite auth: env token, or headless TOTP auto-login) ──
+playwright>=1.40
+pyotp>=2.9
+
 # ── Dev / test ──
 pytest>=8.0
 pytest-asyncio>=0.23

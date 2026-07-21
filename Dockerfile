@@ -1,4 +1,4 @@
-# AlgoTrader Pro — DO App Platform image
+# EMA-RSI Intraday Algo — DO App Platform image (live paper-trading service).
 # Replaces the Python buildpack so Chromium's system libraries can be
 # installed for the automated Kite TOTP login (playwright headless flow).
 # bookworm pin: playwright 1.52's --with-deps knows Debian 12 package names
@@ -28,4 +28,4 @@ RUN uv run --no-sync playwright install --with-deps chromium \
 COPY . .
 
 EXPOSE 8080
-CMD ["sh", "-c", "cd algotrader_v4 && uvicorn main:app --host 0.0.0.0 --port ${PORT:-8080} --workers 1 --loop uvloop --http httptools --log-level warning --access-log"]
+CMD ["sh", "-c", "cd ema-rsi-intraday-algo/backend && uvicorn app.api.server:app --host 0.0.0.0 --port ${PORT:-8080} --workers 1 --loop uvloop --http httptools --log-level warning --access-log"]

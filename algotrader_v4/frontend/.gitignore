@@ -1,8 +1,0 @@
-node_modules/
-*.local
-.env
-
-# Playwright
-test-results/
-playwright-report/
-playwright/.cache/
