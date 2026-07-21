@@ -56,6 +56,32 @@ stays in SIMULATION/PAPER.
 
 ---
 
+## Run a backtest / paper session on real data (CLI)
+
+Point the engine at your own 3-minute data — a CSV or a Kite historical JSON dump —
+and get a full costed report. **The CLI only ever runs BACKTEST or PAPER (simulated);
+it never connects to a broker or places a real order.**
+
+```bash
+cd ema-rsi-intraday-algo/backend
+
+# backtest a CSV (columns: timestamp, open, high, low, close, volume[, symbol])
+python scripts/algo.py backtest --csv data/RELIANCE_3min.csv --symbol RELIANCE \
+    --config ../config/strategy.default.yaml --out out/
+
+# backtest every *.csv in a folder (symbol = filename), custom capital
+python scripts/algo.py backtest --dir data/ --capital 500000
+
+# paper-trading session over Kite historical JSON, with 5 bps fill slippage
+python scripts/algo.py paper --json data/INFY.json --symbol INFY --slippage-bps 5
+```
+
+The backtest prints a summary (trades, win rate, net P&L, avg R, expectancy, drawdown,
+per-exit-reason breakdown) and, with `--out`, writes `trades.csv` + `report.json`.
+Supported inputs: CSV (flexible headers, ISO / `YYYY-MM-DD HH:MM:SS` / epoch timestamps)
+and Kite historical JSON. Loaders carry OHLCV only — indicators are computed by the
+engine, identically across every mode.
+
 ## Quick start — Phase 1 (strategy core + tests)
 
 Phase 1 needs only three runtime packages and pytest — no database or broker required.
