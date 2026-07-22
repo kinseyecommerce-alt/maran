@@ -74,6 +74,18 @@ def test_run_historical_backtest_needs_auth():
     assert "error" in out
 
 
+def test_warmup_seeds_indicator_history():
+    cfg = wide_session_config()
+    candles = build_buy_scenario("target_3R", cfg)["RELIANCE"]  # >= min_history candles
+    settings = Settings(trading_symbols="RELIANCE", warmup_days=5)
+    svc = LiveService(settings, cfg, broker=PaperBrokerAdapter(), adapter=_FakeHistAdapter(candles))
+    assert svc.start() is True
+    assert svc.warmup_seeded == 1
+    assert svc.status()["warmup_seeded"] == 1
+    seeded = svc.session._sym["RELIANCE"].completed
+    assert len(seeded) >= cfg.min_history  # engine can now evaluate immediately
+
+
 def test_historical_ohlc_shape():
     cfg = wide_session_config()
     candles = build_buy_scenario("target_3R", cfg)["RELIANCE"]

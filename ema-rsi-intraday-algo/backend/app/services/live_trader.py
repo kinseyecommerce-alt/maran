@@ -111,6 +111,18 @@ class TickDrivenSession:
         self._square_off = _t(self.cfg.session.forced_square_off)
 
     # ── public ──
+    def seed_history(self, symbol: str, candles: list[Candle]) -> bool:
+        """Warm a symbol's indicators from historical candles so the engine can evaluate
+        the moment live candles arrive. Backfilled candles NEVER produce an entry — we
+        prime the engine over them and discard any signal; only live candles trade."""
+        if len(candles) < 2:
+            return False
+        st = self._sym.setdefault(symbol, _SymbolState(symbol))
+        st.completed = list(candles)
+        # walk indicators + the state machine through history; discard the result
+        self.engine.evaluate(symbol, st.completed, forming_open=candles[-1].close)
+        return True
+
     def run_stream(self, adapter: MarketDataAdapter) -> LiveSessionResult:
         """Drive the session from an adapter's tick stream to completion (replay), or
         until disconnect (live)."""
