@@ -32,7 +32,20 @@ def build_service() -> LiveService:
         cfg = StrategyConfig()
     # apply the short-side switch (long-only unless ENABLE_SHORTS=true)
     cfg = cfg.model_copy(update={"short_enabled": settings.enable_shorts})
-    return LiveService(settings, cfg)
+    # risk caps from settings so the deployed service honours them (the live path used
+    # RiskLimits() defaults before this)
+    from decimal import Decimal
+
+    from app.risk.daily_limits import RiskLimits
+
+    limits = RiskLimits(
+        risk_per_trade_percentage=Decimal(str(settings.default_risk_percentage)),
+        maximum_simultaneous_positions=settings.max_simultaneous_positions,
+        maximum_trades_per_day=settings.max_trades_per_day,
+        maximum_consecutive_losses=settings.max_consecutive_losses,
+        maximum_daily_loss_percentage=Decimal(str(settings.max_daily_loss_percentage)),
+    )
+    return LiveService(settings, cfg, limits=limits)
 
 
 @asynccontextmanager
