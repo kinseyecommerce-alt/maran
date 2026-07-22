@@ -64,6 +64,24 @@ class ZerodhaMarketDataAdapter(MarketDataAdapter):
         self._ticker = ticker
         self._subscribed: set[str] = set()
         self._seq = 0
+        self._raw_ticks = 0  # ticks received off the wire (before symbol match)
+        self._ws_state = "init"
+        self._ws_error: str | None = None
+
+    def feed_diag(self) -> dict:
+        connected = None
+        try:
+            connected = bool(self._ticker and self._ticker.is_connected())
+        except Exception:
+            connected = None
+        return {
+            "ws_state": self._ws_state,
+            "ws_connected": connected,
+            "ws_error": self._ws_error,
+            "ticks_raw": self._raw_ticks,
+            "ticks_used": self._seq,
+            "tokens_subscribed": len([s for s in self._subscribed if s in self._symbol_to_token]),
+        }
 
     # ── clients (lazy) ──
     @property
@@ -174,6 +192,7 @@ class ZerodhaMarketDataAdapter(MarketDataAdapter):
         tokens = [self._symbol_to_token[s] for s in self._subscribed if s in self._symbol_to_token]
 
         def _on_ticks(ws, ticks):
+            self._raw_ticks += len(ticks)
             for raw in ticks:
                 sym = self._token_to_symbol.get(raw.get("instrument_token"))
                 if sym is None:
@@ -182,11 +201,27 @@ class ZerodhaMarketDataAdapter(MarketDataAdapter):
                 on_tick(kite_tick_to_tick(raw, sym, sequence_id=self._seq))
 
         def _on_connect(ws, response):
+            self._ws_state = "connected"
             ws.subscribe(tokens)
             ws.set_mode(ws.MODE_FULL, tokens)
 
+        def _on_error(ws, code, reason):
+            self._ws_state = "error"
+            self._ws_error = f"{code}: {reason}"
+
+        def _on_close(ws, code, reason):
+            self._ws_state = "closed"
+            self._ws_error = f"{code}: {reason}"
+
+        def _on_noreconnect(ws):
+            self._ws_state = "noreconnect"
+
         ticker.on_ticks = _on_ticks
         ticker.on_connect = _on_connect
+        ticker.on_error = _on_error
+        ticker.on_close = _on_close
+        ticker.on_noreconnect = _on_noreconnect
+        self._ws_state = "connecting"
         ticker.connect(threaded=True)
 
     def health_status(self) -> dict:
