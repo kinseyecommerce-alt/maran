@@ -67,6 +67,8 @@ class ZerodhaMarketDataAdapter(MarketDataAdapter):
         self._raw_ticks = 0  # ticks received off the wire (before symbol match)
         self._ws_state = "init"
         self._ws_error: str | None = None
+        self._tick_errors = 0
+        self._last_tick_error: str | None = None
 
     def feed_diag(self) -> dict:
         connected = None
@@ -80,6 +82,8 @@ class ZerodhaMarketDataAdapter(MarketDataAdapter):
             "ws_error": self._ws_error,
             "ticks_raw": self._raw_ticks,
             "ticks_used": self._seq,
+            "tick_errors": self._tick_errors,
+            "last_tick_error": self._last_tick_error,
             "tokens_subscribed": len([s for s in self._subscribed if s in self._symbol_to_token]),
         }
 
@@ -198,7 +202,11 @@ class ZerodhaMarketDataAdapter(MarketDataAdapter):
                 if sym is None:
                     continue
                 self._seq += 1
-                on_tick(kite_tick_to_tick(raw, sym, sequence_id=self._seq))
+                try:
+                    on_tick(kite_tick_to_tick(raw, sym, sequence_id=self._seq))
+                except Exception as exc:  # one bad tick must not kill the stream
+                    self._tick_errors += 1
+                    self._last_tick_error = f"{type(exc).__name__}: {exc}"
 
         def _on_connect(ws, response):
             self._ws_state = "connected"
