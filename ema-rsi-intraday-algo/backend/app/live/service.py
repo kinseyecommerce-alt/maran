@@ -205,6 +205,9 @@ class LiveService:
             "net_pnl": float(net),
             "open_positions": self.open_positions(),
             "rejections": dict(r.rejections) if r else {},
+            "feed": self._adapter.feed_diag()
+            if self._adapter is not None and hasattr(self._adapter, "feed_diag")
+            else None,
         }
 
     def open_positions(self) -> list[dict]:
