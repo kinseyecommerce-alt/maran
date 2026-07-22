@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import contextlib
 from collections.abc import Callable, Iterable
-from datetime import datetime
+from datetime import datetime, timedelta
 from decimal import Decimal
 
 from app.market_data.interfaces import (
@@ -21,13 +21,24 @@ from app.market_data.interfaces import (
 )
 from app.strategy.models import Candle, D, candle_from_ohlc
 
+_IST = timedelta(minutes=330)  # UTC+5:30
+
+
+def _ist_now() -> datetime:
+    """Current IST wall-clock, robust to the host timezone (utcnow is always UTC)."""
+    return datetime.utcnow() + _IST
+
 
 def kite_tick_to_tick(raw: dict, symbol: str, *, sequence_id: int | None = None) -> Tick:
     """Convert one KiteTicker (MODE_FULL) tick dict into a neutral Tick."""
     depth = raw.get("depth") or {}
     buys = depth.get("buy") or []
     sells = depth.get("sell") or []
-    ts = raw.get("exchange_timestamp") or raw.get("timestamp") or datetime.utcnow()
+    # Bucket live ticks by IST arrival time. pykiteconnect renders exchange_timestamp in the
+    # host's local timezone (UTC on the deploy box), which places every tick before the 09:15
+    # IST session open and clamps all of them to one interval — so no 3-min candle ever closes.
+    # IST arrival time is correct for a real-time stream and robust to the host TZ.
+    ts = _ist_now()
     return Tick(
         symbol=symbol,
         timestamp=ts,
