@@ -68,6 +68,10 @@ class Settings(BaseSettings):
     # Daily pre-market Kite re-login (IST) and how often to retry auth when not ready.
     premarket_login_time: str = "08:50"
     auth_retry_seconds: int = 300
+    # On startup, backfill this many days of history per symbol to warm the indicators
+    # (the slow EMA needs ~238 candles; live-only accrual could never reach it intraday).
+    warmup_enabled: bool = True
+    warmup_days: int = 5
     # Trade the short side? Evidence shows the short side is negatively predictive, so the
     # deployment runs long-only by default; flip ENABLE_SHORTS=true to re-enable both sides.
     enable_shorts: bool = True

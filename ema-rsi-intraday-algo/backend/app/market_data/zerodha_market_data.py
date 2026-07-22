@@ -141,7 +141,7 @@ class ZerodhaMarketDataAdapter(MarketDataAdapter):
         from datetime import timedelta
 
         interval = {"3m": "3minute", "5m": "5minute", "1m": "minute"}.get(timeframe, "3minute")
-        to_date = datetime.now()
+        to_date = _ist_now()  # Kite interprets the range in IST; use IST wall-clock
         from_date = to_date - timedelta(days=days)
         raw = self.kite.historical_data(
             token, from_date=from_date, to_date=to_date, interval=interval

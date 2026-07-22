@@ -51,6 +51,7 @@ class LiveService:
         self.status_reason = "not started"
         self.started_at: str | None = None
         self.last_auth_error: str | None = None
+        self.warmup_seeded = 0
         self._adapter_injected = adapter is not None
         self._auth_day = None
         self._last_attempt: datetime | None = None
@@ -75,6 +76,11 @@ class LiveService:
                 if adapter is None:
                     return False
                 adapter.subscribe(self.symbols)
+                # warm the indicators from history BEFORE streaming, else the slow EMA never
+                # seats intraday and nothing ever evaluates.
+                if self.settings.warmup_enabled:
+                    self.status_reason = "warming up"
+                    self._warm_up(adapter)
                 adapter.stream_ticks(self.session.on_tick)  # KiteTicker connects threaded
                 self._adapter = adapter
                 self.running = True
@@ -111,6 +117,31 @@ class LiveService:
         adapter._token_to_symbol = tok_to_sym  # noqa: SLF001
         self.symbols = list(sym_to_tok)  # only what we could resolve
         return adapter
+
+    def _warm_up(self, adapter) -> None:
+        """Backfill history per symbol (rate-limited) and seed the engine's indicators."""
+        if not hasattr(adapter, "get_historical_candles"):
+            return
+        from concurrent.futures import ThreadPoolExecutor
+
+        days = self.settings.warmup_days
+        need = self.cfg.min_history
+
+        def fetch(sym: str):
+            try:
+                return sym, adapter.get_historical_candles(sym, "3m", days)
+            except Exception:
+                return sym, []
+
+        seeded = 0
+        assert self.session is not None
+        # 3 workers ≈ Kite's historical rate limit; failures per-symbol are skipped
+        with ThreadPoolExecutor(max_workers=3) as pool:
+            for sym, cs in pool.map(fetch, list(self.symbols)):
+                if len(cs) >= need and self.session.seed_history(sym, cs):
+                    seeded += 1
+        self.warmup_seeded = seeded
+        logger.info("warm-up seeded %d/%d symbols", seeded, len(self.symbols))
 
     def stop(self) -> None:
         with self._lock:
@@ -197,6 +228,7 @@ class LiveService:
         return {
             **self.readiness(),
             "started_at": self.started_at,
+            "warmup_seeded": self.warmup_seeded,
             "candles_built": r.candles_built if r else 0,
             "orders_placed": r.orders_placed if r else 0,
             "trades": len(trades),
