@@ -44,6 +44,7 @@ def build_service() -> LiveService:
         maximum_trades_per_day=settings.max_trades_per_day,
         maximum_consecutive_losses=settings.max_consecutive_losses,
         maximum_daily_loss_percentage=Decimal(str(settings.max_daily_loss_percentage)),
+        maximum_total_open_risk_percentage=Decimal(str(settings.max_total_open_risk_percentage)),
     )
     return LiveService(settings, cfg, limits=limits)
 
