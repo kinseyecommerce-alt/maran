@@ -171,6 +171,13 @@ class LiveService:
             "last_auth_error": self.last_auth_error,
             "shorts_enabled": self.cfg.short_enabled,
             "symbols_requested": len(self.symbols),
+            "limits": {
+                "max_positions": self._limits.maximum_simultaneous_positions,
+                "max_trades_per_day": self._limits.maximum_trades_per_day,
+                "max_consecutive_losses": self._limits.maximum_consecutive_losses,
+                "max_daily_loss_pct": float(self._limits.maximum_daily_loss_percentage),
+                "max_symbol_trades_per_day": self._limits.maximum_symbol_trades_per_day,
+            },
         }
 
     def _places_real_orders(self) -> bool:

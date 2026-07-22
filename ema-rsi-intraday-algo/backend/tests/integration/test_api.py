@@ -25,6 +25,19 @@ def test_enable_shorts_switch_flows_to_config(monkeypatch):
     cfg_mod.get_settings.cache_clear()
 
 
+def test_risk_caps_flow_from_settings_into_service():
+    from app.core import config as cfg_mod
+
+    cfg_mod.get_settings.cache_clear()
+    svc = server.build_service()
+    lim = svc.readiness()["limits"]
+    assert lim["max_positions"] == 10
+    assert lim["max_trades_per_day"] == 250
+    assert svc._limits.maximum_simultaneous_positions == 10
+    assert svc._limits.maximum_trades_per_day == 250
+    cfg_mod.get_settings.cache_clear()
+
+
 def test_health_always_ok():
     c = _client_with_service(LiveService(Settings(), wide_session_config()))
     r = c.get("/health")
