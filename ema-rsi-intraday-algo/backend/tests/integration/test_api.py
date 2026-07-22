@@ -33,8 +33,10 @@ def test_risk_caps_flow_from_settings_into_service():
     lim = svc.readiness()["limits"]
     assert lim["max_positions"] == 10
     assert lim["max_trades_per_day"] == 250
-    assert svc._limits.maximum_simultaneous_positions == 10
-    assert svc._limits.maximum_trades_per_day == 250
+    assert lim["max_consecutive_losses"] == 20
+    assert lim["max_total_open_risk_pct"] == 8.0
+    # 10 positions × 0.5% risk = 5% must fit under the open-risk cap
+    assert svc._limits.maximum_total_open_risk_percentage >= 5
     cfg_mod.get_settings.cache_clear()
 
 

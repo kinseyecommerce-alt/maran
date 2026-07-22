@@ -76,11 +76,11 @@ class Settings(BaseSettings):
     default_capital: float = 1_000_000
     default_risk_percentage: float = 0.50
     maximum_stop_percentage: float = 1.0
-    max_daily_loss_percentage: float = 1.5
+    max_daily_loss_percentage: float = 10.0
     max_trades_per_day: int = 250
-    max_consecutive_losses: int = 3
+    max_consecutive_losses: int = 20
     max_simultaneous_positions: int = 10
-    max_total_open_risk_percentage: float = 1.5
+    max_total_open_risk_percentage: float = 8.0
 
     strategy_config_path: str = "config/strategy.default.yaml"
     risk_config_path: str = "config/risk.default.yaml"

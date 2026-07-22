@@ -176,6 +176,7 @@ class LiveService:
                 "max_trades_per_day": self._limits.maximum_trades_per_day,
                 "max_consecutive_losses": self._limits.maximum_consecutive_losses,
                 "max_daily_loss_pct": float(self._limits.maximum_daily_loss_percentage),
+                "max_total_open_risk_pct": float(self._limits.maximum_total_open_risk_percentage),
                 "max_symbol_trades_per_day": self._limits.maximum_symbol_trades_per_day,
             },
         }
