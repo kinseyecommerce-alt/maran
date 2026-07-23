@@ -184,6 +184,15 @@ class LiveService:
         pre-market time. Returns when `stop_supervisor()` is called."""
         premarket = parse_hhmm(self.settings.premarket_login_time)
         retry = self.settings.auth_retry_seconds
+        # Let the web process finish ASGI startup and bind the port BEFORE the first (heavy)
+        # start() attempt. The first start() parses Kite's multi-MB instrument dump, builds
+        # token maps for the whole universe, and warms ~500 symbols from history — all
+        # GIL-holding. Kicked off the instant this thread spawns, it can starve the event loop
+        # from completing startup, so uvicorn never binds and the platform health check never
+        # passes (the deploy then fails on DeployContainerHealthChecksFailed). A short initial
+        # pause guarantees the health check goes green first; the deploy gate needs one pass.
+        if not self._adapter_injected:  # tests inject an adapter and must start synchronously
+            self._stop_event.wait(self.settings.boot_start_delay_seconds)
         while not self._stop_event.is_set():
             now = datetime.utcnow()
             if self.running:

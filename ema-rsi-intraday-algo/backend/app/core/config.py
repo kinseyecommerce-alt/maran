@@ -68,6 +68,9 @@ class Settings(BaseSettings):
     # Daily pre-market Kite re-login (IST) and how often to retry auth when not ready.
     premarket_login_time: str = "08:50"
     auth_retry_seconds: int = 300
+    # Pause before the supervisor's first start() so the web process finishes ASGI startup
+    # and binds the port (passing the platform health check) before heavy Kite work begins.
+    boot_start_delay_seconds: int = 20
     # On startup, backfill this many days of history per symbol to warm the indicators
     # (the slow EMA needs ~238 candles; live-only accrual could never reach it intraday).
     warmup_enabled: bool = True
