@@ -192,7 +192,13 @@ class LiveService:
         # passes (the deploy then fails on DeployContainerHealthChecksFailed). A short initial
         # pause guarantees the health check goes green first; the deploy gate needs one pass.
         if not self._adapter_injected:  # tests inject an adapter and must start synchronously
+            print(
+                f"[boot] supervisor: quiet for {self.settings.boot_start_delay_seconds}s so the "
+                f"deploy finalizes before heavy start()",
+                flush=True,
+            )
             self._stop_event.wait(self.settings.boot_start_delay_seconds)
+            print("[boot] supervisor: quiet period elapsed, attempting start()", flush=True)
         while not self._stop_event.is_set():
             now = datetime.utcnow()
             if self.running:
