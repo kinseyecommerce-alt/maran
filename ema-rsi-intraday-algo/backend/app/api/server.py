@@ -79,6 +79,15 @@ def _svc() -> LiveService:
     return _service
 
 
+@app.get("/", tags=["system"])
+def root() -> dict:
+    """Root — always 200 while the server runs. DigitalOcean's default health check
+    (used when no explicit health_check http_path is applied to the deployed spec) probes
+    `GET /`; without this route FastAPI returns 404 and every fresh deploy is marked
+    unhealthy and rolled back. Keep this liveness-only (no dependency on the tick loop)."""
+    return {"status": "ok", "service": "ema-rsi-intraday-algo", "mode": "paper"}
+
+
 @app.get("/health", tags=["system"])
 def health() -> dict:
     """Liveness — the process is up. Always 200 while the server runs."""

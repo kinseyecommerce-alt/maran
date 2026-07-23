@@ -40,6 +40,15 @@ def test_risk_caps_flow_from_settings_into_service():
     cfg_mod.get_settings.cache_clear()
 
 
+def test_root_always_ok():
+    # DigitalOcean's default health check probes GET / — it must return 200, not 404,
+    # or every fresh deploy is marked unhealthy and rolled back.
+    c = _client_with_service(LiveService(Settings(), wide_session_config()))
+    r = c.get("/")
+    assert r.status_code == 200
+    assert r.json()["status"] == "ok"
+
+
 def test_health_always_ok():
     c = _client_with_service(LiveService(Settings(), wide_session_config()))
     r = c.get("/health")
