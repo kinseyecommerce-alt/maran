@@ -73,20 +73,26 @@ class LiveService:
                     starting_capital=Decimal(str(self.settings.default_capital)),
                     limits=self._limits,
                 )
+                print("[boot] start: building adapter (auth + instruments)", flush=True)
                 adapter = self._adapter or self._build_zerodha_adapter()
                 if adapter is None:
+                    print(f"[boot] start: no adapter ({self.status_reason})", flush=True)
                     return False
                 adapter.subscribe(self.symbols)
                 # warm the indicators from history BEFORE streaming, else the slow EMA never
                 # seats intraday and nothing ever evaluates.
                 if self.settings.warmup_enabled:
                     self.status_reason = "warming up"
+                    print(f"[boot] start: warming up {len(self.symbols)} symbols", flush=True)
                     self._warm_up(adapter)
+                    print(f"[boot] start: warm-up done ({self.warmup_seeded} seeded)", flush=True)
+                print("[boot] start: connecting tick stream", flush=True)
                 adapter.stream_ticks(self.session.on_tick)  # KiteTicker connects threaded
                 self._adapter = adapter
                 self.running = True
                 self.ready = True
                 self.status_reason = "streaming"
+                print("[boot] start: streaming", flush=True)
                 self.started_at = datetime.utcnow().isoformat()
                 self._auth_day = ist_now(datetime.utcnow()).date()
                 logger.info("LiveService started on %d symbols (paper)", len(self.symbols))
