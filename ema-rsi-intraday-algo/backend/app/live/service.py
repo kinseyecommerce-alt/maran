@@ -233,6 +233,11 @@ class LiveService:
         trades = r.trades if r else []
         net = sum((t.net_pnl for t in trades), Decimal(0))
         wins = sum(1 for t in trades if t.net_pnl > 0)
+        feed = (
+            self._adapter.feed_diag()
+            if self._adapter is not None and hasattr(self._adapter, "feed_diag")
+            else None
+        )
         return {
             **self.readiness(),
             "started_at": self.started_at,
@@ -245,10 +250,23 @@ class LiveService:
             "net_pnl": float(net),
             "open_positions": self.open_positions(),
             "rejections": dict(r.rejections) if r else {},
-            "feed": self._adapter.feed_diag()
-            if self._adapter is not None and hasattr(self._adapter, "feed_diag")
-            else None,
+            "feed": feed,
+            # A stuck WebSocket (dead reactor / rejected token) presents as "running" but
+            # with zero ticks off the wire well after start. Surface it so the feed's health
+            # is visible in /status instead of only in the container logs.
+            "feed_stalled": self._feed_stalled(feed),
         }
+
+    def _feed_stalled(self, feed: dict | None) -> bool:
+        """True when we've been streaming for a while but no ticks have arrived off the
+        wire — the classic dead-reactor / rejected-token symptom (raw tick count stays 0)."""
+        if not (self.running and feed and self.started_at):
+            return False
+        try:
+            up_seconds = (datetime.utcnow() - datetime.fromisoformat(self.started_at)).total_seconds()
+        except ValueError:
+            return False
+        return up_seconds > 180 and int(feed.get("ticks_raw", 0) or 0) == 0
 
     def open_positions(self) -> list[dict]:
         if self.session is None:
