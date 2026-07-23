@@ -52,10 +52,16 @@ def build_service() -> LiveService:
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     global _service
+    # Boot milestones printed (flush=True) so a fresh container's RUN logs show exactly how
+    # far startup got — the health check gates on the port serving, so anything slow here is
+    # diagnosable from these lines rather than guessed at.
+    print("[boot] lifespan: building service", flush=True)
     _service = build_service()
+    print("[boot] lifespan: service built, starting supervisor thread", flush=True)
     # run the supervisor off the event loop so boot/health never blocks on Kite; it
     # retries auth until streaming and re-logs-in each new trading day (pre-market).
     threading.Thread(target=_service.supervise, name="live-supervisor", daemon=True).start()
+    print("[boot] lifespan: supervisor started, port now serving", flush=True)
     try:
         yield
     finally:
