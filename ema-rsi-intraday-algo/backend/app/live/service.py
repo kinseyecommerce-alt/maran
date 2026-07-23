@@ -10,6 +10,7 @@ enables on its own.
 from __future__ import annotations
 
 import logging
+import os
 import threading
 from datetime import datetime
 from decimal import Decimal
@@ -155,14 +156,21 @@ class LiveService:
             self.status_reason = "stopped"
 
     def restart_for_new_day(self) -> bool:
-        """Fresh login + fresh session for a new trading day. A rebuilt Kite adapter re-runs
-        auto-login for a new token; an injected (test) adapter is reused."""
+        """New trading day → fresh Kite login + session.
+
+        In production the tick stream is KiteTicker, whose twisted reactor **cannot be
+        restarted within a process** — an in-process restart leaves the WebSocket stuck at
+        "connecting" with no ticks. So we exit the process and let the platform start a
+        fresh one, which re-authenticates for the new day, warms up, and connects a new
+        reactor cleanly. Tests inject a non-KiteTicker adapter and take the in-process path.
+        """
         self.stop()
-        if not self._adapter_injected:
-            self._adapter = None
-        self.session = None
-        logger.info("LiveService re-authenticating for a new trading day")
-        return self.start()
+        if self._adapter_injected:  # tests: no twisted reactor, in-process restart is fine
+            self.session = None
+            logger.info("LiveService re-authenticating for a new trading day (in-process)")
+            return self.start()
+        logger.warning("new trading day — exiting for a clean restart (fresh Kite WS reactor)")
+        os._exit(0)  # platform restarts the service; boot re-auths + warms + reconnects
 
     def supervise(self, poll_seconds: float = 60.0) -> None:
         """Blocking supervisor loop (run in a daemon thread). Attempts start until running,
