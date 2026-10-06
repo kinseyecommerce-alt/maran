@@ -811,6 +811,7 @@ class Settings(BaseSettings):
     ws_max_connections:       int   = 50     # max simultaneous WebSocket clients
     order_max_retries:        int   = 3      # kite_client retry attempts on transient error
     tick_interval_ms:         int   = 250    # PAPER mode poll interval (ms); 250 = 4 ticks/s
+    paper_offhours_tick_sec:  float = 5.0    # PAPER simulator pace outside NSE hours
 
     # Server
     host: str = "0.0.0.0"

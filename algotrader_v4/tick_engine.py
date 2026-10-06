@@ -1223,9 +1223,17 @@ class TickEngine:
                 tasks = [self._fetch_and_process(sym) for sym in self._symbols]
                 await asyncio.gather(*tasks, return_exceptions=True)
 
-            # Sleep the remainder of the configured tick interval
+            # Sleep the remainder of the configured tick interval. After NSE
+            # hours the PAPER simulator only keeps prices alive (the NSE
+            # agents are held by segment hours): 4 ticks/s × every symbol,
+            # each rebuilding indicator frames on the event loop, pinned the
+            # server at 100% CPU and made every API call take ~1 s.
+            interval = settings.tick_interval_ms / 1000
+            if (not self._live_data_enabled() and not is_market_open()
+                    and not settings.segment_paper_after_hours):
+                interval = max(interval, settings.paper_offhours_tick_sec)
             elapsed = time.monotonic() - t_start
-            await asyncio.sleep(max(0, settings.tick_interval_ms / 1000 - elapsed))
+            await asyncio.sleep(max(0, interval - elapsed))
 
     async def _fetch_and_process(self, symbol: str) -> None:
         """PAPER mode only — generate next GBM tick and process it."""

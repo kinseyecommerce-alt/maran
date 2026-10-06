@@ -2,7 +2,9 @@
 segment_engine.py — PAPER engine for segments with no real feed in this build
 (BSE_EQ, MCX, CDS).
 
-  • SIMULATED feed: per-instrument GBM ticks every second. Every price it
+  • SIMULATED feed: per-instrument GBM ticks every second, scaled so a full
+    session's typical high-low range matches the instrument's real intraday
+    range (gold ≈1%, crude ≈2.5%, currency pairs ≈0.3–0.5%). Every price it
     produces is labelled SIMULATED. BSE stocks start from the real NSE EOD
     close of the same company (shown as "NSE close" reference); MCX/CDS
     contracts start from a synthetic seed level, flagged synthetic_seed=True,
@@ -12,7 +14,8 @@ segment_engine.py — PAPER engine for segments with no real feed in this build
     when the segment is PAPER and raises SegmentLiveNotSupported otherwise
     (these segments cannot be armed for LIVE — see segments.KITE_STUBS).
   • Native strategies (trend = EMA cross, mean reversion = z-score) on 10-s
-    bars, with volatility-scaled SL/target, time stop, and square-off before
+    bars. SL = max(30% of the day range, 2.5σ of realised 10-min moves),
+    target = 1.6×SL, 60-min time stop, and square-off before
     the segment closes. Every entry goes through segments.entry_check()
     (kill switch, PAPER/LIVE gate, hours, daily loss, positions, capital).
 """
@@ -40,24 +43,32 @@ class Contract:
     segment: str
     multiplier: float    # P&L per 1.0 price move per lot
     margin_pct: float    # paper margin as fraction of notional (1.0 = cash equity)
-    vol: float           # annualised vol for the simulator
+    day_range_pct: float  # typical full-session high-low range, % of price (simulator scale)
     seed: Optional[float] = None
     kind: str = "FUT"
 
 
+# E[high − low] of Brownian motion over a session = √(8/π)·σ_session ≈ 1.596·σ
+_RANGE_TO_SIGMA = 1.0 / math.sqrt(8.0 / math.pi)
+SL_RANGE_FRAC = 0.30        # stop distance ≥ 30% of the instrument's day range
+TARGET_R = 1.6              # target = 1.6 × stop distance
+TIME_STOP_SEC = 60 * 60
+
+
 UNIVERSE: dict[str, list[Contract]] = {
-    "BSE_EQ": [Contract(s, "BSE_EQ", 1.0, 1.0, 0.25, kind="EQ") for s in
+    # large-cap cash equities: ~1.5–2.5% typical day range
+    "BSE_EQ": [Contract(s, "BSE_EQ", 1.0, 1.0, 2.0, kind="EQ") for s in
                ("RELIANCE", "HDFCBANK", "ICICIBANK", "INFY", "TCS",
                 "ITC", "LT", "SBIN", "BHARTIARTL", "AXISBANK")],
-    "MCX": [Contract("GOLDM-FUT", "MCX", 10.0, 0.10, 0.15, 120000.0),
-            Contract("SILVERM-FUT", "MCX", 5.0, 0.12, 0.25, 145000.0),
-            Contract("CRUDEOILM-FUT", "MCX", 10.0, 0.15, 0.35, 5600.0),
-            Contract("NATURALGAS-FUT", "MCX", 1250.0, 0.20, 0.50, 290.0),
-            Contract("COPPER-FUT", "MCX", 2500.0, 0.10, 0.20, 900.0)],
-    "CDS": [Contract("USDINR-FUT", "CDS", 1000.0, 0.03, 0.04, 88.5),
-            Contract("EURINR-FUT", "CDS", 1000.0, 0.04, 0.07, 103.0),
-            Contract("GBPINR-FUT", "CDS", 1000.0, 0.04, 0.08, 118.0),
-            Contract("JPYINR-FUT", "CDS", 1000.0, 0.04, 0.09, 59.0)],
+    "MCX": [Contract("GOLDM-FUT", "MCX", 10.0, 0.10, 1.0, 120000.0),
+            Contract("SILVERM-FUT", "MCX", 5.0, 0.12, 1.8, 145000.0),
+            Contract("CRUDEOILM-FUT", "MCX", 10.0, 0.15, 2.5, 5600.0),
+            Contract("NATURALGAS-FUT", "MCX", 1250.0, 0.20, 3.5, 290.0),
+            Contract("COPPER-FUT", "MCX", 2500.0, 0.10, 1.2, 900.0)],
+    "CDS": [Contract("USDINR-FUT", "CDS", 1000.0, 0.03, 0.3, 88.5),
+            Contract("EURINR-FUT", "CDS", 1000.0, 0.04, 0.45, 103.0),
+            Contract("GBPINR-FUT", "CDS", 1000.0, 0.04, 0.5, 118.0),
+            Contract("JPYINR-FUT", "CDS", 1000.0, 0.04, 0.5, 59.0)],
 }
 
 STRATEGY_META = {
@@ -70,7 +81,20 @@ STRATEGY_META = {
 }
 
 BAR_SEC = 10
-_SEC_PER_YEAR = 252 * 6.25 * 3600
+
+
+def session_seconds(segment: str) -> float:
+    """Length of the segment's trading session (MCX ≈14.5 h, CDS 8 h, BSE 6.25 h)."""
+    from segments import SEGMENTS
+    s = SEGMENTS[segment]
+    o, c = s.open_t, s.close_t
+    return float((c.hour * 3600 + c.minute * 60) - (o.hour * 3600 + o.minute * 60))
+
+
+def tick_sigma(c: "Contract", dt: float = 1.0) -> float:
+    """Per-tick log-return σ so that E[session high − low] ≈ day_range_pct."""
+    sigma_session = (c.day_range_pct / 100.0) * _RANGE_TO_SIGMA
+    return sigma_session * math.sqrt(dt / session_seconds(c.segment))
 
 
 def _now_iso() -> str:
@@ -164,8 +188,8 @@ class NativeEngine:
         self.bars: dict[str, deque] = {}
         self._bar_open_ts: dict[str, float] = {}
         self.positions_: dict[str, dict] = {}        # key sym@seg
-        self.orders: deque = deque(maxlen=300)
-        self.closed: deque = deque(maxlen=300)
+        self.orders: deque = deque(maxlen=5000)     # whole day (40 entries/segment/day cap)
+        self.closed: deque = deque(maxlen=5000)
         self.realised: dict[str, float] = {s: 0.0 for s in UNIVERSE}
         self.trades: dict[str, int] = {s: 0 for s in UNIVERSE}
         self._day = None
@@ -208,17 +232,18 @@ class NativeEngine:
         if not self._seeded:
             self.seed()
         now = now if now is not None else time.time()
-        for key, c in self.contracts.items():
-            sig = c.vol * math.sqrt(dt / _SEC_PER_YEAR) * 4.0   # 4× intraday activity for paper
-            p = self.price[key] * math.exp(-0.5 * sig * sig + sig * self._rng.gauss(0, 1))
-            self.price[key] = p
-            ob = self._bar_open_ts.get(key)
-            if ob is None or now - ob >= BAR_SEC:
-                self.bars[key].append(p)
-                self._bar_open_ts[key] = now
-            else:
-                self.bars[key][-1] = p
-        self.last_tick_ts = now
+        with self._lock:                          # readers get a consistent price snapshot
+            for key, c in self.contracts.items():
+                sig = tick_sigma(c, dt)
+                p = self.price[key] * math.exp(-0.5 * sig * sig + sig * self._rng.gauss(0, 1))
+                self.price[key] = p
+                ob = self._bar_open_ts.get(key)
+                if ob is None or now - ob >= BAR_SEC:
+                    self.bars[key].append(p)
+                    self._bar_open_ts[key] = now
+                else:
+                    self.bars[key][-1] = p
+            self.last_tick_ts = now
 
     # ── orders (paper ledger only) ─────────────────────────────────────────
     def route_order(self, segment: str, symbol: str, side: str, lots: int, reason: str,
@@ -257,14 +282,12 @@ class NativeEngine:
         if not ok:
             strat.state.last_signal = {"symbol": c.symbol, "action": side, "skipped": why}
             return None
-        bars = list(self.bars[key])
-        sd = _std(bars[-30:]) if len(bars) >= 10 else px * 0.001
-        sd = max(sd, px * 0.0003)
+        dist = self.stop_distance(key)
         rec = self.route_order(c.segment, c.symbol, side, lots, f"{strat.name} entry", strat.name)
         sgn = 1 if side == "BUY" else -1
         pos = {"key": key, "symbol": c.symbol, "segment": c.segment, "strategy": strat.name,
                "side": side, "lots": lots, "qty": sgn * lots, "entry": rec["price"],
-               "sl": rec["price"] - sgn * 2.0 * sd, "target": rec["price"] + sgn * 3.0 * sd,
+               "sl": rec["price"] - sgn * dist, "target": rec["price"] + sgn * TARGET_R * dist,
                "opened": time.time(), "margin": round(lots * margin_lot, 2),
                "order_id": rec["order_id"], "price_source": "SIMULATED"}
         with self._lock:
@@ -277,6 +300,20 @@ class NativeEngine:
                     c.segment, side, c.symbol, lots, rec["price"], strat.name)
         return pos
 
+    def stop_distance(self, key: str) -> float:
+        """Stop distance in price units: the larger of 30% of the instrument's
+        typical day range and 2.5σ of realised 10-minute moves (bar returns).
+        Never a few seconds of noise."""
+        c = self.contracts[key]
+        px = self.price[key]
+        floor = SL_RANGE_FRAC * (c.day_range_pct / 100.0) * px
+        bars = list(self.bars.get(key, ()))
+        rv = 0.0
+        if len(bars) >= 12:
+            rets = [math.log(b / a) for a, b in zip(bars[-31:-1], bars[-30:]) if a > 0 and b > 0]
+            rv = _std(rets) * math.sqrt(600 / BAR_SEC) * px * 2.5
+        return max(floor, rv)
+
     def _close(self, key: str, reason: str) -> Optional[dict]:
         with self._lock:
             pos = self.positions_.pop(key, None)
@@ -287,6 +324,10 @@ class NativeEngine:
         rec = self.route_order(c.segment, c.symbol, side, pos["lots"], reason, pos["strategy"])
         pnl = (rec["price"] - pos["entry"]) * pos["qty"] * c.multiplier
         with self._lock:
+            # the exit order carries its realised P&L → realised = Σ listed exits
+            rec["pnl"] = round(pnl, 2)
+            rec["entry_order_id"] = pos.get("order_id")
+            rec["entry_price"] = pos["entry"]
             self.realised[c.segment] = self.realised.get(c.segment, 0.0) + pnl
             self.closed.appendleft({**pos, "exit": rec["price"], "pnl": round(pnl, 2), "reason": reason,
                                     "closed": _now_iso()})
@@ -325,7 +366,7 @@ class NativeEngine:
                 self._close(key, "stop_loss")
             elif (long and px >= pos["target"]) or (not long and px <= pos["target"]):
                 self._close(key, "target")
-            elif time.time() - pos["opened"] > 30 * 60:
+            elif time.time() - pos["opened"] > TIME_STOP_SEC:
                 self._close(key, "time_stop")
             elif now_dt >= sq_cut and segment_manager.is_open(pos["segment"], now_dt):
                 self._close(key, "segment_squareoff")
@@ -389,6 +430,22 @@ class NativeEngine:
             st.stop()
 
     # ── read models ────────────────────────────────────────────────────────
+    def snapshot_state(self) -> dict:
+        """One consistent copy (same price tick) of positions, prices, orders."""
+        with self._lock:
+            return {"positions": {k: dict(v) for k, v in self.positions_.items()},
+                    "price": dict(self.price),
+                    "orders": [dict(o) for o in self.orders],        # newest first
+                    "closed": [dict(t) for t in self.closed]}
+
+    def realised_today(self, segment: str, orders: Optional[list] = None) -> float:
+        """Realised P&L = Σ pnl of today's listed exit orders in the segment."""
+        from segments import segment_manager
+        today = segment_manager.now().date().isoformat()
+        src = orders if orders is not None else list(self.orders)
+        return round(sum(float(o.get("pnl") or 0.0) for o in src
+                         if o.get("segment") == segment and str(o.get("ts", "")).startswith(today)), 2)
+
     def positions(self, segment: str) -> list[dict]:
         out = []
         for key, p in list(self.positions_.items()):
@@ -403,7 +460,7 @@ class NativeEngine:
 
     def pnl(self, segment: str) -> dict:
         unreal = sum(p["pnl"] for p in self.positions(segment))
-        r = self.realised.get(segment, 0.0)
+        r = self.realised_today(segment)
         return {"realised": round(r, 2), "unrealised": round(unreal, 2),
                 "total": round(r + unreal, 2), "trades_today": self.trades.get(segment, 0)}
 
@@ -444,6 +501,57 @@ class NativeEngine:
         except Exception:
             pass
         return "SIMULATED"
+
+    # ── persistence (paper_store) ─────────────────────────────────────────
+    def export_state(self) -> dict:
+        with self._lock:
+            return {"positions": {k: dict(v) for k, v in self.positions_.items()},
+                    "price": dict(self.price),
+                    "bars": {k: list(v) for k, v in self.bars.items()},
+                    "orders": [dict(o) for o in self.orders],
+                    "closed": [dict(t) for t in self.closed],
+                    "realised": dict(self.realised), "trades": dict(self.trades),
+                    "day": self._day.isoformat() if self._day else None,
+                    "strategies": {n: {"trades_today": s.state.trades_today, "pnl_today": s.state.pnl_today,
+                                       "last_signal": s.state.last_signal}
+                                   for n, s in self.strategies.items()}}
+
+    def import_state(self, data: dict, today: str) -> dict:
+        """Restore a saved paper book. Open positions and prices always come
+        back (closing-time logic squares them off if their segment has closed);
+        orders, closed trades, realised P&L and counters only if saved today."""
+        same_day = data.get("day") == today
+        with self._lock:
+            for k, v in (data.get("price") or {}).items():
+                if k in self.contracts:
+                    self.price[k] = float(v)
+            for k, v in (data.get("bars") or {}).items():
+                if k in self.contracts:
+                    self.bars[k] = deque((float(x) for x in v), maxlen=240)
+            for k in self.contracts:
+                self.bars.setdefault(k, deque(maxlen=240))
+            self.positions_.clear()
+            for k, v in (data.get("positions") or {}).items():
+                if k in self.contracts:
+                    v = dict(v)
+                    v["opened"] = time.time() - min(max(time.time() - float(v.get("opened") or 0), 0), TIME_STOP_SEC)
+                    self.positions_[k] = v
+            self.orders.clear(); self.closed.clear()
+            if same_day:
+                self.orders.extend(data.get("orders") or [])
+                self.closed.extend(data.get("closed") or [])
+                self.realised.update({k: float(v) for k, v in (data.get("realised") or {}).items()})
+                self.trades.update({k: int(v) for k, v in (data.get("trades") or {}).items()})
+                from datetime import date as _date
+                self._day = _date.fromisoformat(today)
+                for n, sv in (data.get("strategies") or {}).items():
+                    st = self.strategies.get(n)
+                    if st:
+                        st.state.trades_today = int(sv.get("trades_today") or 0)
+                        st.state.pnl_today = float(sv.get("pnl_today") or 0.0)
+                        st.state.last_signal = sv.get("last_signal") or {}
+            self._seeded = bool(self.price) and all(k in self.price for k in self.contracts)
+        return {"positions": len(self.positions_), "orders": len(self.orders), "same_day": same_day}
 
     def snapshot(self, segment: str) -> dict:
         return {"segment": segment, "positions": self.positions(segment), "pnl": self.pnl(segment),
