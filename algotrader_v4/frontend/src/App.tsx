@@ -6,6 +6,7 @@ import {
   LayoutDashboard, ClipboardList, Target, Scale, History, Brain,
 } from 'lucide-react'
 import Header from './components/Header'
+import IndexStrip from './components/IndexStrip'
 import PositionsTab from './components/tabs/PositionsTab'
 import OrdersTab from './components/tabs/OrdersTab'
 import BracketsTab from './components/tabs/BracketsTab'
@@ -299,6 +300,9 @@ export default function App() {
 
       {/* HEADER */}
       <Header />
+
+      {/* LIVE INDEX LEVELS */}
+      <IndexStrip />
 
       {/* HALTED BANNER */}
       {isHalted && (

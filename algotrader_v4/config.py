@@ -214,6 +214,16 @@ class Settings(BaseSettings):
 
     # Pre-learned system (set after running historical_learner.py)
     skip_startup_backtest: bool = False   # use pre-learned approved_symbols.json
+    # PAPER only: approve watchlist symbols whose startup backtest could not
+    # run for lack of history (no Kite/TrueData session), so agents trade
+    # autonomously on the simulator. Symbols that FAIL a real backtest are
+    # still rejected; LIVE always keeps the strict gate.
+    paper_approve_untested: bool = True
+    # PAPER + GBM simulator only: when Kite 1-min history is unavailable, seed
+    # candle buffers with SYNTHETIC warm-up bars drawn from the simulator's
+    # own GBM, so agents can evaluate immediately instead of after 10-50 min.
+    # Never used when a real feed is active (LIVE, TrueData, Kite data).
+    paper_synthetic_backfill: bool = True
     use_nifty100_watchlist: bool = False  # auto-use full Nifty 100 as watchlist
 
     # Intelligence layer — Claude Opus real-time market timing gate
@@ -705,6 +715,22 @@ class Settings(BaseSettings):
     # — only the market-data feed is real. Default False keeps the offline GBM
     # simulator so paper trading works without a broker connection / off-hours.
     paper_use_live_data: bool = False
+
+    # Live index prices (NIFTY / BANKNIFTY / FINNIFTY / MIDCPNIFTY / INDIA VIX /
+    # SENSEX) — see index_feed.py. Source priority: Kite quote (when a Kite
+    # session is connected and market data is not stubbed) → NSE public
+    # allIndices API (no credentials needed) → last good value (marked stale)
+    # → the PAPER simulator's own price (labelled SIMULATED).
+    index_feed_enabled: bool = True
+    index_feed_interval_sec: float = Field(default=5.0, ge=1.0, le=300.0)
+    index_feed_use_nse: bool = True       # allow the free NSE public fallback
+    index_feed_stale_sec: float = Field(default=120.0, ge=5.0)
+    # PAPER without a live tick feed: anchor the GBM simulator's index prices
+    # to the real index level from index_feed, so index futures/options agents
+    # paper-trade around today's real NIFTY/BANKNIFTY instead of a ₹1000 seed.
+    # Orders stay 100% simulated — only the simulated price is re-anchored.
+    index_feed_nse_min_interval_sec: float = 15.0   # be polite to NSE's public API
+    paper_anchor_indices: bool = True
 
     # Daily capital allocation. Each of the 8 strategy agents gets its own
     # independent pool (capital_per_agent) — no sharing across siblings, so

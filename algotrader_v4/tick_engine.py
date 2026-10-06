@@ -899,6 +899,19 @@ class TickEngine:
     def remove_subscriber(self, name: str) -> None:
         self._subscribers.pop(name, None)
 
+    def reset_symbol(self, symbol: str) -> None:
+        """Drop one symbol's candle history + indicator cache (keeps the
+        subscription). Used when the PAPER simulator is re-anchored to a real
+        level far from its seed, so indicators never see an artificial gap."""
+        for bufs in (self._bufs_1min, self._bufs_5min):
+            buf = bufs.get(symbol)
+            if buf is not None:
+                buf.reset()
+        for d in (self._last_tick_ltp, self._last_tick_ts, self._dedup_pending_vol,
+                  self._ind_cache_count, self._ind_cache_ltp, self._ind_cache,
+                  self._latest_tick, self._latest_ind):
+            d.pop(symbol, None)
+
     # ── Shared tick processing ────────────────────────────────────────
 
     async def _process_tick(self, symbol: str, tick: Tick, source: str = "KITE") -> None:
@@ -1343,6 +1356,51 @@ class TickEngine:
         rest = [s for s in self._symbols if s in self._bufs_1min and s not in seen]
         return pri + rest
 
+    def _paper_synthetic_backfill(self, syms: list[str], n_bars: int = 200) -> int:
+        """PAPER + GBM simulator only: give still-cold buffers synthetic warm-up
+        bars from paper_sim so agents can evaluate at once. Returns the number
+        of symbols seeded. A no-op whenever a real feed is active."""
+        if (settings.trading_mode != "PAPER" or self._live_data_enabled()
+                or not getattr(settings, "paper_synthetic_backfill", True)):
+            return 0
+        seeded = 0
+        for sym in syms:
+            buf1 = self._bufs_1min.get(sym)
+            buf5 = self._bufs_5min.get(sym)
+            if buf1 is None or len(buf1.candles()) > 50:
+                continue
+            try:
+                bars = paper_sim.synthetic_bars(sym, n_bars=n_bars, bar_sec=60)
+                if not bars:
+                    continue
+                _five: dict = {}
+                for ts, o, h, l, c, vol in bars:
+                    buf1.seed_candle(o, h, l, c, vol, ts)
+                    _b = ts.replace(minute=ts.minute // 5 * 5, second=0, microsecond=0)
+                    agg = _five.get(_b)
+                    if agg is None:
+                        _five[_b] = [o, h, l, c, vol, _b]
+                    else:
+                        agg[1] = max(agg[1], h); agg[2] = min(agg[2], l)
+                        agg[3] = c; agg[4] += vol
+                if buf5:
+                    # Drop the newest bucket if it is the still-forming 5-min bar.
+                    _cur5 = bars[-1][0] + timedelta(minutes=1)
+                    _cur5 = _cur5.replace(minute=_cur5.minute // 5 * 5, second=0, microsecond=0)
+                    for _b, (o, h, l, c, vol, ts) in _five.items():
+                        if _b >= _cur5:
+                            continue
+                        buf5.seed_candle(o, h, l, c, vol, ts)
+                self._ind_cache.pop(sym, None)
+                self._ind_cache_count.pop(sym, None)
+                seeded += 1
+            except Exception as exc:
+                logger.debug("TickEngine: synthetic backfill failed for {}: {}", sym, exc)
+        if seeded:
+            logger.info("TickEngine: PAPER — no real 1-min history; seeded {}/{} symbols "
+                        "with SYNTHETIC simulator warm-up bars (paper only)", seeded, len(syms))
+        return seeded
+
     async def _backfill_bufs(self, max_symbols: int = 120) -> None:
         """Seed 1-min and 5-min candle buffers with Kite historical bars.
 
@@ -1427,6 +1485,8 @@ class TickEngine:
                 seeded += 1
             except Exception as exc:
                 logger.debug("TickEngine: backfill failed for {}: {}", sym, exc)
+
+        seeded += self._paper_synthetic_backfill(syms)
 
         if seeded < len(syms) // 4:
             logger.warning(

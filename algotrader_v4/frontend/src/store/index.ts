@@ -1,5 +1,5 @@
 import { create } from 'zustand'
-import type { TickData, Position, Order, Bracket, RiskStatus, Agent, BotStatus, HealthData, AgentActivityEntry } from '../types'
+import type { IndexQuote, TickData, Position, Order, Bracket, RiskStatus, Agent, BotStatus, HealthData, AgentActivityEntry } from '../types'
 
 interface AppStore {
   // Auth
@@ -23,6 +23,10 @@ interface AppStore {
   ticks: Record<string, TickData>
   sparklines: Record<string, number[]>
   setTick: (t: TickData) => void
+
+  // Live index levels (NIFTY / BANKNIFTY / …) from /market/indices + WS "indices"
+  indices: IndexQuote[]
+  setIndices: (i: IndexQuote[]) => void
 
   // Selected symbol for chart
   selectedSymbol: string
@@ -89,6 +93,9 @@ export const useStore = create<AppStore>((set, get) => ({
       sparklines: { ...state.sparklines, [t.symbol]: spark },
     }
   }),
+
+  indices: [],
+  setIndices: (i) => set({ indices: i }),
 
   selectedSymbol: '',
   setSelectedSymbol: (s) => set({ selectedSymbol: s }),

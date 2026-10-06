@@ -271,6 +271,122 @@ def load_symbol(
     return result.sort_values("date").reset_index(drop=True)
 
 
+# ── Index daily history (NSE "ind_close_all" archive) ───────────────────────
+# Equity bhavcopy has no index rows, so without a Kite session NIFTY had NO
+# daily history: the regime detector logged NIFTY=0 / ADX=0 and ran blind.
+# NSE publishes every index's daily OHLC in one small public CSV per day.
+_IDX_BASE = "https://nsearchives.nseindia.com/content/indices/ind_close_all_{dmy}.csv"
+_IDX_CACHE_DIR = _CACHE_DIR / "indices"
+_IDX_DAY: "dict[date, dict[str, tuple[float, float, float, float, int]]]" = {}
+_IDX_MISSING: dict[date, float] = {}
+
+INDEX_NAMES: dict[str, str] = {
+    "NIFTY": "NIFTY 50", "NIFTY50": "NIFTY 50", "NIFTY 50": "NIFTY 50",
+    "BANKNIFTY": "NIFTY BANK", "NIFTYBANK": "NIFTY BANK",
+    "FINNIFTY": "NIFTY FINANCIAL SERVICES",
+    "MIDCPNIFTY": "NIFTY MIDCAP SELECT",
+    "NIFTYNEXT50": "NIFTY NEXT 50", "NIFTYIT": "NIFTY IT", "NIFTYAUTO": "NIFTY AUTO",
+    "NIFTYPHARMA": "NIFTY PHARMA", "NIFTYFMCG": "NIFTY FMCG", "NIFTYMETAL": "NIFTY METAL",
+    "NIFTYENERGY": "NIFTY ENERGY", "NIFTYREALTY": "NIFTY REALTY",
+    "INDIAVIX": "INDIA VIX",
+}
+
+
+def is_index(symbol: str) -> bool:
+    return symbol.upper().strip() in INDEX_NAMES
+
+
+def _parse_index_csv(content: bytes) -> dict[str, tuple]:
+    df = pd.read_csv(io.BytesIO(content))
+    df = df.rename(columns=lambda c: str(c).strip())
+    out: dict[str, tuple] = {}
+    for row in df.itertuples(index=False):
+        vals = list(row)
+        try:
+            name = str(vals[0]).strip().upper()
+            o, h, l, c = (float(vals[i]) for i in (2, 3, 4, 5))
+        except (ValueError, TypeError, IndexError):
+            continue
+        try:
+            vol = int(float(vals[8]))
+        except (ValueError, TypeError, IndexError):
+            vol = 0
+        if c > 0:
+            out.setdefault(name, (o or c, h or c, l or c, c, vol))
+    return out
+
+
+def _index_day(d: date) -> Optional[dict]:
+    hit = _IDX_DAY.get(d)
+    if hit is not None:
+        return hit
+    cache = _IDX_CACHE_DIR / f"ind_close_all_{d.strftime('%d%m%Y')}.csv"
+    content: Optional[bytes] = None
+    if cache.exists():
+        content = cache.read_bytes()
+    else:
+        ts = _IDX_MISSING.get(d)
+        if ts is not None:
+            recent = (_now_ist().date() - d).days <= 5
+            if not (recent and _time.monotonic() - ts > _MISSING_RECENT_TTL):
+                return None
+        import urllib.request
+        try:
+            req = urllib.request.Request(_IDX_BASE.format(dmy=d.strftime("%d%m%Y")), headers={
+                "User-Agent": "Mozilla/5.0", "Referer": "https://www.nseindia.com/"})
+            with urllib.request.urlopen(req, timeout=15) as resp:
+                content = resp.read()
+            if not content.lstrip().lower().startswith(b"index name"):
+                raise ValueError("not an index close file")
+            cache.parent.mkdir(parents=True, exist_ok=True)
+            cache.write_bytes(content)
+            _IDX_MISSING.pop(d, None)
+        except Exception as exc:
+            _IDX_MISSING[d] = _time.monotonic()
+            logger.debug("Index close file {} not available — {}", d.isoformat(), exc)
+            return None
+    try:
+        parsed = _parse_index_csv(content)
+    except Exception:
+        cache.unlink(missing_ok=True)
+        return None
+    _IDX_DAY[d] = parsed
+    while len(_IDX_DAY) > _DAY_IDX_MAX:
+        _IDX_DAY.pop(next(iter(_IDX_DAY)))
+    return parsed
+
+
+def load_index(symbol: str, from_date: date, to_date: date) -> pd.DataFrame:
+    """Daily OHLC for an NSE index (NIFTY, BANKNIFTY, INDIAVIX, ...) from the
+    public ind_close_all archive. Same columns as load_symbol()."""
+    name = INDEX_NAMES.get(symbol.upper().strip(), symbol.upper().strip())
+    rows: list[dict] = []
+    consec_fail = 0
+    with _DOWNLOAD_LOCK:
+        for d in _trading_days(from_date, to_date):
+            was_known = d in _IDX_DAY or d in _IDX_MISSING or (
+                _IDX_CACHE_DIR / f"ind_close_all_{d.strftime('%d%m%Y')}.csv").exists()
+            day = _index_day(d)
+            if day is None:
+                if not was_known:
+                    consec_fail += 1
+                    if consec_fail >= _MAX_CONSEC_FAILURES:
+                        logger.warning("Index history: {} consecutive downloads failed — "
+                                       "skipping the rest of {}", consec_fail, symbol)
+                        break
+                continue
+            consec_fail = 0
+            v = day.get(name)
+            if v is None:
+                continue
+            o, h, l, c, vol = v
+            rows.append({"date": pd.Timestamp(d), "open": o, "high": h,
+                         "low": l, "close": c, "volume": vol})
+    if not rows:
+        return pd.DataFrame(columns=["date", "open", "high", "low", "close", "volume"])
+    return pd.DataFrame(rows).sort_values("date").reset_index(drop=True)
+
+
 def latest_available_date() -> date:
     """Return the latest date for which Bhavcopy is likely published (T-1)."""
     today = _now_ist().date()

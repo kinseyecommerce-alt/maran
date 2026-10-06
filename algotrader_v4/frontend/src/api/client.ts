@@ -156,8 +156,12 @@ export const api = {
 
   // ── Settings — Trading Mode ─────────────────────────────────────────────────
   getTradingMode: () => ax().get('/settings/trading-mode'),
-  setTradingMode: (mode: 'PAPER' | 'LIVE', confirm: boolean = false) =>
-                    ax().post('/settings/trading-mode', { mode, confirm }),
+  // LIVE requires confirm=true AND the typed phrase "SEND" (enforced server-side).
+  setTradingMode: (mode: 'PAPER' | 'LIVE', confirm: boolean = false, confirmText: string = '') =>
+                    ax().post('/settings/trading-mode', { mode, confirm, confirm_text: confirmText }),
+
+  // ── Market — live index levels ──────────────────────────────────────────────
+  indices: (refresh: boolean = false) => ax().get('/market/indices', { params: refresh ? { refresh: true } : {} }),
 
   // ── Settings — Capital Allocation ───────────────────────────────────────────
   getCapitalAllocation: () => ax().get('/settings/capital-allocation'),

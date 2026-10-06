@@ -833,6 +833,7 @@ function SaveSection({ onSave, saving, label = 'Save' }: { onSave: () => void; s
 function TradingConfigPanel({ addToast }: { addToast: (msg: string, type?: any) => void }) {
   const [mode, setMode]             = useState('PAPER')
   const [modeConfirm, setModeConfirm] = useState(false)
+  const [modeConfirmText, setModeConfirmText] = useState('')
   const [modeSaving, setModeSaving] = useState(false)
 
   const [cap, setCap] = useState({
@@ -876,12 +877,18 @@ function TradingConfigPanel({ addToast }: { addToast: (msg: string, type?: any) 
   }, [])
 
   const handleModeSwitch = async (target: string) => {
-    if (target === 'LIVE' && !modeConfirm) { setModeConfirm(true); return }
+    if (target === 'LIVE' && !modeConfirm) { setModeConfirm(true); setModeConfirmText(''); return }
+    // Real-money gate: the operator must type SEND (server enforces it too).
+    if (target === 'LIVE' && modeConfirmText.trim() !== 'SEND') {
+      addToast('Type SEND to switch to LIVE', 'error'); return
+    }
     setModeSaving(true)
     try {
-      const r = await api.setTradingMode(target as 'PAPER' | 'LIVE', target === 'LIVE')
+      const r = await api.setTradingMode(target as 'PAPER' | 'LIVE', target === 'LIVE',
+                                         target === 'LIVE' ? modeConfirmText.trim() : '')
       setMode(r.data.trading_mode)
       setModeConfirm(false)
+      setModeConfirmText('')
       addToast(`Switched to ${r.data.trading_mode} mode (in-memory)`, target === 'LIVE' ? 'buy' : 'info')
     } catch (e: any) {
       addToast(e.response?.data?.detail || 'Mode switch failed', 'error')
@@ -942,10 +949,13 @@ function TradingConfigPanel({ addToast }: { addToast: (msg: string, type?: any) 
             ))}
             {modeConfirm && (
               <div className="flex items-center gap-2 ml-2">
-                <span className="text-xs text-rose-400">⚠ Confirm switch to LIVE?</span>
-                <button onClick={() => handleModeSwitch('LIVE')}
-                  className="text-xs px-2 py-1 bg-rose-600 text-white rounded-lg">Yes</button>
-                <button onClick={() => setModeConfirm(false)}
+                <span className="text-xs text-rose-400">⚠ Real orders — type SEND:</span>
+                <input value={modeConfirmText} onChange={e => setModeConfirmText(e.target.value)}
+                  placeholder="SEND" autoComplete="off" spellCheck={false} data-testid="live-confirm-text"
+                  className="w-20 px-2 py-1 bg-slate-900 border border-rose-700 rounded-lg text-xs text-slate-100 font-mono" />
+                <button onClick={() => handleModeSwitch('LIVE')} disabled={modeConfirmText.trim() !== 'SEND' || modeSaving}
+                  className="text-xs px-2 py-1 bg-rose-600 text-white rounded-lg disabled:opacity-40">Go LIVE</button>
+                <button onClick={() => { setModeConfirm(false); setModeConfirmText('') }}
                   className="text-xs px-2 py-1 border border-slate-600 text-slate-300 rounded-lg">No</button>
               </div>
             )}

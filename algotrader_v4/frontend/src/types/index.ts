@@ -101,6 +101,24 @@ export interface HealthData {
   time: string
 }
 
+export interface IndexQuote {
+  symbol: string
+  name: string
+  ltp: number | null
+  change: number | null
+  change_pct: number | null
+  prev_close?: number
+  open?: number
+  high?: number
+  low?: number
+  source: 'KITE' | 'NSE' | 'SIMULATED' | 'UNAVAILABLE'
+  stale: boolean
+  available: boolean
+  age_sec?: number
+  ts?: string
+  exchange_ts?: string
+}
+
 export type TabId = 'positions' | 'orders' | 'brackets' | 'risk' | 'agents' | 'sebi' | 'history' | 'gate'
 
 export interface AgentActivityEntry {
