@@ -8,7 +8,9 @@ import {
 import Header from './components/Header'
 import IndexStrip from './components/IndexStrip'
 import MarketOverview from './components/MarketOverview'
-import { EngineLabel, agentOn } from './components/EngineStatus'
+import { EngineLabel } from './components/EngineStatus'
+import AgentsPanel from './components/Agents/AgentsPanel'
+import { listedStrategies, strategyView } from './components/Agents/shared'
 import PositionsTab from './components/tabs/PositionsTab'
 import OrdersTab from './components/tabs/OrdersTab'
 import BracketsTab from './components/tabs/BracketsTab'
@@ -23,18 +25,6 @@ import { api } from './api/client'
 import type { TabId } from './types'
 
 type PageId = TabId | 'dashboard'
-
-const AGENT_META: Record<string, { strategy: string; displayName: string; id: string }> = {
-  intraday:      { strategy: 'VWAP Breakout',      displayName: 'INTRADAY',  id: 'AGN-01' },
-  options:       { strategy: 'Options CE/PE',       displayName: 'F&O',       id: 'AGN-02' },
-  swing:         { strategy: 'Multi-TF Trend',      displayName: 'SWING',     id: 'AGN-03' },
-  scalping:      { strategy: 'Orderbook Imbalance', displayName: 'SCALPING',  id: 'AGN-04' },
-  futures:       { strategy: 'Futures Momentum',    displayName: 'FUTURES',   id: 'AGN-05' },
-  momentum:      { strategy: 'Price Momentum',      displayName: 'MOMENTUM',  id: 'AGN-06' },
-  mean_reversion:{ strategy: 'Mean Reversion',      displayName: 'MEAN REV',  id: 'AGN-07' },
-  pairs:         { strategy: 'Statistical Arb',     displayName: 'PAIRS ARB', id: 'AGN-08' },
-}
-const AGENT_ORDER = ['intraday', 'options', 'swing', 'scalping', 'futures', 'momentum', 'mean_reversion', 'pairs']
 
 const TAB_COMPONENTS: Record<string, React.ComponentType> = {
   positions: PositionsTab,
@@ -223,31 +213,10 @@ export default function App() {
 
   useEffect(() => { setTickSince(0) }, [agentActivity.length])
 
-  const handlePause = async (name: string) => {
-    try {
-      await api.pauseAgent(name)
-      addToast(`Agent ${name} paused`, 'info')
-      api.agents().then(r => setAgents(r.data)).catch(() => {})
-    } catch (e: any) {
-      addToast(e.response?.data?.detail || 'Pause failed', 'error')
-    }
-  }
-
-  const handleResume = async (name: string) => {
-    try {
-      await api.resumeAgent(name)
-      addToast(`Agent ${name} resumed`, 'buy')
-      api.agents().then(r => setAgents(r.data)).catch(() => {})
-    } catch (e: any) {
-      addToast(e.response?.data?.detail || 'Resume failed', 'error')
-    }
-  }
-
-  // ON/OFF everywhere comes from the engine snapshot (same object as the
-  // header button and footer), falling back to /agents only before it loads.
-  const isOn        = (k: string) => agentOn(engine, k, agents[k]?.running)
-  const activeCount = AGENT_ORDER.filter(k => isOn(k)).length
-  const pausedCount = AGENT_ORDER.filter(k => (agents[k] || engine) && !isOn(k)).length
+  // Sidebar counters use the same server records as every agent card.
+  const listedKeys  = listedStrategies(engine)
+  const activeCount = listedKeys.filter(k => strategyView(engine, k).on).length
+  const pausedCount = listedKeys.length - activeCount
 
   const dailyPnl    = botStatus?.performance?.daily_pnl ?? positions.reduce((s, p) => s + (p.pnl || 0), 0)
   const pnlPositive = dailyPnl >= 0
@@ -256,7 +225,10 @@ export default function App() {
 
 
   const logs = agentActivity.length > 0 ? agentActivity : [
-    { time: '--:--:--', agent: 'SYSTEM', action: 'No activity yet — start bot to see live signals.', type: 'system' as const, cat: 'SYS' as const },
+    { time: '--:--:--', agent: 'SYSTEM', action: engine?.state === 'running'
+        ? 'Engine running — waiting for the first agent signal…'
+        : engine?.state === 'starting' ? `Engine starting — ${engine.label}` : 'No activity yet — start bot to see live signals.',
+      type: 'system' as const, cat: 'SYS' as const },
   ]
 
   const openPositionCount = positions.filter(p => p.quantity !== 0).length
@@ -385,102 +357,8 @@ export default function App() {
               {/* LEFT: AGENTS + ACTIVITY STREAM */}
               <div className="flex-1 flex flex-col min-w-0 border-r border-slate-800 bg-[#070b14]">
 
-                {/* AGENTS GRID */}
-                <div className="px-4 pt-4 pb-2 shrink-0">
-                  <div className="flex items-center justify-between mb-3">
-                    <h2 className="text-xs font-semibold tracking-widest text-slate-400 flex items-center gap-2">
-                      <Zap className="w-4 h-4 text-emerald-500" />
-                      AUTONOMOUS AGENTS
-                      <span className="text-slate-600 font-normal">({AGENT_ORDER.length})</span>
-                    </h2>
-                    <div className="text-xs font-mono text-slate-500 flex gap-4">
-                      <EngineLabel testId="engine-agents-panel" />
-                      {engine && <span data-testid="engine-agents-count">AGENTS: <span className="text-slate-300">{activeCount}/{AGENT_ORDER.length}</span></span>}
-                      {health?.mode        && <span>MODE: <span className={health.mode === 'LIVE' ? 'text-rose-400' : 'text-amber-400'}>{health.mode}</span></span>}
-                    </div>
-                  </div>
-
-                  <div className="flex gap-3 overflow-x-auto pb-2" style={{ scrollbarWidth: 'thin' }}>
-                    {AGENT_ORDER.map(key => {
-                      const agent  = agents[key]
-                      const meta   = AGENT_META[key]
-                      const active = isOn(key)
-                      const starting = engine?.state === 'starting'
-
-                      const ls = agent?.last_signal as unknown
-                      let sigDisplay = '—'
-                      if (typeof ls === 'string' && ls) sigDisplay = ls
-                      else if (ls && typeof ls === 'object') {
-                        const s = ls as Record<string, unknown>
-                        sigDisplay = [s.symbol, s.action].filter(Boolean).join(' ') || '—'
-                      }
-
-                      return (
-                        <div
-                          key={key}
-                          className={`rounded-lg bg-slate-900/50 flex flex-col border shrink-0 transition-colors overflow-hidden ${
-                            active ? 'border-emerald-700/40 border-l-2 border-l-emerald-500' : 'border-slate-800 opacity-80'
-                          }`}
-                          style={{ minWidth: '175px', width: 'calc(12.5% - 10px)' }}
-                        >
-                          <div className="p-3 flex-1">
-                            <div className="flex items-center justify-between mb-1.5">
-                              <div className="flex items-center gap-1.5">
-                                <span className="font-mono text-[9px] text-slate-600">{meta.id}</span>
-                                <span className={`w-1.5 h-1.5 rounded-full ${active ? 'bg-emerald-500 shadow-[0_0_6px_#10b981]' : 'bg-amber-500'}`} />
-                              </div>
-                              <span data-testid={`agent-state-${key}`}
-                                className={`text-[10px] font-mono px-1.5 py-0.5 rounded ${starting ? 'text-amber-300 bg-amber-500/10 animate-pulse' : active ? 'text-emerald-400 bg-emerald-500/10' : 'text-amber-500 bg-amber-500/10'}`}>
-                                {starting ? 'STARTING' : active ? 'ON' : 'OFF'}
-                              </span>
-                            </div>
-                            <div className="font-bold text-sm text-white leading-none">{meta.displayName}</div>
-                            <div className="text-[10px] text-slate-500 italic mt-0.5 truncate">{meta.strategy}</div>
-
-                            <div className="mt-2 flex gap-3 text-[10px]">
-                              <div>
-                                <div className="text-slate-600">Trades</div>
-                                <div className="font-mono text-slate-300">{agent?.trades_today ?? 0}</div>
-                              </div>
-                              {agent?.win_rate != null && (
-                                <div>
-                                  <div className="text-slate-600">Win%</div>
-                                  <div className={`font-mono ${Number(agent.win_rate) >= 55 ? 'text-emerald-400' : 'text-rose-400'}`}>
-                                    {Number(agent.win_rate).toFixed(0)}%
-                                  </div>
-                                </div>
-                              )}
-                            </div>
-
-                            <div className="mt-2 bg-slate-950 rounded px-2 py-1.5 border border-slate-800/60">
-                              <div className="text-[9px] text-slate-600 uppercase tracking-wider">Signal</div>
-                              <div className="font-mono text-[10px] text-slate-400 truncate mt-0.5" title={sigDisplay}>{sigDisplay}</div>
-                            </div>
-
-                            <div className="mt-2 flex gap-1.5">
-                              {active ? (
-                                <button
-                                  className="flex-1 flex items-center justify-center gap-1 bg-slate-800 hover:bg-slate-700 text-slate-300 text-[10px] py-1.5 rounded transition-colors"
-                                  onClick={() => handlePause(key)}
-                                >
-                                  <Square className="w-2.5 h-2.5" /> Pause
-                                </button>
-                              ) : (
-                                <button
-                                  className="flex-1 flex items-center justify-center gap-1 bg-emerald-500/20 hover:bg-emerald-500/30 text-emerald-400 text-[10px] py-1.5 rounded transition-colors border border-emerald-500/30"
-                                  onClick={() => handleResume(key)}
-                                >
-                                  <Play className="w-2.5 h-2.5 fill-current" /> Resume
-                                </button>
-                              )}
-                            </div>
-                          </div>
-                          <div className={`h-[2px] w-full ${active ? 'bg-emerald-500 animate-pulse' : 'bg-amber-600/50'}`} />
-                        </div>
-                      )
-                    })}
-                  </div>
-                </div>
+                {/* AGENTS: segment agents + their strategies */}
+                <AgentsPanel />
 
                 {/* ACTIVITY STREAM */}
                 <div className="flex-1 flex flex-col p-4 border-t border-slate-800 bg-slate-950 overflow-hidden">

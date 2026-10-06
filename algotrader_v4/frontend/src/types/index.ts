@@ -35,6 +35,66 @@ export interface EngineStatus {
   agents_total: number
   tick_feed: 'running' | 'stopped'
   ts_ms: number
+  strategies?: Record<string, StrategyState>
+  segments?: SegmentState[]
+  segments_running?: number
+}
+
+export type AgentRunState = 'starting' | 'running' | 'paused' | 'closed' | 'killed' | 'stopped'
+
+/** One record per strategy agent — the ONLY input for every badge, Pause/Resume
+ *  button and toggle on the dashboard panel and the Agents tab. */
+export interface StrategyState {
+  segment: string
+  state: AgentRunState
+  reason: string
+  on: boolean
+  running: boolean
+  enabled: boolean
+  native: boolean
+  hidden: boolean
+  trades_today: number
+  pnl_today: number
+  display?: string | null
+  desc?: string | null
+  can_resume: boolean
+}
+
+export interface SegmentInstrument {
+  symbol: string
+  price: number | null
+  source: 'SIMULATED'
+  synthetic_seed: boolean
+  ref_close: number | null
+  ref_close_date: string | null
+  ref_source: string | null
+}
+
+export interface SegmentState {
+  code: 'NSE_EQ' | 'NSE_FO' | 'BSE_EQ' | 'MCX' | 'CDS'
+  label: string
+  kite_exchange: string
+  state: AgentRunState
+  reason: string
+  on: boolean
+  open: boolean
+  hours: string
+  mode: 'PAPER' | 'LIVE'
+  effective_mode: 'PAPER' | 'LIVE'
+  live_supported: boolean
+  live_stub_reason: string | null
+  feed: 'REAL' | 'MIXED' | 'SIMULATED'
+  killed: boolean
+  kill_reason: string | null
+  capital: number
+  capital_used: number
+  limits: { capital: number; max_daily_loss: number; max_positions: number; max_trades_per_day: number }
+  pnl: { realised: number; unrealised: number; total: number; trades_today: number }
+  positions: number
+  entries_today: number
+  strategies: string[]
+  strategies_running: number
+  universe: { count: number; feed: string; instruments?: SegmentInstrument[]; symbols?: string[] }
 }
 
 export interface OverviewStock {

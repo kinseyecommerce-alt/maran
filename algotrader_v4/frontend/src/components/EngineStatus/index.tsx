@@ -16,6 +16,7 @@ export function engineView(e: EngineStatus | null): { text: string; cls: string;
 
 /** Is an agent ON according to the engine snapshot? (falls back to the agent's own flag) */
 export function agentOn(e: EngineStatus | null, name: string, fallback?: boolean): boolean {
+  if (e?.strategies && name in e.strategies) return e.strategies[name].on
   if (e && name in e.agents) return e.agents[name]
   return !!fallback
 }

@@ -184,8 +184,15 @@ export const api = {
 
   // ── Settings — Agent Enables ────────────────────────────────────────────────
   getAgentEnables: () => ax().get('/settings/agent-enables'),
-  setAgentEnables: (data: { intraday?: boolean; fno?: boolean; swing?: boolean; scalping?: boolean }) =>
+  // keys are server strategy names (intraday, options, …, mcx_trend) — the old
+  // type used 'fno', which the server silently ignored
+  setAgentEnables: (data: Record<string, boolean>) =>
                      ax().post('/settings/agent-enables', data),
+  segments:        () => ax().get('/segments'),
+  segmentKill:     (code: string, flatten = true) => ax().post(`/segments/${code}/kill`, { reason: 'manual', flatten }),
+  segmentRearm:    (code: string) => ax().post(`/segments/${code}/rearm`),
+  segmentMode:     (code: string, mode: 'PAPER' | 'LIVE', confirm = false, confirm_text = '') =>
+                     ax().post(`/segments/${code}/mode`, { mode, confirm, confirm_text }),
 
   // ── Settings — Intelligence ─────────────────────────────────────────────────
   getIntelligence: () => ax().get('/settings/intelligence'),
