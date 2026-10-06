@@ -348,3 +348,8 @@ Playwright Chromium path (this environment):
   The 8 strategies live in NSE_EQ/NSE_FO. BSE/MCX/CDS run native strategies on a
   SIMULATED feed with their own paper ledger. engine.strategies/segments drive
   both the dashboard panel and the Agents tab. Tests: test_segments.py.
+- `book.py`: one read model (Kite paper book + segment ledgers). It feeds
+  `/portfolio/positions|orders|book`, `engine.book` (header counters, Today
+  P&L + per-segment breakdown) and the agent cards' trades/P&L. Native trades
+  are counted on entry. Public `/health` is redacted (states only).
+  Tests: test_book.py.

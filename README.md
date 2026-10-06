@@ -150,6 +150,28 @@ come from a single `engine_status()` with states `stopped`, `starting`
 `error`. It is returned by `/health`, `/bot/status`, `/bot/start` and
 `/bot/stop`, and pushed as the WebSocket event `engine` whenever it changes.
 
+### One book: positions, orders, P&L
+
+`book.py` is a read-only view that combines the NSE/NFO Kite paper book
+(or the real Kite book in LIVE) with the BSE/MCX/CDS segment paper ledgers.
+Each row says its `segment`, its `strategy` (taken from the order tag or the
+guard owner), and its `price_source`/`simulated`. The following all read the
+same rows:
+- `/portfolio/positions?segment=` and `/portfolio/orders?segment=`, shown in
+  the Positions/Orders tabs with a segment filter and a SIMULATED badge;
+- `/portfolio/book`;
+- `engine.book` (header POSITIONS/ORDERS, sidebar Today P&L with a
+  per-segment breakdown);
+- `engine.strategies[*]` (agent cards: trades = entries today, P&L =
+  realised + open).
+
+Kill-switch square-off and closing-time square-off (10 min before close, or
+when the engine finds a segment already closed) write exit orders and
+realised P&L to the ledger, so every view updates together.
+
+Unauthenticated `/health` returns only states. P&L, capital, positions and
+orders need auth, like `/portfolio/*` and `/segments`.
+
 ## Tests
 
 ```bash
@@ -162,6 +184,7 @@ python test_all_agents_e2e.py   # every agent: signal → paper order
 python test_index_feed_and_safety.py  # index feed, typed-SEND LIVE gate, paper gate
 python test_dashboard_status_and_prices.py  # one engine status; honest price sources
 python test_segments.py  # segment agents, per-segment gates, one agent state
+python test_book.py      # one book: positions/orders/P&L across segments
 python nse_day_simulation.py    # offline GBM day simulation, all 5 agents
 ```
 
