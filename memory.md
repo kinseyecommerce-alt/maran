@@ -353,3 +353,10 @@ Playwright Chromium path (this environment):
   P&L + per-segment breakdown) and the agent cards' trades/P&L. Native trades
   are counted on entry. Public `/health` is redacted (states only).
   Tests: test_book.py.
+- One snapshot (`book.build()`, `/portfolio/book`) drives every SPA view.
+  Realised = Σ exit-order pnl, open = Σ positions, "today" is IST. The Kite
+  paper journal keeps the whole day (the hot list prunes after 30 min).
+  `paper_store.py` persists the paper book to `kv_store` (restored at startup,
+  saved every 2 s). Simulator σ is calibrated to day ranges. Stops are ≥30% of
+  the day range. NSE sim ticks every 5 s after hours. The daily-loss gate still
+  uses the agents' counters. Tests: test_book_consistency.py.

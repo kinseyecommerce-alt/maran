@@ -172,6 +172,40 @@ realised P&L to the ledger, so every view updates together.
 Unauthenticated `/health` returns only states. P&L, capital, positions and
 orders need auth, like `/portfolio/*` and `/segments`.
 
+`book.build()` reads each ledger once. The native engine is copied under its
+lock, so every row uses the same price tick. P&L is derived like this:
+- **Realised** is the sum of `pnl` on today's listed exit orders. Native exit
+  orders and the reducing fills in the Kite paper book record their realised
+  P&L.
+- **Open** is the sum of the listed positions' P&L, with the lot multiplier
+  applied once.
+- **Total** is realised + open.
+
+"Today" is the IST date. The SPA polls one `/portfolio/book` snapshot every
+2 s, and immediately when `engine.book.rev` changes. The header counters, nav
+badges, Today P&L (realised · N closed / open · M pos), Positions, Orders
+(with a Realised column) and the agent and segment cards all render that
+snapshot. Load errors are shown on screen. A 401 (for example after a server
+restart, which issues a new JWT secret) returns to the login screen. A stored
+cross-origin `api_base` is ignored. API JSON is sent `Cache-Control:
+no-store`.
+
+The paper book (native positions, prices and bars, today's orders and closed
+trades, the Kite paper book and its order journal, agent counters, segment
+kill switches) is saved every 2 s, and on shutdown, to the `kv_store` table
+of the SQLite DB (`DATABASE_PATH`, default `logs/algotrader.db`; tests use a
+temp dir). It is restored at startup. Open positions always come back. Orders,
+realised P&L and counters come back only if they were saved today (IST).
+LIVE arming is never persisted.
+
+The simulator scales tick volatility so that a session's expected high-low
+matches the instrument's typical day range: gold 1%, silver 1.8%, crude 2.5%,
+natural gas 3.5%, copper 1.2%, USDINR 0.3%, EURINR 0.45%, GBP/JPY 0.5%, BSE
+large caps 2%. The stop is max(30% of the day range, 2.5σ of realised 10-min
+moves), the target is 1.6× the stop, and there is a 60-min time stop. After
+NSE hours, the PAPER NSE tick simulator slows to one tick every 5 s
+(`PAPER_OFFHOURS_TICK_SEC`).
+
 ## Tests
 
 ```bash
@@ -185,6 +219,7 @@ python test_index_feed_and_safety.py  # index feed, typed-SEND LIVE gate, paper 
 python test_dashboard_status_and_prices.py  # one engine status; honest price sources
 python test_segments.py  # segment agents, per-segment gates, one agent state
 python test_book.py      # one book: positions/orders/P&L across segments
+python test_book_consistency.py  # orders view, P&L split, simulator vol, persistence
 python nse_day_simulation.py    # offline GBM day simulation, all 5 agents
 ```
 
