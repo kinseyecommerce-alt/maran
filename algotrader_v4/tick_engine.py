@@ -685,6 +685,20 @@ def _detect_walls(ltp: float, bid_depth: list, ask_depth: list) -> tuple[bool, b
 
 # ── Tick Engine ───────────────────────────────────────────────────────────────
 
+def normalize_price_source(raw: Optional[str]) -> Optional[str]:
+    """Map a raw tick-ingest source to the label shown next to a price."""
+    if not raw:
+        return None
+    r = str(raw).upper()
+    if r == "PAPER" or r.startswith("SIM"):
+        return "SIMULATED"
+    if r.startswith("TRUEDATA"):
+        return "TRUEDATA"
+    if r.startswith("KITE"):
+        return "KITE"
+    return r
+
+
 class TickEngine:
     """
     In LIVE mode: KiteConnect WebSocket (true real-time sub-second ticks) with
@@ -704,6 +718,8 @@ class TickEngine:
 
         self._latest_tick: dict[str, Tick]            = {}
         self._latest_ind:  dict[str, LiveIndicators]  = {}
+        # Raw ingest source of each symbol's latest tick (PAPER / KITE_WS / ...)
+        self._latest_src:  dict[str, str]             = {}
 
         self._subscribers:  dict[str, asyncio.Queue]  = {}
         self._queue_drop_count: dict[str, int]        = {}  # dropped-tick counter per subscriber
@@ -909,7 +925,7 @@ class TickEngine:
                 buf.reset()
         for d in (self._last_tick_ltp, self._last_tick_ts, self._dedup_pending_vol,
                   self._ind_cache_count, self._ind_cache_ltp, self._ind_cache,
-                  self._latest_tick, self._latest_ind):
+                  self._latest_tick, self._latest_ind, self._latest_src):
             d.pop(symbol, None)
 
     # ── Shared tick processing ────────────────────────────────────────
@@ -1032,6 +1048,7 @@ class TickEngine:
 
         self._latest_tick[symbol] = tick
         self._latest_ind[symbol]  = ind
+        self._latest_src[symbol]  = source
 
         # Paper-mode: update P&L and check SL/SL-M triggers on each tick
         if settings.trading_mode == "PAPER":
@@ -1129,6 +1146,8 @@ class TickEngine:
                     "ichimoku_kijun":  round(ind.ichimoku_kijun,  2),
                     "ichimoku_cloud":  ind.ichimoku_cloud_dir,
                     "source":          source,
+                    "price_source":    normalize_price_source(source),
+                    "simulated":       normalize_price_source(source) == "SIMULATED",
                     "ts":         tick.timestamp.isoformat(),
                 })
             except Exception as exc:
@@ -1249,6 +1268,11 @@ class TickEngine:
 
     # ── Query helpers ─────────────────────────────────────────────────
 
+    def price_source(self, symbol: str) -> Optional[str]:
+        """Honest label for the latest price of *symbol*: "SIMULATED" (GBM
+        paper simulator), "KITE", "TRUEDATA", or None when never ticked."""
+        return normalize_price_source(self._latest_src.get(symbol))
+
     def latest(self, symbol: str) -> tuple[Optional[Tick], Optional[LiveIndicators]]:
         return self._latest_tick.get(symbol), self._latest_ind.get(symbol)
 
@@ -1285,6 +1309,10 @@ class TickEngine:
                     "macd_hist":      round(ind.macd_hist, 4),
                     "vol_ratio":      round(ind.volume_ratio, 2),
                     "source":         "NSE" if settings.trading_mode == "LIVE" else "PAPER",
+                    # Where this price actually came from — "source" above is
+                    # the legacy mode label kept for API compatibility.
+                    "price_source":   self.price_source(sym) or "UNKNOWN",
+                    "simulated":      self.price_source(sym) == "SIMULATED",
                     "supertrend":     round(ind.supertrend, 2),
                     "supertrend_dir": ind.supertrend_dir,
                     "hma":            round(ind.hma, 2),

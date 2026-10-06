@@ -387,6 +387,28 @@ def load_index(symbol: str, from_date: date, to_date: date) -> pd.DataFrame:
     return pd.DataFrame(rows).sort_values("date").reset_index(drop=True)
 
 
+def last_close(symbol: str, series: str = "EQ", max_back: int = 7) -> Optional[tuple[float, date]]:
+    """Most recent real NSE end-of-day close for *symbol* → (close, day), or
+    None. Walks back from latest_available_date() over at most *max_back*
+    weekdays (one small cached file per day)."""
+    sym = symbol.upper().strip()
+    d = latest_available_date()
+    tried = 0
+    while tried < max_back:
+        if d.weekday() < 5:
+            tried += 1
+            with _DOWNLOAD_LOCK:
+                idx = _day_index(d, series.upper())
+            if idx is not None:
+                syms, ohlc, _vol = idx
+                i = int(np.searchsorted(syms, sym))
+                if i < len(syms) and syms[i] == sym:
+                    return round(float(ohlc[i][3]), 2), d
+                return None          # day exists but symbol not listed in series
+        d -= timedelta(days=1)
+    return None
+
+
 def latest_available_date() -> date:
     """Return the latest date for which Bhavcopy is likely published (T-1)."""
     today = _now_ist().date()

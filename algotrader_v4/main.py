@@ -947,6 +947,75 @@ async def kite_token_refresh():
 # Phases: "idle" | "scanning_instruments" | "loading_instruments" | "started" | "error"
 _bot_start_status: dict = {"phase": "idle", "error": None}
 
+_ENGINE_STARTING_LABELS = {
+    "scanning_instruments": "Scanning instruments…",
+    "loading_instruments":  "Loading instruments…",
+}
+
+
+def engine_status() -> dict:
+    """THE single source of truth for every engine / bot status indicator.
+
+    state: "starting" (background start in progress — scanning/loading
+    instruments), "running" (master agent live), "error" (last start failed),
+    "stopped". The dashboard header button, agents panel, footer and agent
+    cards all render this one object (served by /health, /bot/status,
+    /bot/start, /bot/stop and pushed over WS as event "engine")."""
+    phase = _bot_start_status.get("phase", "idle")
+    agents_on = {n: bool(a.state.running) for n, a in ALL_AGENTS.items()}
+    if phase in _ENGINE_STARTING_LABELS:
+        state, label = "starting", _ENGINE_STARTING_LABELS[phase]
+    elif master_agent.running:
+        state, label = "running", "Running"
+    elif phase == "error":
+        state, label = "error", "Start failed"
+    else:
+        state, label = "stopped", "Stopped"
+    return {
+        "state": state,
+        "label": label,
+        "phase": phase,
+        "error": _bot_start_status.get("error") if state == "error" else None,
+        "master_running": bool(master_agent.running),
+        "agents": agents_on,
+        "agents_running": sum(agents_on.values()),
+        "agents_total": len(agents_on),
+        "tick_feed": "running" if tick_engine._running else "stopped",
+        "ts_ms": int(time.time() * 1000),
+    }
+
+
+def _engine_signature(e: dict) -> tuple:
+    return (e["state"], e["phase"], e["tick_feed"], tuple(sorted(e["agents"].items())))
+
+
+_engine_last_sig: Optional[tuple] = None
+
+
+async def broadcast_engine(force: bool = False) -> dict:
+    """Push the engine status to every WS client when it changed."""
+    global _engine_last_sig
+    e = engine_status()
+    sig = _engine_signature(e)
+    if force or sig != _engine_last_sig:
+        _engine_last_sig = sig
+        try:
+            await broadcast({"event": "engine", "data": e})
+        except Exception:
+            pass
+    return e
+
+
+async def _engine_watch_loop() -> None:
+    while True:
+        try:
+            await broadcast_engine()
+        except asyncio.CancelledError:
+            break
+        except Exception as exc:
+            logger.debug("[engine] watch error: {}", exc)
+        await asyncio.sleep(1.0)
+
 
 async def _do_start_bg(req: BotStartRequest, strategies: list[str]) -> None:
     """
@@ -973,6 +1042,7 @@ async def _do_start_bg(req: BotStartRequest, strategies: list[str]) -> None:
         # ── Symbol scanner (async — does NOT block the event loop) ─────────────
         if not watchlist:
             _bot_start_status["phase"] = "scanning_instruments"
+            await broadcast_engine()
             await symbol_scanner.run(strategies=strategies, force=req.force_scan)
             watchlist = symbol_scanner.all_selected_flat()
             if not watchlist:
@@ -985,6 +1055,7 @@ async def _do_start_bg(req: BotStartRequest, strategies: list[str]) -> None:
         # filter_watchlist calls backtest_engine.run() → bhavcopy HTTP downloads.
         # Running each one in the thread executor keeps the event loop responsive.
         _bot_start_status["phase"] = "loading_instruments"
+        await broadcast_engine()
         loop = asyncio.get_event_loop()
         prefiltered: dict[str, list[dict]] = {}
         for strat in strategies:
@@ -1007,12 +1078,14 @@ async def _do_start_bg(req: BotStartRequest, strategies: list[str]) -> None:
 
         _bot_start_status["phase"] = "started"
         logger.info("[bot/start] Background start complete — agents running")
+        await broadcast_engine()
 
     except Exception as exc:
         logger.error("[bot/start] Background start failed: {}", exc)
         _bot_start_status["phase"] = "error"
         _bot_start_status["error"] = str(exc)
         master_agent.running = False
+        await broadcast_engine()
 
 
 @app.post("/bot/start", tags=["Bot"])
@@ -1044,6 +1117,7 @@ async def start_bot(req: BotStartRequest):
             "message": "Bot start is in progress. Poll GET /bot/status for updates.",
             "start_phase": _bot_start_status["phase"],
             "trading_mode": settings.trading_mode,
+            "engine": engine_status(),
         },
         status_code=202,
     )
@@ -1053,7 +1127,7 @@ async def stop_bot():
     global _bot_start_status
     _bot_start_status = {"phase": "idle", "error": None}
     await master_agent.stop()
-    return {"status": "stopped"}
+    return {"status": "stopped", "engine": await broadcast_engine(force=True)}
 
 @app.post("/bot/test-order", tags=["Bot"])
 async def test_order(
@@ -1082,6 +1156,7 @@ def bot_status():
     status = master_agent.get_status()
     status["start_phase"] = _bot_start_status.get("phase", "idle")
     status["start_error"] = _bot_start_status.get("error")
+    status["engine"] = engine_status()
     return status
 
 @app.get("/bot/directives", tags=["Bot"])
@@ -1244,6 +1319,17 @@ async def market_indices(refresh: bool = False):
         data = _index_feed.snapshot()
     return {"indices": data, "market_open": is_market_open(),
             "trading_mode": settings.trading_mode, **{"feed": _index_feed.status()}}
+
+@app.get("/market/overview", tags=["Market"])
+async def market_overview_endpoint(symbols: str = "", limit: int = Query(default=20, ge=0, le=60)):
+    """Prices for the dashboard Market overview, each with an honest ``source``:
+    indices from the live index feed (KITE / NSE / SIMULATED / UNAVAILABLE,
+    with ``stale``); stocks KITE / TRUEDATA when a real feed exists, otherwise
+    SIMULATED (PAPER simulator) with the real NSE end-of-day close as a
+    reference; ``chart`` = NIFTY daily closes + today's real level."""
+    from market_overview import market_overview as _mo
+    syms = [_clean_symbol(s) for s in symbols.split(",") if s.strip()][:60] if symbols else None
+    return await _mo.build(syms, limit=limit)
 
 @app.get("/market/option-chain/{symbol}", tags=["Market"])
 async def option_chain(symbol: str):
@@ -2697,6 +2783,7 @@ def health():
             "market_open": is_market_open(),
             "master": "running" if master_agent.running else "stopped",
             "tick_engine": "running" if tick_engine._running else "stopped",
+            "engine": engine_status(),
             "agents": {n: a.state.running for n, a in ALL_AGENTS.items()},
             "agent_enabled": dict(bot_state._agent_enabled),
             "subscribed_symbols": tick_engine.symbols(),
@@ -3671,6 +3758,7 @@ async def on_startup():
     tick_engine.start_loop()
     logger.info("[startup] Index symbols subscribed: {}", [i["symbol"] for i in _IDX])
     _index_feed.start(broadcast)
+    asyncio.create_task(_engine_watch_loop(), name="engine_watch")
 
     # Load SEBI IP whitelist from env at startup so restarts don't reset it
     if settings.sebi_whitelisted_ips:
