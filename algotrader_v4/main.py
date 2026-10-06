@@ -1228,6 +1228,23 @@ async def market_status():
         status["data_source"] = "GBM simulator (PAPER, no live feed)"
     return status
 
+@app.get("/market/indices", tags=["Market"])
+async def market_indices(refresh: bool = False):
+    """Live index levels — NIFTY, BANKNIFTY, FINNIFTY, MIDCPNIFTY, INDIA VIX,
+    SENSEX. Each row carries ``source`` (KITE / NSE / SIMULATED / UNAVAILABLE)
+    and ``stale``. Works without Kite credentials via the NSE public feed;
+    ``refresh=true`` forces an immediate re-fetch instead of the cached value."""
+    from index_feed import index_feed as _index_feed
+    if refresh or _index_feed.refresh_count == 0:
+        try:
+            data = await asyncio.wait_for(_index_feed.refresh(), timeout=15.0)
+        except Exception:
+            data = _index_feed.snapshot()
+    else:
+        data = _index_feed.snapshot()
+    return {"indices": data, "market_open": is_market_open(),
+            "trading_mode": settings.trading_mode, **{"feed": _index_feed.status()}}
+
 @app.get("/market/option-chain/{symbol}", tags=["Market"])
 async def option_chain(symbol: str):
     symbol = _clean_symbol(symbol)
@@ -2226,23 +2243,38 @@ def patch_pattern_toggle(req: PatternToggleRequest):
     return {"agent": req.agent, "pattern": req.pattern, "enabled": req.enabled}
 
 
+# Typed confirmation phrase required (exactly, case-sensitive) to arm LIVE.
+LIVE_CONFIRM_PHRASE = "SEND"
+
+
 class TradingModeRequest(BaseModel):
     mode: str          # "PAPER" or "LIVE"
     confirm: bool = False
+    # The operator must TYPE the phrase — a boolean alone is one click / one
+    # scripted field away from real-money orders.
+    confirm_text: str = Field(default="", max_length=32)
 
 
 @app.post("/settings/trading-mode", tags=["Settings"])
 def set_trading_mode(req: TradingModeRequest):
     """Switch trading mode between PAPER and LIVE at runtime.
-    Requires confirm=true when switching to LIVE as a safety gate.
+    Switching to LIVE requires BOTH confirm=true AND confirm_text="SEND"
+    (typed, exact). Switching back to PAPER is always allowed.
     The change is in-memory only; update .env to make it permanent.
     """
     from fastapi import HTTPException
     mode = req.mode.upper()
     if mode not in ("PAPER", "LIVE"):
         raise HTTPException(status_code=400, detail="mode must be PAPER or LIVE")
-    if mode == "LIVE" and not req.confirm:
-        raise HTTPException(status_code=400, detail="confirm=true required to switch to LIVE mode")
+    if mode == "LIVE":
+        if not req.confirm:
+            raise HTTPException(status_code=400, detail="confirm=true required to switch to LIVE mode")
+        if not hmac.compare_digest(req.confirm_text.strip().encode(), LIVE_CONFIRM_PHRASE.encode()):
+            logger.warning("Trading mode LIVE switch REFUSED — typed confirmation missing/incorrect")
+            raise HTTPException(
+                status_code=400,
+                detail=f'Type {LIVE_CONFIRM_PHRASE} (confirm_text) to switch to LIVE mode — real orders will be sent',
+            )
     prev = settings.trading_mode
     settings.trading_mode = mode
     logger.warning("Trading mode changed: {} → {} (in-memory only; update .env to persist)", prev, mode)
@@ -3626,9 +3658,19 @@ async def on_startup():
     # These are needed for the dashboard chart and regime detection regardless
     # of whether the bot has been started. tick_engine.subscribe is idempotent.
     from nifty100 import INDEX_SYMBOLS as _IDX
+    # Prime live index levels first (Kite → NSE public fallback, no creds
+    # needed) so the PAPER simulator seeds NIFTY/BANKNIFTY at the real level
+    # instead of a placeholder. Bounded: never delays boot by more than ~6s.
+    from index_feed import index_feed as _index_feed
+    if settings.index_feed_enabled:
+        try:
+            await asyncio.wait_for(_index_feed.refresh(), timeout=6.0)
+        except Exception as _ie:
+            logger.warning("[startup] index feed prime failed ({}) — continuing", _ie)
     tick_engine.subscribe(_IDX)
     tick_engine.start_loop()
     logger.info("[startup] Index symbols subscribed: {}", [i["symbol"] for i in _IDX])
+    _index_feed.start(broadcast)
 
     # Load SEBI IP whitelist from env at startup so restarts don't reset it
     if settings.sebi_whitelisted_ips:
@@ -3809,7 +3851,12 @@ async def on_shutdown():
     except Exception as _e:
         logger.warning("Shutdown: could not stop agents: {}", _e)
 
-    # 2. Stop tick engine (cancels poll loop, stops WebSocket)
+    # 2. Stop tick engine (cancels poll loop, stops WebSocket) + index feed
+    try:
+        from index_feed import index_feed as _index_feed
+        _index_feed.stop()
+    except Exception:
+        pass
     try:
         tick_engine.stop()
     except Exception as _te:
