@@ -321,12 +321,14 @@ def t_spa_market_overview_honest():
     app = (SRC / "App.tsx").read_text()
     mo = (SRC / "components/MarketOverview/index.tsx").read_text()
     pos = (SRC / "components/tabs/PositionsTab.tsx").read_text()
+    sim = (SRC / "components/tabs/SegmentFilter.tsx").read_text()
     assert "<MarketOverview />" in app
     assert "watchlistSymbols" not in app and "niftySpark" not in app      # old sim panel gone
     assert "ticks" not in mo                                              # never the raw sim ticks
     assert "api.marketOverview" in mo and "wsIndices" in mo               # same feed as strip
     assert "'SIMULATED'" in mo and "STALE" in mo and "NO DATA" in mo
-    assert "price_source === 'SIMULATED'" in pos and ">SIM<" in pos
+    # Positions: server-labelled rows (book.py sets simulated/price_source) → SIMULATED badge
+    assert "SimBadge show={pos.simulated}" in pos and "SIMULATED" in sim
 
 
 run("tick sources normalised: PAPER -> SIMULATED, KITE_* -> KITE", t_normalize)
