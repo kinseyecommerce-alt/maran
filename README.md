@@ -96,6 +96,43 @@ source at all the simulator level is shown labelled `SIMULATED`, or
 index strip under the SPA header. Daily index history for the regime
 detector comes from NSE's public `ind_close_all` archive.
 
+### Market-segment agents
+
+One supervising agent per segment, each with its own capital, risk limits
+(daily loss = 2% of segment capital, max positions, max entries/day), kill
+switch, P&L, instrument universe, trading-hours window and PAPER/LIVE gate
+(`segments.py`):
+
+| Segment | Kite | Hours (IST) | Strategies | Feed |
+|---|---|---|---|---|
+| NSE_EQ  NSE stocks | NSE | 09:15–15:30 | intraday, scalping, swing, momentum, mean_reversion, pairs | Kite/TrueData, else SIMULATED |
+| NSE_FO  NSE F&O | NFO | 09:15–15:30 | options, futures | Kite/TrueData, else SIMULATED |
+| BSE_EQ  BSE stocks | BSE | 09:15–15:30 | bse_momentum, bse_mean_reversion | SIMULATED (starts at real NSE close) |
+| MCX  commodities | MCX | 09:00–23:30 (`MCX_CLOSE_TIME`) | mcx_trend, mcx_mean_reversion | SIMULATED (synthetic levels) |
+| CDS  currency | CDS | 09:00–17:00 | cds_trend, cds_mean_reversion | SIMULATED (synthetic levels) |
+
+- Strategies run only while their segment is open; the supervisor stops them
+  at close and restarts them at the next open. `SEGMENT_PAPER_AFTER_HOURS=true`
+  lets PAPER keep trading on the simulator after hours.
+- Every agent entry passes `risk_manager.check_before_order(..., agent=)`, which
+  applies the segment's kill switch, LIVE arming, hours, loss, positions,
+  entries/day and capital. Orders that only reduce a position always pass.
+- LIVE for a segment needs the global mode LIVE **and**
+  `POST /segments/{code}/mode {"mode":"LIVE","confirm":true,"confirm_text":"SEND"}`.
+  With the global mode LIVE, an un-armed segment places no entries. Switching
+  the global mode to PAPER disarms every segment. BSE_EQ/MCX/CDS can't be armed,
+  and `kite_client.place_order` refuses LIVE orders on BSE/MCX/CDS.
+- BSE/MCX/CDS strategies run in `segment_engine.py`: a SIMULATED feed and their
+  own paper ledger. They never call Kite.
+- Endpoints: `GET /segments`, `GET /segments/{code}`, `POST /segments/{code}/kill`
+  (with `flatten`), `/rearm`, `/mode`. The dashboard panel and Agents tab render
+  `engine.segments` / `engine.strategies` from `/health`, `/bot/status` and the
+  WebSocket `engine` event.
+- Stubbed in the Kite client (`segments.KITE_STUBS`): MCX/CDS instrument master,
+  contract resolution and rollover, commodity margins, MCX/CDS lot sizes,
+  MCX/CDS/BSE tick subscription, BSE quotes, and per-segment square-off in the
+  master agent.
+
 ### Market overview and engine status
 
 `GET /market/overview` (SPA right-hand panel) shows indices from the same
@@ -124,6 +161,7 @@ python test_safety_properties.py # 12/12 safety properties
 python test_all_agents_e2e.py   # every agent: signal → paper order
 python test_index_feed_and_safety.py  # index feed, typed-SEND LIVE gate, paper gate
 python test_dashboard_status_and_prices.py  # one engine status; honest price sources
+python test_segments.py  # segment agents, per-segment gates, one agent state
 python nse_day_simulation.py    # offline GBM day simulation, all 5 agents
 ```
 

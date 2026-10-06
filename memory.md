@@ -342,3 +342,9 @@ Playwright Chromium path (this environment):
 - `market_overview.py` + `GET /market/overview`: indices come from index_feed;
   stocks are KITE/TRUEDATA when real, else labelled SIMULATED with the NSE EOD
   close as reference. Tick rows carry `price_source`/`simulated`.
+- Segment agents (`segments.py`, `segment_engine.py`): NSE_EQ / NSE_FO / BSE_EQ /
+  MCX / CDS, each with its own capital, limits, kill switch, P&L, universe,
+  hours and PAPER/LIVE gate (typed SEND per segment; global PAPER disarms all).
+  The 8 strategies live in NSE_EQ/NSE_FO. BSE/MCX/CDS run native strategies on a
+  SIMULATED feed with their own paper ledger. engine.strategies/segments drive
+  both the dashboard panel and the Agents tab. Tests: test_segments.py.
