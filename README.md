@@ -68,14 +68,44 @@ See `algotrader_v4/deploy/setup-vps.sh` for the full runbook.
 
 - **PAPER** (default) — simulated orders, no real money; safe for testing
 - **LIVE** — real Zerodha Kite orders; set `TRADING_MODE=LIVE` after verification
+- Runtime switch to LIVE (`POST /settings/trading-mode`, dashboard / SPA mode
+  panel) needs `confirm=true` **and** the typed phrase `confirm_text="SEND"`
+  (exact, case-sensitive). Switching back to PAPER is always allowed.
+
+### Paper mode without Kite credentials
+
+`TRADING_MODE=PAPER API_KEY=<local value> uvicorn main:app` runs with no
+broker session at all:
+
+- prices come from the GBM simulator (`market_data.paper_sim`), seeded from the
+  real index levels / last NSE bhavcopy close; candle buffers get synthetic
+  warm-up bars (`paper_synthetic_backfill`) so agents evaluate immediately
+- agents approve watchlist symbols whose startup backtest had no data
+  (`paper_approve_untested`); symbols that FAIL a real backtest stay rejected,
+  and LIVE always uses the strict gate
+- every order goes through `kite_client._paper_place` — Kite's order API is
+  never called in PAPER
+
+### Live index prices
+
+`index_feed.py` polls NIFTY, BANKNIFTY, FINNIFTY, MIDCPNIFTY, INDIA VIX and
+SENSEX: Kite `quote()` when a session exists, otherwise NSE's public
+`allIndices` (no key; SENSEX needs Kite). Stale quotes are flagged; with no
+source at all the simulator level is shown labelled `SIMULATED`, or
+`UNAVAILABLE`. `GET /market/indices`, WebSocket event `indices`, and the
+index strip under the SPA header. Daily index history for the regime
+detector comes from NSE's public `ind_close_all` archive.
 
 ## Tests
 
 ```bash
 cd algotrader_v4
 python test_full_pipeline.py    # 30/30  — all 5 agents: ingestion→order→exit
-python test_pipeline.py         # 306/306 — cross-module: risk/guard/SEBI/kite/TSL + Phases 1-5
+python test_pipeline.py         # 1282 checks — cross-module: risk/guard/SEBI/kite/TSL + Phases 1-5
 python test_sim_orders_flow.py  # 13/13  — PAPER order/guard/risk flow
+python test_safety_properties.py # 12/12 safety properties
+python test_all_agents_e2e.py   # every agent: signal → paper order
+python test_index_feed_and_safety.py  # index feed, typed-SEND LIVE gate, paper gate
 python nse_day_simulation.py    # offline GBM day simulation, all 5 agents
 ```
 

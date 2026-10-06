@@ -323,3 +323,17 @@ Playwright Chromium path (this environment):
 - Python 3.11 — no backslash inside f-string `{}` braces
 - `anthropic>=0.50.0` required when `httpx>=0.28.0` is installed
 - Server must start from `algotrader_v4/` directory (relative imports)
+
+---
+
+## 2026-10-06 — branch `jag/complete-algotrader` (local, from `claude/test-ywyv1r`)
+
+- Offline PAPER now trades autonomously with no Kite session: untested-symbol
+  approval (PAPER only), synthetic simulator warm-up bars, NSE UDiFF bhavcopy.
+- Live index prices: `index_feed.py` (Kite → NSE allIndices → SIMULATED /
+  UNAVAILABLE), `GET /market/indices`, WS `indices`, SPA `IndexStrip`.
+  Regime detector gets NIFTY daily history from NSE `ind_close_all`.
+- LIVE switch needs `confirm=true` + typed `confirm_text="SEND"` (API + both UIs).
+- Fixed: option TSL wrote the underlying's price into the option SL-M trigger.
+- Tests isolate DB / adaptive params / SEBI audit in a temp dir
+  (`DATABASE_PATH`, `ADAPTIVE_DATA_DIR`, `SEBI_AUDIT_DIR`).
