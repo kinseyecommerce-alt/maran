@@ -423,6 +423,11 @@ class KiteClient:
         tag:                str   = "AlgoTraderPro",
         disclosed_quantity: int   = 0,
     ) -> str:
+        # BSE / MCX / CDS live routing is stubbed in this build (no instrument
+        # resolution, margins or feed for those segments) — never send.
+        if settings.trading_mode != "PAPER" and (exchange or "").upper() in ("BSE", "MCX", "CDS"):
+            raise InputException(
+                f"LIVE order routing for {exchange} is not supported (stubbed) — order NOT sent")
         tag      = tag.replace("\n", " ").replace("\r", " ")[:_KITE_ORDER_TAG_MAX]
         quantity = self._validated_quantity(tradingsymbol, exchange, product, quantity)
         disclosed_quantity = self._resolve_disclosed_qty(

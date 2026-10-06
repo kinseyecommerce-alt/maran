@@ -755,6 +755,30 @@ class Settings(BaseSettings):
     # per-order value cap): cap the number of lots per single order. 0 = no cap.
     max_futures_lots_per_order: int = Field(default=10, ge=0)
 
+    # ── Market-segment agents (segments.py) ───────────────────────────────────
+    # One supervising agent per segment, each with its own capital, risk limits,
+    # kill switch, P&L, universe and trading-hours window. Capital is the
+    # segment's paper/live book in ₹; daily loss is a hard per-segment stop.
+    segment_capital_nse_eq:   float = Field(default=6_000_000.0, gt=0)   # 6 equity strategies
+    segment_capital_nse_fo:   float = Field(default=2_000_000.0, gt=0)   # options + futures
+    segment_capital_bse_eq:   float = Field(default=1_000_000.0, gt=0)
+    segment_capital_mcx:      float = Field(default=1_000_000.0, gt=0)
+    segment_capital_cds:      float = Field(default=500_000.0, gt=0)
+    segment_daily_loss_pct:   float = Field(default=2.0, gt=0, le=100)  # of segment capital
+    segment_max_positions_nse_eq: int = Field(default=10, ge=1)
+    segment_max_positions_nse_fo: int = Field(default=4, ge=1)
+    segment_max_positions_bse_eq: int = Field(default=3, ge=1)
+    segment_max_positions_mcx:    int = Field(default=3, ge=1)
+    segment_max_positions_cds:    int = Field(default=3, ge=1)
+    segment_max_trades_per_day:   int = Field(default=40, ge=1)          # per segment
+    # PAPER only: let segments keep trading on the simulator outside their
+    # real trading-hours window (labelled AFTER-HOURS SIM). Off by default so
+    # every segment follows its real exchange hours. LIVE always enforces hours.
+    segment_paper_after_hours: bool = False
+    # MCX evening session end (IST). ~23:30 in Indian winter / ~23:55 when US
+    # DST is in force; configurable rather than guessed per date.
+    mcx_close_time: str = "23:30"
+
     # Max concurrent positions per agent (capital divided per-symbol to avoid overrun)
     max_intraday_positions: int = 5
     max_scalping_positions: int = 5

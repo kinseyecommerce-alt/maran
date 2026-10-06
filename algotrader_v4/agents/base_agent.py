@@ -1537,7 +1537,8 @@ class BaseAgent(ABC):
         except Exception:
             pass
 
-        allowed, _ = risk_manager.check_before_order(sym, qty, ltp, action, exchange=exch)
+        allowed, _ = risk_manager.check_before_order(sym, qty, ltp, action, exchange=exch,
+                                                     agent=self.name)
         if not allowed:
             order_guard.release_claim(sym, self.name, action)
             raise RuntimeError("risk_denied")

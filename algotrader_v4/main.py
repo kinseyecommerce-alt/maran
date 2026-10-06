@@ -390,6 +390,12 @@ class AgentEnablesRequest(BaseModel):
     momentum:        bool | None = None
     mean_reversion:  bool | None = None
     pairs:           bool | None = None
+    bse_momentum:       bool | None = None
+    bse_mean_reversion: bool | None = None
+    mcx_trend:          bool | None = None
+    mcx_mean_reversion: bool | None = None
+    cds_trend:          bool | None = None
+    cds_mean_reversion: bool | None = None
 
 class CapitalAllocationRequest(BaseModel):
     capital_per_agent:       float | None = Field(None, ge=10000, le=10_000_000)
@@ -961,8 +967,8 @@ def engine_status() -> dict:
     "stopped". The dashboard header button, agents panel, footer and agent
     cards all render this one object (served by /health, /bot/status,
     /bot/start, /bot/stop and pushed over WS as event "engine")."""
+    from segments import segment_manager
     phase = _bot_start_status.get("phase", "idle")
-    agents_on = {n: bool(a.state.running) for n, a in ALL_AGENTS.items()}
     if phase in _ENGINE_STARTING_LABELS:
         state, label = "starting", _ENGINE_STARTING_LABELS[phase]
     elif master_agent.running:
@@ -971,6 +977,13 @@ def engine_status() -> dict:
         state, label = "error", "Start failed"
     else:
         state, label = "stopped", "Stopped"
+    # Per-strategy and per-segment state come from ONE place (segments.py);
+    # the dashboard panel, Agents tab cards, badges, Pause/Resume buttons and
+    # toggles all render these records.
+    strategies = segment_manager.strategy_states(phase, bool(master_agent.running))
+    segs = segment_manager.segment_states(phase, bool(master_agent.running), strategies)
+    agents_on = {n: v["on"] for n, v in strategies.items()}
+    listed = [n for n, v in strategies.items() if not v["hidden"]]
     return {
         "state": state,
         "label": label,
@@ -978,15 +991,22 @@ def engine_status() -> dict:
         "error": _bot_start_status.get("error") if state == "error" else None,
         "master_running": bool(master_agent.running),
         "agents": agents_on,
-        "agents_running": sum(agents_on.values()),
-        "agents_total": len(agents_on),
+        "agents_running": sum(1 for n in listed if agents_on[n]),
+        "agents_total": len(listed),
+        "strategies": strategies,
+        "segments": segs,
+        "segments_running": sum(1 for s in segs if s["on"]),
         "tick_feed": "running" if tick_engine._running else "stopped",
         "ts_ms": int(time.time() * 1000),
     }
 
 
 def _engine_signature(e: dict) -> tuple:
-    return (e["state"], e["phase"], e["tick_feed"], tuple(sorted(e["agents"].items())))
+    return (e["state"], e["phase"], e["tick_feed"],
+            tuple(sorted((n, v["state"], v["reason"], v["enabled"], v["trades_today"])
+                         for n, v in e["strategies"].items())),
+            tuple((s["code"], s["state"], s["reason"], s["mode"], s["killed"], s["positions"],
+                   round(s["pnl"]["total"])) for s in e["segments"]))
 
 
 _engine_last_sig: Optional[tuple] = None
@@ -1007,8 +1027,12 @@ async def broadcast_engine(force: bool = False) -> dict:
 
 
 async def _engine_watch_loop() -> None:
+    from segments import segment_manager
+    from segment_engine import native_engine
     while True:
         try:
+            native_engine.ensure_running()        # SIMULATED BSE/MCX/CDS feed
+            segment_manager.supervise()           # hours windows / kill switches
             await broadcast_engine()
         except asyncio.CancelledError:
             break
@@ -1076,6 +1100,14 @@ async def _do_start_bg(req: BotStartRequest, strategies: list[str]) -> None:
         tick_engine.subscribe(_IDX)
         logger.info("[bot/start] Index symbols subscribed: {}", [i["symbol"] for i in _IDX])
 
+        # ── Segment-native paper strategies (BSE / MCX / CDS, SIMULATED feed) ─
+        from segment_engine import native_engine
+        native_engine.ensure_running()
+        _native = native_engine.start_strategies()
+        logger.info("[bot/start] segment-native strategies started: {}", _native)
+        from segments import segment_manager
+        segment_manager.supervise(force=True)
+
         _bot_start_status["phase"] = "started"
         logger.info("[bot/start] Background start complete — agents running")
         await broadcast_engine()
@@ -1138,6 +1170,10 @@ async def test_order(
     if sebi_compliance._state.value == "KILLED":
         raise HTTPException(status_code=503, detail="Kill switch active — test order blocked")
     symbol = _clean_symbol(symbol)
+    from segments import segment_manager
+    if settings.trading_mode == "LIVE" and segment_manager.mode("NSE_EQ") != "LIVE":
+        raise HTTPException(status_code=409, detail="NSE Stocks segment is PAPER-gated — arm it "
+                                                    "with typed SEND before a live test order")
     order_id = kite_client.place_order(
         tradingsymbol=symbol, exchange="NSE",
         transaction_type="BUY", quantity=qty,
@@ -1414,24 +1450,53 @@ def market_depth(symbol: str):
 
 # ── Agents ────────────────────────────────────────────────────────────────────
 @app.get("/agents", tags=["Agents"])
-def agents(): return {n: a.get_status() for n, a in ALL_AGENTS.items()}
+def agents():
+    from segment_engine import native_engine
+    from segments import STRATEGY_SEGMENT
+    out = {n: {**a.get_status(), "segment": STRATEGY_SEGMENT.get(n)} for n, a in ALL_AGENTS.items()}
+    out.update({n: s.get_status() for n, s in native_engine.strategies.items()})
+    return out
 
 @app.post("/agents/{name}/pause", tags=["Agents"])
-def pause_agent(name: str):
-    a = ALL_AGENTS.get(name)
-    if not a: raise HTTPException(404, "Not found")
-    a.stop()
+async def pause_agent(name: str):
+    from segment_engine import native_engine
+    from segments import segment_manager
+    if name in native_engine.strategies:
+        native_engine.strategies[name].stop()
+    else:
+        a = ALL_AGENTS.get(name)
+        if not a: raise HTTPException(404, "Not found")
+        a.stop()
+        # Drop the agent's tick queue too — a paused agent's queue otherwise
+        # keeps filling (same as the regime-plan pause path).
+        tick_engine.remove_subscriber(f"agent_{name}")
     # Persist the pause — a deliberately halted agent must not be silently
     # resumed by auto-start after a deploy restart (bit us live 2026-07-13).
     bot_state.set_agent_enabled(name, False)
-    return {"status": "paused"}
+    segment_manager._held.pop(name, None)
+    return {"status": "paused", "engine": await broadcast_engine(force=True)}
 
 @app.post("/agents/{name}/resume", tags=["Agents"])
 async def resume_agent(name: str):
-    a = ALL_AGENTS.get(name)
+    from segment_engine import native_engine
+    from segments import segment_manager, STRATEGY_SEGMENT, SEGMENTS
+    a = ALL_AGENTS.get(name) or native_engine.strategies.get(name)
     if not a: raise HTTPException(404, "Not found")
+    code = STRATEGY_SEGMENT.get(name)
+    if code and segment_manager.killed(code):
+        raise HTTPException(409, f"{SEGMENTS[code].label} kill switch is active — re-arm the segment first")
+    if code and not segment_manager.window_ok(code):
+        raise HTTPException(409, f"{SEGMENTS[code].label} is closed ({segment_manager.hours_text(code)})")
     # An explicit manual resume overrides (and clears) a persisted pause/disable.
     bot_state.set_agent_enabled(name, True)
+    master_agent.regime_paused.discard(name)
+    master_agent.directive_paused.discard(name)
+    if a.state.running:
+        return {"status": "running", "engine": await broadcast_engine(force=True)}
+    if name in native_engine.strategies:
+        native_engine.ensure_running()
+        a.start()
+        return {"status": "resumed", "segment": code, "engine": await broadcast_engine(force=True)}
 
     wl = master_agent._agent_watchlists.get(name, [])
     if not wl:
@@ -1461,7 +1526,77 @@ async def resume_agent(name: str):
 
     q = tick_engine.add_subscriber(f"agent_{name}")
     a.start(q)
-    return {"status": "resumed", "symbols": [w["symbol"] for w in wl]}
+    return {"status": "resumed", "symbols": [w["symbol"] for w in wl],
+            "engine": await broadcast_engine(force=True)}
+
+
+# ── Market-segment agents ───────────────────────────────────────────────────────
+class SegmentModeRequest(BaseModel):
+    mode: str
+    confirm: bool = False
+    confirm_text: str = Field(default="", max_length=32)
+
+
+class SegmentKillRequest(BaseModel):
+    reason: str = Field(default="manual", max_length=80)
+    flatten: bool = True
+
+
+def _seg_code(code: str) -> str:
+    from segments import SEGMENTS
+    c = (code or "").upper()
+    if c not in SEGMENTS:
+        raise HTTPException(404, f"Unknown segment {code!r}. Valid: {list(SEGMENTS)}")
+    return c
+
+
+@app.get("/segments", tags=["Segments"])
+def list_segments():
+    """All segment agents (same records as engine.segments) + Kite stubs."""
+    from segments import KITE_STUBS
+    e = engine_status()
+    return {"segments": e["segments"], "strategies": e["strategies"], "kite_stubs": KITE_STUBS,
+            "trading_mode": settings.trading_mode}
+
+
+@app.get("/segments/{code}", tags=["Segments"])
+def segment_detail(code: str):
+    from segment_engine import native_engine
+    from segments import segment_manager, SEGMENTS
+    c = _seg_code(code)
+    e = engine_status()
+    row = next(s for s in e["segments"] if s["code"] == c)
+    detail = {**row, "positions_detail": segment_manager.positions(c)}
+    if SEGMENTS[c].native:
+        snap = native_engine.snapshot(c)
+        detail.update({"orders": snap["orders"], "closed_trades": snap["closed"]})
+    return detail
+
+
+@app.post("/segments/{code}/kill", tags=["Segments"])
+async def segment_kill(code: str, req: SegmentKillRequest = SegmentKillRequest()):
+    from segments import segment_manager
+    r = segment_manager.kill(_seg_code(code), reason=req.reason or "manual", flatten=req.flatten)
+    return {**r, "engine": await broadcast_engine(force=True)}
+
+
+@app.post("/segments/{code}/rearm", tags=["Segments"])
+async def segment_rearm(code: str):
+    from segments import segment_manager
+    r = segment_manager.rearm(_seg_code(code))
+    return {**r, "engine": await broadcast_engine(force=True)}
+
+
+@app.post("/segments/{code}/mode", tags=["Segments"])
+async def segment_mode(code: str, req: SegmentModeRequest):
+    """Per-segment paper gate. LIVE needs the global mode LIVE + confirm=true +
+    typed confirm_text="SEND", and a segment whose live routing is supported."""
+    from segments import segment_manager, SegmentModeError
+    try:
+        r = segment_manager.set_mode(_seg_code(code), req.mode, req.confirm, req.confirm_text)
+    except SegmentModeError as exc:
+        raise HTTPException(exc.status, exc.detail)
+    return {**r, "engine": await broadcast_engine(force=True)}
 
 
 # ── Backtest ────────────────────────────────────────────────────────────────────
@@ -2108,9 +2243,12 @@ def set_agent_enables(req: AgentEnablesRequest):
     for name, val in updates.items():
         bot_state.set_agent_enabled(name, val)
         if not val:
-            a = ALL_AGENTS.get(name)
+            from segment_engine import native_engine
+            a = ALL_AGENTS.get(name) or native_engine.strategies.get(name)
             if a and a.state.running:
                 a.stop()
+                if name in ALL_AGENTS:
+                    tick_engine.remove_subscriber(f"agent_{name}")
     return dict(bot_state._agent_enabled)
 
 
@@ -2364,6 +2502,9 @@ def set_trading_mode(req: TradingModeRequest):
     prev = settings.trading_mode
     settings.trading_mode = mode
     logger.warning("Trading mode changed: {} → {} (in-memory only; update .env to persist)", prev, mode)
+    if mode == "PAPER":
+        from segments import segment_manager
+        segment_manager.disarm_all()
     return {
         "status": "ok",
         "trading_mode": mode,
