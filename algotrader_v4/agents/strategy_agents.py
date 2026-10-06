@@ -12,7 +12,7 @@ from typing import Optional
 import pandas as pd
 from pathlib import Path
 
-from ist_clock import now_ist
+from ist_clock import now_ist, entry_session_time, paper_after_hours_active
 from agents.base_agent import BaseAgent
 from tick_engine import MarketSnapshot, LiveIndicators, Tick, IndicatorCalc
 from risk_manager import risk_manager
@@ -163,7 +163,7 @@ class IntradayAgent(BaseAgent):
         sym = snap.symbol
         ltp = snap.tick.ltp
         now = now_ist()
-        t   = now.time().replace(tzinfo=None)
+        t   = entry_session_time()  # remaps outside hours when PAPER after-hours sim
 
         if time(14, 50) <= t:
             # Roll prev-state forward so the first tick tomorrow morning doesn't
@@ -852,7 +852,7 @@ class IntradayAgent(BaseAgent):
                 return True, "EMA9 reclaim exit"
 
         now = now_ist().time().replace(tzinfo=None)
-        if now.hour >= 15:
+        if now.hour >= 15 and not paper_after_hours_active():
             return True, "Auto square-off 3:00 PM"
         return False, ""
 
@@ -988,7 +988,7 @@ class OptionsAgent(BaseAgent):
         sym = snap.symbol
         ltp = snap.tick.ltp
         now = now_ist()
-        t   = now.time().replace(tzinfo=None)
+        t   = entry_session_time()  # remaps outside hours when PAPER after-hours sim
 
         # Hard stop at 14:00 — no options entries after this (theta decay too aggressive)
         if t >= time(14, 0):
@@ -2397,7 +2397,7 @@ class OptionsAgent(BaseAgent):
             _t0 = self._entry_clock.setdefault(_csym, _now_m)
             _held_min = (_now_m - _t0) / 60.0
             _now_clock = now_ist().time()
-            if _now_clock >= self.FLATTEN_AFTER:
+            if _now_clock >= self.FLATTEN_AFTER and not paper_after_hours_active():
                 self._entry_clock.pop(_csym, None)
                 return True, f"Late-day theta flatten (>{self.FLATTEN_AFTER.strftime('%H:%M')}) ₹{prem:.1f}"
             if _held_min >= self.MAX_HOLD_MIN and chg < self.MIN_HOLD_PROFIT:
@@ -3160,7 +3160,7 @@ class ScalpingAgent(BaseAgent):
         ind = snap.indicators
         ltp = snap.tick.ltp
         now = now_ist()
-        t   = now.time().replace(tzinfo=None)
+        t   = entry_session_time()  # remaps outside hours when PAPER after-hours sim
 
         if not ind.ema9 or ind.ema9 != ind.ema9:
             return "HOLD", None
@@ -3811,7 +3811,7 @@ class ScalpingAgent(BaseAgent):
                 return True, "VWAP breakout exit"
 
         # Hard auto-exit well before close (leave 15 min for TSL to close)
-        if now_ist().time() >= time(14, 55):
+        if now_ist().time().replace(tzinfo=None) >= time(14, 55) and not paper_after_hours_active():
             return True, "Auto square-off 2:55 PM"
 
         return False, ""
@@ -3929,7 +3929,7 @@ class FuturesAgent(BaseAgent):
         sym = snap.symbol
         ltp = snap.tick.ltp
         now = now_ist()
-        t   = now.time().replace(tzinfo=None)
+        t   = entry_session_time()  # remaps outside hours when PAPER after-hours sim
 
         # Tradeable guard: index futures always; stock futures per
         # settings.futures_stock_symbols (lots from kite_client's table —
@@ -4736,7 +4736,7 @@ class FuturesAgent(BaseAgent):
             return True, "Rollover period — exit before 14:00 cutoff"
 
         # 7. Auto square-off 14:55 (hard cutoff for all futures)
-        if now_ist().time().replace(tzinfo=None) >= time(14, 55):
+        if now_ist().time().replace(tzinfo=None) >= time(14, 55) and not paper_after_hours_active():
             return True, "Auto square-off 14:55"
 
         return False, ""
@@ -4799,7 +4799,7 @@ class MeanReversionAgent(BaseAgent):
         sym = snap.symbol
         ltp = snap.tick.ltp
         now = now_ist()
-        t   = now.time().replace(tzinfo=None)
+        t   = entry_session_time()  # remaps outside hours when PAPER after-hours sim
 
         if t >= time(14, 45) or time(9, 15) <= t < time(9, 25):
             # Roll prev-state forward so the first tick after the guard window
@@ -5147,7 +5147,7 @@ class MeanReversionAgent(BaseAgent):
             if ind.rsi_14 <= 50 and entry > 0 and ltp < entry:
                 return True, f"RSI normalised {ind.rsi_14:.0f} — exit"
 
-        if now_ist().time().replace(tzinfo=None) >= time(14, 55):
+        if now_ist().time().replace(tzinfo=None) >= time(14, 55) and not paper_after_hours_active():
             return True, "Auto square-off 2:55 PM"
         return False, ""
 
@@ -5208,7 +5208,7 @@ class MomentumAgent(BaseAgent):
         sym = snap.symbol
         ltp = snap.tick.ltp
         now = now_ist()
-        t   = now.time().replace(tzinfo=None)
+        t   = entry_session_time()  # remaps outside hours when PAPER after-hours sim
 
         if t >= time(14, 50) or time(9, 15) <= t < time(9, 30):
             # Roll prev-state forward so the first tick after the guard window
@@ -5649,7 +5649,7 @@ class MomentumAgent(BaseAgent):
             if ind.rsi_14 <= 22 and ind.macd_hist > 0:
                 return True, f"RSI exhaustion {ind.rsi_14:.0f}"
 
-        if now_ist().time().replace(tzinfo=None) >= time(14, 55):
+        if now_ist().time().replace(tzinfo=None) >= time(14, 55) and not paper_after_hours_active():
             return True, "Auto square-off 2:55 PM"
         return False, ""
 
@@ -5801,7 +5801,7 @@ class PairsAgent(BaseAgent):
         self._prices[sym] = snap.tick.ltp
 
         now = now_ist()
-        t   = now.time().replace(tzinfo=None)
+        t   = entry_session_time()  # remaps outside hours when PAPER after-hours sim
         if not (time(9, 30) <= t <= time(14, 30)):
             return "HOLD", None
 
@@ -5959,7 +5959,7 @@ class PairsAgent(BaseAgent):
             if abs(zscore) >= self.ZSCORE_CUT:
                 return True, f"Pairs far-diverge z={zscore:.2f}"
 
-        if now_ist().time().replace(tzinfo=None) >= time(14, 30):
+        if now_ist().time().replace(tzinfo=None) >= time(14, 30) and not paper_after_hours_active():
             return True, "Pairs auto-square 2:30 PM"
         return False, ""
 

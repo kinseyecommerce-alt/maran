@@ -74,3 +74,29 @@ def minutes_to_squareoff(squareoff_time: str) -> int:
     sq_mins  = h * 60 + m
     now_mins = t.hour * 60 + t.minute
     return max(0, sq_mins - now_mins)
+
+
+def paper_after_hours_active() -> bool:
+    """True when PAPER mode is allowing simulated trading outside segment hours
+    (SEGMENT_PAPER_AFTER_HOURS). LIVE always returns False."""
+    try:
+        from config import settings
+        return settings.trading_mode == "PAPER" and bool(settings.segment_paper_after_hours)
+    except Exception:
+        return False
+
+
+def entry_session_time(outside_standin: dtime | None = None) -> dtime:
+    """IST clock for strategy *entry* session windows.
+
+    Outside NSE cash hours (09:15–15:30), when paper_after_hours_active(),
+    return a mid-session stand-in (default 11:00) so agents can still evaluate
+    overnight. LIVE and normal PAPER keep the real clock. Square-off / flatten
+    exits must check paper_after_hours_active() separately and skip.
+    """
+    t = now_ist().time().replace(tzinfo=None)
+    if outside_standin is None:
+        outside_standin = dtime(11, 0)
+    if paper_after_hours_active() and (t < _MARKET_OPEN or t >= _MARKET_CLOSE):
+        return outside_standin
+    return t

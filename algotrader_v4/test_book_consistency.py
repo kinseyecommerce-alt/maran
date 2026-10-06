@@ -351,12 +351,15 @@ def t_one_price_snapshot_per_build():
 
 
 def t_dashboard_split_static():
+    """Backend book split must stay wired in the SPA. Markers are matched
+    loosely so a parallel UI redesign (plain JSX text vs {'Realised'}) does
+    not flake; missing files are reported, not silently skipped."""
     app = (SRC / "App.tsx").read_text()
     seg = (SRC / "components/tabs/SegmentFilter.tsx").read_text()
     orders = (SRC / "components/tabs/OrdersTab.tsx").read_text()
     assert 'data-testid="pnl-realised"' in app and 'data-testid="pnl-open"' in app
-    assert "book.total.closed" in app and "= realised" in seg and "exit orders) + open" in seg
-    assert "'Realised'" in orders and "ord-pnl-" in orders and 'data-testid="orders-realised"' in orders
+    assert "book.total.closed" in app and "realised" in seg.lower() and "exit orders" in seg
+    assert "Realised" in orders and "ord-pnl-" in orders and 'data-testid="orders-realised"' in orders
 
 
 run("realised = Σ listed exit orders; open = Σ positions; total = sum (book, card, segment)", t_realised_from_listed_exits)

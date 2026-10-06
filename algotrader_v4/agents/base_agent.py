@@ -17,6 +17,7 @@ import httpx
 from loguru import logger
 
 from config import settings
+from ist_clock import paper_after_hours_active
 from kite_client import kite_client
 from broker_router import broker_router
 from risk_manager import risk_manager
@@ -795,9 +796,15 @@ class BaseAgent(ABC):
             # prices that no longer exist, creating phantom entries.
             import time as _time_chk
             _snap_age = _time_chk.monotonic() - getattr(snap.tick, "_monotonic_ts", 0)
-            if _snap_age > 5.0 and getattr(snap.tick, "_monotonic_ts", 0) > 0:
-                logger.debug("[{}] {} dropped stale snap ({:.1f}s old)",
-                             self.name, snap.symbol, _snap_age)
+            # After-hours PAPER ticks every paper_offhours_tick_sec (default 5s);
+            # a 5s stale cut would discard nearly every snap under load. Loosen
+            # only in that mode — LIVE / daytime PAPER keep the tight 5s bound.
+            _stale_lim = 5.0
+            if paper_after_hours_active():
+                _stale_lim = max(15.0, float(getattr(settings, "paper_offhours_tick_sec", 5.0)) * 3.0)
+            if _snap_age > _stale_lim and getattr(snap.tick, "_monotonic_ts", 0) > 0:
+                logger.debug("[{}] {} dropped stale snap ({:.1f}s old, lim={:.1f})",
+                             self.name, snap.symbol, _snap_age, _stale_lim)
                 continue
 
             self.state.ticks_processed += 1
