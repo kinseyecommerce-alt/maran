@@ -34,7 +34,7 @@ export default function AgentsPanel() {
           </div>
         </div>
 
-        <div className="grid grid-cols-5 gap-1.5" data-testid="segment-strip">
+        <div className="grid gap-1.5" style={{ gridTemplateColumns: 'repeat(auto-fill, minmax(140px, 1fr))' }} data-testid="segment-strip">
           {segs.map(s => {
             const b = segmentBadge(s)
             const nums = segmentNumbers(s, snap)
@@ -80,7 +80,7 @@ export default function AgentsPanel() {
       {/* Strategy agents */}
       <div>
         <h2 className="text-[10px] font-semibold tracking-[0.14em] uppercase text-slate-500 mb-2">Strategy Agents</h2>
-        <div className="flex gap-2 overflow-x-auto pb-1" style={{ scrollbarWidth: 'thin' }}>
+        <div className="grid gap-2" style={{ gridTemplateColumns: 'repeat(auto-fill, minmax(168px, 1fr))' }} data-testid="strategy-agents-grid">
           {keys.map(key => {
             const st   = engine!.strategies![key]
             const nb   = cardNumbers(st, snap, key)
@@ -96,10 +96,9 @@ export default function AgentsPanel() {
             }
             return (
               <div key={key} data-testid={`agent-card-${key}`} data-state={v.state}
-                className={`rounded border bg-[#11141a] flex flex-col shrink-0 overflow-hidden ${
+                className={`rounded border bg-[#11141a] flex flex-col min-w-0 overflow-hidden ${
                   v.on ? 'border-emerald-900/50 border-l-2 border-l-emerald-700' : 'border-[#1e2430] opacity-85'
-                }`}
-                style={{ minWidth: '168px', width: 'calc(12.5% - 8px)' }}>
+                }`}>
                 <div className="p-2.5 flex-1">
                   <div className="flex items-center justify-between mb-1">
                     <div className="flex items-center gap-1.5 min-w-0">
