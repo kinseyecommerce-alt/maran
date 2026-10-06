@@ -49,13 +49,13 @@ export function listedStrategies(e: EngineStatus | null, segment?: string): stri
 }
 
 const BADGE: Record<AgentRunState | 'unknown', { text: string; cls: string }> = {
-  starting: { text: 'STARTING', cls: 'text-amber-300 bg-amber-500/10 animate-pulse' },
-  running:  { text: 'ON',       cls: 'text-emerald-400 bg-emerald-500/10' },
-  paused:   { text: 'PAUSED',   cls: 'text-amber-500 bg-amber-500/10' },
-  closed:   { text: 'CLOSED',   cls: 'text-sky-400 bg-sky-500/10' },
-  killed:   { text: 'KILLED',   cls: 'text-rose-400 bg-rose-500/10' },
-  stopped:  { text: 'OFF',      cls: 'text-slate-400 bg-slate-500/10' },
-  unknown:  { text: '…',        cls: 'text-slate-500 bg-slate-500/10' },
+  starting: { text: 'STARTING', cls: 'text-amber-400/90 bg-amber-950/40 border border-amber-900/40 animate-pulse' },
+  running:  { text: 'RUNNING',  cls: 'text-emerald-400/90 bg-emerald-950/40 border border-emerald-900/40' },
+  paused:   { text: 'PAUSED',   cls: 'text-amber-500/80 bg-amber-950/30 border border-amber-900/30' },
+  closed:   { text: 'CLOSED',   cls: 'text-slate-400 bg-slate-800/50 border border-slate-700/50' },
+  killed:   { text: 'KILLED',   cls: 'text-rose-400/80 bg-rose-950/40 border border-rose-900/40' },
+  stopped:  { text: 'STOPPED',  cls: 'text-slate-500 bg-slate-800/40 border border-slate-700/40' },
+  unknown:  { text: '…',        cls: 'text-slate-600 bg-slate-900/40 border border-slate-800/40' },
 }
 
 export interface StrategyView {

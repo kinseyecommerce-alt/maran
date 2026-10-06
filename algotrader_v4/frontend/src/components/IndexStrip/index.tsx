@@ -39,24 +39,24 @@ export default function IndexStrip() {
 
   return (
     <div data-testid="index-strip"
-      className="h-7 bg-slate-950 border-b border-slate-800 flex items-center gap-5 px-4 overflow-x-auto shrink-0 text-[11px] font-mono">
+      className="h-8 sticky top-0 z-20 bg-[#0a0c10] border-b border-[#1e2430] flex items-center gap-6 px-4 overflow-x-auto shrink-0 text-[11px] font-mono">
       {indices.map(q => {
         const up = (q.change_pct ?? 0) >= 0
         return (
           <div key={q.symbol} data-testid={`index-${q.symbol}`}
             title={`${q.name} · source ${q.source}${q.stale ? ' (stale)' : ''}${q.exchange_ts ? ` · ${q.exchange_ts}` : ''}`}
-            className={clsx('flex items-center gap-1.5 whitespace-nowrap', (q.stale || !q.available) && 'opacity-50')}>
-            <span className="text-slate-500">{SHORT[q.symbol] ?? q.symbol}</span>
-            <span className="text-slate-200">{fmt(q.ltp)}</span>
+            className={clsx('flex items-center gap-2 whitespace-nowrap', (q.stale || !q.available) && 'opacity-50')}>
+            <span className="text-slate-500 text-[10px] tracking-wide">{SHORT[q.symbol] ?? q.symbol}</span>
+            <span className="text-slate-100 font-semibold tabular-nums">{fmt(q.ltp)}</span>
             {q.available && q.change_pct !== null && (
-              <span className={up ? 'text-emerald-400' : 'text-rose-400'}>
-                {up ? '▲' : '▼'} {fmt(Math.abs(q.change_pct))}%
+              <span className={clsx('tabular-nums text-[10px]', up ? 'text-emerald-400' : 'text-rose-400')}>
+                {up ? '+' : ''}{fmt(q.change_pct)}%
               </span>
             )}
-            <span className={clsx('text-[9px] px-1 rounded',
-              q.source === 'SIMULATED' ? 'text-amber-400 bg-amber-400/10'
-                : q.source === 'UNAVAILABLE' ? 'text-slate-600'
-                : 'text-sky-400 bg-sky-400/10')}>
+            <span className={clsx('text-[9px] px-1 rounded border',
+              q.source === 'SIMULATED' ? 'text-amber-300 bg-amber-500/10 border-amber-500/40 font-bold'
+                : q.source === 'UNAVAILABLE' ? 'text-slate-600 border-transparent'
+                : 'text-slate-500 bg-slate-800/50 border-slate-700/50')}>
               {SOURCE_LABEL[q.source] ?? q.source}
             </span>
           </div>

@@ -81,7 +81,7 @@ export default function AgentsTab() {
         const keys = listedStrategies(engine, s.code)
         return (
           <section key={s.code} data-testid={`agents-tab-segment-${s.code}`} data-state={s.state}
-            className={`border rounded-xl p-3 ${s.killed ? 'border-rose-800/70 bg-rose-950/10' : 'border-slate-700/50 bg-slate-900/30'}`}>
+            className={`border rounded p-3 ${s.killed ? 'border-rose-900/60 bg-rose-950/10' : 'border-[#1e2430] bg-[#11141a]'}`}>
             {/* Segment agent header */}
             <div className="flex flex-wrap items-center gap-x-3 gap-y-1 mb-2">
               <span className="text-sm font-bold text-slate-100">{s.label}</span>
@@ -122,7 +122,7 @@ export default function AgentsTab() {
                 const agent = agents[key]
                 return (
                   <div key={key} data-testid={`agents-tab-card-${key}`} data-state={v.state}
-                    className={`bg-slate-800/60 border rounded-xl p-3 ${v.on ? 'border-emerald-800/60' : 'border-slate-700/50'}`}>
+                    className={`bg-[#0a0c10] border rounded p-3 ${v.on ? 'border-emerald-900/50' : 'border-[#1e2430]'}`}>
                     <div className="flex items-start justify-between mb-2">
                       <div>
                         <div className="flex items-center gap-2">
@@ -185,23 +185,23 @@ export default function AgentsTab() {
 
       {/* Adaptive allocator */}
       {adaptive && (
-        <div className="bg-slate-800/40 border border-slate-700/40 rounded-xl p-4">
-          <div className="text-[10px] font-bold text-slate-600 uppercase tracking-widest mb-3">Adaptive Capital Allocator</div>
-          <div className="grid grid-cols-2 gap-2">
+        <div className="bg-[#11141a] border border-[#1e2430] rounded p-4" data-testid="adaptive-allocator">
+          <div className="text-[10px] font-semibold text-slate-500 uppercase tracking-[0.14em] mb-3">Adaptive Capital Allocator</div>
+          <div className="grid grid-cols-2 gap-x-6 gap-y-1.5">
             {adaptive.buckets && Object.entries(adaptive.buckets as Record<string, any>).map(([k, v]: [string, any]) => (
-              <div key={k} className="flex justify-between items-center text-xs">
+              <div key={k} className="flex justify-between items-center text-xs border-b border-[#1e2430]/60 py-1">
                 <span className="text-slate-500 capitalize">{k}</span>
-                <span className="font-mono text-slate-300">{v.weight ? `${(v.weight * 100).toFixed(0)}%` : '—'}</span>
+                <span className="font-mono text-slate-200 tabular-nums font-semibold">{v.weight ? `${(v.weight * 100).toFixed(0)}%` : '—'}</span>
               </div>
             ))}
           </div>
           <div className="flex gap-2 mt-3">
             <button onClick={() => api.adaptiveReview().catch(() => {})}
-              className="text-[11px] px-2.5 py-1 rounded border border-slate-600 text-slate-400 hover:bg-slate-700 transition-colors">
+              className="text-[11px] px-2.5 py-1 rounded border border-slate-700 text-slate-400 hover:bg-slate-800 transition-colors focus-ring">
               Force Review
             </button>
             <button onClick={() => api.capitalRebalance().catch(() => {})}
-              className="text-[11px] px-2.5 py-1 rounded border border-slate-600 text-slate-400 hover:bg-slate-700 transition-colors">
+              className="text-[11px] px-2.5 py-1 rounded border border-slate-700 text-slate-400 hover:bg-slate-800 transition-colors focus-ring">
               Rebalance Capital
             </button>
           </div>

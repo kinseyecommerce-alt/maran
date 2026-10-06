@@ -14,7 +14,7 @@ function DarkInput({ type = 'text', value, onChange, placeholder, className = ''
     <input
       type={type} value={value} onChange={onChange} placeholder={placeholder}
       readOnly={readOnly}
-      className={`w-full px-3 py-2 bg-slate-900 border border-slate-700 rounded-lg text-slate-200 text-xs placeholder:text-slate-600 focus:outline-none focus:ring-1 focus:ring-emerald-500 focus:border-emerald-500 font-mono transition-all ${readOnly ? 'opacity-50 cursor-default' : ''} ${className}`}
+      className={`w-full px-3 py-2 bg-[#0a0c10] border border-[#1e2430] rounded text-slate-200 text-xs placeholder:text-slate-600 focus:outline-none focus-visible:ring-2 focus-visible:ring-emerald-600/50 focus:border-emerald-800 font-mono transition-all ${readOnly ? 'opacity-50 cursor-default' : ''} ${className}`}
     />
   )
 }
@@ -23,12 +23,12 @@ function DarkBtn({ children, onClick, variant = 'default', disabled = false, cla
   children: React.ReactNode; onClick?: () => void
   variant?: 'default' | 'danger' | 'buy' | 'outline'; disabled?: boolean; className?: string
 }) {
-  const base = 'inline-flex items-center justify-center px-3 py-1.5 rounded-lg text-xs font-medium transition-colors disabled:opacity-50 disabled:cursor-not-allowed'
+  const base = 'inline-flex items-center justify-center px-3 py-1.5 rounded text-xs font-medium transition-colors disabled:opacity-40 disabled:cursor-not-allowed focus:outline-none focus-visible:ring-2 focus-visible:ring-emerald-600/50'
   const variants = {
-    default: 'bg-emerald-600 hover:bg-emerald-500 text-white',
-    buy:     'bg-emerald-600 hover:bg-emerald-500 text-white',
-    danger:  'bg-rose-600 hover:bg-rose-500 text-white',
-    outline: 'bg-transparent border border-slate-600 text-slate-300 hover:bg-slate-800',
+    default: 'bg-emerald-800 hover:bg-emerald-700 text-white border border-emerald-700/40',
+    buy:     'bg-emerald-800 hover:bg-emerald-700 text-white border border-emerald-700/40',
+    danger:  'bg-rose-900 hover:bg-rose-800 text-rose-100 border border-rose-800/50',
+    outline: 'bg-transparent border border-slate-700 text-slate-300 hover:bg-slate-800',
   }
   return (
     <button className={`${base} ${variants[variant]} ${className}`} onClick={onClick} disabled={disabled}>
@@ -39,10 +39,10 @@ function DarkBtn({ children, onClick, variant = 'default', disabled = false, cla
 
 function StatusBadge({ children, variant }: { children: React.ReactNode; variant: 'live' | 'paper' | 'ok' | 'warn' }) {
   const styles = {
-    live:  'bg-rose-500/20 text-rose-400 border border-rose-500/30',
-    paper: 'bg-amber-500/20 text-amber-400 border border-amber-500/30',
-    ok:    'bg-emerald-500/20 text-emerald-400 border border-emerald-500/30',
-    warn:  'bg-slate-700 text-slate-400 border border-slate-600',
+    live:  'bg-rose-950/50 text-rose-400 border border-rose-900/50',
+    paper: 'bg-amber-950/40 text-amber-400 border border-amber-900/50',
+    ok:    'bg-emerald-950/40 text-emerald-400 border border-emerald-900/50',
+    warn:  'bg-slate-800/60 text-slate-400 border border-slate-700/50',
   }
   return (
     <span className={`inline-flex items-center px-2 py-0.5 rounded text-[10px] font-bold tracking-wider font-mono ${styles[variant]}`}>
@@ -1343,27 +1343,26 @@ export default function Header() {
   return (
     <>
       {/* ── Header bar ───────────────────────────────────────────────────── */}
-      <header className="h-12 bg-slate-900 border-b border-slate-800 flex items-center px-4 gap-4 shrink-0 z-30">
+      <header className="h-11 sticky top-0 bg-[#11141a] border-b border-[#1e2430] flex items-center px-4 gap-3 shrink-0 z-30">
         <div className="flex items-center gap-2 min-w-max">
-          <Cpu className="w-5 h-5 text-emerald-400" />
-          <div className="font-bold tracking-widest text-base leading-none">
-            <span className="text-emerald-400">ALGO</span><span className="text-white">PRO</span>
+          <Cpu className="w-4 h-4 text-emerald-500/90" />
+          <div className="font-bold tracking-[0.18em] text-sm leading-none font-mono">
+            <span className="text-emerald-400">ALGO</span><span className="text-slate-100">PRO</span>
           </div>
-          <span className="text-[10px] text-slate-500 font-mono ml-1">{health?.version || 'v4'}</span>
+          <span className="text-[10px] text-slate-600 font-mono">{health?.version || 'v4'}</span>
         </div>
 
-        <div className="h-5 w-px bg-slate-700" />
+        <div className="h-4 w-px bg-[#1e2430]" />
 
         <div className={clsx(
-          'flex items-center gap-1.5 px-2 py-1 rounded text-xs font-mono',
-          wsConnected ? 'text-emerald-400 bg-emerald-400/10' : 'text-slate-500 bg-slate-800',
+          'flex items-center gap-1.5 px-2 py-0.5 rounded text-[10px] font-mono border',
+          wsConnected
+            ? 'text-emerald-400/90 bg-emerald-950/30 border-emerald-900/40'
+            : 'text-slate-500 bg-slate-900 border-slate-800',
         )}>
           {wsConnected ? (
             <>
-              <span className="relative flex h-2 w-2">
-                <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-emerald-400 opacity-75" />
-                <span className="relative inline-flex rounded-full h-2 w-2 bg-emerald-500" />
-              </span>
+              <span className="inline-flex rounded-full h-1.5 w-1.5 bg-emerald-500" />
               NSE {marketOpen ? 'OPEN' : 'CONNECTED'}
             </>
           ) : (
@@ -1374,8 +1373,8 @@ export default function Header() {
         <StatusBadge variant={mode === 'LIVE' ? 'live' : 'paper'}>{mode}</StatusBadge>
 
         {health?.ticker_source && (
-          <span className="text-xs text-slate-500 font-mono hidden sm:block">
-            TICKS: <span className="text-slate-300">{health.ticker_source}</span>
+          <span className="text-[10px] text-slate-600 font-mono hidden sm:block">
+            TICKS <span className="text-slate-400">{health.ticker_source}</span>
           </span>
         )}
 
@@ -1397,19 +1396,20 @@ export default function Header() {
         </span>
 
         <button onClick={openSettings}
-          className="p-1.5 rounded-lg hover:bg-slate-800 text-slate-500 hover:text-slate-300 transition-colors relative"
+          aria-label="Settings"
+          className="p-1.5 rounded hover:bg-slate-800 text-slate-500 hover:text-slate-300 transition-colors relative focus-ring"
         >
           <Settings className="w-4 h-4" />
           {connectedCount > 0 && (
-            <span className="absolute -top-0.5 -right-0.5 w-2 h-2 rounded-full bg-emerald-400" />
+            <span className="absolute -top-0.5 -right-0.5 w-1.5 h-1.5 rounded-full bg-emerald-500" />
           )}
         </button>
       </header>
 
       {/* ── Settings overlay ─────────────────────────────────────────────── */}
       {configOpen && (
-        <div className="fixed inset-0 z-50 flex flex-col bg-slate-950 font-sans">
-          <div className="flex items-center gap-2.5 px-5 py-3 border-b border-slate-800/60 shrink-0">
+        <div className="fixed inset-0 z-50 flex flex-col bg-[#0a0c10] font-sans">
+          <div className="flex items-center gap-2.5 px-5 py-3 border-b border-[#1e2430] shrink-0">
             <span className="text-emerald-400 font-bold tracking-widest text-xs">ALGOPRO</span>
             <span className="text-slate-700 text-sm">/</span>
             <span className="text-slate-400 text-xs">Settings</span>

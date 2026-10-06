@@ -6,12 +6,14 @@ export function SegmentFilter({ value, onChange, rows, testId }:
   { value: string; onChange: (v: string) => void; rows: { segment?: string | null }[]; testId: string }) {
   const count = (c: string) => rows.filter(r => c === 'ALL' || r.segment === c).length
   return (
-    <div className="flex items-center gap-1" data-testid={testId}>
+    <div className="flex items-center gap-0.5" data-testid={testId} role="tablist" aria-label="Segment filter">
       {['ALL', ...SEGMENT_ORDER].map(c => (
         <button key={c} data-testid={`${testId}-${c}`} onClick={() => onChange(c)}
-          className={`text-[10px] font-mono px-2 py-0.5 rounded border ${value === c
-            ? 'border-emerald-600 text-emerald-300 bg-emerald-900/30' : 'border-slate-700 text-slate-400 hover:bg-slate-800'}`}>
-          {c} <span className="text-slate-500">{count(c)}</span>
+          role="tab" aria-selected={value === c}
+          className={`text-[10px] font-mono px-2 py-1 rounded border transition-colors focus-ring ${value === c
+            ? 'border-slate-500 text-slate-100 bg-slate-800'
+            : 'border-transparent text-slate-500 hover:text-slate-300 hover:bg-slate-800/60'}`}>
+          {c} <span className="text-slate-600">{count(c)}</span>
         </button>
       ))}
     </div>
@@ -22,7 +24,9 @@ export function SimBadge({ show, testId }: { show?: boolean; testId?: string }) 
   if (!show) return null
   return (
     <span data-testid={testId} title="Paper simulator price — not a market quote"
-      className="ml-1.5 text-[9px] font-normal px-1 py-px rounded text-amber-300 bg-amber-500/15 border border-amber-500/40">SIMULATED</span>
+      className="ml-1.5 text-[9px] font-bold px-1 py-px rounded text-amber-300 bg-amber-500/15 border border-amber-500/50 tracking-wide">
+      SIMULATED
+    </span>
   )
 }
 
@@ -37,7 +41,7 @@ export function BookStatus({ testId }: { testId: string }) {
   const at    = useStore(s => s.bookAt)
   const t = snap?.summary.total
   return (
-    <div className="flex items-center gap-4 px-4 py-1.5 border-b border-slate-800 bg-slate-950/60 text-[10px] font-mono text-slate-500"
+    <div className="flex items-center gap-4 px-4 py-1.5 border-b border-[#1e2430] bg-[#0a0c10] text-[10px] font-mono text-slate-500"
       data-testid={testId}>
       {t ? (
         <span data-testid={`${testId}-equation`}>
