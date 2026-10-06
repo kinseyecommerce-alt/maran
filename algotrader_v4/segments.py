@@ -466,7 +466,8 @@ class SegmentManager:
                 self._held.pop(name, None)
 
     # ── THE single source of per-strategy / per-segment state ─────────────
-    def strategy_states(self, phase: str, master_running: bool) -> dict:
+    def strategy_states(self, phase: str, master_running: bool,
+                        sbook: Optional[dict] = None) -> dict:
         import bot_state
         try:
             from master_agent_v5 import master_agent
@@ -504,12 +505,17 @@ class SegmentManager:
             else:
                 state, reason = "paused", "not started"
             meta = getattr(a, "meta", None) or {}
+            bk = (sbook or {}).get(name) or {}
             out[name] = {
                 "segment": code, "state": state, "reason": reason, "on": state == "running",
                 "running": running, "enabled": enabled, "native": native,
                 "hidden": name in HIDDEN_UNLESS_RUNNING and not running,
-                "trades_today": int(getattr(a.state, "trades_today", 0) or 0),
-                "pnl_today": round(float(getattr(a.state, "pnl_today", 0) or 0), 2),
+                # trades = entries today; P&L = realised + open (from book.py)
+                "trades_today": int(bk.get("trades_today", getattr(a.state, "trades_today", 0)) or 0),
+                "pnl_today": float(bk.get("total", round(float(getattr(a.state, "pnl_today", 0) or 0), 2))),
+                "pnl_realised": float(bk.get("realised", 0.0)),
+                "pnl_unrealised": float(bk.get("unrealised", 0.0)),
+                "open_positions": int(bk.get("open_positions", 0)),
                 "display": meta.get("display"), "desc": meta.get("desc"),
                 "can_resume": state not in ("starting", "stopped", "killed", "closed"),
             }

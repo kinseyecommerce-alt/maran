@@ -85,7 +85,7 @@ app.openapi = _custom_openapi
 _EXEMPT_PATHS = frozenset({"/health", "/readiness", "/openapi.json", "/auth/login-url", "/config/validate"})
 _EXEMPT_PREFIXES = ("/swagger-static",)
 _SENSITIVE_GETS = frozenset({
-    "/portfolio/positions", "/portfolio/orders", "/sebi/audit-log",
+    "/portfolio/positions", "/portfolio/orders", "/portfolio/book", "/sebi/audit-log",
     "/docs", "/redoc",
     "/gate/log", "/agents/activity", "/brackets", "/trailing-sl/status", "/metrics",
     "/portfolio/performance-report",   # full P&L history — requires auth
@@ -120,11 +120,31 @@ _SENSITIVE_GETS = frozenset({
     "/macro/status",                   # macro risk gate state
 })
 
+def _request_authed(request) -> bool:
+    """X-API-Key (programmatic) OR JWT Bearer / HttpOnly cookie (browser UI)."""
+    api_key = request.headers.get("X-API-Key", "")
+    auth_hdr = request.headers.get("Authorization", "")
+    has_key = bool(settings.api_key) and hmac.compare_digest(
+        api_key.encode(), settings.api_key.encode()
+    )
+    if has_key:
+        return True
+    if settings.jwt_secret_key:
+        if auth_hdr.startswith("Bearer ") and decode_token(auth_hdr[7:]) is not None:
+            return True
+        cookie_jwt = request.cookies.get("jwt", "")
+        if cookie_jwt and decode_token(cookie_jwt) is not None:
+            return True
+    return False
+
+
 @app.middleware("http")
 async def _api_key_gate(request: Request, call_next):
     mutates = request.method in ("POST", "PUT", "PATCH", "DELETE")
     is_sensitive_get = (request.url.path in _SENSITIVE_GETS
-                        or request.url.path.startswith("/admin/"))
+                        or request.url.path.startswith("/admin/")
+                        or request.url.path == "/segments"
+                        or request.url.path.startswith("/segments/"))   # P&L, capital, positions
     needs_auth = mutates or is_sensitive_get
     is_exempt = (
         request.url.path in _EXEMPT_PATHS
@@ -135,21 +155,7 @@ async def _api_key_gate(request: Request, call_next):
     # SECURITY: fail-closed — if no auth credentials are configured, block ALL
     # mutating requests (do not allow "open by default" even in PAPER mode).
     if needs_auth and not is_exempt:
-        # Accept X-API-Key (programmatic) OR JWT Bearer (browser/UI)
-        api_key = request.headers.get("X-API-Key", "")
-        auth_hdr = request.headers.get("Authorization", "")
-        has_key = bool(settings.api_key) and hmac.compare_digest(
-            api_key.encode(), settings.api_key.encode()
-        )
-        has_jwt = False
-        if settings.jwt_secret_key:
-            # Accept Bearer token (API clients) OR HttpOnly cookie (browser dashboard)
-            if auth_hdr.startswith("Bearer "):
-                has_jwt = decode_token(auth_hdr[7:]) is not None
-            if not has_jwt:
-                cookie_jwt = request.cookies.get("jwt", "")
-                has_jwt = bool(cookie_jwt) and decode_token(cookie_jwt) is not None
-        if not has_key and not has_jwt:
+        if not _request_authed(request):
             return JSONResponse({"detail": "Unauthorized: provide X-API-Key or Bearer token"}, status_code=401)
     return await call_next(request)
 
@@ -980,8 +986,13 @@ def engine_status() -> dict:
     # Per-strategy and per-segment state come from ONE place (segments.py);
     # the dashboard panel, Agents tab cards, badges, Pause/Resume buttons and
     # toggles all render these records.
-    strategies = segment_manager.strategy_states(phase, bool(master_agent.running))
+    import book as _book
+    _pos = _book.positions()
+    _ord = _book.orders()
+    strategies = segment_manager.strategy_states(phase, bool(master_agent.running),
+                                                 _book.strategy_book(_pos))
     segs = segment_manager.segment_states(phase, bool(master_agent.running), strategies)
+    book_summary = _book.summary(_pos, _ord)
     agents_on = {n: v["on"] for n, v in strategies.items()}
     listed = [n for n, v in strategies.items() if not v["hidden"]]
     return {
@@ -996,6 +1007,8 @@ def engine_status() -> dict:
         "strategies": strategies,
         "segments": segs,
         "segments_running": sum(1 for s in segs if s["on"]),
+        # header counters + Today P&L (all segments) — same rows as /portfolio/*
+        "book": book_summary,
         "tick_feed": "running" if tick_engine._running else "stopped",
         "ts_ms": int(time.time() * 1000),
     }
@@ -1006,7 +1019,8 @@ def _engine_signature(e: dict) -> tuple:
             tuple(sorted((n, v["state"], v["reason"], v["enabled"], v["trades_today"])
                          for n, v in e["strategies"].items())),
             tuple((s["code"], s["state"], s["reason"], s["mode"], s["killed"], s["positions"],
-                   round(s["pnl"]["total"])) for s in e["segments"]))
+                   round(s["pnl"]["total"])) for s in e["segments"]),
+            (e["book"]["total"]["positions"], e["book"]["total"]["orders"], round(e["book"]["total"]["pnl"])))
 
 
 _engine_last_sig: Optional[tuple] = None
@@ -1994,18 +2008,37 @@ async def multi_leg_order(req: MultiLegRequest):
 
 # HIGH-6: generic error messages, raw exceptions logged server-side only
 @app.get("/portfolio/positions", tags=["Portfolio"])
-def positions():
-    try: return kite_client.positions()
+def positions(segment: Optional[str] = None):
+    """Every open position across ALL segments (NSE/NFO Kite book + BSE/MCX/CDS
+    segment ledgers), Kite-shaped rows + segment / strategy / price_source."""
+    import book as _book
+    try:
+        rows = _book.positions()
+        if segment:
+            rows = [r for r in rows if r.get("segment") == segment.upper()]
+        return {"net": rows, "day": rows, "summary": _book.summary(order_rows=None, pos_rows=_book.positions())}
     except Exception as e:
         logger.error("Portfolio positions error: {}", e)
         raise HTTPException(500, "Unable to fetch positions")
 
 @app.get("/portfolio/orders", tags=["Portfolio"])
-def orders():
-    try: return kite_client.orders()
+def orders(segment: Optional[str] = None):
+    """Today's orders across ALL segments (oldest first)."""
+    import book as _book
+    try:
+        rows = _book.orders()
+        if segment:
+            rows = [r for r in rows if r.get("segment") == segment.upper()]
+        return rows
     except Exception as e:
         logger.error("Portfolio orders error: {}", e)
         raise HTTPException(500, "Unable to fetch orders")
+
+@app.get("/portfolio/book", tags=["Portfolio"])
+def portfolio_book():
+    """Positions + orders + per-segment / per-strategy P&L in one snapshot."""
+    import book as _book
+    return _book.snapshot()
 
 
 # ── Claude Gate Log (dashboard) ──────────────────────────────────────────────
@@ -2916,15 +2949,35 @@ def whitelist_ip(req: WhitelistIPRequest):
 
 
 # ── Health ────────────────────────────────────────────────────────────────────
+_PUBLIC_STRATEGY_KEYS = ("segment", "state", "reason", "on", "running", "enabled", "native",
+                         "hidden", "display", "desc", "can_resume")
+_PUBLIC_SEGMENT_KEYS = ("code", "label", "kite_exchange", "state", "reason", "on", "open", "hours",
+                        "mode", "effective_mode", "live_supported", "live_stub_reason", "feed",
+                        "killed", "kill_reason", "strategies", "strategies_running")
+
+
+def _public_engine(e: dict) -> dict:
+    """Unauthenticated /health: states only — no P&L, capital, positions or
+    orders (those are sensitive like /portfolio/*)."""
+    out = {k: v for k, v in e.items() if k not in ("strategies", "segments", "book")}
+    out["strategies"] = {n: {k: v[k] for k in _PUBLIC_STRATEGY_KEYS if k in v}
+                         for n, v in e.get("strategies", {}).items()}
+    out["segments"] = [{k: s[k] for k in _PUBLIC_SEGMENT_KEYS if k in s} for s in e.get("segments", [])]
+    out["redacted"] = True
+    return out
+
+
 @app.get("/health", tags=["System"])
-def health():
+def health(request: Request):
+    e = engine_status()
     return {"status": "ok", "version": "4.0.0", "mode": settings.trading_mode,
             "architecture": f"tick-driven {settings.tick_interval_ms}ms",
             "market_data_source": "KiteConnect (WebSocket + REST quote; orders + market data)",
             "market_open": is_market_open(),
             "master": "running" if master_agent.running else "stopped",
             "tick_engine": "running" if tick_engine._running else "stopped",
-            "engine": engine_status(),
+            # full engine (book, P&L, capital) only for an authenticated caller
+            "engine": e if _request_authed(request) else _public_engine(e),
             "agents": {n: a.state.running for n, a in ALL_AGENTS.items()},
             "agent_enabled": dict(bot_state._agent_enabled),
             "subscribed_symbols": tick_engine.symbols(),

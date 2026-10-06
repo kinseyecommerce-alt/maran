@@ -74,8 +74,8 @@ _SEC_PER_YEAR = 252 * 6.25 * 3600
 
 
 def _now_iso() -> str:
-    from ist_clock import now_ist          # IST, independent of the host clock
-    return now_ist().isoformat(timespec="seconds")
+    from segments import segment_manager   # IST (ist_clock), independent of the host clock
+    return segment_manager.now().isoformat(timespec="seconds")
 
 
 class SegmentLiveNotSupported(RuntimeError):
@@ -221,7 +221,8 @@ class NativeEngine:
         self.last_tick_ts = now
 
     # ── orders (paper ledger only) ─────────────────────────────────────────
-    def route_order(self, segment: str, symbol: str, side: str, lots: int, reason: str) -> dict:
+    def route_order(self, segment: str, symbol: str, side: str, lots: int, reason: str,
+                    strategy: Optional[str] = None) -> dict:
         from segments import segment_manager
         if segment_manager.effective_mode(segment) == "LIVE":
             # Unreachable by construction (segments cannot be armed); kept as a hard stop.
@@ -232,7 +233,8 @@ class NativeEngine:
         oid = f"PAPER-{segment}-{uuid.uuid4().hex[:8].upper()}"
         rec = {"order_id": oid, "segment": segment, "symbol": symbol, "side": side, "lots": lots,
                "price": round(px, 4), "ts": _now_iso(),
-               "reason": reason, "price_source": "SIMULATED", "status": "COMPLETE"}
+               "reason": reason, "strategy": strategy, "price_source": "SIMULATED",
+               "status": "COMPLETE"}
         with self._lock:
             self.orders.appendleft(rec)
         return rec
@@ -258,7 +260,7 @@ class NativeEngine:
         bars = list(self.bars[key])
         sd = _std(bars[-30:]) if len(bars) >= 10 else px * 0.001
         sd = max(sd, px * 0.0003)
-        rec = self.route_order(c.segment, c.symbol, side, lots, f"{strat.name} entry")
+        rec = self.route_order(c.segment, c.symbol, side, lots, f"{strat.name} entry", strat.name)
         sgn = 1 if side == "BUY" else -1
         pos = {"key": key, "symbol": c.symbol, "segment": c.segment, "strategy": strat.name,
                "side": side, "lots": lots, "qty": sgn * lots, "entry": rec["price"],
@@ -267,6 +269,9 @@ class NativeEngine:
                "order_id": rec["order_id"], "price_source": "SIMULATED"}
         with self._lock:
             self.positions_[key] = pos
+            # trades = entries today (same convention as the NSE agents)
+            self.trades[c.segment] = self.trades.get(c.segment, 0) + 1
+        strat.state.trades_today += 1
         strat.state.last_signal = {"symbol": c.symbol, "action": side, "price": rec["price"]}
         logger.info("[segment:{}] PAPER {} {} lots={} @ {} (SIMULATED) by {}",
                     c.segment, side, c.symbol, lots, rec["price"], strat.name)
@@ -279,16 +284,14 @@ class NativeEngine:
             return None
         c = self.contracts[key]
         side = "SELL" if pos["qty"] > 0 else "BUY"
-        rec = self.route_order(c.segment, c.symbol, side, pos["lots"], reason)
+        rec = self.route_order(c.segment, c.symbol, side, pos["lots"], reason, pos["strategy"])
         pnl = (rec["price"] - pos["entry"]) * pos["qty"] * c.multiplier
         with self._lock:
             self.realised[c.segment] = self.realised.get(c.segment, 0.0) + pnl
-            self.trades[c.segment] = self.trades.get(c.segment, 0) + 1
             self.closed.appendleft({**pos, "exit": rec["price"], "pnl": round(pnl, 2), "reason": reason,
                                     "closed": _now_iso()})
         st = self.strategies.get(pos["strategy"])
         if st:
-            st.state.trades_today += 1
             st.state.pnl_today += pnl
         return {**pos, "exit": rec["price"], "pnl": round(pnl, 2), "reason": reason}
 
@@ -324,8 +327,11 @@ class NativeEngine:
                 self._close(key, "target")
             elif time.time() - pos["opened"] > 30 * 60:
                 self._close(key, "time_stop")
-            elif segment_manager.is_open(pos["segment"], now_dt) and now_dt >= sq_cut:
+            elif now_dt >= sq_cut and segment_manager.is_open(pos["segment"], now_dt):
                 self._close(key, "segment_squareoff")
+            elif not segment_manager.window_ok(pos["segment"], now_dt):
+                # past the close (or restarted after it): no intraday carry
+                self._close(key, "segment_closed")
         # entries
         for st in self.strategies.values():
             if not st.state.running:
