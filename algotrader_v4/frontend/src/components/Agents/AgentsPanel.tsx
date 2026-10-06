@@ -58,8 +58,9 @@ export default function AgentsPanel() {
                   <span data-testid={`segment-feed-${s.code}`}
                     className={s.feed === 'REAL'
                       ? 'text-emerald-500'
-                      : 'text-amber-300 border border-amber-500/40 px-1 rounded font-bold'}>
-                    {s.feed === 'REAL' ? 'REAL' : 'SIMULATED'}
+                      : 'text-amber-300 border border-amber-500/40 px-1 rounded font-bold'}
+                    title={s.feed === 'SIMULATED' ? 'Paper simulator prices — not market quotes' : s.feed}>
+                    {s.feed}
                   </span>
                   <span data-testid={`segment-pnl-${s.code}`} data-value={nums.pnl}
                     className={`ml-auto font-semibold tabular-nums ${nums.pnl >= 0 ? 'text-emerald-400' : 'text-rose-400'}`}>
