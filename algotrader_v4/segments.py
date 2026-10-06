@@ -324,6 +324,9 @@ class SegmentManager:
                     trades += int(a.state.trades_today or 0)
         except Exception:
             pass
+        # NOTE: displays use book.py (Σ pnl of listed exit fills); this gate
+        # input stays on the agents' own realised counters (unchanged risk
+        # semantics).
         unreal = sum(p["pnl"] for p in self.positions(code))
         return {"realised": round(realised, 2), "unrealised": round(unreal, 2),
                 "total": round(realised + unreal, 2), "trades_today": trades}

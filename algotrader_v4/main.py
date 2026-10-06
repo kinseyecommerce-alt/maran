@@ -185,6 +185,16 @@ async def _security_headers(request: Request, call_next):
     response.headers["X-Content-Type-Options"] = "nosniff"
     response.headers["Referrer-Policy"]        = "strict-origin-when-cross-origin"
     response.headers["Content-Security-Policy"] = _CSP
+    # Live data must never come from a browser/proxy cache; the SPA shell is
+    # revalidated on every load so a rebuilt bundle is picked up (hashed
+    # /assets/* files stay cacheable).
+    path = request.url.path
+    if path.startswith("/assets/"):
+        response.headers.setdefault("Cache-Control", "public, max-age=31536000, immutable")
+    elif path in ("/", "/dashboard", "/login") or path.endswith(".html"):
+        response.headers["Cache-Control"] = "no-cache"
+    elif "application/json" in (response.headers.get("content-type") or ""):
+        response.headers["Cache-Control"] = "no-store"
     if request.url.scheme == "https":
         response.headers["Strict-Transport-Security"] = "max-age=31536000; includeSubDomains"
     return response
@@ -987,12 +997,17 @@ def engine_status() -> dict:
     # the dashboard panel, Agents tab cards, badges, Pause/Resume buttons and
     # toggles all render these records.
     import book as _book
-    _pos = _book.positions()
-    _ord = _book.orders()
+    _b = _book.build()                     # ONE snapshot: positions, orders, P&L
     strategies = segment_manager.strategy_states(phase, bool(master_agent.running),
-                                                 _book.strategy_book(_pos))
+                                                 _b["strategies"])
     segs = segment_manager.segment_states(phase, bool(master_agent.running), strategies)
-    book_summary = _book.summary(_pos, _ord)
+    book_summary = _b["summary"]
+    for s in segs:                         # segment cards: same numbers as the book
+        bs = book_summary["by_segment"].get(s["code"])
+        if bs:
+            s["pnl"] = {**(s.get("pnl") or {}), "realised": bs["realised"],
+                        "unrealised": bs["unrealised"], "total": bs["pnl"], "closed": bs["closed"]}
+            s["positions"] = bs["positions"]
     agents_on = {n: v["on"] for n, v in strategies.items()}
     listed = [n for n, v in strategies.items() if not v["hidden"]]
     return {
@@ -1043,11 +1058,16 @@ async def broadcast_engine(force: bool = False) -> dict:
 async def _engine_watch_loop() -> None:
     from segments import segment_manager
     from segment_engine import native_engine
+    import paper_store
+    _last_save = 0.0
     while True:
         try:
             native_engine.ensure_running()        # SIMULATED BSE/MCX/CDS feed
             segment_manager.supervise()           # hours windows / kill switches
             await broadcast_engine()
+            if time.monotonic() - _last_save >= 2.0:   # paper book → SQLite (if changed)
+                _last_save = time.monotonic()
+                await asyncio.get_running_loop().run_in_executor(None, paper_store.save)
         except asyncio.CancelledError:
             break
         except Exception as exc:
@@ -2013,10 +2033,11 @@ def positions(segment: Optional[str] = None):
     segment ledgers), Kite-shaped rows + segment / strategy / price_source."""
     import book as _book
     try:
-        rows = _book.positions()
+        b = _book.build()
+        rows = b["positions"]
         if segment:
             rows = [r for r in rows if r.get("segment") == segment.upper()]
-        return {"net": rows, "day": rows, "summary": _book.summary(order_rows=None, pos_rows=_book.positions())}
+        return {"net": rows, "day": rows, "summary": b["summary"]}
     except Exception as e:
         logger.error("Portfolio positions error: {}", e)
         raise HTTPException(500, "Unable to fetch positions")
@@ -2026,7 +2047,7 @@ def orders(segment: Optional[str] = None):
     """Today's orders across ALL segments (oldest first)."""
     import book as _book
     try:
-        rows = _book.orders()
+        rows = _book.build()["orders"]
         if segment:
             rows = [r for r in rows if r.get("segment") == segment.upper()]
         return rows
@@ -3839,6 +3860,13 @@ async def on_startup():
     # Initialise SQLite state store
     from state_store import init_db, get_daily_pnl, get_kv
     init_db()
+    # Restore today's PAPER book (positions, orders, segment ledgers, P&L)
+    # before any engine loop runs.
+    try:
+        import paper_store
+        paper_store.restore()
+    except Exception as _pe:
+        logger.warning("[startup] paper book restore failed: {}", _pe)
     # Restore persisted kill-switch state AFTER the DB is guaranteed to exist
     # (a restart must never silently clear an emergency halt). Also re-halts
     # risk_manager when KILLED was restored.
@@ -4120,6 +4148,11 @@ async def on_shutdown():
     squareoff explicitly via /orders/squareoff before stopping the service.
     """
     logger.warning("FastAPI shutdown: stopping all agents and tick engine…")
+    try:
+        import paper_store
+        paper_store.save(force=True)
+    except Exception as _pe:
+        logger.warning("Shutdown: paper book save failed: {}", _pe)
 
     # 1. Stop all running agents gracefully
     try:

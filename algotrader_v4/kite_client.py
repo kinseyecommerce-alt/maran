@@ -142,6 +142,12 @@ class KiteClient:
         self._kite: Optional[KiteConnect] = None
         self._paper_orders:    dict[str, dict] = {}   # order_id → order dict (O(1) lookup)
         self._paper_orders_lock: Lock = Lock()
+        # Whole-day journal of paper orders (same dict objects as _paper_orders,
+        # so status/fill updates show up). _paper_orders is pruned after 30 min
+        # for the order-manager hot path; the journal is not — the Orders tab,
+        # header counters and realised P&L read today's full list from it.
+        self._paper_journal: dict[str, dict] = {}
+        self._paper_journal_day: str = ""
         self._paper_filled_ids: set[str] = set()     # guard against double-fill race
         self._paper_positions: list[dict] = []
         self._paper_positions_lock: Lock = Lock()
@@ -843,6 +849,7 @@ class KiteClient:
         }
         with self._paper_orders_lock:
             self._paper_orders[order_id] = record
+            self._journal_locked(record)
             self._prune_paper_orders_locked()
         # Only update position for immediately filled orders
         if status == "COMPLETE":
@@ -851,6 +858,63 @@ class KiteClient:
                     transaction_type, tradingsymbol, order_type,
                     quantity, fill_price, order_id)
         return order_id
+
+    def _journal_locked(self, record: dict) -> None:
+        """Caller holds _paper_orders_lock. New IST day → fresh journal."""
+        day = datetime.now(tz=_IST).date().isoformat()
+        if getattr(self, "_paper_journal_day", "") != day or not hasattr(self, "_paper_journal"):
+            self._paper_journal_day = day
+            self._paper_journal = {}
+        self._paper_journal[record["order_id"]] = record
+
+    def paper_orders_today(self) -> list[dict]:
+        """Every paper order placed today (IST), including ones pruned from
+        the 30-min hot list. Same dict objects → live status / fill / pnl."""
+        with self._paper_orders_lock:
+            day = datetime.now(tz=_IST).date().isoformat()
+            if getattr(self, "_paper_journal_day", "") != day:
+                return []
+            return list(getattr(self, "_paper_journal", {}).values())
+
+    def paper_realised_today(self, exchange: Optional[str] = None) -> float:
+        """Realised P&L = Σ pnl recorded on today's reducing fills."""
+        return round(sum(float(o.get("pnl") or 0.0) for o in self.paper_orders_today()
+                         if exchange is None or o.get("exchange") == exchange), 2)
+
+    def export_paper_state(self) -> dict:
+        with self._paper_orders_lock:
+            journal = [dict(o) for o in getattr(self, "_paper_journal", {}).values()]
+            hot = list(self._paper_orders.keys())
+            day = getattr(self, "_paper_journal_day", "")
+        with self._paper_positions_lock:
+            positions = [dict(p) for p in self._paper_positions]
+        return {"day": day, "journal": journal, "hot": hot, "positions": positions,
+                "ltp": dict(self._paper_ltp), "filled": list(self._paper_filled_ids)[-2000:]}
+
+    def import_paper_state(self, data: dict, today: str) -> dict:
+        """Restore the paper book: open positions always (MIS square-off and
+        agents' exits still apply); today's journal / pending orders only if
+        saved today."""
+        same_day = data.get("day") == today
+        with self._paper_positions_lock:
+            self._paper_positions[:] = [dict(p) for p in (data.get("positions") or [])
+                                        if p.get("quantity")]
+        for s, v in (data.get("ltp") or {}).items():
+            try:
+                self._paper_ltp[s] = float(v)
+            except (TypeError, ValueError):
+                pass
+        n = 0
+        if same_day:
+            with self._paper_orders_lock:
+                self._paper_journal_day = today
+                self._paper_journal = {o["order_id"]: dict(o) for o in (data.get("journal") or [])
+                                       if o.get("order_id")}
+                hot = set(data.get("hot") or [])
+                self._paper_orders = {oid: o for oid, o in self._paper_journal.items() if oid in hot}
+                self._paper_filled_ids = set(data.get("filled") or [])
+                n = len(self._paper_journal)
+        return {"positions": len(self._paper_positions), "orders": n, "same_day": same_day}
 
     def expire_stale_paper_limit_orders(self) -> int:
         """Cancel OPEN LIMIT/SL orders that have not filled within _PAPER_LIMIT_EXPIRY_SEC.
@@ -909,6 +973,13 @@ class KiteClient:
                 if pos["tradingsymbol"] == sym:
                     old_qty = pos["quantity"]
                     new_qty = old_qty + qty_delta
+                    if old_qty and qty_delta and (old_qty > 0) != (qty_delta > 0):
+                        # reducing / closing fill → realised P&L on the closed quantity,
+                        # recorded on the order itself (journal shares the dict)
+                        closed = min(abs(qty_delta), abs(old_qty))
+                        realised = round((fill_price - pos["average_price"]) * closed
+                                         * (1 if old_qty > 0 else -1), 2)
+                        self._record_fill_pnl(order, realised)
                     if new_qty != 0 and abs(qty_delta) > 0:
                         if old_qty == 0:
                             # Re-entering a flat position — reset average to this fill price.
@@ -935,6 +1006,16 @@ class KiteClient:
                 "last_price":    fill_price,
                 "pnl":           0.0,
             })
+
+    def _record_fill_pnl(self, order: dict, realised: float) -> None:
+        oid = order.get("order_id")
+        order["pnl"] = realised
+        if oid:
+            with self._paper_orders_lock:
+                for book in (self._paper_orders, getattr(self, "_paper_journal", {})):
+                    o = book.get(oid)
+                    if o is not None:
+                        o["pnl"] = realised
 
     # ── Paper-mode tick-driven updates ────────────────────────────────────
 
