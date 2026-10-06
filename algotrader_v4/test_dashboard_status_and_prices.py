@@ -18,6 +18,7 @@ _iso_dir = _tf_iso.mkdtemp(prefix="algotrader-test-")
 _os_iso.environ.setdefault("DATABASE_PATH", _os_iso.path.join(_iso_dir, "algotrader.db"))
 _os_iso.environ.setdefault("ADAPTIVE_DATA_DIR", _os_iso.path.join(_iso_dir, "adaptive"))
 _os_iso.environ.setdefault("SEBI_AUDIT_DIR", _iso_dir)
+_os_iso.environ.setdefault("SEGMENT_PAPER_AFTER_HOURS", "true")   # segment hours are tested explicitly in test_segments.py
 _os_iso.environ["API_KEY"] = "unit-test-local-only"
 _os_iso.environ["TRADING_MODE"] = "PAPER"
 
@@ -143,11 +144,14 @@ def t_spa_indicators_use_engine():
     store = (SRC / "store/index.ts").read_text()
     agents_tab = (SRC / "components/tabs/AgentsTab.tsx").read_text()
     ws = (SRC / "ws/websocket.ts").read_text()
-    assert 'EngineLabel testId="engine-agents-panel"' in app
+    panel = (SRC / "components/Agents/AgentsPanel.tsx").read_text()
+    assert "<AgentsPanel />" in app                       # dashboard agents panel component
+    assert 'EngineLabel testId="engine-agents-panel"' in panel
     assert 'EngineLabel testId="engine-footer"' in app
     assert "health?.master" not in app and "health.master" not in app
     assert "ENGINE: <span className=\"text-slate-300\">{health.tick_engine}" not in app
-    assert "agentOn(engine" in app and "agentOn(engine" in agents_tab
+    # agent cards on both surfaces use the shared strategyView(engine, key)
+    assert "strategyView(engine" in panel and "strategyView(engine" in agents_tab
     assert "master_running" not in hdr and "start_phase" not in hdr      # button = engine only
     assert "engineState === 'starting'" in hdr and 'data-testid="engine-header"' in hdr
     assert "get().setEngine(h?.engine)" in store and "get().setEngine(b?.engine)" in store
