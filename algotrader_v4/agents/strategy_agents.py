@@ -2159,6 +2159,12 @@ class OptionsAgent(BaseAgent):
         # _on_sl_hit immediately, and a missing entry there falls back to pos.symbol
         # (the underlying equity, NSE/MIS) — wrong instrument for option exits.
         _setup_tsl_callbacks()
+        _opt_type_pm = str(signal.get("option_type", "CE")).upper()
+        try:
+            _delta_pm = abs(float(signal.get("entry_delta", 0.5) or 0.5))
+        except (TypeError, ValueError):
+            _delta_pm = 0.5
+        _delta_pm = max(min(_delta_pm, 1.0), 0.05)
         with _tsl_sl_orders_lock:
             _tsl_sl_orders[order_id] = {
                 "sl_order_id":   sl_order_id,
@@ -2166,6 +2172,13 @@ class OptionsAgent(BaseAgent):
                 "exchange":      exch,
                 "tradingsymbol": opt_sym,
                 "lot_size":      lot_size,
+                # TSL trails the UNDERLYING; the SL-M rests on the contract.
+                # _on_sl_moved maps the underlying stop to a premium trigger.
+                "premium_map": {
+                    "entry_premium":    float(opt_price),
+                    "entry_underlying": float(S),
+                    "delta": _delta_pm if _opt_type_pm == "CE" else -_delta_pm,
+                },
             }
         # Keyed by the UNDERLYING with the underlying entry price (snap.ltp), so
         # profit/SL percentages track underlying moves consistently. Registering
@@ -2321,6 +2334,11 @@ class OptionsAgent(BaseAgent):
                 "exchange":      exch,
                 "tradingsymbol": pe_sym,
                 "lot_size":      signal.get("lot_size", 1),
+                "premium_map": {   # ATM put: delta ≈ −0.5
+                    "entry_premium":    float(pe_price),
+                    "entry_underlying": float(S),
+                    "delta": -0.5,
+                },
             }
         # Long PE = bearish exposure → trails as SELL on the underlying; the
         # contract itself is still closed by SELLing it (exit_side).

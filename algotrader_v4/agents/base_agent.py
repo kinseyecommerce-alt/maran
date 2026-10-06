@@ -50,6 +50,18 @@ _tsl_sl_orders_lock = __import__("threading").Lock()
 _tsl_callbacks_installed: bool = False
 
 
+def _premium_trigger(pm: dict, underlying_sl: float) -> float:
+    """Map a TSL stop expressed on the UNDERLYING to an SL-M trigger on the
+    option CONTRACT: premium ≈ entry_premium + signed_delta × ΔS, floored at
+    one tick and rounded to the ₹0.05 F&O tick size. Without this the option
+    stop was modified to the underlying's spot level (e.g. ₹1770 on a ₹24
+    premium) — an instant fill in PAPER, a rejected/mis-placed stop in LIVE."""
+    prem = float(pm["entry_premium"]) + float(pm["delta"]) * (
+        float(underlying_sl) - float(pm["entry_underlying"]))
+    prem = max(prem, 0.05)
+    return round(round(prem / 0.05) * 0.05, 2)
+
+
 def _setup_tsl_callbacks() -> None:
     """Wire global TSL callbacks once (idempotent). Must be called before first register()."""
     global _tsl_callbacks_installed
@@ -76,6 +88,8 @@ def _setup_tsl_callbacks() -> None:
         # (captured at entry) — offset the trigger so "breakeven at spot" is
         # breakeven on the CONTRACT, not a basis-sized locked-in loss.
         _trig = round(pos.current_sl + float(entry.get("basis") or 0.0), 2)
+        if entry.get("premium_map"):
+            _trig = _premium_trigger(entry["premium_map"], pos.current_sl)
         try:
             await _loop.run_in_executor(
                 None, lambda: kite_client.modify_order(order_id=sl_oid, trigger_price=_trig)
@@ -638,6 +652,7 @@ class BaseAgent(ABC):
 
         # Normal path: run backtest per symbol (first-time setup)
         approved = []
+        untested: list[str] = []
         for item in watchlist:
             sym, exch = item["symbol"], item.get("exchange", "NSE")
             res = backtest_engine.run(sym, exch, self.name)
@@ -646,11 +661,41 @@ class BaseAgent(ABC):
                 self._approved.add(sym)
                 logger.info("[{}] {} PASS (win={:.0f}% sharpe={:.2f})",
                             self.name, sym, res.win_rate, res.sharpe_ratio)
+            elif self._paper_untested_ok(res):
+                # PAPER with NO history to backtest (no Kite/TrueData session):
+                # the backtest could not run at all — it did not fail on
+                # evidence. Without this, a credential-less PAPER install
+                # approved 0 symbols and every agent sat idle, never placing
+                # a single autonomous order. Same philosophy as the PAPER
+                # top-up above: paper is where untested symbols earn evidence.
+                # Symbols that FAILED a real backtest stay rejected, and LIVE
+                # never takes this branch.
+                approved.append(item)
+                self._approved.add(sym)
+                untested.append(sym)
             else:
                 logger.info("[{}] {} FAIL: {}", self.name, sym,
                             ", ".join(res.fail_reasons))
+        if untested:
+            logger.info("[{}] PAPER: {} symbol(s) approved untested (no history to "
+                        "backtest): {}", self.name, len(untested), untested)
+        _cap = int(getattr(settings, "max_symbols_per_agent", 30) or 0)
+        if untested and _cap > 0 and len(approved) > _cap:
+            approved = approved[:_cap]
+            self._approved = {a["symbol"] for a in approved}
         self.state.approved_symbols = [a["symbol"] for a in approved]
         return approved
+
+    @staticmethod
+    def _paper_untested_ok(res) -> bool:
+        """True when a backtest result is a no-data non-result (not a loss on
+        evidence) and PAPER mode allows trading untested symbols."""
+        if settings.trading_mode != "PAPER":
+            return False
+        if not getattr(settings, "paper_approve_untested", True):
+            return False
+        reasons = list(getattr(res, "fail_reasons", []) or [])
+        return bool(reasons) and all(str(r).startswith("Insufficient data") for r in reasons)
 
     def add_symbols(self, symbols: list[str]) -> int:
         """Promote intraday scanner picks into this agent's tradeable book.
