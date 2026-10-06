@@ -161,6 +161,7 @@ export const api = {
                     ax().post('/settings/trading-mode', { mode, confirm, confirm_text: confirmText }),
 
   // ── Market — live index levels ──────────────────────────────────────────────
+  marketOverview: (limit: number = 20) => ax().get('/market/overview', { params: { limit } }),
   indices: (refresh: boolean = false) => ax().get('/market/indices', { params: refresh ? { refresh: true } : {} }),
 
   // ── Settings — Capital Allocation ───────────────────────────────────────────

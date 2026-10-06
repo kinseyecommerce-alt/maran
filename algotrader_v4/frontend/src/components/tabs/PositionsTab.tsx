@@ -4,7 +4,7 @@ import { api } from '../../api/client'
 import { Pnl, Badge } from '../ui'
 
 export default function PositionsTab() {
-  const { positions, ticks, setPositions } = useStore()
+  const { positions, ticks, setPositions, health } = useStore()
 
   useEffect(() => {
     api.positions().then(r => setPositions(r.data.net || [])).catch(() => {})
@@ -55,7 +55,13 @@ export default function PositionsTab() {
                   </Badge>
                 </td>
                 <td className="px-4 py-3 font-mono text-slate-300">₹{pos.average_price.toFixed(2)}</td>
-                <td className="px-4 py-3 font-mono font-semibold text-slate-100">₹{ltp.toFixed(2)}</td>
+                <td className="px-4 py-3 font-mono font-semibold text-slate-100">
+                  ₹{ltp.toFixed(2)}
+                  {(tick ? tick.price_source === 'SIMULATED' : health?.mode === 'PAPER') && (
+                    <span data-testid={`pos-sim-${pos.tradingsymbol}`} title="Paper simulator price — not a market quote"
+                          className="ml-1.5 text-[9px] font-normal px-1 py-px rounded text-amber-300 bg-amber-500/15 border border-amber-500/40">SIM</span>
+                  )}
+                </td>
                 <td className="px-4 py-3"><Pnl value={pnl} /></td>
                 <td className="px-4 py-3">
                   <span className={`text-xs font-mono font-medium ${pct >= 0 ? 'text-emerald-400' : 'text-rose-400'}`}>

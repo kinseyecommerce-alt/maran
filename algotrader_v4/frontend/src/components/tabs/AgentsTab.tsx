@@ -1,6 +1,7 @@
 import React, { useEffect, useState } from 'react'
 import { useStore } from '../../store'
 import { api } from '../../api/client'
+import { agentOn } from '../EngineStatus'
 
 function fmtLastSignal(s: unknown): string {
   if (!s) return '—'
@@ -25,7 +26,7 @@ const AGENT_META: Record<string, { emoji: string; name: string; desc: string }> 
 type EnableMap = Record<string, boolean>
 
 export default function AgentsTab() {
-  const { agents, setAgents, addToast } = useStore()
+  const { agents, setAgents, addToast, engine } = useStore()
   const [enables, setEnables] = useState<EnableMap>({})
   const [enableBusy, setEnableBusy] = useState<Record<string, boolean>>({})
   const [adaptive, setAdaptive] = useState<any>(null)
@@ -68,7 +69,7 @@ export default function AgentsTab() {
       {/* Agent cards */}
       {Object.entries(AGENT_META).map(([key, meta]) => {
         const agent   = agents[key]
-        const running = agent?.running ?? false
+        const running = agentOn(engine, key, agent?.running)   // same source as dashboard
         const enabled = enables[key] !== false
 
         return (

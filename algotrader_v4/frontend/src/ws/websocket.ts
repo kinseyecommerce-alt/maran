@@ -40,6 +40,8 @@ export function connectWS() {
       const data = JSON.parse(e.data)
       if (data.event === 'tick') {
         setTick(data as TickData)
+      } else if (data.event === 'engine' && data.data) {
+        useStore.getState().setEngine(data.data)
       } else if (data.event === 'indices' && Array.isArray(data.data)) {
         useStore.getState().setIndices(data.data)
       } else if (data.event === 'order_placed') {

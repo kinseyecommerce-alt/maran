@@ -1172,7 +1172,8 @@ function RiskLimitsPanel({ addToast }: { addToast: (msg: string, type?: any) => 
 // ─── Main Header ──────────────────────────────────────────────────────────────
 
 export default function Header() {
-  const { health, botStatus, wsConnected, setHealth, setBotStatus, addToast } = useStore()
+  const { health, wsConnected, setHealth, setBotStatus, addToast, engine, setEngine } = useStore()
+  const engineState = engine?.state
 
   const [time, setTime]         = useState(new Date())
   const [configOpen, setConfigOpen] = useState(false)
@@ -1206,9 +1207,11 @@ export default function Header() {
       api.botStatus().then(r => setBotStatus(r.data)).catch(() => {})
     }
     poll()
-    const t = setInterval(poll, 5000)
+    // Poll fast while the engine is starting so every indicator flips to
+    // RUNNING together (WS "engine" events also push changes instantly).
+    const t = setInterval(poll, engineState === 'starting' ? 1500 : 5000)
     return () => clearInterval(t)
-  }, [])
+  }, [engineState])
 
   useEffect(() => {
     if (!configOpen) return
@@ -1252,23 +1255,24 @@ export default function Header() {
   const handleBotToggle = useCallback(async () => {
     setBotLoading(true)
     try {
-      if (botStatus?.master_running) {
-        await api.botStop()
+      if (engine?.state === 'running') {
+        const r = await api.botStop()
+        setEngine(r.data?.engine)
         addToast('Bot stopped', 'info')
-        setBotStatus(null)
+        api.botStatus().then(s => setBotStatus(s.data)).catch(() => {})
       } else {
         const r = await api.botStart(['intraday', 'scalping'])
+        setEngine(r.data?.engine)
         if (r.status === 202 || r.data.status === 'starting') {
-          addToast('Loading instruments… agents will be live in a few seconds', 'info')
+          addToast('Engine starting — loading instruments…', 'info')
         } else {
           addToast(`Bot started — ${r.data.watchlist?.length || 0} symbols`, 'buy')
         }
-        setBotStatus(r.data)
       }
     } catch (e: any) {
       addToast(e.response?.data?.detail || 'Bot toggle failed', 'error')
     } finally { setBotLoading(false) }
-  }, [botStatus])
+  }, [engine])
 
   const saveBrokerCreds = async (fields: string[], successMsg: string) => {
     const payload: Record<string, string> = {}
@@ -1377,16 +1381,20 @@ export default function Header() {
 
         <div className="flex-1" />
 
-        <DarkBtn variant={botStatus?.master_running ? 'danger' : 'buy'} onClick={handleBotToggle}
-          disabled={botLoading || ['scanning_instruments','loading_instruments'].includes(botStatus?.start_phase ?? '')}>
-          {botStatus?.master_running
-            ? <><ZapOff className="w-3.5 h-3.5 mr-1.5" />Stop Bot</>
-            : botStatus?.start_phase === 'scanning_instruments'
-              ? <><Zap className="w-3.5 h-3.5 mr-1.5 animate-pulse" />Scanning…</>
-              : botStatus?.start_phase === 'loading_instruments'
-              ? <><Zap className="w-3.5 h-3.5 mr-1.5 animate-pulse" />Loading instruments…</>
-              : <><Zap className="w-3.5 h-3.5 mr-1.5" />Start Bot</>}
-        </DarkBtn>
+        {/* Driven ONLY by store.engine (same object as agents panel + footer). */}
+        <span data-testid="engine-header" data-engine-state={engine?.state ?? 'unknown'}
+              title={engine?.error || engine?.label || ''}>
+          <DarkBtn variant={engineState === 'running' ? 'danger' : 'buy'} onClick={handleBotToggle}
+            disabled={botLoading || !engine || engineState === 'starting'}>
+            {engineState === 'running'
+              ? <><ZapOff className="w-3.5 h-3.5 mr-1.5" />Stop Bot</>
+              : engineState === 'starting'
+                ? <><Zap className="w-3.5 h-3.5 mr-1.5 animate-pulse" />Starting · {engine?.label}</>
+                : engineState === 'error'
+                  ? <><Zap className="w-3.5 h-3.5 mr-1.5" />Start failed — retry</>
+                  : <><Zap className="w-3.5 h-3.5 mr-1.5" />Start Bot</>}
+          </DarkBtn>
+        </span>
 
         <button onClick={openSettings}
           className="p-1.5 rounded-lg hover:bg-slate-800 text-slate-500 hover:text-slate-300 transition-colors relative"

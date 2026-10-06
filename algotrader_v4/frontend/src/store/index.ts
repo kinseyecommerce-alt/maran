@@ -1,5 +1,5 @@
 import { create } from 'zustand'
-import type { IndexQuote, TickData, Position, Order, Bracket, RiskStatus, Agent, BotStatus, HealthData, AgentActivityEntry } from '../types'
+import type { EngineStatus, MarketOverviewData, IndexQuote, TickData, Position, Order, Bracket, RiskStatus, Agent, BotStatus, HealthData, AgentActivityEntry } from '../types'
 
 interface AppStore {
   // Auth
@@ -35,6 +35,16 @@ interface AppStore {
   // Bot
   botStatus: BotStatus | null
   setBotStatus: (b: BotStatus | null) => void
+
+  // Engine — the ONE status every indicator renders. Fed by /health,
+  // /bot/status, /bot/start, /bot/stop and WS "engine"; newest ts_ms wins so
+  // an older poll response can never overwrite a newer state.
+  engine: EngineStatus | null
+  setEngine: (e: EngineStatus | null | undefined) => void
+
+  // Market overview (honest per-price sources) from /market/overview
+  overview: MarketOverviewData | null
+  setOverview: (o: MarketOverviewData) => void
 
   // Portfolio
   positions: Position[]
@@ -81,7 +91,7 @@ export const useStore = create<AppStore>((set, get) => ({
   setWsConnected: (v) => set({ wsConnected: v }),
 
   health: null,
-  setHealth: (h) => set({ health: h }),
+  setHealth: (h) => { set({ health: h }); get().setEngine(h?.engine) },
 
   ticks: {},
   sparklines: {},
@@ -101,7 +111,18 @@ export const useStore = create<AppStore>((set, get) => ({
   setSelectedSymbol: (s) => set({ selectedSymbol: s }),
 
   botStatus: null,
-  setBotStatus: (b) => set({ botStatus: b }),
+  setBotStatus: (b) => { set({ botStatus: b }); get().setEngine(b?.engine) },
+
+  engine: null,
+  setEngine: (e) => {
+    if (!e) return
+    const cur = get().engine
+    if (cur && e.ts_ms < cur.ts_ms) return
+    set({ engine: e })
+  },
+
+  overview: null,
+  setOverview: (o) => set({ overview: o }),
 
   positions: [],
   orders:    [],

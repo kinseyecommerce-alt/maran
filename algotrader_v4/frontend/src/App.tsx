@@ -7,6 +7,8 @@ import {
 } from 'lucide-react'
 import Header from './components/Header'
 import IndexStrip from './components/IndexStrip'
+import MarketOverview from './components/MarketOverview'
+import { EngineLabel, agentOn } from './components/EngineStatus'
 import PositionsTab from './components/tabs/PositionsTab'
 import OrdersTab from './components/tabs/OrdersTab'
 import BracketsTab from './components/tabs/BracketsTab'
@@ -162,7 +164,7 @@ export default function App() {
     health, wsConnected,
     ticks, sparklines,
     positions, orders, botStatus, riskStatus,
-    addToast, token, clearToken,
+    addToast, token, clearToken, engine,
   } = useStore()
 
   const [isAuthed, setIsAuthed] = useState<boolean | null>(null)
@@ -241,27 +243,17 @@ export default function App() {
     }
   }
 
-  const activeCount = AGENT_ORDER.filter(k => agents[k]?.running).length
-  const pausedCount = AGENT_ORDER.filter(k => agents[k] && !agents[k].running).length
+  // ON/OFF everywhere comes from the engine snapshot (same object as the
+  // header button and footer), falling back to /agents only before it loads.
+  const isOn        = (k: string) => agentOn(engine, k, agents[k]?.running)
+  const activeCount = AGENT_ORDER.filter(k => isOn(k)).length
+  const pausedCount = AGENT_ORDER.filter(k => (agents[k] || engine) && !isOn(k)).length
 
   const dailyPnl    = botStatus?.performance?.daily_pnl ?? positions.reduce((s, p) => s + (p.pnl || 0), 0)
   const pnlPositive = dailyPnl >= 0
   const pnlDisplay  = `${pnlPositive ? '+' : ''}₹${Math.abs(dailyPnl).toLocaleString('en-IN', { maximumFractionDigits: 2 })}`
   const isHalted    = riskStatus?.is_halted
 
-  const watchlistSymbols = Object.keys(ticks).slice(0, 8)
-  const niftyKey   = Object.keys(ticks).find(k => k.includes('NIFTY')) || ''
-  const niftyTick  = niftyKey ? ticks[niftyKey] : null
-  const niftySpark = niftyKey ? (sparklines[niftyKey] || []) : []
-
-  const chartData  = niftySpark.length >= 10
-    ? niftySpark.slice(-30).map(v => {
-        const arr = niftySpark.slice(-30)
-        const min = Math.min(...arr); const max = Math.max(...arr)
-        return 10 + ((v - min) / (max - min || 1)) * 80
-      })
-    : [...Array(30)].map((_, i) => 25 + Math.sin(i * 0.4) * 15 + Math.cos(i * 0.3) * 10)
-  const linePoints = chartData.map((h, i) => `${(i / (chartData.length - 1)) * 100},${100 - h}`).join(' ')
 
   const logs = agentActivity.length > 0 ? agentActivity : [
     { time: '--:--:--', agent: 'SYSTEM', action: 'No activity yet — start bot to see live signals.', type: 'system' as const, cat: 'SYS' as const },
@@ -402,7 +394,8 @@ export default function App() {
                       <span className="text-slate-600 font-normal">({AGENT_ORDER.length})</span>
                     </h2>
                     <div className="text-xs font-mono text-slate-500 flex gap-4">
-                      {health?.tick_engine && <span>ENGINE: <span className="text-slate-300">{health.tick_engine}</span></span>}
+                      <EngineLabel testId="engine-agents-panel" />
+                      {engine && <span data-testid="engine-agents-count">AGENTS: <span className="text-slate-300">{activeCount}/{AGENT_ORDER.length}</span></span>}
                       {health?.mode        && <span>MODE: <span className={health.mode === 'LIVE' ? 'text-rose-400' : 'text-amber-400'}>{health.mode}</span></span>}
                     </div>
                   </div>
@@ -411,7 +404,8 @@ export default function App() {
                     {AGENT_ORDER.map(key => {
                       const agent  = agents[key]
                       const meta   = AGENT_META[key]
-                      const active = agent?.running ?? false
+                      const active = isOn(key)
+                      const starting = engine?.state === 'starting'
 
                       const ls = agent?.last_signal as unknown
                       let sigDisplay = '—'
@@ -435,8 +429,9 @@ export default function App() {
                                 <span className="font-mono text-[9px] text-slate-600">{meta.id}</span>
                                 <span className={`w-1.5 h-1.5 rounded-full ${active ? 'bg-emerald-500 shadow-[0_0_6px_#10b981]' : 'bg-amber-500'}`} />
                               </div>
-                              <span className={`text-[10px] font-mono px-1.5 py-0.5 rounded ${active ? 'text-emerald-400 bg-emerald-500/10' : 'text-amber-500 bg-amber-500/10'}`}>
-                                {active ? 'ON' : 'OFF'}
+                              <span data-testid={`agent-state-${key}`}
+                                className={`text-[10px] font-mono px-1.5 py-0.5 rounded ${starting ? 'text-amber-300 bg-amber-500/10 animate-pulse' : active ? 'text-emerald-400 bg-emerald-500/10' : 'text-amber-500 bg-amber-500/10'}`}>
+                                {starting ? 'STARTING' : active ? 'ON' : 'OFF'}
                               </span>
                             </div>
                             <div className="font-bold text-sm text-white leading-none">{meta.displayName}</div>
@@ -548,85 +543,8 @@ export default function App() {
                 </div>
               </div>
 
-              {/* RIGHT: WATCHLIST + NIFTY CHART */}
-              <div className="w-64 flex flex-col bg-slate-900 shrink-0">
-
-                <div className="flex-1 border-b border-slate-800 flex flex-col min-h-0">
-                  <div className="p-3 border-b border-slate-800 flex justify-between items-center bg-slate-950/50 shrink-0">
-                    <h3 className="text-xs font-semibold tracking-widest text-slate-400 flex items-center gap-2">
-                      <Activity className="w-3.5 h-3.5" />
-                      MARKET OVERVIEW
-                    </h3>
-                  </div>
-                  <div className="flex-1 overflow-y-auto acc-scroll">
-                    {watchlistSymbols.length > 0 ? watchlistSymbols.map(sym => {
-                      const tick = ticks[sym]
-                      const up   = (tick?.change_pct ?? 0) >= 0
-                      return (
-                        <div key={sym} className="flex justify-between items-center p-3 border-b border-slate-800/50 hover:bg-slate-800/30 cursor-pointer transition-colors">
-                          <div>
-                            <div className="font-bold text-slate-200 text-sm">{sym}</div>
-                            <div className="text-[10px] text-slate-500 mt-0.5">{tick?.source || 'NSE'}</div>
-                          </div>
-                          <div className="text-right">
-                            <div className="font-mono text-sm text-slate-200">
-                              {tick ? tick.ltp.toLocaleString('en-IN', { maximumFractionDigits: 2 }) : '—'}
-                            </div>
-                            {tick && (
-                              <div className={`font-mono text-[10px] flex items-center justify-end gap-1 mt-0.5 ${up ? 'text-emerald-400' : 'text-rose-400'}`}>
-                                {up ? <TrendingUp className="w-3 h-3" /> : <TrendingDown className="w-3 h-3" />}
-                                {up ? '+' : ''}{tick.change_pct?.toFixed(2)}%
-                              </div>
-                            )}
-                          </div>
-                        </div>
-                      )
-                    }) : (
-                      <div className="p-4 text-center text-slate-600 text-xs mt-4">
-                        <WifiOff className="w-8 h-8 mx-auto mb-2 opacity-30" />
-                        No live ticks yet
-                      </div>
-                    )}
-                  </div>
-                </div>
-
-                {/* NIFTY CHART */}
-                <div className="h-48 p-3 bg-slate-950/30 flex flex-col shrink-0">
-                  <div className="flex justify-between items-center mb-2">
-                    <h3 className="text-xs font-semibold tracking-widest text-slate-400 flex items-center gap-2">
-                      <BarChart3 className="w-3.5 h-3.5" />
-                      {niftyKey || 'NIFTY'} TREND
-                    </h3>
-                    {niftyTick && (
-                      <span className="text-[10px] font-mono text-emerald-400">
-                        {niftyTick.ltp.toLocaleString('en-IN', { maximumFractionDigits: 2 })}
-                      </span>
-                    )}
-                  </div>
-                  <div className="flex-1 relative border border-slate-800 rounded bg-[#0b1120] overflow-hidden group">
-                    <div className="absolute inset-0 pointer-events-none flex flex-col justify-between py-[12.5%] opacity-20">
-                      <div className="w-full h-px border-t border-dashed border-slate-400" />
-                      <div className="w-full h-px border-t border-dashed border-slate-400" />
-                      <div className="w-full h-px border-t border-dashed border-slate-400" />
-                    </div>
-                    <div className="absolute inset-0 flex items-end">
-                      <div className="w-full h-full flex items-end justify-between px-1 opacity-40 group-hover:opacity-60 transition-opacity">
-                        {chartData.map((h, i) => (
-                          <div key={i} className="w-[2%] bg-emerald-500/20 rounded-t-[1px]" style={{ height: `${h}%` }} />
-                        ))}
-                      </div>
-                      <svg className="absolute inset-0 h-full w-full opacity-80" viewBox="0 0 100 100" preserveAspectRatio="none">
-                        <polyline points={linePoints} fill="none" stroke="rgba(16,185,129,0.8)" strokeWidth="1.5" vectorEffect="non-scaling-stroke" />
-                        <polygon points={`0,100 ${linePoints} 100,100`} fill="rgba(16,185,129,0.05)" />
-                      </svg>
-                    </div>
-                    <div className="absolute bottom-2 right-2 flex items-center gap-1.5 bg-slate-900/80 backdrop-blur border border-slate-700/50 px-2 py-1 rounded text-[10px] font-mono text-emerald-400">
-                      <Crosshair className="w-3 h-3" />
-                      {niftyTick?.trend || 'LIVE'}
-                    </div>
-                  </div>
-                </div>
-              </div>
+              {/* RIGHT: MARKET OVERVIEW — real index feed + honestly-labelled stock prices */}
+              <MarketOverview />
             </div>
 
           ) : (
@@ -673,8 +591,8 @@ export default function App() {
           <span className="flex items-center gap-1">{health?.version || '—'}</span>
         </div>
         <div className="flex items-center gap-4">
-          <span>ENGINE: {health?.master || '—'}</span>
-          <span>TICKS: {health?.tick_engine || '—'}</span>
+          <EngineLabel testId="engine-footer" />
+          <span>FEED: {engine?.tick_feed || health?.tick_engine || '—'}</span>
           <span>TICKER: {health?.ticker_source || '—'}</span>
           <span className={wsConnected ? 'text-emerald-500' : 'text-slate-600'}>
             {wsConnected ? '● LIVE' : '○ OFFLINE'}
