@@ -4,6 +4,15 @@ Tests every module's internal logic and cross-module connections.
 Run: cd algotrader_v4 && python test_pipeline.py
 """
 from __future__ import annotations
+# Test isolation: keep test trades/P&L out of the app's real SQLite DB
+# (logs/algotrader.db). Without this, running the suite on a deployed box
+# wrote synthetic P&L that the server restored as "today's P&L" on its next
+# boot — enough to trip the daily-loss halt. Override with DATABASE_PATH.
+import os as _os_iso, tempfile as _tf_iso
+_iso_dir = _tf_iso.mkdtemp(prefix="algotrader-test-")
+_os_iso.environ.setdefault("DATABASE_PATH", _os_iso.path.join(_iso_dir, "algotrader.db"))
+_os_iso.environ.setdefault("ADAPTIVE_DATA_DIR", _os_iso.path.join(_iso_dir, "adaptive"))
+_os_iso.environ.setdefault("SEBI_AUDIT_DIR", _iso_dir)
 
 import asyncio
 import sys
@@ -8554,7 +8563,7 @@ def t_admin_portal_log_file_closed():
     """After Popen inherits the log_file fd, the parent must close its copy
     to avoid accumulating open file descriptors on each /api/{user}/start call."""
     from pathlib import Path
-    src = Path("/home/user/maran/algotrader_v4/admin/portal.py").read_text()
+    src = (Path(__file__).resolve().parent / "admin" / "portal.py").read_text()
     popen_pos = src.find("Popen(")
     close_pos  = src.find("log_file.close()")
     assert close_pos > popen_pos, (
@@ -10264,7 +10273,6 @@ def t_signal_aggregator_recent_signals_trims_expired():
 
 def t_greeks_spot_zero_raises():
     """calculate_greeks must raise ValueError when spot=0 (prevents ZeroDivisionError in gamma)."""
-    import pytest
     from datetime import date, timedelta
     import greeks_engine as _ge
     future_date = date.today() + timedelta(days=7)
@@ -16123,4 +16131,8 @@ failed = summary()
 # TrueData credentials configured these threads block on network I/O after the
 # asyncio event loop closes, causing a 12+ second hang on sys.exit()).
 import os as _os
+# os._exit() skips interpreter shutdown, so buffered stdout (e.g. when piped
+# to a file or CI log) was silently dropped — including the RESULTS summary.
+sys.stdout.flush()
+sys.stderr.flush()
 _os._exit(1 if failed else 0)
