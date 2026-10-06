@@ -65,7 +65,18 @@ export const api = {
   botTestOrder: (data: { symbol: string; side: 'BUY' | 'SELL'; qty: number }) =>
                  ax().post('/bot/test-order', data),
 
-  // ── Market ──────────────────────────────────────────────────────────────────
+  
+  // ── Strategy inventor ───────────────────────────────────────────────────────
+  inventStatus:      () => ax().get('/invent/status'),
+  inventEnabled:     (enabled: boolean) => ax().post('/invent/enabled', { enabled }),
+  inventPropose:     (segment: string, regime?: string) => ax().post('/invent/propose', { segment, regime }),
+  inventArmLiveTiny: (id: string, confirm: boolean, confirm_text: string) =>
+                       ax().post(`/invent/${id}/arm-live-tiny`, { confirm, confirm_text }),
+  inventDisarmLive:  (id: string) => ax().post(`/invent/${id}/disarm-live`),
+  inventStrategies:  (segment?: string) => ax().get('/invent/strategies', { params: { segment } }),
+  inventJournal:     (limit = 50) => ax().get('/invent/journal', { params: { limit } }),
+
+// ── Market ──────────────────────────────────────────────────────────────────
   marketLive:       () => ax().get('/market/live'),
   marketLiveSymbol: (symbol: string) => ax().get(`/market/live/${symbol}`),
   marketStatus:     () => ax().get('/market/status'),

@@ -775,6 +775,15 @@ class Settings(BaseSettings):
     # real trading-hours window (labelled AFTER-HOURS SIM). Off by default so
     # every segment follows its real exchange hours. LIVE always enforces hours.
     segment_paper_after_hours: bool = False
+    # ── Strategy inventor (trend-driven short-lived strategies) ──────────────
+    invent_enabled_default: bool = False   # dashboard toggle; off until jag enables
+    invent_max_concurrent_global: int = 6
+    invent_max_per_segment: int = 2
+    invent_cooldown_sec: int = 900         # min seconds between invents per segment
+    invent_ttl_sec: int = 7200             # strategy lifetime
+    invent_paper_warmup_fills: int = 3     # paper fills before live_eligible
+    invent_paper_warmup_min: int = 30      # OR minutes active with ≥1 fill, no breach
+    invent_live_tiny_qty_equity: int = 1   # LIVE tiny size (shares / 1 lot)
     # MCX evening session end (IST). ~23:30 in Indian winter / ~23:55 when US
     # DST is in force; configurable rather than guessed per date.
     mcx_close_time: str = "23:30"

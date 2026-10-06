@@ -1068,6 +1068,12 @@ async def _engine_watch_loop() -> None:
             if time.monotonic() - _last_save >= 2.0:   # paper book → SQLite (if changed)
                 _last_save = time.monotonic()
                 await asyncio.get_running_loop().run_in_executor(None, paper_store.save)
+            try:
+                from strategy_inventor import strategy_inventor
+                if strategy_inventor.enabled:
+                    await asyncio.get_running_loop().run_in_executor(None, strategy_inventor.evaluate)
+            except Exception as _inv_exc:
+                logger.debug("[invent] evaluate: {}", _inv_exc)
         except asyncio.CancelledError:
             break
         except Exception as exc:
@@ -2519,6 +2525,78 @@ def patch_pattern_toggle(req: PatternToggleRequest):
         raise HTTPException(status_code=400, detail=f"Unknown pattern '{req.pattern}' for agent '{req.agent}'")
     bot_state.set_pattern_enabled(req.agent, req.pattern, req.enabled)
     return {"agent": req.agent, "pattern": req.pattern, "enabled": req.enabled}
+
+
+
+# ── Strategy inventor (trend-driven short-lived strategies) ───────────────────
+class InventToggleRequest(BaseModel):
+    enabled: bool
+
+class InventForceRequest(BaseModel):
+    segment: str
+    regime: str | None = None
+
+class InventArmLiveRequest(BaseModel):
+    confirm: bool = False
+    confirm_text: str = Field(default="", max_length=32)
+
+
+@app.get("/invent/status", tags=["Invent"])
+def invent_status():
+    from strategy_inventor import strategy_inventor
+    return strategy_inventor.snapshot()
+
+
+@app.post("/invent/enabled", tags=["Invent"])
+def invent_set_enabled(req: InventToggleRequest):
+    """Toggle the trend-driven strategy inventor. Off by default."""
+    from strategy_inventor import strategy_inventor
+    return strategy_inventor.set_enabled(req.enabled)
+
+
+@app.post("/invent/propose", tags=["Invent"])
+def invent_propose(req: InventForceRequest):
+    """Force-propose a PAPER invented strategy for a segment (invent mode must be on)."""
+    from strategy_inventor import strategy_inventor
+    from segments import SEGMENTS
+    if req.segment not in SEGMENTS:
+        raise HTTPException(400, f"unknown segment {req.segment!r}")
+    r = strategy_inventor.invent(req.segment, regime=req.regime, force=True)
+    if not r.get("ok"):
+        raise HTTPException(409, r.get("reason", "invent refused"))
+    return r
+
+
+@app.post("/invent/{strategy_id}/arm-live-tiny", tags=["Invent"])
+def invent_arm_live_tiny(strategy_id: str, req: InventArmLiveRequest):
+    """Arm one invented strategy for a min-lot/1-share LIVE order.
+    Requires confirm=true + confirm_text='SEND'. Never auto-armed."""
+    from strategy_inventor import strategy_inventor
+    r = strategy_inventor.arm_live_tiny(strategy_id, req.confirm, req.confirm_text)
+    if not r.get("ok"):
+        raise HTTPException(400, r.get("reason", "arm refused"))
+    return r
+
+
+@app.post("/invent/{strategy_id}/disarm-live", tags=["Invent"])
+def invent_disarm_live(strategy_id: str):
+    from strategy_inventor import strategy_inventor
+    r = strategy_inventor.disarm_live(strategy_id)
+    if not r.get("ok"):
+        raise HTTPException(404, r.get("reason", "not found"))
+    return r
+
+
+@app.get("/invent/strategies", tags=["Invent"])
+def invent_list(segment: str | None = None, include_done: bool = True):
+    from strategy_inventor import strategy_inventor
+    return {"strategies": strategy_inventor.list_strategies(segment, include_done)}
+
+
+@app.get("/invent/journal", tags=["Invent"])
+def invent_journal(limit: int = 50):
+    from strategy_inventor import strategy_inventor
+    return {"journal": strategy_inventor.journal(limit)}
 
 
 # Typed confirmation phrase required (exactly, case-sensitive) to arm LIVE.

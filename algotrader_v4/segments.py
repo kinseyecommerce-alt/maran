@@ -248,6 +248,11 @@ class SegmentManager:
         logger.warning("[segments] KILL SWITCH {} ({})", code, reason)
         flattened = self._flatten(code) if flatten else []
         self.supervise(force=True)
+        try:
+            from strategy_inventor import strategy_inventor
+            strategy_inventor.on_segment_kill(code, reason)
+        except Exception:
+            pass
         return {"segment": code, "killed": True, "reason": reason, "flattened": flattened}
 
     def rearm(self, code: str) -> dict:

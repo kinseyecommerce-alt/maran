@@ -3,7 +3,7 @@ import {
   Activity, Terminal, Cpu, WifiOff, ShieldCheck,
   TrendingUp, TrendingDown, BarChart3,
   Zap, Play, Square, Database, Crosshair,
-  LayoutDashboard, ClipboardList, Target, Scale, History, Brain,
+  LayoutDashboard, ClipboardList, Target, Scale, History, Brain, Lightbulb,
 } from 'lucide-react'
 import Header from './components/Header'
 import IndexStrip from './components/IndexStrip'
@@ -19,6 +19,7 @@ import AgentsTab from './components/tabs/AgentsTab'
 import SebiTab from './components/tabs/SebiTab'
 import TradeHistoryTab from './components/tabs/TradeHistoryTab'
 import ClaudeGateTab from './components/tabs/ClaudeGateTab'
+import InventedTab from './components/tabs/InventedTab'
 import { connectWS } from './ws/websocket'
 import { useStore } from './store'
 import { api } from './api/client'
@@ -35,6 +36,7 @@ const TAB_COMPONENTS: Record<string, React.ComponentType> = {
   sebi:      SebiTab,
   history:   TradeHistoryTab,
   gate:      ClaudeGateTab,
+  invented:  InventedTab,
 }
 
 const SIDEBAR_NAV: { id: PageId; label: string; Icon: React.ComponentType<{ className?: string }> }[] = [
@@ -44,6 +46,7 @@ const SIDEBAR_NAV: { id: PageId; label: string; Icon: React.ComponentType<{ clas
   { id: 'brackets',  label: 'Brackets',      Icon: Target          },
   { id: 'risk',      label: 'Risk',          Icon: ShieldCheck     },
   { id: 'agents',    label: 'Agents',        Icon: Cpu             },
+  { id: 'invented',  label: 'Invented',      Icon: Lightbulb       },
   { id: 'sebi',      label: 'SEBI',          Icon: Scale           },
   { id: 'history',   label: 'Trade History', Icon: History         },
   { id: 'gate',      label: 'Claude Gate',   Icon: Brain           },
