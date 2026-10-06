@@ -6,7 +6,18 @@ const ax = () => {
   const headers: Record<string, string> = {}
   if (apiKey)  headers['X-API-Key']     = apiKey
   if (token)   headers['Authorization'] = `Bearer ${token}`
-  return axios.create({ baseURL: apiBase, headers, timeout: 10000, withCredentials: true })
+  const inst = axios.create({ baseURL: apiBase, headers, timeout: 10000, withCredentials: true })
+  // A 401 on a data call means the session is gone (the server issues a new
+  // JWT secret on every restart). Surface it — go back to the login screen —
+  // instead of every panel silently showing empty data next to stale numbers.
+  inst.interceptors.response.use(undefined, (err) => {
+    const url = String(err?.config?.url || '')
+    if (err?.response?.status === 401 && !url.startsWith('/auth/')) {
+      useStore.getState().setSessionExpired(true)
+    }
+    return Promise.reject(err)
+  })
+  return inst
 }
 
 // Login uses OAuth2PasswordRequestForm (application/x-www-form-urlencoded)
@@ -76,6 +87,7 @@ export const api = {
   // ── Portfolio ───────────────────────────────────────────────────────────────
   positions: () => ax().get('/portfolio/positions'),
   orders:    () => ax().get('/portfolio/orders'),
+  book:      () => ax().get('/portfolio/book'),
 
   // ── Risk ────────────────────────────────────────────────────────────────────
   riskStatus:      () => ax().get('/risk/status'),

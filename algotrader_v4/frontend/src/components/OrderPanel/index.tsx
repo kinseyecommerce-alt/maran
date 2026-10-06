@@ -9,7 +9,7 @@ type OrderType = 'MARKET' | 'LIMIT' | 'SL' | 'SL-M'
 type Product = 'MIS' | 'CNC' | 'NRML'
 
 export default function OrderPanel() {
-  const { selectedSymbol, ticks, addToast, setPositions, setOrders } = useStore()
+  const { selectedSymbol, ticks, addToast } = useStore()
   const [side, setSide] = useState<Side>('BUY')
   const [qty, setQty] = useState('1')
   const [price, setPrice] = useState('0')
@@ -36,8 +36,7 @@ export default function OrderPanel() {
   }, [])
 
   const refresh = useCallback(() => {
-    api.positions().then(r => setPositions(r.data.net || [])).catch(() => {})
-    api.orders().then(r => setOrders(r.data || [])).catch(() => {})
+    useStore.getState().refreshBook()
   }, [])
 
   const handlePlace = async () => {

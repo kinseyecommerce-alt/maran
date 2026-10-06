@@ -51,12 +51,34 @@ export interface BookSegment {
   pnl: number
   positions: number
   orders: number
+  /** exit orders listed today (their pnl sums to `realised`) */
+  closed?: number
+  realised_source?: 'orders' | 'agents'
   simulated: boolean
 }
 
 export interface BookSummary {
-  total: { realised: number; unrealised: number; pnl: number; positions: number; orders: number }
+  total: { realised: number; unrealised: number; pnl: number; positions: number; orders: number; closed?: number }
   by_segment: Record<string, BookSegment>
+  /** changes whenever an order/position is added or removed */
+  rev?: string
+  ts?: string
+}
+
+export interface BookStrategy {
+  trades_today: number
+  realised: number
+  unrealised: number
+  total: number
+  open_positions: number
+}
+
+/** GET /portfolio/book — ONE snapshot (same price tick) of every view. */
+export interface BookSnapshot {
+  positions: Position[]
+  orders: Order[]
+  summary: BookSummary
+  strategies: Record<string, BookStrategy>
 }
 
 /** Segment metadata every position/order row carries (book.py). */
@@ -180,6 +202,9 @@ export interface Order extends BookRowMeta {
   placed_at?: string
   tag?: string
   average_price?: number
+  /** realised P&L — set on exit (reducing) fills only */
+  pnl?: number | null
+  entry_price?: number | null
 }
 
 export interface Bracket {

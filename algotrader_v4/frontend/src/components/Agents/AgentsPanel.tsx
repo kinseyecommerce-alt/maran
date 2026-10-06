@@ -1,12 +1,13 @@
 import { Play, Square, Zap } from 'lucide-react'
 import { useStore } from '../../store'
 import { EngineLabel } from '../EngineStatus'
-import { listedStrategies, metaFor, strategyView, segmentBadge, signedInr, inr, useAgentControls, SEGMENT_ORDER } from './shared'
+import { listedStrategies, metaFor, strategyView, segmentBadge, signedInr, inr, useAgentControls, SEGMENT_ORDER, cardNumbers, segmentNumbers } from './shared'
 
 /** Dashboard "Autonomous agents" panel: one card per market-segment agent and
  *  one card per strategy inside it. Every state shown comes from store.engine. */
 export default function AgentsPanel() {
   const { engine, agents, health } = useStore()
+  const snap = useStore(s => s.book)
   const ctl = useAgentControls()
   const keys = listedStrategies(engine)
   const segs = [...(engine?.segments || [])].sort(
@@ -47,7 +48,8 @@ export default function AgentsPanel() {
                 <span className={s.effective_mode === 'LIVE' ? 'text-rose-400' : 'text-amber-400'}>{s.effective_mode}</span>
                 <span data-testid={`segment-feed-${s.code}`}
                   className={s.feed === 'REAL' ? 'text-emerald-400' : 'text-amber-300 border border-amber-500/40 px-1 rounded'}>{s.feed}</span>
-                <span className={s.pnl.total >= 0 ? 'text-emerald-400 ml-auto' : 'text-rose-400 ml-auto'}>{signedInr(s.pnl.total)}</span>
+                <span data-testid={`segment-pnl-${s.code}`} data-value={segmentNumbers(s, snap).pnl}
+                  className={segmentNumbers(s, snap).pnl >= 0 ? 'text-emerald-400 ml-auto' : 'text-rose-400 ml-auto'}>{signedInr(segmentNumbers(s, snap).pnl)}</span>
               </div>
               <div className="text-[9px] text-slate-500 mt-0.5 truncate" title={s.reason}>
                 {s.strategies_running}/{s.strategies.length} on · cap {inr(s.capital_used)} / {inr(s.capital)}{s.reason ? ` · ${s.reason}` : ''}
@@ -61,6 +63,7 @@ export default function AgentsPanel() {
       <div className="flex gap-3 overflow-x-auto pb-2" style={{ scrollbarWidth: 'thin' }}>
         {keys.map(key => {
           const st   = engine!.strategies![key]
+          const nb   = cardNumbers(st, snap, key)
           const meta = metaFor(key, st)
           const v    = strategyView(engine, key)
           const agent = agents[key]
@@ -92,11 +95,11 @@ export default function AgentsPanel() {
                 <div className="mt-2 flex gap-3 text-[10px]">
                   <div>
                     <div className="text-slate-600">Trades</div>
-                    <div className="font-mono text-slate-300" data-testid={`agent-trades-${key}`}>{st.trades_today ?? 0}</div>
+                    <div className="font-mono text-slate-300" data-testid={`agent-trades-${key}`}>{nb.trades}</div>
                   </div>
                   <div>
                     <div className="text-slate-600">P&L</div>
-                    <div data-testid={`agent-pnl-${key}`} data-value={st.pnl_today} title={`realised ${signedInr(st.pnl_realised ?? 0)} · open ${signedInr(st.pnl_unrealised ?? 0)} (${st.open_positions ?? 0} pos)`} className={`font-mono ${st.pnl_today >= 0 ? 'text-emerald-400' : 'text-rose-400'}`}>{signedInr(st.pnl_today)}</div>
+                    <div data-testid={`agent-pnl-${key}`} data-value={nb.pnl} title={`realised ${signedInr(nb.realised)} (its exit orders) · open ${signedInr(nb.unrealised)} (${nb.open} pos)`} className={`font-mono ${nb.pnl >= 0 ? 'text-emerald-400' : 'text-rose-400'}`}>{signedInr(nb.pnl)}</div>
                   </div>
                 </div>
                 <div className="mt-2 bg-slate-950 rounded px-2 py-1.5 border border-slate-800/60">

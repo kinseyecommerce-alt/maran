@@ -1,6 +1,6 @@
 import { useStore } from '../../store'
 import { api } from '../../api/client'
-import type { EngineStatus, SegmentState, StrategyState, AgentRunState } from '../../types'
+import type { BookSnapshot, EngineStatus, SegmentState, StrategyState, AgentRunState } from '../../types'
 
 /** Display metadata only — never state. State always comes from engine.strategies. */
 export const STRATEGY_META: Record<string, { displayName: string; strategy: string; id: string }> = {
@@ -116,4 +116,20 @@ export function useAgentControls() {
     mode:   (c: string, m: 'PAPER' | 'LIVE', text = '') =>
               run(api.segmentMode(c, m, m === 'LIVE', text), `${c} → ${m}`),
   }
+}
+
+/** Segment card P&L / positions: the same /portfolio/book snapshot. */
+export function segmentNumbers(s: SegmentState, snap: BookSnapshot | null) {
+  const b = snap?.summary.by_segment?.[s.code]
+  if (b) return { pnl: b.pnl, realised: b.realised, unrealised: b.unrealised, positions: b.positions, closed: b.closed ?? 0 }
+  return { pnl: s.pnl.total, realised: s.pnl.realised, unrealised: s.pnl.unrealised, positions: s.positions, closed: 0 }
+}
+
+/** Card trades / P&L: the /portfolio/book snapshot (same rows as Positions,
+ *  Orders, header and Today P&L); engine.strategies only until it loads. */
+export function cardNumbers(st: StrategyState | undefined, snap: BookSnapshot | null, key: string) {
+  const b = snap?.strategies?.[key]
+  if (b) return { trades: b.trades_today, pnl: b.total, realised: b.realised, unrealised: b.unrealised, open: b.open_positions }
+  return { trades: st?.trades_today ?? 0, pnl: st?.pnl_today ?? 0, realised: st?.pnl_realised ?? 0,
+           unrealised: st?.pnl_unrealised ?? 0, open: st?.open_positions ?? 0 }
 }

@@ -4,7 +4,7 @@ import { api } from '../../api/client'
 import type { SegmentState } from '../../types'
 import {
   listedStrategies, metaFor, strategyView, segmentBadge, inr, signedInr,
-  useAgentControls, SEGMENT_ORDER,
+  useAgentControls, SEGMENT_ORDER, cardNumbers, segmentNumbers,
 } from '../Agents/shared'
 
 function fmtLastSignal(s: unknown): string {
@@ -51,6 +51,7 @@ function SegmentModeControl({ s }: { s: SegmentState }) {
 
 export default function AgentsTab() {
   const { agents, setAgents, engine } = useStore()
+  const snap = useStore(s => s.book)
   const ctl = useAgentControls()
   const [adaptive, setAdaptive] = useState<any>(null)
 
@@ -103,10 +104,11 @@ export default function AgentsTab() {
             <div className="grid grid-cols-5 gap-2 text-[10px] mb-3">
               <div><div className="text-slate-500 uppercase">Capital</div><div className="font-mono text-slate-200">{inr(s.capital_used)} / {inr(s.capital)}</div></div>
               <div><div className="text-slate-500 uppercase">P&L today</div>
-                <div className={`font-mono ${s.pnl.total >= 0 ? 'text-emerald-400' : 'text-rose-400'}`}>{signedInr(s.pnl.total)}
-                  <span className="text-slate-500"> (R {signedInr(s.pnl.realised)} · U {signedInr(s.pnl.unrealised)})</span></div></div>
+                <div data-testid={`agents-tab-segment-pnl-${s.code}`} data-value={segmentNumbers(s, snap).pnl}
+                  className={`font-mono ${segmentNumbers(s, snap).pnl >= 0 ? 'text-emerald-400' : 'text-rose-400'}`}>{signedInr(segmentNumbers(s, snap).pnl)}
+                  <span className="text-slate-500"> (realised {signedInr(segmentNumbers(s, snap).realised)} · open {signedInr(segmentNumbers(s, snap).unrealised)})</span></div></div>
               <div><div className="text-slate-500 uppercase">Daily loss limit</div><div className="font-mono text-slate-200">{inr(s.limits.max_daily_loss)}</div></div>
-              <div><div className="text-slate-500 uppercase">Positions</div><div className="font-mono text-slate-200">{s.positions} / {s.limits.max_positions}</div></div>
+              <div><div className="text-slate-500 uppercase">Positions</div><div className="font-mono text-slate-200">{segmentNumbers(s, snap).positions} / {s.limits.max_positions}</div></div>
               <div><div className="text-slate-500 uppercase">Entries today</div><div className="font-mono text-slate-200">{s.entries_today} / {s.limits.max_trades_per_day}</div></div>
             </div>
 
@@ -114,6 +116,7 @@ export default function AgentsTab() {
             <div className="grid grid-cols-2 xl:grid-cols-3 gap-2">
               {keys.map(key => {
                 const st = engine.strategies![key]
+                const nb = cardNumbers(st, snap, key)
                 const v = strategyView(engine, key)
                 const meta = metaFor(key, st)
                 const agent = agents[key]
@@ -138,8 +141,8 @@ export default function AgentsTab() {
                       </button>
                     </div>
                     <div className="grid grid-cols-3 gap-2 mb-2 py-1.5 border-y border-slate-700/50 text-[10px]">
-                      <div><div className="text-slate-500 uppercase">Trades</div><div className="font-mono text-slate-200" data-testid={`agents-tab-trades-${key}`}>{st.trades_today ?? 0}</div></div>
-                      <div><div className="text-slate-500 uppercase">P&L</div><div data-testid={`agents-tab-pnl-${key}`} data-value={st.pnl_today} title={`realised ${signedInr(st.pnl_realised ?? 0)} · open ${signedInr(st.pnl_unrealised ?? 0)} (${st.open_positions ?? 0} pos)`} className={`font-mono ${st.pnl_today >= 0 ? 'text-emerald-400' : 'text-rose-400'}`}>{signedInr(st.pnl_today)}</div></div>
+                      <div><div className="text-slate-500 uppercase">Trades</div><div className="font-mono text-slate-200" data-testid={`agents-tab-trades-${key}`}>{nb.trades}</div></div>
+                      <div><div className="text-slate-500 uppercase">P&L</div><div data-testid={`agents-tab-pnl-${key}`} data-value={nb.pnl} title={`realised ${signedInr(nb.realised)} (its exit orders) · open ${signedInr(nb.unrealised)} (${nb.open} pos)`} className={`font-mono ${nb.pnl >= 0 ? 'text-emerald-400' : 'text-rose-400'}`}>{signedInr(nb.pnl)}</div></div>
                       <div><div className="text-slate-500 uppercase">Last signal</div><div className="font-mono text-slate-400 truncate">{fmtLastSignal(agent?.last_signal)}</div></div>
                     </div>
                     {v.action === 'pause' ? (

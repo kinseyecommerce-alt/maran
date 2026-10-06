@@ -46,11 +46,8 @@ export function connectWS() {
         useStore.getState().setIndices(data.data)
       } else if (data.event === 'order_placed') {
         addToast(`Order placed: ${data.order_id} (${data.symbol})`, 'info')
-        // Refresh portfolio
-        import('../api/client').then(({ api }) => {
-          api.positions().then(r => useStore.getState().setPositions(r.data.net || []))
-          api.orders().then(r => useStore.getState().setOrders(r.data || []))
-        })
+        // Refresh the one portfolio snapshot (header, tabs, cards)
+        useStore.getState().refreshBook()
       } else if (data.event === 'signal') {
         addToast(`Signal: ${data.signal?.action || data.signal} on ${data.symbol}`, 'info')
         const action = data.signal?.action || data.signal || 'SIGNAL'

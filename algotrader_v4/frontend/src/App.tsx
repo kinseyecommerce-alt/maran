@@ -153,9 +153,16 @@ export default function App() {
     agentActivity, setAgentActivity,
     health, wsConnected,
     ticks, sparklines,
-    positions, orders, botStatus, riskStatus,
+    riskStatus,
     addToast, token, clearToken, engine,
   } = useStore()
+  // ONE portfolio snapshot (GET /portfolio/book): header counters, nav badges,
+  // Today P&L split, Positions, Orders and agent-card P&L all read it.
+  const snap          = useStore(s => s.book)
+  const bookError     = useStore(s => s.bookError)
+  const bookAt        = useStore(s => s.bookAt)
+  const refreshBook   = useStore(s => s.refreshBook)
+  const sessionExpired = useStore(s => s.sessionExpired)
 
   const [isAuthed, setIsAuthed] = useState<boolean | null>(null)
   const [activePage, setActivePage] = useState<PageId>('dashboard')
@@ -173,6 +180,21 @@ export default function App() {
         else setIsAuthed(true)
       })
   }, [token])
+
+  useEffect(() => {
+    if (sessionExpired) { clearToken(); setIsAuthed(false) }
+  }, [sessionExpired])
+
+  // Snapshot poller: every 2 s, and immediately when the engine push says the
+  // book changed (new order / position). Single-flight inside refreshBook.
+  const bookRev = engine?.book?.rev
+  useEffect(() => {
+    if (!isAuthed) return
+    refreshBook()
+    const t = setInterval(refreshBook, 2000)
+    return () => clearInterval(t)
+  }, [isAuthed])
+  useEffect(() => { if (isAuthed && bookRev) refreshBook() }, [bookRev])
 
   useEffect(() => {
     if (!isAuthed) return
@@ -218,9 +240,9 @@ export default function App() {
   const activeCount = listedKeys.filter(k => strategyView(engine, k).on).length
   const pausedCount = listedKeys.length - activeCount
 
-  // Today P&L, POSITIONS and ORDERS: one server-side book over every segment
-  // (engine.book — the same rows /portfolio/positions and /portfolio/orders serve).
-  const book        = engine?.book
+  // Today P&L, POSITIONS and ORDERS: the one /portfolio/book snapshot (the
+  // same rows the Positions and Orders tabs list). Until it loads: "—".
+  const book        = snap?.summary
   const dailyPnl    = book?.total.pnl ?? 0
   const pnlPositive = dailyPnl >= 0
   const pnlDisplay  = `${pnlPositive ? '+' : '-'}₹${Math.abs(dailyPnl).toLocaleString('en-IN', { maximumFractionDigits: 2 })}`
@@ -234,8 +256,11 @@ export default function App() {
       type: 'system' as const, cat: 'SYS' as const },
   ]
 
-  const openPositionCount = book?.total.positions ?? 0
-  const orderCount        = book?.total.orders ?? 0
+  const openPositionCount = snap ? snap.positions.length : null
+  const orderCount        = snap ? snap.orders.length : null
+  const fmtInr = (v: number, d = 0) => `${v >= 0 ? '+' : '-'}₹${Math.abs(v).toLocaleString('en-IN', { maximumFractionDigits: d })}`
+  const bookAge = bookAt ? Math.round((Date.now() - bookAt) / 1000) : null
+  const bookStale = !!bookError || (bookAge !== null && bookAge > 10)
 
   const handleLogout = async () => {
     try { await api.authLogout() } catch {}
@@ -244,8 +269,8 @@ export default function App() {
   }
 
   const navBadge = (id: PageId): number | undefined => {
-    if (id === 'positions') return openPositionCount > 0 ? openPositionCount : undefined
-    if (id === 'orders')    return orderCount > 0 ? orderCount : undefined
+    if (id === 'positions') return openPositionCount ? openPositionCount : undefined
+    if (id === 'orders')    return orderCount ? orderCount : undefined
     return undefined
   }
 
@@ -258,7 +283,7 @@ export default function App() {
     )
   }
   if (isAuthed === false) {
-    return <LoginScreen onSuccess={() => setIsAuthed(true)} />
+    return <LoginScreen onSuccess={() => { useStore.getState().setSessionExpired(false); setIsAuthed(true) }} />
   }
 
   const PageComponent = activePage !== 'dashboard' ? TAB_COMPONENTS[activePage] : null
@@ -293,12 +318,30 @@ export default function App() {
             <div data-testid="today-pnl" data-value={dailyPnl}
               title={book ? `Realised ${book.total.realised.toFixed(0)} · open ${book.total.unrealised.toFixed(0)} — all segments` : ''}
               className={`font-mono font-bold text-xl leading-none ${pnlPositive ? 'text-emerald-400' : 'text-rose-400'}`}>
-              {pnlDisplay}
+              {book ? pnlDisplay : '—'}
             </div>
             <div className={`text-[10px] mt-1 flex items-center gap-1 font-mono ${pnlPositive ? 'text-emerald-500/70' : 'text-rose-400/70'}`}>
               {pnlPositive ? <TrendingUp className="w-3 h-3" /> : <TrendingDown className="w-3 h-3" />}
               Today P&L · all segments
             </div>
+            {book && (
+              <div className="mt-1.5 text-[10px] font-mono leading-tight" data-testid="pnl-split">
+                <div className="flex justify-between" data-testid="pnl-realised" data-value={book.total.realised}
+                  title="Σ realised P&L of today's exit orders (Orders tab, Realised column)">
+                  <span className="text-slate-500">Realised · {book.total.closed ?? 0} closed</span>
+                  <span className={book.total.realised >= 0 ? 'text-emerald-400' : 'text-rose-400'}>{fmtInr(book.total.realised)}</span>
+                </div>
+                <div className="flex justify-between" data-testid="pnl-open" data-value={book.total.unrealised}
+                  title="Σ P&L of the open positions (Positions tab)">
+                  <span className="text-slate-500">Open · {book.total.positions} pos</span>
+                  <span className={book.total.unrealised >= 0 ? 'text-emerald-400' : 'text-rose-400'}>{fmtInr(book.total.unrealised)}</span>
+                </div>
+              </div>
+            )}
+            {(bookError || bookStale) && (
+              <div className="mt-1 text-[9px] font-mono text-amber-400" data-testid="book-stale"
+                title={bookError || ''}>{bookError ? `book: ${bookError}` : `book ${bookAge}s old`}</div>
+            )}
             {book && (
               <div className="mt-1.5 space-y-px" data-testid="pnl-breakdown">
                 {Object.entries(book.by_segment).map(([code, s]) => (
@@ -338,7 +381,7 @@ export default function App() {
                   <span className="flex-1 text-left">{item.label}</span>
                   {badge !== undefined && (
                     <span className="bg-emerald-600 text-white rounded-full text-[9px] w-4 h-4 flex items-center justify-center shrink-0 font-bold">
-                      {badge > 9 ? '9+' : badge}
+                      {badge > 99 ? '99+' : badge}
                     </span>
                   )}
                 </button>
@@ -462,8 +505,8 @@ export default function App() {
                 })()}
                 <div className="flex-1" />
                 <div className="flex items-center gap-3 text-[10px] font-mono text-slate-500">
-                  <span data-testid="hdr-positions">POSITIONS: <span className="text-slate-300">{openPositionCount}</span></span>
-                  <span data-testid="hdr-orders">ORDERS: <span className="text-slate-300">{orderCount}</span></span>
+                  <span data-testid="hdr-positions" data-value={openPositionCount ?? ''}>POSITIONS: <span className="text-slate-300">{openPositionCount ?? '—'}</span></span>
+                  <span data-testid="hdr-orders" data-value={orderCount ?? ''}>ORDERS: <span className="text-slate-300">{orderCount ?? '—'}</span></span>
                   {book && (
                     <span data-testid="hdr-pnl" data-value={dailyPnl}>DAILY P&L:
                       <span className={dailyPnl >= 0 ? ' text-emerald-400' : ' text-rose-400'}>

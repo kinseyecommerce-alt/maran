@@ -1,8 +1,10 @@
 import { create } from 'zustand'
-import type { EngineStatus, MarketOverviewData, IndexQuote, TickData, Position, Order, Bracket, RiskStatus, Agent, BotStatus, HealthData, AgentActivityEntry } from '../types'
+import type { BookSnapshot, EngineStatus, MarketOverviewData, IndexQuote, TickData, Position, Order, Bracket, RiskStatus, Agent, BotStatus, HealthData, AgentActivityEntry } from '../types'
 
 interface AppStore {
   // Auth
+  sessionExpired: boolean
+  setSessionExpired: (v: boolean) => void
   token: string
   setToken: (t: string) => void
   clearToken: () => void
@@ -46,7 +48,13 @@ interface AppStore {
   overview: MarketOverviewData | null
   setOverview: (o: MarketOverviewData) => void
 
-  // Portfolio
+  // Portfolio — ONE snapshot (GET /portfolio/book) drives the header
+  // counters, nav badges, Today P&L split, Positions, Orders and agent-card
+  // P&L, so they cannot disagree. positions/orders mirror book.* for older callers.
+  book: BookSnapshot | null
+  bookError: string | null
+  bookAt: number
+  refreshBook: () => Promise<void>
   positions: Position[]
   orders: Order[]
   setPositions: (p: Position[]) => void
@@ -75,7 +83,33 @@ interface AppStore {
   removeToast: (id: string) => void
 }
 
+/** A stored api_base is only honoured when it is same-origin (or on the Vite
+ *  dev server). A stale cross-origin value (e.g. localhost vs 127.0.0.1) is
+ *  blocked by the CSP (connect-src 'self') — REST silently fails while the
+ *  WebSocket still updates the header, so the Orders tab looked empty. */
+export function resolveApiBase(stored: string | null, envBase: string | undefined, origin: string, port: string): string {
+  if (stored) {
+    try {
+      const u = new URL(stored, origin)
+      if (u.origin === origin || port === '5173' || port === '3000') return stored
+    } catch { /* ignore malformed */ }
+    console.warn(`[api] ignoring stored api_base ${stored} (page origin is ${origin})`)
+  }
+  return envBase || origin
+}
+
+export function describeError(e: any): string {
+  if (e?.response) return `HTTP ${e.response.status}${e.response.data?.detail ? ` — ${e.response.data.detail}` : ''}`
+  if (e?.code === 'ECONNABORTED') return 'request timed out'
+  return e?.message || 'request failed'
+}
+
+let _bookInflight: Promise<void> | null = null
+
 export const useStore = create<AppStore>((set, get) => ({
+  sessionExpired: false,
+  setSessionExpired: (v) => set(v ? { sessionExpired: true, engine: null, book: null, positions: [], orders: [] }
+                                  : { sessionExpired: false }),
   token:      localStorage.getItem('jwt_token') || '',
   setToken:   (t) => { localStorage.setItem('jwt_token', t); set({ token: t }) },
   clearToken: () => { localStorage.removeItem('jwt_token'); set({ token: '' }) },
@@ -84,7 +118,8 @@ export const useStore = create<AppStore>((set, get) => ({
   // Same-origin by default (backend serves this SPA), so a fresh browser with
   // no localStorage override works out of the box. VITE_API_BASE_URL/localStorage
   // remain available for split-origin deployments (separately hosted frontend).
-  apiBase: localStorage.getItem('api_base') || import.meta.env.VITE_API_BASE_URL || window.location.origin,
+  apiBase: resolveApiBase(localStorage.getItem('api_base'), import.meta.env.VITE_API_BASE_URL,
+                          window.location.origin, window.location.port),
   wsConnected: false,
   setApiKey:   (k) => { localStorage.setItem('api_key', k); set({ apiKey: k }) },
   setApiBase:  (b) => { localStorage.setItem('api_base', b); set({ apiBase: b }) },
@@ -126,6 +161,24 @@ export const useStore = create<AppStore>((set, get) => ({
   overview: null,
   setOverview: (o) => set({ overview: o }),
 
+  book: null,
+  bookError: null,
+  bookAt: 0,
+  refreshBook: () => {
+    if (_bookInflight) return _bookInflight            // single-flight: no piling up
+    _bookInflight = import('../api/client')
+      .then(({ api }) => api.book())
+      .then(r => {
+        const b = r.data as BookSnapshot
+        if (!b || !Array.isArray(b.orders) || !Array.isArray(b.positions) || !b.summary) {
+          throw new Error('unexpected /portfolio/book payload')
+        }
+        set({ book: b, bookError: null, bookAt: Date.now(), positions: b.positions, orders: b.orders })
+      })
+      .catch(e => { set({ bookError: describeError(e) }) })
+      .finally(() => { _bookInflight = null })
+    return _bookInflight
+  },
   positions: [],
   orders:    [],
   setPositions: (p) => set({ positions: p }),

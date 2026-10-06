@@ -1,8 +1,8 @@
-import { useEffect, useState } from 'react'
+import { useState } from 'react'
 import { useStore } from '../../store'
 import { api } from '../../api/client'
-import { Badge, Btn } from '../ui'
-import { SegmentFilter, SimBadge } from './SegmentFilter'
+import { Badge, Btn, Pnl } from '../ui'
+import { SegmentFilter, SimBadge, BookStatus } from './SegmentFilter'
 
 const statusVariant = (s: string): 'buy' | 'sell' | 'neutral' | 'warning' => {
   if (s === 'COMPLETE') return 'buy'
@@ -17,17 +17,17 @@ const hhmmss = (ts?: string) => {
   return m ? m[1] : ts
 }
 
-/** Today's orders across ALL segments (/portfolio/orders → book.py). */
+/** Today's orders (IST) across ALL segments, from the one /portfolio/book
+ *  snapshot — the same array the header ORDERS counter and nav badge count.
+ *  Exit orders carry their realised P&L; their sum is the "Realised" figure
+ *  in the sidebar and in Today P&L. */
 export default function OrdersTab() {
-  const { orders, setOrders, addToast } = useStore()
+  const snap = useStore(s => s.book)
+  const refreshBook = useStore(s => s.refreshBook)
+  const addToast = useStore(s => s.addToast)
   const [seg, setSeg] = useState('ALL')
-
-  const load = () => api.orders().then(r => setOrders(r.data || [])).catch(() => {})
-  useEffect(() => {
-    load()
-    const t = setInterval(load, 3000)
-    return () => clearInterval(t)
-  }, [])
+  const orders = snap?.orders ?? []
+  const load = () => refreshBook()
 
   const handleCancel = async (orderId: string) => {
     try {
@@ -40,20 +40,31 @@ export default function OrdersTab() {
   }
 
   const shown = [...orders].reverse().filter(o => seg === 'ALL' || o.segment === seg)
+  const exits = shown.filter(o => o.pnl != null)
+  const realised = exits.reduce((a, o) => a + (o.pnl || 0), 0)
 
   return (
     <div className="h-full overflow-auto" data-testid="orders-tab">
       <div className="flex items-center justify-between px-4 py-2 border-b border-slate-700/60 bg-slate-900 sticky top-0 gap-3">
-        <span className="text-sm font-semibold text-slate-200" data-testid="orders-count">{shown.length} order{shown.length !== 1 ? 's' : ''} today</span>
+        <span className="text-sm font-semibold text-slate-200" data-testid="orders-count" data-value={shown.length}>
+          {snap ? `${shown.length} order${shown.length !== 1 ? 's' : ''} today` : 'Orders —'}
+        </span>
         <SegmentFilter value={seg} onChange={setSeg} rows={orders} testId="ord-filter" />
+        <div className="flex items-center gap-2" title="Σ realised P&L of the exit orders listed">
+          <span className="text-xs text-slate-500">Realised ({exits.length} exits{seg !== 'ALL' ? `, ${seg}` : ''}):</span>
+          <span data-testid="orders-realised" data-value={realised}><Pnl value={realised} /></span>
+        </div>
       </div>
-      {shown.length === 0 ? (
+      <BookStatus testId="ord-book" />
+      {!snap ? (
+        <div className="flex items-center justify-center h-40 text-slate-400 text-sm">Loading orders…</div>
+      ) : shown.length === 0 ? (
         <div className="flex items-center justify-center h-40 text-slate-400 text-sm">No orders today{seg !== 'ALL' ? ` in ${seg}` : ''}</div>
       ) : (
         <table className="w-full text-sm">
           <thead>
             <tr className="border-b border-slate-700/50 bg-slate-800/40 sticky top-10">
-              {['Time', 'Order ID', 'Symbol', 'Segment', 'Strategy', 'Side', 'Qty', 'Type', 'Price', 'Status', ''].map(h => (
+              {['Time (IST)', 'Order ID', 'Symbol', 'Segment', 'Strategy', 'Side', 'Qty', 'Type', 'Price', 'Realised', 'Status', ''].map(h => (
                 <th key={h} className="text-left px-3 py-2 text-xs font-medium text-slate-500">{h}</th>
               ))}
             </tr>
@@ -76,6 +87,10 @@ export default function OrdersTab() {
                   <td className="px-3 py-2 font-mono text-slate-300">
                     {px > 0 ? `₹${px.toFixed(2)}` : 'MKT'}
                     <SimBadge show={o.simulated} testId={`ord-sim-${o.order_id}`} />
+                  </td>
+                  <td className="px-3 py-2" data-testid={`ord-pnl-${o.order_id}`} data-value={o.pnl ?? ''}
+                    title={o.pnl != null && o.entry_price != null ? `entry ₹${o.entry_price} → exit ₹${px}` : ''}>
+                    {o.pnl != null ? <Pnl value={o.pnl} /> : <span className="text-slate-600 text-xs">entry</span>}
                   </td>
                   <td className="px-3 py-2"><Badge variant={statusVariant(o.status)}>{o.status}</Badge></td>
                   <td className="px-3 py-2">
