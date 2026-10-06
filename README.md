@@ -96,6 +96,23 @@ source at all the simulator level is shown labelled `SIMULATED`, or
 index strip under the SPA header. Daily index history for the regime
 detector comes from NSE's public `ind_close_all` archive.
 
+### Market overview and engine status
+
+`GET /market/overview` (SPA right-hand panel) shows indices from the same
+feed as the strip. Stock rows say where each price came from: `KITE` or
+`TRUEDATA` when a real feed is connected (marked `STALE` when old),
+otherwise `SIMULATED` (the PAPER simulator, which paper fills use), shown
+with the real NSE end-of-day close for reference. NSE's public per-stock
+quote APIs are blocked, so real stock prices need Kite or TrueData. The
+NIFTY chart uses NSE daily closes, and today's point is added only when the
+live level is real and fresh.
+
+All engine/bot indicators (header button, agents panel, footer, agent cards)
+come from a single `engine_status()` with states `stopped`, `starting`
+(including the start phase, e.g. Loading instruments…), `running` and
+`error`. It is returned by `/health`, `/bot/status`, `/bot/start` and
+`/bot/stop`, and pushed as the WebSocket event `engine` whenever it changes.
+
 ## Tests
 
 ```bash
@@ -106,6 +123,7 @@ python test_sim_orders_flow.py  # 13/13  — PAPER order/guard/risk flow
 python test_safety_properties.py # 12/12 safety properties
 python test_all_agents_e2e.py   # every agent: signal → paper order
 python test_index_feed_and_safety.py  # index feed, typed-SEND LIVE gate, paper gate
+python test_dashboard_status_and_prices.py  # one engine status; honest price sources
 python nse_day_simulation.py    # offline GBM day simulation, all 5 agents
 ```
 

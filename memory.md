@@ -337,3 +337,8 @@ Playwright Chromium path (this environment):
 - Fixed: option TSL wrote the underlying's price into the option SL-M trigger.
 - Tests isolate DB / adaptive params / SEBI audit in a temp dir
   (`DATABASE_PATH`, `ADAPTIVE_DATA_DIR`, `SEBI_AUDIT_DIR`).
+- Engine status: single `engine_status()` (stopped/starting/running/error)
+  feeds every indicator via `/health`, `/bot/status` and WS `engine`.
+- `market_overview.py` + `GET /market/overview`: indices come from index_feed;
+  stocks are KITE/TRUEDATA when real, else labelled SIMULATED with the NSE EOD
+  close as reference. Tick rows carry `price_source`/`simulated`.
