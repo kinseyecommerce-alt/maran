@@ -276,6 +276,7 @@ def t_spa_reads_one_book():
     assert "const book        = engine?.book" in app and "book?.total.pnl" in app
     assert "book?.total.positions" in app and "book?.total.orders" in app
     assert 'data-testid="today-pnl"' in app and "pnl-seg-" in app and 'data-testid="hdr-orders"' in app
+    assert "pnlPositive ? '+' : '-'}₹" in app                              # losses keep their sign
     assert "botStatus?.performance?.daily_pnl" not in app and "positions.reduce" not in app
     assert "SegmentFilter" in pos and "SimBadge" in pos and "pos.pnl" in pos
     assert "(ltp - pos.average_price) * pos.quantity" not in pos            # server P&L, lot multipliers

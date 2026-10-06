@@ -30,7 +30,7 @@ export default function PositionsTab() {
         </span>
         <SegmentFilter value={seg} onChange={setSeg} rows={open} testId="pos-filter" />
         <div className="flex items-center gap-2">
-          <span className="text-xs text-slate-500">Total P&L:</span>
+          <span className="text-xs text-slate-500">Open P&L:</span>
           <span data-testid="positions-total-pnl" data-value={totalPnl}><Pnl value={totalPnl} /></span>
         </div>
       </div>

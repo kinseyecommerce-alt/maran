@@ -223,7 +223,7 @@ export default function App() {
   const book        = engine?.book
   const dailyPnl    = book?.total.pnl ?? 0
   const pnlPositive = dailyPnl >= 0
-  const pnlDisplay  = `${pnlPositive ? '+' : ''}₹${Math.abs(dailyPnl).toLocaleString('en-IN', { maximumFractionDigits: 2 })}`
+  const pnlDisplay  = `${pnlPositive ? '+' : '-'}₹${Math.abs(dailyPnl).toLocaleString('en-IN', { maximumFractionDigits: 2 })}`
   const isHalted    = riskStatus?.is_halted
 
 
