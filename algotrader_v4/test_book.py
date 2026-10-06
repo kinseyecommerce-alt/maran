@@ -77,6 +77,7 @@ def env(now, running=()):
     """Fixed IST clock, clean paper books, master running, given strategies on."""
     saved = (segment_manager._now_fn, master_agent.running, dict(_main._bot_start_status),
              list(kite_client._paper_positions), dict(kite_client._paper_orders),
+             (dict(kite_client._paper_journal), kite_client._paper_journal_day),
              dict(native_engine.positions_), list(native_engine.orders), list(native_engine.closed),
              dict(native_engine.realised), dict(native_engine.trades),
              {n: (s.state.running, s.state.trades_today, s.state.pnl_today) for n, s in native_engine.strategies.items()},
@@ -86,6 +87,7 @@ def env(now, running=()):
     master_agent.running = True
     _main._bot_start_status.update(phase="started", error=None)
     kite_client._paper_positions.clear(); kite_client._paper_orders.clear()
+    kite_client._paper_journal = {}; kite_client._paper_journal_day = ""
     native_engine.positions_.clear(); native_engine.orders.clear(); native_engine.closed.clear()
     native_engine._day = now.date()
     native_engine.realised = {k: 0.0 for k in native_engine.realised}
@@ -103,7 +105,8 @@ def env(now, running=()):
         yield
     finally:
         p.stop()
-        (segment_manager._now_fn, master_agent.running, bs, kp, ko, npos, nord, ncl, nre, ntr, nst, ast, kl) = saved
+        (segment_manager._now_fn, master_agent.running, bs, kp, ko, kj, npos, nord, ncl, nre, ntr, nst, ast, kl) = saved
+        kite_client._paper_journal, kite_client._paper_journal_day = kj
         _main._bot_start_status.clear(); _main._bot_start_status.update(bs)
         kite_client._paper_positions[:] = kp
         kite_client._paper_orders.clear(); kite_client._paper_orders.update(ko)
@@ -273,19 +276,19 @@ def t_spa_reads_one_book():
     pos = (SRC / "components/tabs/PositionsTab.tsx").read_text()
     ords = (SRC / "components/tabs/OrdersTab.tsx").read_text()
     store = (SRC / "store/index.ts").read_text()
-    assert "const book        = engine?.book" in app and "book?.total.pnl" in app
-    assert "book?.total.positions" in app and "book?.total.orders" in app
+    assert "const book        = snap?.summary" in app and "book?.total.pnl" in app
+    assert "snap ? snap.positions.length" in app and "snap ? snap.orders.length" in app
     assert 'data-testid="today-pnl"' in app and "pnl-seg-" in app and 'data-testid="hdr-orders"' in app
     assert "pnlPositive ? '+' : '-'}₹" in app                              # losses keep their sign
     assert "botStatus?.performance?.daily_pnl" not in app and "positions.reduce" not in app
-    assert "SegmentFilter" in pos and "SimBadge" in pos and "pos.pnl" in pos
+    assert "SegmentFilter" in pos and "SimBadge" in pos and "pos.pnl" in pos and "s.book" in pos
     assert "(ltp - pos.average_price) * pos.quantity" not in pos            # server P&L, lot multipliers
     assert "SegmentFilter" in ords and "o.segment" in ords and "o.strategy" in ords and "SimBadge" in ords
     assert "e.redacted && cur && !cur.redacted" in store
     tab = (SRC / "components/tabs/AgentsTab.tsx").read_text()
     panel = (SRC / "components/Agents/AgentsPanel.tsx").read_text()
-    for src, pre in ((tab, "agents-tab-"), (panel, "agent-")):           # both cards: engine.strategies
-        assert f"{pre}trades-${{key}}" in src and f"{pre}pnl-${{key}}" in src and "st.pnl_realised" in src
+    for src, pre in ((tab, "agents-tab-"), (panel, "agent-")):           # both cards: the book snapshot
+        assert f"{pre}trades-${{key}}" in src and f"{pre}pnl-${{key}}" in src and "cardNumbers(st, snap, key)" in src
 
 
 run("/portfolio/positions + /orders include NSE paper + BSE/MCX/CDS ledgers, tagged, filterable", t_positions_orders_all_segments)
