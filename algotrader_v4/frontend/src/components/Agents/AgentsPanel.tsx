@@ -92,11 +92,11 @@ export default function AgentsPanel() {
                 <div className="mt-2 flex gap-3 text-[10px]">
                   <div>
                     <div className="text-slate-600">Trades</div>
-                    <div className="font-mono text-slate-300">{st.trades_today ?? 0}</div>
+                    <div className="font-mono text-slate-300" data-testid={`agent-trades-${key}`}>{st.trades_today ?? 0}</div>
                   </div>
                   <div>
                     <div className="text-slate-600">P&L</div>
-                    <div className={`font-mono ${st.pnl_today >= 0 ? 'text-emerald-400' : 'text-rose-400'}`}>{signedInr(st.pnl_today)}</div>
+                    <div data-testid={`agent-pnl-${key}`} data-value={st.pnl_today} title={`realised ${signedInr(st.pnl_realised ?? 0)} · open ${signedInr(st.pnl_unrealised ?? 0)} (${st.open_positions ?? 0} pos)`} className={`font-mono ${st.pnl_today >= 0 ? 'text-emerald-400' : 'text-rose-400'}`}>{signedInr(st.pnl_today)}</div>
                   </div>
                 </div>
                 <div className="mt-2 bg-slate-950 rounded px-2 py-1.5 border border-slate-800/60">

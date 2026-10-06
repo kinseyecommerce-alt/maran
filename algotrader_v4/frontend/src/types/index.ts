@@ -38,6 +38,36 @@ export interface EngineStatus {
   strategies?: Record<string, StrategyState>
   segments?: SegmentState[]
   segments_running?: number
+  /** Header counters + Today P&L over ALL segments (same rows as /portfolio/*) */
+  book?: BookSummary
+  /** true when served to an unauthenticated caller (no P&L / book) */
+  redacted?: boolean
+}
+
+export interface BookSegment {
+  label: string
+  realised: number
+  unrealised: number
+  pnl: number
+  positions: number
+  orders: number
+  simulated: boolean
+}
+
+export interface BookSummary {
+  total: { realised: number; unrealised: number; pnl: number; positions: number; orders: number }
+  by_segment: Record<string, BookSegment>
+}
+
+/** Segment metadata every position/order row carries (book.py). */
+export interface BookRowMeta {
+  segment?: string | null
+  strategy?: string | null
+  price_source?: string | null
+  simulated?: boolean
+  native?: boolean
+  lots?: number | null
+  multiplier?: number
 }
 
 export type AgentRunState = 'starting' | 'running' | 'paused' | 'closed' | 'killed' | 'stopped'
@@ -54,7 +84,11 @@ export interface StrategyState {
   native: boolean
   hidden: boolean
   trades_today: number
+  /** realised + open P&L (book.py) */
   pnl_today: number
+  pnl_realised?: number
+  pnl_unrealised?: number
+  open_positions?: number
   display?: string | null
   desc?: string | null
   can_resume: boolean
@@ -121,7 +155,7 @@ export interface MarketOverviewData {
   ts: string
 }
 
-export interface Position {
+export interface Position extends BookRowMeta {
   tradingsymbol: string
   exchange: string
   product: string
@@ -133,7 +167,7 @@ export interface Position {
   sell_quantity?: number
 }
 
-export interface Order {
+export interface Order extends BookRowMeta {
   order_id: string
   tradingsymbol: string
   exchange: string
@@ -145,6 +179,7 @@ export interface Order {
   status: string
   placed_at?: string
   tag?: string
+  average_price?: number
 }
 
 export interface Bracket {

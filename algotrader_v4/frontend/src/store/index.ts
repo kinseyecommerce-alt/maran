@@ -118,6 +118,8 @@ export const useStore = create<AppStore>((set, get) => ({
     if (!e) return
     const cur = get().engine
     if (cur && e.ts_ms < cur.ts_ms) return
+    // never let a redacted (unauthenticated) snapshot wipe the full one
+    if (e.redacted && cur && !cur.redacted) return
     set({ engine: e })
   },
 

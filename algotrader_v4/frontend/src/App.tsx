@@ -218,7 +218,10 @@ export default function App() {
   const activeCount = listedKeys.filter(k => strategyView(engine, k).on).length
   const pausedCount = listedKeys.length - activeCount
 
-  const dailyPnl    = botStatus?.performance?.daily_pnl ?? positions.reduce((s, p) => s + (p.pnl || 0), 0)
+  // Today P&L, POSITIONS and ORDERS: one server-side book over every segment
+  // (engine.book — the same rows /portfolio/positions and /portfolio/orders serve).
+  const book        = engine?.book
+  const dailyPnl    = book?.total.pnl ?? 0
   const pnlPositive = dailyPnl >= 0
   const pnlDisplay  = `${pnlPositive ? '+' : ''}₹${Math.abs(dailyPnl).toLocaleString('en-IN', { maximumFractionDigits: 2 })}`
   const isHalted    = riskStatus?.is_halted
@@ -231,7 +234,8 @@ export default function App() {
       type: 'system' as const, cat: 'SYS' as const },
   ]
 
-  const openPositionCount = positions.filter(p => p.quantity !== 0).length
+  const openPositionCount = book?.total.positions ?? 0
+  const orderCount        = book?.total.orders ?? 0
 
   const handleLogout = async () => {
     try { await api.authLogout() } catch {}
@@ -241,7 +245,7 @@ export default function App() {
 
   const navBadge = (id: PageId): number | undefined => {
     if (id === 'positions') return openPositionCount > 0 ? openPositionCount : undefined
-    if (id === 'orders')    return orders.length > 0 ? orders.length : undefined
+    if (id === 'orders')    return orderCount > 0 ? orderCount : undefined
     return undefined
   }
 
@@ -286,13 +290,29 @@ export default function App() {
 
           {/* P&L block */}
           <div className="px-4 py-3 border-b border-slate-800 shrink-0">
-            <div className={`font-mono font-bold text-xl leading-none ${pnlPositive ? 'text-emerald-400' : 'text-rose-400'}`}>
+            <div data-testid="today-pnl" data-value={dailyPnl}
+              title={book ? `Realised ${book.total.realised.toFixed(0)} · open ${book.total.unrealised.toFixed(0)} — all segments` : ''}
+              className={`font-mono font-bold text-xl leading-none ${pnlPositive ? 'text-emerald-400' : 'text-rose-400'}`}>
               {pnlDisplay}
             </div>
             <div className={`text-[10px] mt-1 flex items-center gap-1 font-mono ${pnlPositive ? 'text-emerald-500/70' : 'text-rose-400/70'}`}>
               {pnlPositive ? <TrendingUp className="w-3 h-3" /> : <TrendingDown className="w-3 h-3" />}
-              Today P&L
+              Today P&L · all segments
             </div>
+            {book && (
+              <div className="mt-1.5 space-y-px" data-testid="pnl-breakdown">
+                {Object.entries(book.by_segment).map(([code, s]) => (
+                  <div key={code} data-testid={`pnl-seg-${code}`} data-value={s.pnl}
+                    className="flex justify-between text-[9px] font-mono text-slate-500"
+                    title={`${s.label}: realised ${s.realised.toFixed(0)} · open ${s.unrealised.toFixed(0)} · ${s.positions} pos · ${s.orders} orders${s.simulated ? ' · SIMULATED prices' : ''}`}>
+                    <span>{code}{s.positions ? ` · ${s.positions}p` : ''}</span>
+                    <span className={s.pnl > 0 ? 'text-emerald-400' : s.pnl < 0 ? 'text-rose-400' : ''}>
+                      {s.pnl >= 0 ? '+' : '-'}₹{Math.abs(s.pnl).toLocaleString('en-IN', { maximumFractionDigits: 0 })}
+                    </span>
+                  </div>
+                ))}
+              </div>
+            )}
             <div className="flex gap-3 mt-2 text-[10px] font-mono">
               <span className="text-slate-500">ACTIVE: <span className="text-emerald-400">{activeCount}</span></span>
               <span className="text-slate-500">PAUSED: <span className="text-amber-500">{pausedCount}</span></span>
@@ -442,12 +462,12 @@ export default function App() {
                 })()}
                 <div className="flex-1" />
                 <div className="flex items-center gap-3 text-[10px] font-mono text-slate-500">
-                  <span>POSITIONS: <span className="text-slate-300">{openPositionCount}</span></span>
-                  <span>ORDERS: <span className="text-slate-300">{orders.length}</span></span>
-                  {riskStatus && (
-                    <span>DAILY P&L:
-                      <span className={riskStatus.daily_pnl >= 0 ? ' text-emerald-400' : ' text-rose-400'}>
-                        {' '}{riskStatus.daily_pnl >= 0 ? '+' : ''}₹{Math.abs(riskStatus.daily_pnl).toLocaleString('en-IN', { maximumFractionDigits: 0 })}
+                  <span data-testid="hdr-positions">POSITIONS: <span className="text-slate-300">{openPositionCount}</span></span>
+                  <span data-testid="hdr-orders">ORDERS: <span className="text-slate-300">{orderCount}</span></span>
+                  {book && (
+                    <span data-testid="hdr-pnl" data-value={dailyPnl}>DAILY P&L:
+                      <span className={dailyPnl >= 0 ? ' text-emerald-400' : ' text-rose-400'}>
+                        {' '}{dailyPnl >= 0 ? '+' : '-'}₹{Math.abs(dailyPnl).toLocaleString('en-IN', { maximumFractionDigits: 0 })}
                       </span>
                     </span>
                   )}

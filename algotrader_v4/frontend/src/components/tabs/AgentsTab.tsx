@@ -138,8 +138,8 @@ export default function AgentsTab() {
                       </button>
                     </div>
                     <div className="grid grid-cols-3 gap-2 mb-2 py-1.5 border-y border-slate-700/50 text-[10px]">
-                      <div><div className="text-slate-500 uppercase">Trades</div><div className="font-mono text-slate-200">{st.trades_today}</div></div>
-                      <div><div className="text-slate-500 uppercase">P&L</div><div className={`font-mono ${st.pnl_today >= 0 ? 'text-emerald-400' : 'text-rose-400'}`}>{signedInr(st.pnl_today)}</div></div>
+                      <div><div className="text-slate-500 uppercase">Trades</div><div className="font-mono text-slate-200" data-testid={`agents-tab-trades-${key}`}>{st.trades_today ?? 0}</div></div>
+                      <div><div className="text-slate-500 uppercase">P&L</div><div data-testid={`agents-tab-pnl-${key}`} data-value={st.pnl_today} title={`realised ${signedInr(st.pnl_realised ?? 0)} · open ${signedInr(st.pnl_unrealised ?? 0)} (${st.open_positions ?? 0} pos)`} className={`font-mono ${st.pnl_today >= 0 ? 'text-emerald-400' : 'text-rose-400'}`}>{signedInr(st.pnl_today)}</div></div>
                       <div><div className="text-slate-500 uppercase">Last signal</div><div className="font-mono text-slate-400 truncate">{fmtLastSignal(agent?.last_signal)}</div></div>
                     </div>
                     {v.action === 'pause' ? (
