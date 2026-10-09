@@ -721,12 +721,14 @@ class StrategyInventor:
                                                   transaction_type=strat.side, symbol="")
             if not ok:
                 strat.next_entry_ts = time.time() + 120
+                strat.last_error = f"entry waiting: {why}"[:200]
                 return {"ok": False, "reason": why}
             oid = kite_client.place_order(
                 tradingsymbol=sym, exchange=exchange, transaction_type=strat.side, quantity=qty,
                 order_type="MARKET", product=product, tag=tag[:20],
             )
             src = self._price_source(und)
+            strat.last_error = ""
             strat.symbol, strat.entry_price, strat.order_id = sym, float(px), str(oid)
             strat.qty, strat.price_source = qty, src
             strat.simulated = src != "KITE"
@@ -758,6 +760,7 @@ class StrategyInventor:
         eng_lots, _m, why = native_engine.size_lots(key, dist)     # ≤ 1% risk + margin slot
         if eng_lots < 1:
             strat.next_entry_ts = time.time() + 120
+            strat.last_error = f"entry waiting: {why}"[:200]
             return {"ok": False, "reason": why}
         lots = max(1, min(eng_lots, int(risk // (dist * c.multiplier)) if dist > 0 else 1))
         ttl = max(60, min(strat.ttl_left(), 60 * 60))
@@ -766,7 +769,9 @@ class StrategyInventor:
                                         time_stop_sec=ttl, reason=f"{tag} entry")
         if not r.get("ok"):
             strat.next_entry_ts = time.time() + 120
+            strat.last_error = f"entry waiting: {r.get('reason')}"[:200]
             return r
+        strat.last_error = ""
         strat.symbol, strat.entry_price, strat.order_id = sym, float(r["price"]), r["order_id"]
         strat.qty, strat.price_source = int(r["lots"]), r["price_source"]
         strat.simulated = r["price_source"] != "KITE"

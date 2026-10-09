@@ -772,9 +772,9 @@ class Settings(BaseSettings):
     segment_risk_per_trade_pct: float = Field(default=1.0, gt=0, le=10)  # max loss at stop, % of segment capital
     segment_max_positions_nse_eq: int = Field(default=10, ge=1)
     segment_max_positions_nse_fo: int = Field(default=4, ge=1)
-    segment_max_positions_bse_eq: int = Field(default=3, ge=1)
-    segment_max_positions_mcx:    int = Field(default=3, ge=1)
-    segment_max_positions_cds:    int = Field(default=3, ge=1)
+    segment_max_positions_bse_eq: int = Field(default=5, ge=1)
+    segment_max_positions_mcx:    int = Field(default=5, ge=1)
+    segment_max_positions_cds:    int = Field(default=5, ge=1)
     segment_max_trades_per_day:   int = Field(default=40, ge=1)          # per segment
     # PAPER only: let segments keep trading on the simulator outside their
     # real trading-hours window (labelled AFTER-HOURS SIM). Off by default so

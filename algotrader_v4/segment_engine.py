@@ -398,7 +398,10 @@ class NativeEngine:
         risk_lot = dist * c.multiplier
         if margin_lot <= 0 or risk_lot <= 0:
             return 0, margin_lot, "no price"
-        slot = lim["capital"] / max(lim["max_positions"], 1)
+        # margin slot per position: an equal share, but never under 30% of the
+        # segment (one COPPER lot blocks ~₹2.5L); the total stays capped by
+        # entry_check's capital gate.
+        slot = max(lim["capital"] / max(lim["max_positions"], 1), 0.3 * lim["capital"])
         lots_risk = int(lim["risk_per_trade"] // risk_lot)
         lots_margin = int(slot // margin_lot)
         lots = min(lots_risk, lots_margin)

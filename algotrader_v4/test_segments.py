@@ -597,7 +597,7 @@ def t_mcx_risk_sizing():
             lim = _limits(c.segment)
             if lots:
                 assert lots * dist * c.multiplier <= lim["risk_per_trade"] + 1e-6, (key, lots)
-                assert lots * margin_lot <= lim["capital"] / lim["max_positions"] + 1e-6
+                assert lots * margin_lot <= max(lim["capital"] / lim["max_positions"], 0.3 * lim["capital"]) + 1e-6
             else:
                 assert "risk" in why or "margin" in why
         key = "NATURALGAS-FUT@MCX"
