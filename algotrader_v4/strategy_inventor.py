@@ -363,6 +363,23 @@ class StrategyInventor:
                and s.status in ("expired", "killed", "paper_done")]
         if len(bad) >= 2:
             return False, f"{strat.name} already lost twice today in {strat.segment}"
+        # self-improvement: the family may be retired / cooling off, and lessons
+        # from journaled paper trades veto ideas that lost in this regime.
+        lesson_note = ""
+        try:
+            from self_learning import learning
+            ok_l, why_l, _f = learning.entry_gate(f"invent:{strat.segment}", strat.segment, strat.regime)
+            if not ok_l:
+                return False, f"invented family {strat.segment}: {why_l}"
+            les = learning.lesson_for(strat.segment, strat.regime, strat.name)
+            if les and les["kind"] == "avoid":
+                return False, (f"lesson: {strat.name} lost ₹{les['net']:,.0f} after costs over {les['n']} "
+                               f"paper trades in {strat.regime} ({strat.segment})")
+            if les and les["kind"] == "favor":
+                lesson_note = (f"; lesson: {strat.name} made ₹{les['net']:,.0f} over {les['n']} trades "
+                               f"in {strat.regime}")
+        except Exception:
+            pass
         if strat.price_source != "KITE" and self._live_data_on():
             return False, (f"{strat.planned_symbol or strat.segment}: trend measured on "
                            f"{strat.price_source or 'unknown'} prices while Kite live data is on — "
@@ -370,7 +387,7 @@ class StrategyInventor:
         risk = lim["capital"] * float(getattr(settings, "invent_risk_per_trade_pct", 0.5)) / 100.0
         feed = "live Kite price" if strat.price_source == "KITE" else "SIMULATED price (no Kite quote)"
         return True, (f"{strat.reason}; segment P&L ₹{pnl:,.0f} vs cap −₹{cap:,.0f}; "
-                      f"risk ≤ ₹{risk:,.0f}/trade; {feed}; PAPER only")
+                      f"risk ≤ ₹{risk:,.0f}/trade; {feed}; PAPER only{lesson_note}")
 
     def _live_data_on(self) -> bool:
         """PAPER with Kite live data connected → designs must use Kite prices."""
@@ -442,9 +459,21 @@ class StrategyInventor:
             return self._design_fo(regime, tmpl)
         return self._design_eq(regime, tmpl)
 
+    def _learned(self, segment: str) -> dict:
+        try:
+            from self_learning import learning
+            return learning.params(f"invent:{segment}")
+        except Exception:
+            return {}
+
     def _design_native(self, segment: str, regime: str, tmpl: dict) -> dict:
         from segment_engine import native_engine, UNIVERSE, TARGET_R
         busy = self._active_symbols()
+        lp = self._learned(segment)
+        try:
+            from self_learning import learning as _lrn
+        except Exception:
+            _lrn = None
         best = None
         for c in UNIVERSE.get(segment) or []:
             key = f"{c.symbol}@{segment}"
@@ -456,16 +485,21 @@ class StrategyInventor:
             lots, _m, _why = native_engine.size_lots(key, native_engine.stop_distance(key))
             if lots < 1:
                 continue          # cannot be sized inside the segment's risk/margin budget
-            rank = (t["price_source"] == "KITE", t["strength"])
+            idea = f"{c.symbol.replace('-FUT', '').lower()}_trend_{'long' if t['side'] == 'BUY' else 'short'}"
+            les = _lrn.lesson_for(segment, regime, idea) if _lrn else None
+            if les and les["kind"] == "avoid":
+                continue          # this idea lost in this regime — skip it
+            rank = (t["price_source"] == "KITE", bool(les and les["kind"] == "favor"), t["strength"])
             if best is None or rank > best[0]:
                 best = (rank, c, key, t)
         if best is None:
             return {"ok": False, "reason": "no instrument trend yet (needs ~4 min of bars)"}
         _, c, key, t = best
-        if t["strength"] < 0.03:
+        min_str = float(lp.get("min_strength", 0.03))
+        if t["strength"] < min_str:
             return {"ok": False, "reason": f"no clear trend ({c.symbol} {t['move_pct']:+.2f}%)"}
         px = float(native_engine.price.get(key) or 0)
-        dist = native_engine.stop_distance(key)
+        dist = native_engine.stop_distance(key) * float(lp.get("stop_mult", 1.0))
         stop_pct = dist / px * 100.0 if px > 0 else 0.5
         side = t["side"]
         und = c.symbol.replace("-FUT", "")
@@ -473,7 +507,8 @@ class StrategyInventor:
                  f"EMA20, {t['move_pct']:+.2f}% over ~5 min")
         return {"ok": True, "symbol": c.symbol, "side": side, "style": "trend_follow",
                 "name": f"{und.lower()}_trend_{'long' if side == 'BUY' else 'short'}",
-                "stop_pct": round(stop_pct, 3), "target_pct": round(stop_pct * TARGET_R, 3),
+                "stop_pct": round(stop_pct, 3),
+                "target_pct": round(stop_pct * float(lp.get("target_r", TARGET_R)), 3),
                 "price_source": t["price_source"], "trend": trend,
                 "rationale": f"market regime {regime}; {trend}; follow the instrument trend"}
 
@@ -651,7 +686,15 @@ class StrategyInventor:
         from segments import _limits
         lim = _limits(segment)
         inv = lim["capital"] * float(getattr(settings, "invent_risk_per_trade_pct", 0.5)) / 100.0
-        return inv, float(lim.get("risk_per_trade") or lim["capital"] * 0.01)
+        hard = float(lim.get("risk_per_trade") or lim["capital"] * 0.01)
+        try:
+            from self_learning import learning, Guard
+            _ok, _w, f = learning.entry_gate(f"invent:{segment}", segment, self._regime())
+            if _ok:
+                inv = Guard.clamp_risk(segment, inv, f)
+        except Exception:
+            pass
+        return min(inv, hard), hard
 
     def _try_paper_entry(self, strat: InventedStrategy) -> dict:
         """Place one PAPER entry for the invented strategy (LIVE only via the
@@ -769,7 +812,9 @@ class StrategyInventor:
         ttl = max(60, min(strat.ttl_left(), 60 * 60))
         r = native_engine.open_external(strat.segment, sym, strat.side, strategy=f"invent:{strat.id}",
                                         stop_dist=dist, target_dist=tgt, lots=lots,
-                                        time_stop_sec=ttl, reason=f"{tag} entry")
+                                        time_stop_sec=ttl, reason=f"{tag} entry",
+                                        features={"idea": strat.name, "regime": strat.regime,
+                                                  "style": strat.style, "trend": strat.trend})
         if not r.get("ok"):
             strat.next_entry_ts = time.time() + 120
             strat.last_error = f"entry waiting: {r.get('reason')}"[:200]

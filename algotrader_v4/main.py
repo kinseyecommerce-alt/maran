@@ -2619,6 +2619,50 @@ def invent_approvals(limit: int = 100):
     return {"approvals": strategy_inventor.approvals(limit)}
 
 
+# ── Self-improvement (PAPER only) ─────────────────────────────────────────────
+@app.get("/learning/report", tags=["Learning"])
+def learning_report():
+    """What each agent changed, why, and the effect; journal summary; go-live
+    readiness scorecard per segment (display-only — never arms LIVE)."""
+    from self_learning import learning
+    return learning.report()
+
+
+@app.get("/learning/summary", tags=["Learning"])
+def learning_summary():
+    """Compact view for the 15:35 daily close report."""
+    from self_learning import learning
+    r = learning.report()
+    return {"mode": r["mode"], "summary": r["summary"],
+            "readiness": {k: {"status": v["status"], "passed": v["passed"], "of": v["of"]}
+                          for k, v in r["readiness"].items()},
+            "recent_changes": [{"ts": v["ts"], "strategy": v["strategy"], "kind": v["kind"],
+                                "status": v["status"], "changed": v.get("changed"), "reason": v["reason"]}
+                               for v in r["changes"][:10]],
+            "latency": r["latency"]}
+
+
+@app.get("/learning/journal", tags=["Learning"])
+def learning_journal(limit: int = 100, segment: str | None = None):
+    from self_learning import learning
+    return {"journal": learning.journal(min(max(limit, 1), 1000), segment)}
+
+
+class LearningRunRequest(BaseModel):
+    retune: bool = True
+    segments: Optional[list[str]] = None
+
+
+@app.post("/learning/run", tags=["Learning"])
+async def learning_run(req: LearningRunRequest):
+    """Run one learning cycle now (PAPER only). Retune can take a few minutes."""
+    from self_learning import learning, GuardViolation
+    try:
+        return await asyncio.to_thread(learning.run_cycle, req.retune, req.segments)
+    except GuardViolation as exc:
+        raise HTTPException(409, str(exc))
+
+
 @app.post("/invent/{strategy_id}/approve", tags=["Invent"])
 def invent_approve(strategy_id: str):
     """Approve a pending proposal for PAPER trading (only needed when master
@@ -4168,6 +4212,22 @@ async def on_startup():
         asyncio.create_task(_prewarm_gate(), name="prewarm_gate").add_done_callback(_log_task_exc)
     from platform_scheduler import platform_scheduler
     platform_scheduler.start()
+
+    # Self-improvement loop (PAPER only): learned params live, journal observer.
+    try:
+        from self_learning import learning
+        learning.activate()
+
+        async def _learning_observer() -> None:
+            while True:
+                await asyncio.sleep(20)
+                try:
+                    await asyncio.to_thread(learning.observe)
+                except Exception as _lo_exc:
+                    logger.debug("[learning] observer: {}", _lo_exc)
+        asyncio.create_task(_learning_observer(), name="learning_observer").add_done_callback(_log_task_exc)
+    except Exception as _le_exc:
+        logger.warning("[startup] self-learning not started: {}", _le_exc)
 
     # Reload persisted agent enables/pauses BEFORE any auto-start path runs —
     # without this a deploy restart silently re-enabled manually paused agents.

@@ -54,6 +54,11 @@ class PlatformScheduler:
             minutes=5, id="options_cache", max_instances=1, coalesce=True,
         )
         self._sched.add_job(
+            self._learning_cycle, "cron",
+            hour=15, minute=45, day_of_week="mon-fri", id="learning_cycle",
+            max_instances=1, coalesce=True,
+        )
+        self._sched.add_job(
             self._daily_history_download, "cron",
             hour=16, minute=0, day_of_week="mon-fri", id="history_download",
             max_instances=1, coalesce=True,
@@ -70,7 +75,7 @@ class PlatformScheduler:
         )
         self._sched.start()
         logger.info("[platform] scheduler started (Kite@08:50, Report@09:00, Data@09:10, "
-                    "Start@09:16, History@16:00, Learn@16:45, AgentBT@17:15 IST)")
+                    "Start@09:16, SelfLearn@15:45, History@16:00, Learn@16:45, AgentBT@17:15 IST)")
 
     async def stop(self) -> None:
         try:
@@ -168,6 +173,20 @@ class PlatformScheduler:
                         result.get("bars"), len(result.get("failed", [])))
         except Exception as exc:
             logger.error("[platform] Daily history download failed: {}", exc)
+
+    async def _learning_cycle(self) -> None:
+        """15:45 IST: self-improvement review of today's paper trades (PAPER only)."""
+        from ist_clock import is_nse_holiday, now_ist
+        if is_nse_holiday(now_ist().date()) or settings.trading_mode != "PAPER":
+            return
+        try:
+            from self_learning import learning
+            rep = await asyncio.to_thread(learning.run_cycle, True)
+            acc = sum(1 for r in rep.get("retunes", []) if r.get("accepted"))
+            logger.info("[platform] learning cycle: {} reviews, {} retunes ({} accepted), {}s",
+                        len(rep.get("reviews", [])), len(rep.get("retunes", [])), acc, rep.get("elapsed_sec"))
+        except Exception as exc:
+            logger.error("[platform] learning cycle failed: {}", exc)
 
     async def _nightly_learn(self) -> None:
         """Re-run historical learning after the 16:00 data refresh so the

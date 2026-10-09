@@ -76,6 +76,10 @@ export const api = {
   inventStrategies:  (segment?: string) => ax().get('/invent/strategies', { params: { segment } }),
   inventJournal:     (limit = 50) => ax().get('/invent/journal', { params: { limit } }),
 
+  // ── Self-improvement (PAPER only) ───────────────────────────────────────────
+  learningReport:    () => ax().get('/learning/report'),
+  learningJournal:   (limit = 100) => ax().get('/learning/journal', { params: { limit } }),
+
 // ── Market ──────────────────────────────────────────────────────────────────
   marketLive:       () => ax().get('/market/live'),
   marketLiveSymbol: (symbol: string) => ax().get(`/market/live/${symbol}`),

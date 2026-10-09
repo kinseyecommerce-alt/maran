@@ -72,11 +72,24 @@ UNIVERSE: dict[str, list[Contract]] = {
     "BSE_EQ": [Contract(s, "BSE_EQ", 1.0, 1.0, 2.0, kind="EQ") for s in
                ("RELIANCE", "HDFCBANK", "ICICIBANK", "INFY", "TCS",
                 "ITC", "LT", "SBIN", "BHARTIARTL", "AXISBANK")],
+    # Liquid MCX front-month futures (jag 2026-10-09: whole liquid MCX universe).
+    # Contracts whose single-lot margin exceeds the per-position slot (GOLD,
+    # SILVER at ₹10L/segment) are listed but never sized: size_lots() returns 0.
     "MCX": [Contract("GOLDM-FUT", "MCX", 10.0, 0.10, 1.0, 120000.0),
             Contract("SILVERM-FUT", "MCX", 5.0, 0.12, 1.8, 145000.0),
             Contract("CRUDEOILM-FUT", "MCX", 10.0, 0.15, 2.5, 5600.0),
             Contract("NATURALGAS-FUT", "MCX", 1250.0, 0.20, 3.5, 290.0),
-            Contract("COPPER-FUT", "MCX", 2500.0, 0.10, 1.2, 900.0)],
+            Contract("COPPER-FUT", "MCX", 2500.0, 0.10, 1.2, 900.0),
+            Contract("GOLD-FUT", "MCX", 100.0, 0.10, 1.0, 120000.0),
+            Contract("SILVER-FUT", "MCX", 30.0, 0.12, 1.8, 145000.0),
+            Contract("CRUDEOIL-FUT", "MCX", 100.0, 0.15, 2.5, 5600.0),
+            Contract("NATGASMINI-FUT", "MCX", 250.0, 0.20, 3.5, 290.0),
+            Contract("ZINC-FUT", "MCX", 5000.0, 0.10, 1.5, 270.0),
+            Contract("ALUMINIUM-FUT", "MCX", 5000.0, 0.10, 1.2, 250.0),
+            Contract("LEAD-FUT", "MCX", 5000.0, 0.10, 1.0, 185.0),
+            Contract("ZINCMINI-FUT", "MCX", 1000.0, 0.10, 1.5, 270.0),
+            Contract("ALUMINI-FUT", "MCX", 1000.0, 0.10, 1.2, 250.0),
+            Contract("LEADMINI-FUT", "MCX", 1000.0, 0.10, 1.0, 185.0)],
     "CDS": [Contract("USDINR-FUT", "CDS", 1000.0, 0.03, 0.3, 88.5),
             Contract("EURINR-FUT", "CDS", 1000.0, 0.04, 0.45, 103.0),
             Contract("GBPINR-FUT", "CDS", 1000.0, 0.04, 0.5, 118.0),
@@ -192,29 +205,40 @@ class NativeStrategy:
                 "last_signal": self.state.last_signal, "errors": self.state.errors[-5:],
                 "native": True, "feed": _feed_of(self.segment)}
 
+    def params(self) -> dict:
+        """Active (self-improvement) params; defaults == the original constants."""
+        try:
+            from self_learning import learning
+            return learning.params(self.name)
+        except Exception:
+            return {}
+
     # signal on closed bars
     def signal(self, bars: list[float]) -> Optional[str]:
+        p = self.params()
         if self.kind == "trend":
-            if len(bars) < 22:
+            ef, es = int(p.get("ema_fast", 5)), int(p.get("ema_slow", 20))
+            if len(bars) < es + 2:
                 return None
-            f_prev, s_prev = _ema(bars[:-1], 5), _ema(bars[:-1], 20)
-            f, s = _ema(bars, 5), _ema(bars, 20)
+            f_prev, s_prev = _ema(bars[:-1], ef), _ema(bars[:-1], es)
+            f, s = _ema(bars, ef), _ema(bars, es)
             if f_prev <= s_prev and f > s:
                 return "BUY"
             if f_prev >= s_prev and f < s:
                 return "SELL"
             return None
-        if len(bars) < 31:
+        zw, ze = int(p.get("z_window", 30)), float(p.get("z_entry", 2.0))
+        if len(bars) < zw + 1:
             return None
-        win = bars[-30:]
-        m = sum(win) / 30
+        win = bars[-zw:]
+        m = sum(win) / zw
         sd = _std(win)
         if sd <= 0:
             return None
         z = (bars[-1] - m) / sd
-        if z <= -2.0:
+        if z <= -ze:
             return "BUY"
-        if z >= 2.0:
+        if z >= ze:
             return "SELL"
         return None
 
@@ -264,6 +288,7 @@ class NativeEngine:
         # Kite quote overlay (PAPER + live data)
         self.src: dict[str, str] = {}                      # key → KITE | SIMULATED
         self.kite_px: dict[str, tuple] = {}                # key → (price, epoch)
+        self.kite_ba: dict[str, tuple] = {}                # key → (bid, ask, epoch) from Kite depth
         self.kite_sym: dict[str, str] = {}                 # key → "EXCH:TRADINGSYMBOL"
         self.kite_status: dict = {"active": False, "resolved": 0, "error": None,
                                   "last_poll": None, "unresolved": []}
@@ -338,9 +363,17 @@ class NativeEngine:
         key = f"{symbol}@{segment}"
         c = self.contracts[key]
         px = self.price[key]
+        ltp = px
+        # Realistic paper fill: a marketable order takes the live touch (BUY at
+        # the best ask, SELL at the best bid) when a fresh Kite quote with
+        # depth is available and the spread is sane; otherwise the LTP.
+        ba = self.kite_ba.get(key)
+        if ba and time.time() - ba[2] <= KITE_FRESH_SEC and ba[0] > 0 and ba[1] >= ba[0] \
+                and (ba[1] - ba[0]) <= 0.01 * px:
+            px = ba[1] if side == "BUY" else ba[0]
         oid = f"PAPER-{segment}-{uuid.uuid4().hex[:8].upper()}"
         rec = {"order_id": oid, "segment": segment, "symbol": symbol, "side": side, "lots": lots,
-               "price": round(px, 4), "ts": _now_iso(),
+               "price": round(px, 4), "ltp": round(ltp, 4), "ts": _now_iso(),
                "reason": reason, "strategy": strategy, "price_source": self.src.get(key, "SIMULATED"),
                "status": "COMPLETE"}
         with self._lock:
@@ -355,8 +388,20 @@ class NativeEngine:
         if not ok_px:
             strat.state.last_signal = {"symbol": c.symbol, "action": side, "skipped": why}
             return None
-        dist = self.stop_distance(key)
-        lots, margin_lot, why = self.size_lots(key, dist)
+        lp, factor, regime, ver = {}, 1.0, "", None
+        try:
+            from self_learning import learning
+            regime = learning._regime_now()
+            ok_l, why_l, factor = learning.entry_gate(strat.name, c.segment, regime)
+            if not ok_l:
+                strat.state.last_signal = {"symbol": c.symbol, "action": side, "skipped": why_l}
+                return None
+            lp = learning.params(strat.name)
+            ver = (learning._state.get(strat.name) or {}).get("version")
+        except Exception:
+            pass
+        dist = self.stop_distance(key, lp.get("sl_range_frac"))
+        lots, margin_lot, why = self.size_lots(key, dist, factor)
         if lots < 1:
             strat.state.last_signal = {"symbol": c.symbol, "action": side, "skipped": why}
             return None
@@ -369,10 +414,14 @@ class NativeEngine:
         sgn = 1 if side == "BUY" else -1
         pos = {"key": key, "symbol": c.symbol, "segment": c.segment, "strategy": strat.name,
                "side": side, "lots": lots, "qty": sgn * lots, "entry": rec["price"],
-               "sl": rec["price"] - sgn * dist, "target": rec["price"] + sgn * TARGET_R * dist,
+               "sl": rec["price"] - sgn * dist,
+               "target": rec["price"] + sgn * float(lp.get("target_r", TARGET_R)) * dist,
                "opened": time.time(), "margin": round(lots * margin_lot, 2),
                "order_id": rec["order_id"], "price_source": rec["price_source"],
-               "risk": round(lots * dist * c.multiplier, 2)}
+               "risk": round(lots * dist * c.multiplier, 2),
+               "time_stop": int(float(lp.get("time_stop_min", TIME_STOP_SEC / 60)) * 60),
+               "entry_ltp": rec.get("ltp"), "entry_ts": rec["ts"], "param_version": ver,
+               "features": self._features(key, regime, dist, factor)}
         with self._lock:
             self.positions_[key] = pos
             # trades = entries today (same convention as the NSE agents)
@@ -384,7 +433,7 @@ class NativeEngine:
                     pos["risk"], strat.name)
         return pos
 
-    def size_lots(self, key: str, dist: float) -> tuple[int, float, str]:
+    def size_lots(self, key: str, dist: float, risk_factor: float = 1.0) -> tuple[int, float, str]:
         """(lots, margin per lot, reason). Risk-based: a stop-out loses at most
         the segment's per-trade risk budget (1% of capital); also capped by
         the margin slot (capital ÷ max positions) and MAX_FUT_LOTS.
@@ -402,7 +451,10 @@ class NativeEngine:
         # segment (one COPPER lot blocks ~₹2.5L); the total stays capped by
         # entry_check's capital gate.
         slot = max(lim["capital"] / max(lim["max_positions"], 1), 0.3 * lim["capital"])
-        lots_risk = int(lim["risk_per_trade"] // risk_lot)
+        # self-improvement size factor scales the budget DOWN freely; it can
+        # never lift a trade above the segment's per-trade risk cap.
+        budget = min(lim["risk_per_trade"], lim["risk_per_trade"] * max(0.0, float(risk_factor)))
+        lots_risk = int(budget // risk_lot)
         lots_margin = int(slot // margin_lot)
         lots = min(lots_risk, lots_margin)
         if c.kind == "FUT":
@@ -416,7 +468,8 @@ class NativeEngine:
 
     def open_external(self, segment: str, symbol: str, side: str, *, strategy: str,
                       stop_dist: float, target_dist: float, lots: Optional[int] = None,
-                      time_stop_sec: int = TIME_STOP_SEC, reason: str = "") -> dict:
+                      time_stop_sec: int = TIME_STOP_SEC, reason: str = "",
+                      features: Optional[dict] = None) -> dict:
         """Open a PAPER position owned by an outside strategy (the master-approved
         invented strategies). Same gates as native entries (segment
         entry_check: kill switch, hours, daily loss, positions, capital); the
@@ -447,7 +500,10 @@ class NativeEngine:
                "sl": rec["price"] - sgn * stop_dist, "target": rec["price"] + sgn * target_dist,
                "opened": time.time(), "margin": round(lots * margin_lot, 2),
                "order_id": rec["order_id"], "price_source": rec["price_source"],
-               "risk": round(lots * stop_dist * c.multiplier, 2), "time_stop": int(time_stop_sec)}
+               "risk": round(lots * stop_dist * c.multiplier, 2), "time_stop": int(time_stop_sec),
+               "entry_ltp": rec.get("ltp"), "entry_ts": rec["ts"],
+               "features": {**self._features(key, features.get("regime", "") if features else "", stop_dist, 1.0),
+                            **(features or {})}}
         with self._lock:
             self.positions_[key] = pos
             self.trades[segment] = self.trades.get(segment, 0) + 1
@@ -554,7 +610,10 @@ class NativeEngine:
         if not self.kite_sym:
             return 0
         rev = {v: k for k, v in self.kite_sym.items()}
-        data = kite_client.kite.ltp(list(rev))
+        try:
+            data = kite_client.kite.quote(list(rev))       # LTP + best bid/ask (depth)
+        except Exception:
+            data = kite_client.kite.ltp(list(rev))
         now = time.time()
         n = 0
         for ins, row in (data or {}).items():
@@ -563,6 +622,14 @@ class NativeEngine:
             if k and px > 0:
                 self.kite_px[k] = (px, now)
                 n += 1
+                try:
+                    d = (row or {}).get("depth") or {}
+                    b = float(((d.get("buy") or [{}])[0]).get("price") or 0)
+                    a = float(((d.get("sell") or [{}])[0]).get("price") or 0)
+                    if b > 0 and a > 0:
+                        self.kite_ba[k] = (b, a, now)
+                except Exception:
+                    pass
         self.kite_status.update(last_poll=_now_iso(), quotes=n, error=None)
         return n
 
@@ -595,19 +662,29 @@ class NativeEngine:
             return "REAL"
         return "MIXED" if n else "SIMULATED"
 
-    def stop_distance(self, key: str) -> float:
+    def stop_distance(self, key: str, frac: Optional[float] = None) -> float:
         """Stop distance in price units: the larger of 30% of the instrument's
         typical day range and 2.5σ of realised 10-minute moves (bar returns).
         Never a few seconds of noise."""
         c = self.contracts[key]
         px = self.price[key]
-        floor = SL_RANGE_FRAC * (c.day_range_pct / 100.0) * px
+        floor = (SL_RANGE_FRAC if frac is None else frac) * (c.day_range_pct / 100.0) * px
         bars = list(self.bars.get(key, ()))
         rv = 0.0
         if len(bars) >= 12:
             rets = [math.log(b / a) for a, b in zip(bars[-31:-1], bars[-30:]) if a > 0 and b > 0]
             rv = _std(rets) * math.sqrt(600 / BAR_SEC) * px * 2.5
         return max(floor, rv)
+
+    def _features(self, key: str, regime: str, dist: float, factor: float) -> dict:
+        t = self.trend(key) or {}
+        ba = self.kite_ba.get(key)
+        px = self.price.get(key) or 0.0
+        return {"regime": regime, "ema_fast": round(t.get("ema_fast", 0.0), 4),
+                "ema_slow": round(t.get("ema_slow", 0.0), 4), "move_pct": round(t.get("move_pct", 0.0), 4),
+                "strength": round(t.get("strength", 0.0), 4), "stop_dist": round(dist, 4),
+                "stop_pct": round(dist / px * 100, 4) if px else None, "size_factor": round(factor, 3),
+                "spread": round(ba[1] - ba[0], 4) if ba else None}
 
     def _close(self, key: str, reason: str) -> Optional[dict]:
         with self._lock:
@@ -629,6 +706,11 @@ class NativeEngine:
         st = self.strategies.get(pos["strategy"])
         if st:
             st.state.pnl_today += pnl
+        try:
+            from self_learning import learning
+            learning.native_close_hook(pos, {**rec, "reason": reason}, c)
+        except Exception as exc:
+            logger.debug("[segment_engine] journal hook: {}", exc)
         return {**pos, "exit": rec["price"], "pnl": round(pnl, 2), "reason": reason}
 
     def flatten(self, segment: str, reason: str = "flatten") -> list:

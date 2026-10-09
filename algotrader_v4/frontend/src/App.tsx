@@ -3,7 +3,7 @@ import {
   Activity, Terminal, Cpu, WifiOff, ShieldCheck,
   TrendingUp, TrendingDown, BarChart3,
   Zap, Play, Square, Database, Crosshair,
-  LayoutDashboard, ClipboardList, Target, Scale, History, Brain, Lightbulb,
+  LayoutDashboard, ClipboardList, Target, Scale, History, Brain, Lightbulb, GraduationCap,
 } from 'lucide-react'
 import Header from './components/Header'
 import IndexStrip from './components/IndexStrip'
@@ -20,6 +20,7 @@ import SebiTab from './components/tabs/SebiTab'
 import TradeHistoryTab from './components/tabs/TradeHistoryTab'
 import ClaudeGateTab from './components/tabs/ClaudeGateTab'
 import InventedTab from './components/tabs/InventedTab'
+import LearningTab from './components/tabs/LearningTab'
 import { connectWS } from './ws/websocket'
 import { useStore } from './store'
 import { api } from './api/client'
@@ -37,6 +38,7 @@ const TAB_COMPONENTS: Record<string, React.ComponentType> = {
   history:   TradeHistoryTab,
   gate:      ClaudeGateTab,
   invented:  InventedTab,
+  learning:  LearningTab,
 }
 
 const SIDEBAR_NAV: { id: PageId; label: string; Icon: React.ComponentType<{ className?: string }> }[] = [
@@ -47,6 +49,7 @@ const SIDEBAR_NAV: { id: PageId; label: string; Icon: React.ComponentType<{ clas
   { id: 'risk',      label: 'Risk',          Icon: ShieldCheck     },
   { id: 'agents',    label: 'Agents',        Icon: Cpu             },
   { id: 'invented',  label: 'Invented',      Icon: Lightbulb       },
+  { id: 'learning',  label: 'Learning',      Icon: GraduationCap   },
   { id: 'sebi',      label: 'SEBI',          Icon: Scale           },
   { id: 'history',   label: 'Trade History', Icon: History         },
   { id: 'gate',      label: 'Claude Gate',   Icon: Brain           },
@@ -169,7 +172,11 @@ export default function App() {
   const sessionExpired = useStore(s => s.sessionExpired)
 
   const [isAuthed, setIsAuthed] = useState<boolean | null>(null)
-  const [activePage, setActivePage] = useState<PageId>('dashboard')
+  // deep link: /#learning opens a tab directly (used for headless screenshots)
+  const [activePage, setActivePage] = useState<PageId>(() => {
+    const h = (typeof window !== 'undefined' ? window.location.hash.replace('#', '') : '') as PageId
+    return h && (h === 'dashboard' || h in TAB_COMPONENTS) ? h : 'dashboard'
+  })
   const [liveTime, setLiveTime] = useState(
     new Date().toLocaleTimeString('en-IN', { hour12: false, timeZone: 'Asia/Kolkata' })
   )
