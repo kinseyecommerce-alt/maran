@@ -17,7 +17,11 @@ type InventSnap = {
   }
   strategies: any[]
   journal: any[]
+  approvals?: any[]
+  segments?: any[]
 }
+
+const inr = (n: number) => '₹' + Math.round(Number(n || 0)).toLocaleString('en-IN')
 
 const SEGMENTS = ['NSE_EQ', 'NSE_FO', 'BSE_EQ', 'MCX', 'CDS']
 
@@ -98,6 +102,8 @@ export default function InventedTab() {
   const st = snap?.status
   const strategies = snap?.strategies || []
   const journal = snap?.journal || []
+  const approvals = snap?.approvals || []
+  const segs = snap?.segments || []
 
   return (
     <div className="flex-1 overflow-auto p-4 space-y-4" data-testid="invented-tab">
@@ -133,6 +139,19 @@ export default function InventedTab() {
         <Card label="Paper fills armed" value={`${st?.counts?.paper_active ?? 0} / ${st?.counts?.live_armed ?? 0}`} />
       </div>
 
+      <div className="grid grid-cols-1 md:grid-cols-5 gap-2 text-[11px] font-mono" data-testid="invent-segment-capital">
+        {segs.map((g: any) => (
+          <div key={g.code} className={`border rounded px-3 py-2 bg-slate-900/40 ${g.killed ? 'border-rose-800' : 'border-slate-800'}`}
+               data-testid={`invent-seg-${g.code}`}>
+            <div className="flex justify-between text-[10px] text-slate-500"><span>{g.code}</span><span>{g.killed ? `HALTED (${g.killed})` : 'PAPER'}</span></div>
+            <div className="text-sm font-semibold text-slate-200">{inr(g.capital)}</div>
+            <div className={`${(g.pnl || 0) >= 0 ? 'text-emerald-400' : 'text-rose-400'}`}>P&L {inr(g.pnl)}</div>
+            <div className="text-[10px] text-slate-500">cap −{inr(g.max_daily_loss)} · risk {inr(g.risk_per_trade)}/trade</div>
+            <div className="text-[10px] text-amber-400/80">invented: {g.invented_active} active · {inr(g.invented_pnl_today)}</div>
+          </div>
+        ))}
+      </div>
+
       <div className="flex items-center gap-2 flex-wrap">
         <select
           className="bg-slate-900 border border-slate-700 rounded px-2 py-1 text-xs text-slate-200"
@@ -166,23 +185,25 @@ export default function InventedTab() {
               <th className="text-right px-2 py-1">Fills</th>
               <th className="text-right px-2 py-1">P&L</th>
               <th className="text-left px-2 py-1">Symbol</th>
+              <th className="text-left px-2 py-1">Approved</th>
               <th className="text-right px-2 py-1">Actions</th>
             </tr>
           </thead>
           <tbody>
             {strategies.length === 0 && (
-              <tr><td colSpan={9} className="px-3 py-6 text-center text-slate-600">No invented strategies yet — turn Invent ON and propose, or wait for regime-driven invent.</td></tr>
+              <tr><td colSpan={10} className="px-3 py-6 text-center text-slate-600">No invented strategies yet — turn Invent ON and propose, or wait for regime-driven invent.</td></tr>
             )}
             {strategies.slice(0, 40).map((s: any) => (
               <tr key={s.id} className="border-b border-slate-900/80 hover:bg-slate-900/40" data-testid={`invent-row-${s.id}`}>
                 <td className="px-2 py-1 font-mono text-[10px] text-slate-400">{s.id}</td>
                 <td className="px-2 py-1">{s.segment}</td>
-                <td className="px-2 py-1">{s.name} <span className="text-amber-500/80 text-[9px]">{s.label}</span>{s.simulated ? <span className="ml-1 text-[9px] text-yellow-600">SIMULATED</span> : null}</td>
+                <td className="px-2 py-1">{s.name} <span className="text-amber-500/80 text-[9px]">{s.label}</span>{s.simulated ? <span className="ml-1 text-[9px] text-yellow-600">SIMULATED</span> : (s.price_source === 'KITE' ? <span className="ml-1 text-[9px] text-sky-400">KITE LIVE</span> : null)} <span className="text-[9px] text-slate-500">{s.side} {s.qty ? `×${s.qty}` : ''}</span></td>
                 <td className="px-2 py-1 font-mono text-[10px]">{s.regime}</td>
                 <td className="px-2 py-1"><StatusBadge status={s.status} /></td>
                 <td className="px-2 py-1 text-right font-mono">{s.paper_fills}</td>
                 <td className={`px-2 py-1 text-right font-mono ${(s.paper_pnl || 0) >= 0 ? 'text-emerald-400' : 'text-rose-400'}`}>{Number(s.paper_pnl || 0).toFixed(0)}</td>
-                <td className="px-2 py-1 font-mono text-[10px]">{s.symbol || '—'}</td>
+                <td className="px-2 py-1 font-mono text-[10px]">{s.symbol || s.planned_symbol || '—'}</td>
+                <td className="px-2 py-1 font-mono text-[10px] text-slate-400">{s.approved_by ? `${s.approved_by} ${String(s.approved_at || '').slice(11, 19)}` : '—'}</td>
                 <td className="px-2 py-1 text-right space-x-1">
                   {(s.status === 'live_eligible' || s.status === 'paper_active') && s.warm_up_ok && (
                     <button className="text-[10px] text-amber-400 underline" onClick={() => setArmId(s.id)}>Arm LIVE tiny</button>
@@ -226,6 +247,32 @@ export default function InventedTab() {
           </div>
         </div>
       )}
+
+      <div className="border border-slate-800 rounded overflow-hidden">
+        <div className="px-3 py-2 bg-slate-900/80 text-[10px] uppercase tracking-wider text-slate-500">Master approvals (audit · PAPER scope only — LIVE still needs typed SEND)</div>
+        <div className="max-h-56 overflow-auto" data-testid="invent-approvals">
+          <table className="w-full text-[10px] font-mono">
+            <thead className="text-slate-500"><tr className="border-b border-slate-800">
+              <th className="text-left px-2 py-1">Time</th><th className="text-left px-2 py-1">Decision</th>
+              <th className="text-left px-2 py-1">Segment</th><th className="text-left px-2 py-1">Strategy</th>
+              <th className="text-left px-2 py-1">Symbol</th><th className="text-left px-2 py-1">Rationale</th>
+            </tr></thead>
+            <tbody>
+              {approvals.length === 0 && <tr><td colSpan={6} className="px-3 py-3 text-slate-600">No master decisions yet.</td></tr>}
+              {approvals.map((a: any, i: number) => (
+                <tr key={i} className="border-b border-slate-900/80 align-top">
+                  <td className="px-2 py-1 text-slate-500 whitespace-nowrap">{String(a.ts || '').slice(11, 19)}</td>
+                  <td className={`px-2 py-1 ${a.decision === 'APPROVED' ? 'text-emerald-400' : 'text-rose-400'}`}>{a.decision} · {a.approver}</td>
+                  <td className="px-2 py-1">{a.segment}</td>
+                  <td className="px-2 py-1">{a.strategy} {a.side}</td>
+                  <td className="px-2 py-1">{a.symbol} <span className={a.price_source === 'KITE' ? 'text-sky-400' : 'text-yellow-600'}>{a.price_source}</span></td>
+                  <td className="px-2 py-1 text-slate-400">{a.rationale}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      </div>
 
       <div className="border border-slate-800 rounded overflow-hidden">
         <div className="px-3 py-2 bg-slate-900/80 text-[10px] uppercase tracking-wider text-slate-500">Journal</div>

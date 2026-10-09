@@ -161,16 +161,19 @@ export default function AgentsTab() {
             {/* Universe (simulated instruments are labelled as such) */}
             {s.universe?.instruments && (
               <div className="mt-2 flex flex-wrap gap-1.5" data-testid={`segment-universe-${s.code}`}>
-                {s.universe.instruments.map(i => (
+                {s.universe.instruments.map((i: any) => (
                   <span key={i.symbol} className="text-[10px] font-mono bg-slate-900 border border-slate-800 rounded px-1.5 py-0.5"
-                    title={i.synthetic_seed ? 'SIMULATED from a synthetic start level — not a market price'
+                    title={i.source === 'KITE' ? `Live Kite quote ${i.kite_symbol || ''}`
+                      : i.synthetic_seed ? 'SIMULATED from a synthetic start level — not a market price'
                       : (i.ref_close != null ? `SIMULATED · real ${i.ref_source} close ${i.ref_close_date}: ${i.ref_close}` : 'SIMULATED')}>
-                    {i.symbol} <span className="text-amber-300 italic">{i.price != null ? i.price.toLocaleString('en-IN', { maximumFractionDigits: 2 }) : '—'}</span>
-                    <span className="text-amber-500"> SIM</span>
+                    {i.symbol} <span className={i.source === 'KITE' ? 'text-sky-300' : 'text-amber-300 italic'}>{i.price != null ? i.price.toLocaleString('en-IN', { maximumFractionDigits: 2 }) : '—'}</span>
+                    {i.source === 'KITE' ? <span className="text-sky-400"> KITE</span> : <span className="text-amber-500"> SIM</span>}
                   </span>
                 ))}
                 <span className="text-[10px] text-amber-400/80 italic">
-                  SIMULATED prices{s.code === 'BSE_EQ' ? ' (start at the real NSE close)' : ' (synthetic levels, not market prices)'}
+                  {s.feed === 'REAL' ? 'Live Kite prices (paper orders)'
+                    : s.feed === 'MIXED' ? 'Kite prices where available, SIM = simulated fallback'
+                    : `SIMULATED prices${s.code === 'BSE_EQ' ? ' (start at the real NSE close)' : ' (synthetic levels, not market prices)'}`}
                 </span>
               </div>
             )}

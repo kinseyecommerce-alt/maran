@@ -2612,6 +2612,24 @@ def invent_journal(limit: int = 50):
     return {"journal": strategy_inventor.journal(limit)}
 
 
+@app.get("/invent/approvals", tags=["Invent"])
+def invent_approvals(limit: int = 100):
+    """Audit log of master-agent decisions on invented strategies (PAPER scope)."""
+    from strategy_inventor import strategy_inventor
+    return {"approvals": strategy_inventor.approvals(limit)}
+
+
+@app.post("/invent/{strategy_id}/approve", tags=["Invent"])
+def invent_approve(strategy_id: str):
+    """Approve a pending proposal for PAPER trading (only needed when master
+    auto-approve is off). Never arms LIVE."""
+    from strategy_inventor import strategy_inventor
+    r = strategy_inventor.approve(strategy_id, approver="jag")
+    if not r.get("ok"):
+        raise HTTPException(409, r.get("reason", "approve refused"))
+    return r
+
+
 # Typed confirmation phrase required (exactly, case-sensitive) to arm LIVE.
 LIVE_CONFIRM_PHRASE = "SEND"
 

@@ -738,7 +738,7 @@ class Settings(BaseSettings):
     # bucket 5 ways. total_capital = capital_per_agent × len(ALL_AGENTS),
     # used only for whole-book risk limits (portfolio VaR, god_mode sizing).
     capital_per_agent:      float = Field(default=1_000_000.0, gt=0)  # ₹ per agent (₹10L)
-    total_capital:          float = Field(default=8_000_000.0, gt=0)  # whole-book capital (₹) — VaR/god_mode only
+    total_capital:          float = Field(default=5_000_000.0, gt=0)  # whole-book capital (₹) = 5 segments × ₹10L — VaR/god_mode only
     # Legacy per-type percentages — retained for the /settings/capital-allocation
     # report endpoint's backward-compat fields; max_capital_for_agent() no
     # longer reads these (each agent has its own flat pool above).
@@ -759,12 +759,17 @@ class Settings(BaseSettings):
     # One supervising agent per segment, each with its own capital, risk limits,
     # kill switch, P&L, universe and trading-hours window. Capital is the
     # segment's paper/live book in ₹; daily loss is a hard per-segment stop.
-    segment_capital_nse_eq:   float = Field(default=6_000_000.0, gt=0)   # 6 equity strategies
-    segment_capital_nse_fo:   float = Field(default=2_000_000.0, gt=0)   # options + futures
+    # Paper allocation (jag, 2026-10-09): ₹10,00,000 for EACH segment agent,
+    # ₹50L total. Risk scales with it: per-trade risk 1% of segment capital,
+    # daily loss cap 2.5% — hitting it flattens and halts the segment for the
+    # rest of the IST day (auto-released on the next day).
+    segment_capital_nse_eq:   float = Field(default=1_000_000.0, gt=0)
+    segment_capital_nse_fo:   float = Field(default=1_000_000.0, gt=0)
     segment_capital_bse_eq:   float = Field(default=1_000_000.0, gt=0)
     segment_capital_mcx:      float = Field(default=1_000_000.0, gt=0)
-    segment_capital_cds:      float = Field(default=500_000.0, gt=0)
-    segment_daily_loss_pct:   float = Field(default=2.0, gt=0, le=100)  # of segment capital
+    segment_capital_cds:      float = Field(default=1_000_000.0, gt=0)
+    segment_daily_loss_pct:   float = Field(default=2.5, gt=0, le=100)  # of segment capital
+    segment_risk_per_trade_pct: float = Field(default=1.0, gt=0, le=10)  # max loss at stop, % of segment capital
     segment_max_positions_nse_eq: int = Field(default=10, ge=1)
     segment_max_positions_nse_fo: int = Field(default=4, ge=1)
     segment_max_positions_bse_eq: int = Field(default=3, ge=1)
@@ -777,13 +782,22 @@ class Settings(BaseSettings):
     segment_paper_after_hours: bool = False
     # ── Strategy inventor (trend-driven short-lived strategies) ──────────────
     invent_enabled_default: bool = False   # dashboard toggle; off until jag enables
-    invent_max_concurrent_global: int = 6
+    invent_max_concurrent_global: int = 10   # 2 per segment × 5 segments
     invent_max_per_segment: int = 2
     invent_cooldown_sec: int = 900         # min seconds between invents per segment
     invent_ttl_sec: int = 7200             # strategy lifetime
     invent_paper_warmup_fills: int = 3     # paper fills before live_eligible
     invent_paper_warmup_min: int = 30      # OR minutes active with ≥1 fill, no breach
     invent_live_tiny_qty_equity: int = 1   # LIVE tiny size (shares / 1 lot)
+    # Master agent approves invented strategies itself — PAPER ONLY. LIVE still
+    # needs the global typed-SEND switch + segment SEND + per-strategy SEND arm.
+    invent_master_auto_approve: bool = True
+    invent_risk_per_trade_pct: float = 0.5  # paper risk per invented trade, % of segment capital
+    # PAPER + live data: BSE/MCX/CDS paper engines price off Kite quotes
+    # (front-month futures for MCX/CDS) and fall back to the simulator per
+    # instrument when no quote is available. Prices are labelled KITE/SIMULATED.
+    native_kite_quotes: bool = True
+    native_kite_quote_interval_sec: float = 3.0
     # MCX evening session end (IST). ~23:30 in Indian winter / ~23:55 when US
     # DST is in force; configurable rather than guessed per date.
     mcx_close_time: str = "23:30"

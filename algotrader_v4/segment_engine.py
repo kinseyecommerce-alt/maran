@@ -1,8 +1,19 @@
 """
-segment_engine.py — PAPER engine for segments with no real feed in this build
-(BSE_EQ, MCX, CDS).
+segment_engine.py — PAPER engine for the BSE_EQ, MCX and CDS segments.
 
-  • SIMULATED feed: per-instrument GBM ticks every second, scaled so a full
+  • KITE quotes (PAPER + paper_use_live_data + a Kite session): a background
+    poller reads LTPs for BSE cash stocks ("BSE:RELIANCE") and the front-month
+    MCX / CDS futures (resolved from Kite's instrument master) every few
+    seconds. An instrument with a fresh Kite quote trades on it and is
+    labelled KITE; one without falls back to the simulator below and is
+    labelled SIMULATED. Orders still only ever fill in the paper ledger.
+    When an instrument switches SIMULATED → KITE its open simulated position is
+    closed at the last simulated price and its bars are reset (no fake P&L
+    jump from the simulated level to the real one).
+  • Sizing: lots = min(per-trade risk budget ÷ (stop distance × multiplier),
+    margin slot ÷ margin per lot) — risk per trade ≤ segments._limits()
+    ["risk_per_trade"] (1% of the segment's capital).
+  • SIMULATED feed (fallback): per-instrument GBM ticks every second, scaled so a full
     session's typical high-low range matches the instrument's real intraday
     range (gold ≈1%, crude ≈2.5%, currency pairs ≈0.3–0.5%). Every price it
     produces is labelled SIMULATED. BSE stocks start from the real NSE EOD
@@ -22,6 +33,7 @@ segment_engine.py — PAPER engine for segments with no real feed in this build
 from __future__ import annotations
 
 import asyncio
+import datetime as _dt
 import math
 import random
 import threading
@@ -72,15 +84,60 @@ UNIVERSE: dict[str, list[Contract]] = {
 }
 
 STRATEGY_META = {
-    "bse_momentum":       ("BSE_EQ", "trend",  "BSE MOMENTUM",   "EMA cross on simulated BSE ticks"),
-    "bse_mean_reversion": ("BSE_EQ", "meanrev", "BSE MEAN REV",  "z-score fade on simulated BSE ticks"),
-    "mcx_trend":          ("MCX", "trend",   "MCX TREND",        "EMA cross on simulated MCX futures"),
-    "mcx_mean_reversion": ("MCX", "meanrev", "MCX MEAN REV",     "z-score fade on simulated MCX futures"),
-    "cds_trend":          ("CDS", "trend",   "CDS TREND",        "EMA cross on simulated currency futures"),
-    "cds_mean_reversion": ("CDS", "meanrev", "CDS MEAN REV",     "z-score fade on simulated currency futures"),
+    "bse_momentum":       ("BSE_EQ", "trend",  "BSE MOMENTUM",   "EMA cross on BSE ticks (Kite, else simulated)"),
+    "bse_mean_reversion": ("BSE_EQ", "meanrev", "BSE MEAN REV",  "z-score fade on BSE ticks (Kite, else simulated)"),
+    "mcx_trend":          ("MCX", "trend",   "MCX TREND",        "EMA cross on MCX futures (Kite, else simulated)"),
+    "mcx_mean_reversion": ("MCX", "meanrev", "MCX MEAN REV",     "z-score fade on MCX futures (Kite, else simulated)"),
+    "cds_trend":          ("CDS", "trend",   "CDS TREND",        "EMA cross on currency futures (Kite, else simulated)"),
+    "cds_mean_reversion": ("CDS", "meanrev", "CDS MEAN REV",     "z-score fade on currency futures (Kite, else simulated)"),
 }
 
 BAR_SEC = 10
+KITE_FRESH_SEC = 20.0     # quote younger than this drives the price
+KITE_STALE_SEC = 90.0     # older than this → instrument falls back to SIMULATED
+MAX_FUT_LOTS = 5
+
+
+def _kite_exchange(segment: str) -> str:
+    return {"BSE_EQ": "BSE", "MCX": "MCX", "CDS": "CDS"}[segment]
+
+
+def _underlying(symbol: str) -> str:
+    return symbol[:-4] if symbol.endswith("-FUT") else symbol
+
+
+def resolve_front_future(instruments: list[dict], name: str, today: Optional[_dt.date] = None,
+                         roll_days: int = 2) -> Optional[dict]:
+    """Nearest-expiry FUT row for `name`; rolls to the next contract when the
+    nearest expires within `roll_days` (no last-day expiry trading)."""
+    today = today or _dt.date.today()
+    rows = []
+    for r in instruments:
+        if r.get("instrument_type") != "FUT" or r.get("name") != name:
+            continue
+        exp = r.get("expiry")
+        if isinstance(exp, str):
+            try:
+                exp = _dt.date.fromisoformat(exp[:10])
+            except ValueError:
+                continue
+        if isinstance(exp, _dt.datetime):
+            exp = exp.date()
+        if not isinstance(exp, _dt.date) or exp < today:
+            continue
+        rows.append((exp, r))
+    if not rows:
+        return None
+    # Prefer monthly contracts (GOLDM26NOVFUT / USDINR26OCTFUT) over CDS
+    # weekly futures (USDINR26O16FUT), which are thin.
+    import re as _re
+    monthly = [x for x in rows if _re.search(r"\d{2}[A-Z]{3}FUT$", str(x[1].get("tradingsymbol", "")))]
+    rows = monthly or rows
+    rows.sort(key=lambda x: x[0])
+    for exp, r in rows:
+        if (exp - today).days >= roll_days:
+            return r
+    return rows[-1][1]
 
 
 def session_seconds(segment: str) -> float:
@@ -133,7 +190,7 @@ class NativeStrategy:
         return {"name": self.name, "running": self.state.running, "segment": self.segment,
                 "trades_today": self.state.trades_today, "pnl_today": round(self.state.pnl_today, 2),
                 "last_signal": self.state.last_signal, "errors": self.state.errors[-5:],
-                "native": True, "feed": "SIMULATED"}
+                "native": True, "feed": _feed_of(self.segment)}
 
     # signal on closed bars
     def signal(self, bars: list[float]) -> Optional[str]:
@@ -160,6 +217,13 @@ class NativeStrategy:
         if z >= 2.0:
             return "SELL"
         return None
+
+
+def _feed_of(segment: str) -> str:
+    try:
+        return native_engine.feed_label(segment)
+    except Exception:
+        return "SIMULATED"
 
 
 def _ema(xs: list[float], n: int) -> float:
@@ -197,6 +261,14 @@ class NativeEngine:
         self._rng = random.Random()
         self._seeded = False
         self.last_tick_ts: Optional[float] = None
+        # Kite quote overlay (PAPER + live data)
+        self.src: dict[str, str] = {}                      # key → KITE | SIMULATED
+        self.kite_px: dict[str, tuple] = {}                # key → (price, epoch)
+        self.kite_sym: dict[str, str] = {}                 # key → "EXCH:TRADINGSYMBOL"
+        self.kite_status: dict = {"active": False, "resolved": 0, "error": None,
+                                  "last_poll": None, "unresolved": []}
+        self._quote_thread: Optional[threading.Thread] = None
+        self._resolved_at = 0.0
 
     # ── feed (SIMULATED) ───────────────────────────────────────────────────
     def seed(self, ref_fn=None) -> None:
@@ -234,11 +306,22 @@ class NativeEngine:
         now = now if now is not None else time.time()
         with self._lock:                          # readers get a consistent price snapshot
             for key, c in self.contracts.items():
-                sig = tick_sigma(c, dt)
-                p = self.price[key] * math.exp(-0.5 * sig * sig + sig * self._rng.gauss(0, 1))
+                live = self.kite_px.get(key)
+                age = (time.time() - live[1]) if live else None
+                if live and live[0] > 0 and age is not None and age <= KITE_STALE_SEC:
+                    if self.src.get(key) != "KITE":
+                        self._switch_to_kite(key)
+                    # fresh → real price; aging → hold the last real price
+                    p = float(live[0]) if age <= KITE_FRESH_SEC else self.price[key]
+                else:
+                    if self.src.get(key) == "KITE":
+                        logger.warning("[segment_engine] {} Kite quote stale — SIMULATED fallback", key)
+                    self.src[key] = "SIMULATED"
+                    sig = tick_sigma(c, dt)
+                    p = self.price[key] * math.exp(-0.5 * sig * sig + sig * self._rng.gauss(0, 1))
                 self.price[key] = p
                 ob = self._bar_open_ts.get(key)
-                if ob is None or now - ob >= BAR_SEC:
+                if ob is None or now - ob >= BAR_SEC or not self.bars[key]:
                     self.bars[key].append(p)
                     self._bar_open_ts[key] = now
                 else:
@@ -258,7 +341,7 @@ class NativeEngine:
         oid = f"PAPER-{segment}-{uuid.uuid4().hex[:8].upper()}"
         rec = {"order_id": oid, "segment": segment, "symbol": symbol, "side": side, "lots": lots,
                "price": round(px, 4), "ts": _now_iso(),
-               "reason": reason, "strategy": strategy, "price_source": "SIMULATED",
+               "reason": reason, "strategy": strategy, "price_source": self.src.get(key, "SIMULATED"),
                "status": "COMPLETE"}
         with self._lock:
             self.orders.appendleft(rec)
@@ -268,37 +351,229 @@ class NativeEngine:
         from segments import segment_manager, _limits
         key = f"{c.symbol}@{c.segment}"
         px = self.price[key]
-        lim = _limits(c.segment)
-        per_trade = lim["capital"] / max(lim["max_positions"], 1)
-        margin_lot = px * c.multiplier * c.margin_pct
-        lots = int(per_trade // margin_lot) if margin_lot > 0 else 0
-        if c.kind == "FUT":
-            lots = min(lots, 5)
+        dist = self.stop_distance(key)
+        lots, margin_lot, why = self.size_lots(key, dist)
         if lots < 1:
-            strat.state.last_signal = {"symbol": c.symbol, "action": side, "skipped": "capital < 1 lot"}
+            strat.state.last_signal = {"symbol": c.symbol, "action": side, "skipped": why}
             return None
         ok, why = segment_manager.entry_check(c.segment, notional=lots * margin_lot,
                                               transaction_type=side)
         if not ok:
             strat.state.last_signal = {"symbol": c.symbol, "action": side, "skipped": why}
             return None
-        dist = self.stop_distance(key)
         rec = self.route_order(c.segment, c.symbol, side, lots, f"{strat.name} entry", strat.name)
         sgn = 1 if side == "BUY" else -1
         pos = {"key": key, "symbol": c.symbol, "segment": c.segment, "strategy": strat.name,
                "side": side, "lots": lots, "qty": sgn * lots, "entry": rec["price"],
                "sl": rec["price"] - sgn * dist, "target": rec["price"] + sgn * TARGET_R * dist,
                "opened": time.time(), "margin": round(lots * margin_lot, 2),
-               "order_id": rec["order_id"], "price_source": "SIMULATED"}
+               "order_id": rec["order_id"], "price_source": rec["price_source"],
+               "risk": round(lots * dist * c.multiplier, 2)}
         with self._lock:
             self.positions_[key] = pos
             # trades = entries today (same convention as the NSE agents)
             self.trades[c.segment] = self.trades.get(c.segment, 0) + 1
         strat.state.trades_today += 1
         strat.state.last_signal = {"symbol": c.symbol, "action": side, "price": rec["price"]}
-        logger.info("[segment:{}] PAPER {} {} lots={} @ {} (SIMULATED) by {}",
-                    c.segment, side, c.symbol, lots, rec["price"], strat.name)
+        logger.info("[segment:{}] PAPER {} {} lots={} @ {} ({}) risk=₹{:,.0f} by {}",
+                    c.segment, side, c.symbol, lots, rec["price"], rec["price_source"],
+                    pos["risk"], strat.name)
         return pos
+
+    def size_lots(self, key: str, dist: float) -> tuple[int, float, str]:
+        """(lots, margin per lot, reason). Risk-based: a stop-out loses at most
+        the segment's per-trade risk budget (1% of capital); also capped by
+        the margin slot (capital ÷ max positions) and MAX_FUT_LOTS.
+        The old sizing (margin slot only) put e.g. 4 NATURALGAS lots
+        (₹15.4k at the stop, 1.5% of capital) on one trade."""
+        from segments import _limits
+        c = self.contracts[key]
+        px = self.price[key]
+        lim = _limits(c.segment)
+        margin_lot = px * c.multiplier * c.margin_pct
+        risk_lot = dist * c.multiplier
+        if margin_lot <= 0 or risk_lot <= 0:
+            return 0, margin_lot, "no price"
+        slot = lim["capital"] / max(lim["max_positions"], 1)
+        lots_risk = int(lim["risk_per_trade"] // risk_lot)
+        lots_margin = int(slot // margin_lot)
+        lots = min(lots_risk, lots_margin)
+        if c.kind == "FUT":
+            lots = min(lots, MAX_FUT_LOTS)
+        if lots < 1:
+            if lots_margin < 1:
+                return 0, margin_lot, f"margin ₹{margin_lot:,.0f}/lot > slot ₹{slot:,.0f}"
+            return 0, margin_lot, (f"1 lot risks ₹{risk_lot:,.0f} at the stop > "
+                                   f"per-trade risk ₹{lim['risk_per_trade']:,.0f}")
+        return lots, margin_lot, "ok"
+
+    def open_external(self, segment: str, symbol: str, side: str, *, strategy: str,
+                      stop_dist: float, target_dist: float, lots: Optional[int] = None,
+                      time_stop_sec: int = TIME_STOP_SEC, reason: str = "") -> dict:
+        """Open a PAPER position owned by an outside strategy (the master-approved
+        invented strategies). Same gates as native entries (segment
+        entry_check: kill switch, hours, daily loss, positions, capital); the
+        engine then manages its SL / target / time stop / square-off."""
+        from segments import segment_manager
+        key = f"{symbol}@{segment}"
+        if key not in self.contracts:
+            return {"ok": False, "reason": f"no contract {key}"}
+        if key in self.positions_:
+            return {"ok": False, "reason": f"{symbol} already has an open position"}
+        c = self.contracts[key]
+        if lots is None:
+            lots, margin_lot, why = self.size_lots(key, stop_dist)
+        else:
+            margin_lot, why = self.price[key] * c.multiplier * c.margin_pct, "fixed"
+        if lots < 1:
+            return {"ok": False, "reason": why}
+        ok, why = segment_manager.entry_check(segment, notional=lots * margin_lot, transaction_type=side)
+        if not ok:
+            return {"ok": False, "reason": why}
+        rec = self.route_order(segment, symbol, side, lots, reason or f"{strategy} entry", strategy)
+        sgn = 1 if side == "BUY" else -1
+        pos = {"key": key, "symbol": symbol, "segment": segment, "strategy": strategy,
+               "side": side, "lots": lots, "qty": sgn * lots, "entry": rec["price"],
+               "sl": rec["price"] - sgn * stop_dist, "target": rec["price"] + sgn * target_dist,
+               "opened": time.time(), "margin": round(lots * margin_lot, 2),
+               "order_id": rec["order_id"], "price_source": rec["price_source"],
+               "risk": round(lots * stop_dist * c.multiplier, 2), "time_stop": int(time_stop_sec)}
+        with self._lock:
+            self.positions_[key] = pos
+            self.trades[segment] = self.trades.get(segment, 0) + 1
+        logger.info("[segment:{}] PAPER {} {} lots={} @ {} ({}) by {}", segment, side, symbol,
+                    lots, rec["price"], rec["price_source"], strategy)
+        return {"ok": True, "order_id": rec["order_id"], "price": rec["price"], "lots": lots,
+                "price_source": rec["price_source"], "risk": pos["risk"]}
+
+    def closed_by_order(self, entry_order_id: str) -> Optional[dict]:
+        with self._lock:
+            for t in self.closed:
+                if t.get("order_id") == entry_order_id:
+                    return dict(t)
+        return None
+
+    def open_by_order(self, entry_order_id: str) -> Optional[dict]:
+        with self._lock:
+            for p in self.positions_.values():
+                if p.get("order_id") == entry_order_id:
+                    return dict(p)
+        return None
+
+    def trend(self, key: str) -> Optional[dict]:
+        """Instrument trend from its 10-s bars: EMA(5) vs EMA(20) and the move
+        over the last ~5 minutes. None until 22 bars exist."""
+        bars = list(self.bars.get(key, ()))
+        if len(bars) < 22:
+            return None
+        f, sl = _ema(bars, 5), _ema(bars, 20)
+        ref = bars[-31] if len(bars) >= 31 else bars[0]
+        mv = (bars[-1] / ref - 1.0) * 100.0 if ref > 0 else 0.0
+        c = self.contracts[key]
+        rng = c.day_range_pct or 1.0
+        return {"ema_fast": f, "ema_slow": sl, "move_pct": mv,
+                "side": "BUY" if f > sl else "SELL",
+                "strength": abs(mv) / rng, "price_source": self.src.get(key, "SIMULATED")}
+
+    # ── Kite quote overlay ────────────────────────────────────────────────
+    def _kite_wanted(self) -> bool:
+        if settings.trading_mode != "PAPER":
+            return False          # LIVE never prices paper ledgers here (segments can't be armed)
+        if not (getattr(settings, "paper_use_live_data", False)
+                and getattr(settings, "native_kite_quotes", True)):
+            return False
+        try:
+            from kite_client import kite_client
+            return kite_client._kite is not None
+        except Exception:
+            return False
+
+    def _switch_to_kite(self, key: str) -> None:
+        """First real quote for `key`: close any position opened on simulated
+        prices at the last simulated price, reset bars, then label KITE."""
+        pos = self.positions_.get(key)
+        if pos and pos.get("price_source") != "KITE":
+            self._close(key, "feed_switch_to_kite")
+        self.bars[key] = deque(maxlen=240)
+        self._bar_open_ts.pop(key, None)
+        self.src[key] = "KITE"
+        logger.info("[segment_engine] {} now priced from Kite ({})", key, self.kite_sym.get(key))
+
+    def resolve_kite_symbols(self) -> dict:
+        from kite_client import kite_client
+        out, missing = {}, []
+        inst_cache: dict[str, list] = {}
+        for key, c in self.contracts.items():
+            exch = _kite_exchange(c.segment)
+            if c.kind == "EQ":
+                out[key] = f"{exch}:{c.symbol}"
+                continue
+            if exch not in inst_cache:
+                try:
+                    inst_cache[exch] = kite_client.get_instruments(exch) or []
+                except Exception as exc:
+                    logger.warning("[segment_engine] {} instrument master failed: {}", exch, exc)
+                    inst_cache[exch] = []
+            row = resolve_front_future(inst_cache[exch], _underlying(c.symbol))
+            if row:
+                out[key] = f"{exch}:{row['tradingsymbol']}"
+            else:
+                missing.append(key)
+        self.kite_sym = out
+        self.kite_status["resolved"] = len(out)
+        self.kite_status["unresolved"] = missing
+        self._resolved_at = time.time()
+        logger.info("[segment_engine] Kite symbols resolved: {} (missing: {})", out, missing)
+        return out
+
+    def poll_kite_quotes(self) -> int:
+        """One poll: Kite LTP for every resolved instrument. Returns #quotes."""
+        from kite_client import kite_client
+        if not self.kite_sym or time.time() - self._resolved_at > 6 * 3600:
+            self.resolve_kite_symbols()
+        if not self.kite_sym:
+            return 0
+        rev = {v: k for k, v in self.kite_sym.items()}
+        data = kite_client.kite.ltp(list(rev))
+        now = time.time()
+        n = 0
+        for ins, row in (data or {}).items():
+            k = rev.get(ins)
+            px = float((row or {}).get("last_price") or 0)
+            if k and px > 0:
+                self.kite_px[k] = (px, now)
+                n += 1
+        self.kite_status.update(last_poll=_now_iso(), quotes=n, error=None)
+        return n
+
+    def _quote_loop(self) -> None:
+        interval = float(getattr(settings, "native_kite_quote_interval_sec", 3.0) or 3.0)
+        while True:
+            try:
+                if self._kite_wanted():
+                    self.kite_status["active"] = True
+                    self.poll_kite_quotes()
+                else:
+                    self.kite_status["active"] = False
+            except Exception as exc:
+                self.kite_status["error"] = str(exc)[:200]
+                logger.debug("[segment_engine] Kite quote poll failed: {}", exc)
+            time.sleep(max(interval, 1.0))
+
+    def ensure_quote_poller(self) -> None:
+        if self._quote_thread is None or not self._quote_thread.is_alive():
+            self._quote_thread = threading.Thread(target=self._quote_loop, daemon=True,
+                                                  name="native-kite-quotes")
+            self._quote_thread.start()
+
+    def feed_label(self, segment: str) -> str:
+        """REAL when every instrument of the segment trades on Kite quotes,
+        MIXED when some do, SIMULATED otherwise."""
+        keys = [f"{c.symbol}@{segment}" for c in UNIVERSE.get(segment, [])]
+        n = sum(1 for k in keys if self.src.get(k) == "KITE")
+        if keys and n == len(keys):
+            return "REAL"
+        return "MIXED" if n else "SIMULATED"
 
     def stop_distance(self, key: str) -> float:
         """Stop distance in price units: the larger of 30% of the instrument's
@@ -366,7 +641,7 @@ class NativeEngine:
                 self._close(key, "stop_loss")
             elif (long and px >= pos["target"]) or (not long and px <= pos["target"]):
                 self._close(key, "target")
-            elif time.time() - pos["opened"] > TIME_STOP_SEC:
+            elif time.time() - pos["opened"] > pos.get("time_stop", TIME_STOP_SEC):
                 self._close(key, "time_stop")
             elif now_dt >= sq_cut and segment_manager.is_open(pos["segment"], now_dt):
                 self._close(key, "segment_squareoff")
@@ -393,7 +668,8 @@ class NativeEngine:
                     self._open(st, c, side)
 
     async def run(self) -> None:
-        logger.info("[segment_engine] SIMULATED feed + paper strategies running (BSE/MCX/CDS)")
+        logger.info("[segment_engine] paper strategies running (BSE/MCX/CDS) — Kite quotes when "
+                    "available, SIMULATED fallback per instrument")
         while True:
             try:
                 self.step(1.0)
@@ -410,6 +686,8 @@ class NativeEngine:
                 except Exception as exc:
                     logger.warning("[segment_engine] seed failed: {}", exc)
             self._task = asyncio.get_event_loop().create_task(self.run())
+        if self._kite_wanted():
+            self.ensure_quote_poller()
 
     def start_strategies(self) -> list[str]:
         import bot_state
@@ -435,6 +713,7 @@ class NativeEngine:
         with self._lock:
             return {"positions": {k: dict(v) for k, v in self.positions_.items()},
                     "price": dict(self.price),
+                    "src": dict(self.src),
                     "orders": [dict(o) for o in self.orders],        # newest first
                     "closed": [dict(t) for t in self.closed]}
 
@@ -455,7 +734,8 @@ class NativeEngine:
             px = self.price.get(key, p["entry"])
             out.append({"symbol": p["symbol"], "qty": p["qty"], "lots": p["lots"], "avg": p["entry"],
                         "ltp": round(px, 4), "pnl": round((px - p["entry"]) * p["qty"] * c.multiplier, 2),
-                        "strategy": p["strategy"], "price_source": "SIMULATED"})
+                        "strategy": p["strategy"], "price_source": self.src.get(key, "SIMULATED"),
+                        "entry_price_source": p.get("price_source", "SIMULATED")})
         return out
 
     def pnl(self, segment: str) -> dict:
@@ -473,11 +753,14 @@ class NativeEngine:
             for c in UNIVERSE[segment]:
                 key = f"{c.symbol}@{c.segment}"
                 ref = self.ref_close.get(key)
+                src = self.src.get(key, "SIMULATED")
                 rows.append({"symbol": c.symbol, "price": round(self.price[key], 4) if key in self.price else None,
-                             "source": "SIMULATED", "synthetic_seed": c.segment != "BSE_EQ",
+                             "source": src, "kite_symbol": self.kite_sym.get(key),
+                             "synthetic_seed": c.segment != "BSE_EQ" and src != "KITE",
                              "ref_close": ref[0] if ref else None, "ref_close_date": ref[1] if ref else None,
                              "ref_source": "NSE EOD" if ref else None, "lot_multiplier": c.multiplier})
-            return {"count": len(rows), "feed": "SIMULATED", "instruments": rows}
+            return {"count": len(rows), "feed": self.feed_label(segment), "instruments": rows,
+                    "kite": dict(self.kite_status)}
         try:
             from master_agent_v5 import master_agent
             from segments import SEGMENTS
@@ -507,6 +790,7 @@ class NativeEngine:
         with self._lock:
             return {"positions": {k: dict(v) for k, v in self.positions_.items()},
                     "price": dict(self.price),
+                    "src": dict(self.src),
                     "bars": {k: list(v) for k, v in self.bars.items()},
                     "orders": [dict(o) for o in self.orders],
                     "closed": [dict(t) for t in self.closed],
@@ -525,6 +809,11 @@ class NativeEngine:
             for k, v in (data.get("price") or {}).items():
                 if k in self.contracts:
                     self.price[k] = float(v)
+            for k, v in (data.get("src") or {}).items():
+                if k in self.contracts and v in ("KITE", "SIMULATED"):
+                    # KITE positions survive a restart; the overlay re-confirms
+                    # (or falls back) on the first poll.
+                    self.src[k] = v
             for k, v in (data.get("bars") or {}).items():
                 if k in self.contracts:
                     self.bars[k] = deque((float(x) for x in v), maxlen=240)
@@ -557,7 +846,7 @@ class NativeEngine:
         return {"segment": segment, "positions": self.positions(segment), "pnl": self.pnl(segment),
                 "orders": [o for o in list(self.orders) if o["segment"] == segment][:30],
                 "closed": [t for t in list(self.closed) if t["segment"] == segment][:30],
-                "universe": self.universe(segment), "feed": "SIMULATED"}
+                "universe": self.universe(segment), "feed": self.feed_label(segment)}
 
 
 native_engine = NativeEngine()

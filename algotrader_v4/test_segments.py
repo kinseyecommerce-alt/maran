@@ -423,7 +423,10 @@ def _force_cross(key, up=True):
 
 
 def t_native_trade_cycle():
-    with clock(at(*TUE, 20, 0)), world(running={"mcx_trend", "cds_trend"}), no_kite():
+    # _force_cross makes a 1.2% one-bar jump → a very wide volatility stop;
+    # widen the per-trade risk budget so this signal-cycle test still sizes ≥1 lot
+    with clock(at(*TUE, 20, 0)), world(running={"mcx_trend", "cds_trend"}), no_kite(), \
+         mock.patch.object(settings, "segment_risk_per_trade_pct", 10.0):
         native_engine.seed(ref_fn=lambda s: (1000.0, "2026-10-05"))
         native_engine.positions_.clear()
         for st in native_engine.strategies.values():
@@ -564,6 +567,120 @@ run("supervisor stops strategies when their segment closes and restarts them at 
 run("regime plan records pause reason; never starts agents of a closed segment", t_regime_plan_reason_and_hours)
 run("pause/resume endpoints (native + NSE) return the shared state; /segments endpoints", t_endpoints_pause_resume)
 run("SPA: Agents tab + dashboard panel render engine.strategies/segments only", t_spa_static)
+
+
+# ════════════════════════════════════════════════════════════════════════════
+section("G. ₹10L per segment, risk-based sizing, daily halt, Kite quote overlay")
+
+
+def t_capital_10l_each():
+    lim = {c: _limits(c) for c in SEGMENT_ORDER}
+    assert all(v["capital"] == 1_000_000.0 for v in lim.values()), lim
+    assert sum(v["capital"] for v in lim.values()) == 5_000_000.0
+    assert all(v["max_daily_loss"] == 25_000.0 for v in lim.values())      # 2.5%
+    assert all(v["risk_per_trade"] == 10_000.0 for v in lim.values())      # 1%
+    with clock(at(*TUE, 11, 0)), world():
+        seg = {s["code"]: s for s in _main.engine_status()["segments"]}
+        assert all(seg[c]["capital"] == 1_000_000.0 for c in SEGMENT_ORDER)
+
+
+def t_mcx_risk_sizing():
+    """Old sizing (margin slot only) put 4 NATURALGAS lots on one trade — ₹15.4k
+    at the stop (1.5% of capital). Risk sizing keeps every stop-out ≤ 1%."""
+    native_engine.seed()
+    with clock(at(*TUE, 20, 0)):
+        for c in UNIVERSE["MCX"] + UNIVERSE["CDS"] + UNIVERSE["BSE_EQ"]:
+            key = f"{c.symbol}@{c.segment}"
+            native_engine.bars[key].clear()
+            dist = native_engine.stop_distance(key)
+            lots, margin_lot, why = native_engine.size_lots(key, dist)
+            lim = _limits(c.segment)
+            if lots:
+                assert lots * dist * c.multiplier <= lim["risk_per_trade"] + 1e-6, (key, lots)
+                assert lots * margin_lot <= lim["capital"] / lim["max_positions"] + 1e-6
+            else:
+                assert "risk" in why or "margin" in why
+        key = "NATURALGAS-FUT@MCX"
+        native_engine.price[key] = 290.0
+        lots, _, _ = native_engine.size_lots(key, native_engine.stop_distance(key))
+        assert lots == 2, lots              # was 4
+
+
+def t_daily_halt_flattens_and_expires():
+    with clock(at(*TUE, 20, 0)), world(running={"mcx_trend"}), no_kite():
+        native_engine.positions_.clear()
+        key = "GOLDM-FUT@MCX"
+        native_engine.price[key] = 120000.0
+        r = native_engine.open_external("MCX", "GOLDM-FUT", "BUY", strategy="mcx_trend",
+                                        stop_dist=100000.0, target_dist=1.0, lots=1)
+        assert r["ok"], r
+        base = segment_manager.pnl("MCX")["total"]           # earlier tests' realised P&L today
+        native_engine.price[key] = 120000.0 - (base + 26_000.0) / 10.0   # total ≈ −₹26,000 (> 2.5% cap)
+        halted = segment_manager.check_loss_limits()
+        assert "MCX" in halted and segment_manager.killed("MCX") == "daily_loss_limit"
+        assert not native_engine.positions("MCX"), "daily-loss halt must flatten"
+        ok, why = segment_manager.entry_check("MCX", count=False)
+        assert not ok
+    with clock(at(2026, 10, 7, 10, 0)):                      # next IST day
+        assert segment_manager.killed("MCX") is None, "daily halt must expire next day"
+    with clock(at(*TUE, 20, 0)):
+        segment_manager.kill("MCX", reason="manual", flatten=False)
+    with clock(at(2026, 10, 7, 10, 0)):
+        assert segment_manager.killed("MCX") == "manual", "manual kill stays until re-armed"
+        segment_manager.rearm("MCX")
+
+
+def t_kite_overlay_labels_and_switch():
+    import datetime as _d
+    from segment_engine import resolve_front_future
+    rows = [{"instrument_type": "FUT", "name": "GOLDM", "tradingsymbol": "GOLDM26OCTFUT", "expiry": _d.date(2026, 10, 7)},
+            {"instrument_type": "FUT", "name": "GOLDM", "tradingsymbol": "GOLDM26NOVFUT", "expiry": _d.date(2026, 11, 5)},
+            {"instrument_type": "CE", "name": "GOLDM", "tradingsymbol": "X", "expiry": _d.date(2026, 10, 20)}]
+    assert resolve_front_future(rows, "GOLDM", _d.date(2026, 10, 6))["tradingsymbol"] == "GOLDM26NOVFUT"   # roll
+    assert resolve_front_future(rows, "GOLDM", _d.date(2026, 10, 1))["tradingsymbol"] == "GOLDM26OCTFUT"
+    cds = [{"instrument_type": "FUT", "name": "USDINR", "tradingsymbol": "USDINR26O16FUT", "expiry": _d.date(2026, 10, 16)},
+           {"instrument_type": "FUT", "name": "USDINR", "tradingsymbol": "USDINR26OCTFUT", "expiry": _d.date(2026, 10, 28)}]
+    assert resolve_front_future(cds, "USDINR", _d.date(2026, 10, 9))["tradingsymbol"] == "USDINR26OCTFUT"   # monthly, not weekly
+    with clock(at(2026, 10, 7, 20, 0)), world(running=set()), no_kite():   # fresh day: no halt
+        native_engine.positions_.clear()
+        key = "COPPER-FUT@MCX"
+        native_engine.src.pop(key, None)
+        native_engine.kite_px.pop(key, None)
+        native_engine.price[key] = 900.0
+        r = native_engine.open_external("MCX", "COPPER-FUT", "BUY", strategy="mcx_trend",
+                                        stop_dist=50.0, target_dist=50.0, lots=1)
+        assert r["ok"] and r["price_source"] == "SIMULATED"
+        import time as _t
+        native_engine.kite_px[key] = (1012.5, _t.time())
+        native_engine.step(1.0)
+        assert native_engine.src[key] == "KITE" and native_engine.price[key] == 1012.5
+        t = native_engine.closed[0]
+        assert t["reason"] == "feed_switch_to_kite" and abs(t["exit"] - 900.0) < 5, t   # closed at SIM price
+        assert native_engine.feed_label("MCX") == "MIXED"
+        r = native_engine.open_external("MCX", "COPPER-FUT", "SELL", strategy="mcx_trend",
+                                        stop_dist=50.0, target_dist=50.0, lots=1)
+        assert r["price_source"] == "KITE" and native_engine.orders[0]["price_source"] == "KITE"
+        import book
+        rows = [p for p in book.positions() if p.get("tradingsymbol") == "COPPER-FUT"]
+        assert rows and rows[0]["price_source"] == "KITE" and rows[0]["simulated"] is False
+        native_engine.kite_px[key] = (1012.5, _t.time() - 500)                         # stale
+        native_engine.step(1.0)
+        assert native_engine.src[key] == "SIMULATED"
+        native_engine.flatten("MCX")
+        native_engine.kite_px.pop(key, None)
+    saved = settings.trading_mode
+    try:
+        settings.trading_mode = "LIVE"
+        assert native_engine._kite_wanted() is False          # never in LIVE
+    finally:
+        settings.trading_mode = saved
+
+
+run("₹10,00,000 paper capital for each of the 5 segments; 2.5% daily cap, 1% per-trade risk", t_capital_10l_each)
+run("MCX/CDS/BSE sizing is risk-based (≤1% at the stop); NATURALGAS 4 → 2 lots", t_mcx_risk_sizing)
+run("daily loss cap on open P&L halts + flattens the segment; halt expires next IST day", t_daily_halt_flattens_and_expires)
+run("Kite quote overlay: KITE/SIMULATED labels, SIM position closed on switch, stale fallback, never in LIVE", t_kite_overlay_labels_and_switch)
+
 
 passed = sum(1 for _, ok, _ in _results if ok)
 failed = len(_results) - passed

@@ -13,8 +13,10 @@ and its own PAPER/LIVE gate. Strategies run *inside* a segment:
 
     NSE_EQ: intraday, scalping, swing, momentum, mean_reversion, pairs
     NSE_FO: options, futures (+ option_scalping, not started by default)
-    BSE_EQ / MCX / CDS: segment-native paper strategies (segment_engine.py),
-            driven by a SIMULATED feed — no real BSE/MCX/CDS feed is wired.
+    BSE_EQ / MCX / CDS: segment-native paper strategies (segment_engine.py).
+            PAPER + live data: priced off Kite quotes (BSE cash, MCX/CDS
+            front-month futures), per-instrument fallback to the simulator;
+            every price is labelled KITE or SIMULATED. Orders stay paper.
 
 This module is also the single server-side source for every agent/segment
 state shown in the UI (`strategy_states()` / `segment_states()`), consumed by
@@ -130,6 +132,7 @@ def _limits(code: str) -> dict:
     return {
         "capital": cap,
         "max_daily_loss": round(cap * settings.segment_daily_loss_pct / 100.0, 2),
+        "risk_per_trade": round(cap * float(getattr(settings, "segment_risk_per_trade_pct", 1.0)) / 100.0, 2),
         "max_positions": int(getattr(settings, f"segment_max_positions_{k}")),
         "max_trades_per_day": int(settings.segment_max_trades_per_day),
     }
@@ -237,7 +240,42 @@ class SegmentManager:
 
     # ── kill switch ────────────────────────────────────────────────────────
     def killed(self, code: str) -> Optional[str]:
+        self.expire_daily_halts()
         return self._killed.get(code)
+
+    DAILY_HALT = "daily_loss_limit"
+
+    def expire_daily_halts(self) -> list[str]:
+        """A daily-loss halt lasts for the rest of the IST day only: release
+        it once the date has rolled (manual kills stay until re-armed)."""
+        today = self.now().date().isoformat()
+        released = []
+        with self._lock:
+            for c, r in self._killed.items():
+                if r == self.DAILY_HALT and not str(self._killed_at.get(c) or "").startswith(today):
+                    self._killed[c] = None
+                    self._killed_at[c] = None
+                    released.append(c)
+        for c in released:
+            logger.warning("[segments] {} daily-loss halt expired (new IST day) — segment re-armed", c)
+        return released
+
+    def check_loss_limits(self) -> list[str]:
+        """Halt (and flatten) every segment whose P&L today (realised + open)
+        is at or below its daily loss cap. Runs from the supervisor, so a cap
+        is enforced on open positions too — not only when a new entry asks."""
+        halted = []
+        for code in SEGMENT_ORDER:
+            if self._killed.get(code):
+                continue
+            try:
+                lim = _limits(code)
+                if self.pnl(code)["total"] <= -lim["max_daily_loss"]:
+                    self.kill(code, reason=self.DAILY_HALT, flatten=True)
+                    halted.append(code)
+            except Exception as exc:
+                logger.debug("[segments] loss-limit check {}: {}", code, exc)
+        return halted
 
     def kill(self, code: str, reason: str = "manual", flatten: bool = True) -> dict:
         if code not in SEGMENTS:
@@ -332,6 +370,16 @@ class SegmentManager:
         # NOTE: displays use book.py (Σ pnl of listed exit fills); this gate
         # input stays on the agents' own realised counters (unchanged risk
         # semantics).
+        # Master-approved invented strategies trade NSE/NFO through the paper
+        # ledger, not through an agent — their realised P&L counts toward the
+        # segment's daily loss cap too.
+        try:
+            from strategy_inventor import strategy_inventor
+            inv = strategy_inventor.realised_today(code)
+            realised += inv["realised"]
+            trades += inv["entries"]
+        except Exception:
+            pass
         unreal = sum(p["pnl"] for p in self.positions(code))
         return {"realised": round(realised, 2), "unrealised": round(unreal, 2),
                 "total": round(realised + unreal, 2), "trades_today": trades}
@@ -341,7 +389,16 @@ class SegmentManager:
         if spec.native:
             from segment_engine import native_engine
             return native_engine.margin_used(code)
-        return round(sum(abs(p["qty"]) * (p["ltp"] or p["avg"]) for p in self.positions(code)), 2)
+        # NFO futures block margin, not notional (one NIFTY lot ≈ ₹17L notional
+        # would otherwise exceed the whole ₹10L segment allocation).
+        fut_m = float(getattr(settings, "futures_margin_pct", 20.0)) / 100.0
+        used = 0.0
+        for p in self.positions(code):
+            v = abs(p["qty"]) * (p["ltp"] or p["avg"])
+            if code == "NSE_FO" and str(p.get("symbol") or "").endswith("FUT"):
+                v *= fut_m
+            used += v
+        return round(used, 2)
 
     def _roll_day(self) -> None:
         d = self.now().date()
@@ -360,6 +417,7 @@ class SegmentManager:
                     symbol: str = "") -> tuple[bool, str]:
         if not code or code not in SEGMENTS:
             return True, "OK"
+        self.expire_daily_halts()
         spec = SEGMENTS[code]
         # Orders that only reduce an existing position are exits — never
         # blocked by a segment gate (kill switch / hours / LIVE-arming).
@@ -380,7 +438,7 @@ class SegmentManager:
         p = self.pnl(code)
         if p["total"] <= -lim["max_daily_loss"]:
             if not self._killed.get(code):
-                self.kill(code, reason="daily_loss_limit", flatten=False)
+                self.kill(code, reason=self.DAILY_HALT, flatten=True)
             return False, f"{spec.label} daily loss limit ₹{lim['max_daily_loss']:,.0f} hit"
         with self._lock:
             self._roll_day()
@@ -448,6 +506,8 @@ class SegmentManager:
         if not force and now - self._last_supervise < 5.0:
             return
         self._last_supervise = now
+        self.expire_daily_halts()
+        self.check_loss_limits()
         try:
             from master_agent_v5 import master_agent
             import bot_state
@@ -531,6 +591,7 @@ class SegmentManager:
 
     def segment_states(self, phase: str, master_running: bool, strategies: dict) -> list[dict]:
         from segment_engine import native_engine
+        self.expire_daily_halts()
         starting = phase in ("scanning_instruments", "loading_instruments")
         now = self.now()
         rows = []
@@ -561,7 +622,7 @@ class SegmentManager:
                 "open": is_open, "hours": self.hours_text(code),
                 "mode": self.mode(code), "effective_mode": self.effective_mode(code),
                 "live_supported": spec.live_supported, "live_stub_reason": spec.live_stub_reason or None,
-                "feed": "SIMULATED" if spec.native else native_engine.nse_feed_label(code),
+                "feed": native_engine.feed_label(code) if spec.native else native_engine.nse_feed_label(code),
                 "killed": bool(self._killed.get(code)), "kill_reason": self._killed.get(code),
                 "capital": lim["capital"], "capital_used": used,
                 "limits": lim, "pnl": pnl,

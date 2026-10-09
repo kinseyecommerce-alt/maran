@@ -4,7 +4,7 @@ all market segments.
 
 Sources merged (read-only; nothing here places or changes orders):
   • kite_client book   — NSE / NFO (paper ledger in PAPER, Kite in LIVE)
-  • segment_engine     — BSE_EQ / MCX / CDS paper ledgers (SIMULATED feed)
+  • segment_engine     — BSE_EQ / MCX / CDS paper ledgers (Kite quotes, SIMULATED fallback)
 
 Every row carries `segment`, `strategy`, `price_source` and `simulated`, so the
 Positions / Orders tabs, the header counters, Today P&L (with per-segment
@@ -141,6 +141,7 @@ def _position_rows(kpos: list[dict], snap: dict, include_flat: bool = False) -> 
                      "strategy": owner, "price_source": src, "simulated": src == "SIMULATED",
                      "native": False, "lots": None, "multiplier": 1.0})
     price = snap["price"]
+    srcs = snap.get("src") or {}
     for key, raw in snap["positions"].items():
         spec = SEGMENTS.get(raw["segment"])
         c = native_engine.contracts.get(key)
@@ -152,8 +153,10 @@ def _position_rows(kpos: list[dict], snap: dict, include_flat: bool = False) -> 
             "product": "CNC" if c.kind == "EQ" else "NRML",
             "quantity": raw["qty"], "average_price": raw["entry"], "last_price": round(ltp, 4),
             "pnl": round((ltp - raw["entry"]) * raw["qty"] * c.multiplier, 2),
-            "segment": raw["segment"], "strategy": raw["strategy"], "price_source": "SIMULATED",
-            "simulated": True, "native": True, "lots": raw["lots"], "multiplier": c.multiplier,
+            "segment": raw["segment"], "strategy": raw["strategy"],
+            "price_source": srcs.get(key, "SIMULATED"),
+            "simulated": srcs.get(key, "SIMULATED") != "KITE", "native": True,
+            "lots": raw["lots"], "multiplier": c.multiplier,
             "sl": round(raw["sl"], 4), "target": round(raw["target"], 4),
             "order_id": raw.get("order_id"),
         })
@@ -189,7 +192,8 @@ def _order_rows(korders: list[dict], snap: dict, today_only: bool = True) -> lis
             "product": "CNC" if (c and c.kind == "EQ") else "NRML",
             "price": o["price"], "average_price": o["price"], "status": o.get("status", "COMPLETE"),
             "placed_at": ts, "tag": o.get("reason", ""), "segment": o["segment"],
-            "strategy": o.get("strategy"), "price_source": "SIMULATED", "simulated": True, "native": True,
+            "strategy": o.get("strategy"), "price_source": o.get("price_source") or "SIMULATED",
+            "simulated": (o.get("price_source") or "SIMULATED") != "KITE", "native": True,
             "lots": o["lots"], "pnl": o.get("pnl"), "entry_price": o.get("entry_price"),
         })
     rows.sort(key=lambda r: str(r.get("placed_at") or ""))

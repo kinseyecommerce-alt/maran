@@ -5,6 +5,20 @@ Per segment (NSE_EQ / NSE_FO / BSE_EQ / MCX / CDS) the inventor watches the
 shared market regime and may propose a short-lived strategy (entry bias, stop,
 target, max size, TTL). Proposals live in a journal the dashboard reads.
 
+Master agent (2026-10-09, jag: "master agent can create strategies as per
+current trend and market and approve them"):
+  • Each proposal is designed from the live trend — NSE_EQ: the stock that
+    best fits the market regime (Kite ticks: day change, EMA9/21, RSI);
+    NSE_FO: NIFTY/BANKNIFTY monthly future; BSE/MCX/CDS: the instrument with
+    the strongest EMA5/20 trend on Kite quotes (SIMULATED fallback labelled).
+  • The master agent reviews it (segment not halted, segment P&L above 60% of
+    its daily loss cap, the idea has not lost twice today) and approves it
+    for PAPER itself (settings.invent_master_auto_approve). Every decision is
+    in the approvals audit log (/invent/approvals, Invented tab).
+  • Approval scope is PAPER only. It never arms LIVE.
+  • Paper size: risk = invent_risk_per_trade_pct (0.5%) of the segment's
+    capital at the stop, never above the segment's 1% per-trade cap.
+
 PAPER path (default / only path during build):
   • Invented strategies may place PAPER orders only.
   • Caps: invent rate, max concurrent per segment + global.
@@ -53,6 +67,41 @@ _TEMPLATES: dict[str, dict[str, Any]] = {
 
 _NSE_SYMBOLS = ["RELIANCE", "TCS", "HDFCBANK", "INFY", "SBIN", "ITC", "ICICIBANK", "LT"]
 _NFO_UNDERLYINGS = ["NIFTY", "BANKNIFTY", "RELIANCE", "INFY"]  # paper underlyings only
+_NATIVE = ("BSE_EQ", "MCX", "CDS")
+_INDEXES = {"NIFTY", "BANKNIFTY", "FINNIFTY", "MIDCPNIFTY", "SENSEX", "BANKEX", "INDIAVIX", "INDIA VIX"}
+_TERMINAL = ("expired", "killed", "paper_done", "rejected")
+
+
+def _fut_symbol(underlying: str) -> str:
+    """Current NFO monthly futures symbol (same convention as the futures agent)."""
+    from datetime import date
+    try:
+        from agents.strategy_agents import _nse_monthly_expiry
+        today = now_ist().date()
+        exp = _nse_monthly_expiry(today.year, today.month)
+        if today > exp - timedelta(days=1):
+            nm = today.month + 1 if today.month < 12 else 1
+            ny = today.year if today.month < 12 else today.year + 1
+            exp = _nse_monthly_expiry(ny, nm)
+        return f"{underlying}{exp.strftime('%y%b').upper()}FUT"
+    except Exception:
+        d = date.today()
+        return f"{underlying}{d.strftime('%y%b').upper()}FUT"
+
+
+def _fut_underlying(sym: str) -> str:
+    for u in ("BANKNIFTY", "FINNIFTY", "MIDCPNIFTY", "NIFTY"):
+        if sym.startswith(u):
+            return u
+    return sym[:-8] if sym.endswith("FUT") else sym
+
+
+def _lot_size(underlying: str) -> int:
+    try:
+        from kite_client import _FON_LOT_SIZES
+        return int(_FON_LOT_SIZES.get(underlying) or 1)
+    except Exception:
+        return 1
 
 
 @dataclass
@@ -82,6 +131,14 @@ class InventedStrategy:
     label: str = "INVENTED"
     reason: str = ""
     last_error: str = ""
+    qty: int = 0                       # PAPER size (shares / F&O qty / native lots)
+    planned_symbol: Optional[str] = None
+    trend: str = ""
+    price_source: str = ""             # KITE | SIMULATED | UNKNOWN
+    approved_by: str = ""              # master_agent | jag
+    approved_at: str = ""
+    approval_rationale: str = ""
+    next_entry_ts: float = 0.0
 
     def to_dict(self) -> dict:
         d = asdict(self)
@@ -118,6 +175,11 @@ class InventedStrategy:
             return 0
 
 
+def _cutoff() -> str:
+    """Keep finished strategies for 3 days in the persisted journal."""
+    return (now_ist() - timedelta(days=3)).isoformat(timespec="seconds")
+
+
 class StrategyInventor:
     def __init__(self) -> None:
         self._lock = threading.RLock()
@@ -125,6 +187,7 @@ class StrategyInventor:
         self._last_invent_ts: dict[str, float] = {}
         self._enabled: bool = bool(getattr(settings, "invent_enabled_default", False))
         self._journal: list[dict] = []   # append-only event log (capped)
+        self._approvals: list[dict] = [] # master approval audit (capped)
         self._load()
 
     # ── config helpers ────────────────────────────────────────────────────
@@ -155,7 +218,7 @@ class StrategyInventor:
                     "live_eligible": sum(1 for s in active if s.status == "live_eligible"),
                 },
                 "caps": {
-                    "max_concurrent_global": int(getattr(settings, "invent_max_concurrent_global", 6)),
+                    "max_concurrent_global": int(getattr(settings, "invent_max_concurrent_global", 10)),
                     "max_per_segment": int(getattr(settings, "invent_max_per_segment", 2)),
                     "cooldown_sec": int(getattr(settings, "invent_cooldown_sec", 900)),
                     "ttl_sec": int(getattr(settings, "invent_ttl_sec", 7200)),
@@ -178,7 +241,7 @@ class StrategyInventor:
             if segment:
                 rows = [s for s in rows if s.segment == segment]
             if not include_done:
-                rows = [s for s in rows if s.status not in ("expired", "killed", "paper_done")]
+                rows = [s for s in rows if s.status not in _TERMINAL]
             rows.sort(key=lambda s: s.created_at, reverse=True)
             return [s.to_dict() for s in rows]
 
@@ -215,7 +278,7 @@ class StrategyInventor:
         last = self._last_invent_ts.get(segment, 0)
         if time.time() - last < cool:
             return False, f"cooldown {int(cool - (time.time() - last))}s"
-        max_g = int(getattr(settings, "invent_max_concurrent_global", 6))
+        max_g = int(getattr(settings, "invent_max_concurrent_global", 10))
         max_s = int(getattr(settings, "invent_max_per_segment", 2))
         active = [s for s in self._strategies.values()
                   if s.status in ("proposed", "paper_active", "live_eligible", "live_armed")]
@@ -226,7 +289,9 @@ class StrategyInventor:
         return True, "ok"
 
     def invent(self, segment: str, regime: Optional[str] = None, force: bool = False) -> dict:
-        """Propose + activate a short-lived PAPER strategy for the segment."""
+        """Design a short-lived strategy for the segment from the current
+        trend, have the master agent review it and — when approved — activate
+        it for PAPER trading (never LIVE: LIVE stays behind typed SEND)."""
         with self._lock:
             if not force:
                 ok, why = self._can_invent(segment)
@@ -237,34 +302,251 @@ class StrategyInventor:
                     return {"ok": False, "reason": "invent mode off"}
             regime = (regime or self._regime() or "UNKNOWN").upper()
             tmpl = _TEMPLATES.get(regime, _TEMPLATES["UNKNOWN"])
+            design = self._design(segment, regime, tmpl)
+            if not design.get("ok"):
+                self._last_invent_ts[segment] = time.time() - max(
+                    0, int(getattr(settings, "invent_cooldown_sec", 900)) - 60)   # retry in ~1 min
+                return {"ok": False, "reason": design.get("reason", "no setup")}
             ttl = int(getattr(settings, "invent_ttl_sec", 7200))
             now = now_ist()
             sid = f"INV-{segment}-{uuid.uuid4().hex[:8].upper()}"
-            max_qty = 1
-            if segment in ("NSE_FO", "MCX", "CDS"):
-                max_qty = 1  # 1 lot
             strat = InventedStrategy(
-                id=sid, segment=segment, name=tmpl["name"], regime=regime,
-                side=tmpl["side"], style=tmpl["style"],
-                stop_pct=float(tmpl["stop_pct"]), target_pct=float(tmpl["target_pct"]),
-                max_qty=max_qty, status="paper_active",
+                id=sid, segment=segment, name=design["name"], regime=regime,
+                side=design["side"], style=design["style"],
+                stop_pct=float(design["stop_pct"]), target_pct=float(design["target_pct"]),
+                max_qty=1,                               # LIVE tiny cap — never raised
+                status="proposed",
                 created_at=now.isoformat(timespec="seconds"),
                 expires_at=(now + timedelta(seconds=ttl)).isoformat(timespec="seconds"),
-                paper_started_at=now.isoformat(timespec="seconds"),
-                simulated=True, label="INVENTED",
-                reason=f"regime={regime} style={tmpl['style']}",
+                simulated=design.get("price_source") != "KITE", label="INVENTED",
+                reason=design["rationale"], symbol=None,
+                trend=design.get("trend", ""), price_source=design.get("price_source", ""),
             )
+            strat.planned_symbol = design["symbol"]
             self._strategies[sid] = strat
             self._last_invent_ts[segment] = time.time()
-            self._log("invented", segment, f"{sid} {tmpl['name']} ({regime})", sid)
-            self._save()
-            # Try an immediate paper entry
+            self._log("invented", segment, f"{sid} {strat.name} {strat.side} {design['symbol']} ({regime})", sid)
+            approved, rationale = self._master_review(strat)
+            if not approved:
+                strat.status = "rejected"
+                strat.approval_rationale = rationale
+                self._record_approval(strat, "REJECTED", rationale)
+                self._save()
+                return {"ok": False, "reason": f"master rejected: {rationale}", "strategy": strat.to_dict()}
+            if not getattr(settings, "invent_master_auto_approve", True):
+                # waits for a human approve (POST /invent/{id}/approve)
+                self._save()
+                return {"ok": True, "strategy": strat.to_dict(), "entry": None, "pending_approval": True}
+            self._approve(strat, rationale, approver="master_agent")
             placed = self._try_paper_entry(strat)
             self._save()
             return {"ok": True, "strategy": strat.to_dict(), "entry": placed}
 
+    # ── master approval (PAPER only) ──────────────────────────────────────
+    def _master_review(self, strat: "InventedStrategy") -> tuple[bool, str]:
+        """The master agent's checks before an invented strategy may paper
+        trade. Approval scope is PAPER only — it never arms anything LIVE."""
+        from segments import segment_manager, _limits
+        if settings.trading_mode != "PAPER":
+            return False, "auto-approval is PAPER-only; global mode is not PAPER"
+        if segment_manager.killed(strat.segment):
+            return False, f"segment halted ({segment_manager.killed(strat.segment)})"
+        lim = _limits(strat.segment)
+        pnl = float(segment_manager.pnl(strat.segment).get("total", 0.0))
+        cap = float(lim["max_daily_loss"])
+        if pnl <= -0.6 * cap:
+            return False, (f"segment P&L ₹{pnl:,.0f} is ≥60% of its daily loss cap ₹{cap:,.0f} "
+                           f"— no new strategies today")
+        bad = [s for s in self._strategies.values()
+               if s.segment == strat.segment and s.name == strat.name
+               and s.created_at[:10] == strat.created_at[:10] and s.paper_pnl < 0
+               and s.status in ("expired", "killed", "paper_done")]
+        if len(bad) >= 2:
+            return False, f"{strat.name} already lost twice today in {strat.segment}"
+        if strat.price_source != "KITE" and self._live_data_on():
+            return False, (f"{strat.planned_symbol or strat.segment}: trend measured on "
+                           f"{strat.price_source or 'unknown'} prices while Kite live data is on — "
+                           f"waiting for live Kite ticks")
+        risk = lim["capital"] * float(getattr(settings, "invent_risk_per_trade_pct", 0.5)) / 100.0
+        feed = "live Kite price" if strat.price_source == "KITE" else "SIMULATED price (no Kite quote)"
+        return True, (f"{strat.reason}; segment P&L ₹{pnl:,.0f} vs cap −₹{cap:,.0f}; "
+                      f"risk ≤ ₹{risk:,.0f}/trade; {feed}; PAPER only")
+
+    def _live_data_on(self) -> bool:
+        """PAPER with Kite live data connected → designs must use Kite prices."""
+        try:
+            from kite_client import kite_client
+            return bool(getattr(settings, "paper_use_live_data", False)) and kite_client._kite is not None
+        except Exception:
+            return False
+
+    def _approve(self, strat: "InventedStrategy", rationale: str, approver: str) -> None:
+        now = now_ist().isoformat(timespec="seconds")
+        strat.status = "paper_active"
+        strat.paper_started_at = now
+        strat.approved_by = approver
+        strat.approved_at = now
+        strat.approval_rationale = rationale
+        self._record_approval(strat, "APPROVED", rationale, approver)
+        self._log("master_approved", strat.segment, f"{strat.name} → PAPER ({approver})", strat.id)
+        try:
+            from agents.activity_log import push
+            push("master", "GATE_APPROVE", strat.planned_symbol or "", side=strat.side,
+                 detail=f"invented {strat.name} [{strat.segment}] approved for PAPER: {rationale}"[:300])
+        except Exception:
+            pass
+
+    def approve(self, strategy_id: str, approver: str = "jag") -> dict:
+        """Manual approval of a pending proposal (when master auto-approve is off)."""
+        with self._lock:
+            s = self._strategies.get(strategy_id)
+            if not s:
+                return {"ok": False, "reason": "unknown strategy"}
+            if s.status != "proposed":
+                return {"ok": False, "reason": f"status {s.status} cannot be approved"}
+            ok, rationale = self._master_review(s)
+            if not ok:
+                return {"ok": False, "reason": rationale}
+            self._approve(s, rationale, approver=approver)
+            placed = self._try_paper_entry(s)
+            self._save()
+            return {"ok": True, "strategy": s.to_dict(), "entry": placed}
+
+    def _record_approval(self, strat: "InventedStrategy", decision: str, rationale: str,
+                         approver: str = "master_agent") -> None:
+        if not hasattr(self, "_approvals"):
+            self._approvals = []
+        self._approvals.append({
+            "ts": now_ist().isoformat(timespec="seconds"), "id": strat.id,
+            "strategy": strat.name, "segment": strat.segment, "side": strat.side,
+            "symbol": strat.planned_symbol or strat.symbol, "regime": strat.regime,
+            "decision": decision, "approver": approver, "scope": "PAPER",
+            "rationale": rationale, "price_source": strat.price_source,
+        })
+        if len(self._approvals) > 500:
+            self._approvals = self._approvals[-400:]
+
+    def approvals(self, limit: int = 100) -> list[dict]:
+        with self._lock:
+            return list(reversed(getattr(self, "_approvals", [])[-limit:]))
+
+    # ── design from the live trend ────────────────────────────────────────
+    def _active_symbols(self) -> set:
+        return {s.symbol or s.planned_symbol for s in self._strategies.values()
+                if s.status in ("proposed", "paper_active", "live_eligible", "live_armed")}
+
+    def _design(self, segment: str, regime: str, tmpl: dict) -> dict:
+        if segment in _NATIVE:
+            return self._design_native(segment, regime, tmpl)
+        if segment == "NSE_FO":
+            return self._design_fo(regime, tmpl)
+        return self._design_eq(regime, tmpl)
+
+    def _design_native(self, segment: str, regime: str, tmpl: dict) -> dict:
+        from segment_engine import native_engine, UNIVERSE, TARGET_R
+        busy = self._active_symbols()
+        best = None
+        for c in UNIVERSE.get(segment) or []:
+            key = f"{c.symbol}@{segment}"
+            if c.symbol in busy or key in native_engine.positions_:
+                continue
+            t = native_engine.trend(key)
+            if not t:
+                continue
+            rank = (t["price_source"] == "KITE", t["strength"])
+            if best is None or rank > best[0]:
+                best = (rank, c, key, t)
+        if best is None:
+            return {"ok": False, "reason": "no instrument trend yet (needs ~4 min of bars)"}
+        _, c, key, t = best
+        if t["strength"] < 0.03:
+            return {"ok": False, "reason": f"no clear trend ({c.symbol} {t['move_pct']:+.2f}%)"}
+        px = float(native_engine.price.get(key) or 0)
+        dist = native_engine.stop_distance(key)
+        stop_pct = dist / px * 100.0 if px > 0 else 0.5
+        side = t["side"]
+        und = c.symbol.replace("-FUT", "")
+        trend = (f"{c.symbol} {'up' if side == 'BUY' else 'down'}trend: EMA5 {'>' if side == 'BUY' else '<'} "
+                 f"EMA20, {t['move_pct']:+.2f}% over ~5 min")
+        return {"ok": True, "symbol": c.symbol, "side": side, "style": "trend_follow",
+                "name": f"{und.lower()}_trend_{'long' if side == 'BUY' else 'short'}",
+                "stop_pct": round(stop_pct, 3), "target_pct": round(stop_pct * TARGET_R, 3),
+                "price_source": t["price_source"], "trend": trend,
+                "rationale": f"market regime {regime}; {trend}; follow the instrument trend"}
+
+    def _latest(self) -> dict:
+        try:
+            from tick_engine import tick_engine
+            return tick_engine.all_latest() or {}
+        except Exception:
+            return {}
+
+    def _design_eq(self, regime: str, tmpl: dict) -> dict:
+        rows = self._latest()
+        busy = self._active_symbols()
+        side, style = tmpl["side"], tmpl["style"]
+        cands = []
+        for sym, r in rows.items():
+            if sym in _INDEXES or sym in busy or not r.get("ltp"):
+                continue
+            chg = float(r.get("change_pct") or 0)
+            e9, e21 = float(r.get("ema9") or 0), float(r.get("ema21") or 0)
+            rsi = float(r.get("rsi_14") or 50)
+            if style == "fade" and side == "BUY":          # ranging: buy the most oversold
+                score = (50 - rsi) / 10.0
+            elif side == "SELL":
+                score = -chg + (1.0 if e9 and e21 and e9 < e21 else -1.0)
+            else:
+                score = chg + (1.0 if e9 and e21 and e9 > e21 else -1.0)
+            cands.append((r.get("price_source") == "KITE", score, sym, r))
+        if not cands:
+            sym = _NSE_SYMBOLS[int(time.time()) % len(_NSE_SYMBOLS)]
+            return {"ok": True, "symbol": sym, "side": side, "style": style, "name": tmpl["name"],
+                    "stop_pct": tmpl["stop_pct"], "target_pct": tmpl["target_pct"],
+                    "price_source": "UNKNOWN", "trend": "no live ticks — regime template only",
+                    "rationale": f"market regime {regime} → {tmpl['name']} on {sym} (no live ticks)"}
+        cands.sort(key=lambda x: (x[0], x[1]), reverse=True)
+        live, score, sym, r = cands[0]
+        if score <= 0:
+            return {"ok": False, "reason": f"no NSE stock aligned with {regime} ({side})"}
+        trend = (f"{sym} {float(r.get('change_pct') or 0):+.2f}% today, EMA9 "
+                 f"{'<' if float(r.get('ema9') or 0) < float(r.get('ema21') or 0) else '>'} EMA21, "
+                 f"RSI {float(r.get('rsi_14') or 0):.0f}")
+        return {"ok": True, "symbol": sym, "side": side, "style": style, "name": tmpl["name"],
+                "stop_pct": tmpl["stop_pct"], "target_pct": tmpl["target_pct"],
+                "price_source": r.get("price_source") or "UNKNOWN", "trend": trend,
+                "rationale": f"market regime {regime} → {tmpl['name']} ({side}); strongest fit {trend}"}
+
+    def _design_fo(self, regime: str, tmpl: dict) -> dict:
+        rows = self._latest()
+        busy = self._active_symbols()
+        side = tmpl["side"]
+        best = None
+        for und in ("NIFTY", "BANKNIFTY"):
+            r = rows.get(und) or {}
+            if not r.get("ltp"):
+                continue
+            fut = _fut_symbol(und)
+            if fut in busy:
+                continue
+            chg = float(r.get("change_pct") or 0)
+            score = -chg if side == "SELL" else chg
+            if best is None or score > best[0]:
+                best = (score, und, fut, r)
+        if best is None:
+            return {"ok": False, "reason": "no live NIFTY/BANKNIFTY tick or both already traded"}
+        _, und, fut, r = best
+        trend = (f"{und} {float(r.get('change_pct') or 0):+.2f}% today, EMA9 "
+                 f"{'<' if float(r.get('ema9') or 0) < float(r.get('ema21') or 0) else '>'} EMA21")
+        return {"ok": True, "symbol": fut, "side": side, "style": tmpl["style"],
+                "name": f"{und.lower()}_fut_{tmpl['name']}",
+                "stop_pct": min(tmpl["stop_pct"], 0.5), "target_pct": min(tmpl["target_pct"], 1.0),
+                "price_source": r.get("price_source") or "UNKNOWN", "trend": trend,
+                "rationale": f"market regime {regime} → {tmpl['name']} ({side}) on {fut}; {trend}"}
+
     def evaluate(self) -> dict:
-        """Periodic: expire/kill, maybe invent, manage paper exits, promote warm-up."""
+        """Periodic: expire/kill, manage paper exits, promote warm-up, and let
+        the master agent invent + approve new PAPER strategies per segment."""
         summary = {"invented": [], "exits": [], "expired": [], "promoted": [], "killed": []}
         with self._lock:
             if not self._enabled:
@@ -272,7 +554,7 @@ class StrategyInventor:
             from segments import SEGMENTS, segment_manager
             # Kill on segment kill switch
             for s in list(self._strategies.values()):
-                if s.status in ("expired", "killed", "paper_done"):
+                if s.status in ("expired", "killed", "paper_done", "rejected"):
                     continue
                 if segment_manager.killed(s.segment):
                     s.status = "killed"
@@ -282,63 +564,79 @@ class StrategyInventor:
                     self._log("killed", s.segment, s.reason, s.id)
             # Expire TTL
             for s in list(self._strategies.values()):
-                if s.status in ("expired", "killed", "paper_done"):
+                if s.status in ("expired", "killed", "paper_done", "rejected"):
                     continue
                 if s.ttl_left() <= 0:
                     self._flatten_paper(s, "ttl_expired")
                     s.status = "expired"
                     summary["expired"].append(s.id)
                     self._log("expired", s.segment, "TTL", s.id)
-            # Manage open paper positions (SL/target)
+            # Manage open paper positions (SL/target) and re-enter flat ones
             for s in list(self._strategies.values()):
-                if s.status == "paper_active" and s.order_id and s.entry_price and s.symbol:
+                if s.status not in ("paper_active", "live_eligible") or s.live_armed:
+                    continue
+                if s.order_id:
                     ex = self._check_paper_exit(s)
                     if ex:
                         summary["exits"].append(ex)
-            # Promote warm-up → live_eligible (still PAPER until armed)
+                elif time.time() >= getattr(s, "next_entry_ts", 0):
+                    self._try_paper_entry(s)
+            # Promote warm-up → live_eligible (still PAPER until armed with SEND)
             for s in list(self._strategies.values()):
                 if s.status == "paper_active" and s.warm_up_ok() and not s.live_armed:
                     s.status = "live_eligible"
                     summary["promoted"].append(s.id)
-                    self._log("live_eligible", s.segment, "warm-up passed", s.id)
-            # Opportunistic invent per segment (at most one attempt each tick)
+                    self._log("live_eligible", s.segment, "warm-up passed (still PAPER)", s.id)
+            # Master invents per segment (cooldown / caps apply)
             for code in SEGMENTS:
                 ok, _ = self._can_invent(code)
                 if ok:
-                    # Only invent when regime is known / interesting
                     reg = self._regime()
-                    if reg and reg != "UNKNOWN":
-                        r = self.invent(code, regime=reg, force=False)
-                        if r.get("ok"):
-                            summary["invented"].append(r["strategy"]["id"])
+                    if code not in _NATIVE and (not reg or reg.upper() == "UNKNOWN"):
+                        continue          # NSE designs need a known market regime
+                    r = self.invent(code, regime=reg, force=False)
+                    if r.get("ok"):
+                        summary["invented"].append(r["strategy"]["id"])
             self._save()
         return summary
+
+    def realised_today(self, segment: str) -> dict:
+        """Realised paper P&L + entries of invented strategies created today."""
+        today = now_ist().date().isoformat()
+        with self._lock:
+            rows = [s for s in self._strategies.values()
+                    if s.segment == segment and (s.created_at or "")[:10] == today]
+            return {"realised": round(sum(float(s.paper_pnl or 0) for s in rows), 2),
+                    "entries": sum(int(s.paper_fills or 0) for s in rows)}
 
     # ── paper trading ─────────────────────────────────────────────────────
     def _pick_symbol(self, segment: str) -> Optional[str]:
         if segment == "NSE_EQ":
             return _NSE_SYMBOLS[int(time.time()) % len(_NSE_SYMBOLS)]
         if segment == "NSE_FO":
-            # Paper path uses the underlying equity/index symbol on NSE for the
-            # tiny probe (full NFO chain needs Kite). Label stays NSE_FO.
             return _NFO_UNDERLYINGS[int(time.time()) % len(_NFO_UNDERLYINGS)]
         from segment_engine import native_engine, UNIVERSE
         contracts = UNIVERSE.get(segment) or []
         if not contracts:
             return None
-        # Prefer a contract with a live simulated price
         for c in contracts:
             key = f"{c.symbol}@{segment}"
             if key in native_engine.price and native_engine.price[key] > 0:
                 return c.symbol
         return contracts[0].symbol
 
+    def _risk_budget(self, segment: str) -> tuple[float, float]:
+        """(invented-trade risk ₹, hard per-trade cap ₹) for the segment."""
+        from segments import _limits
+        lim = _limits(segment)
+        inv = lim["capital"] * float(getattr(settings, "invent_risk_per_trade_pct", 0.5)) / 100.0
+        return inv, float(lim.get("risk_per_trade") or lim["capital"] * 0.01)
+
     def _try_paper_entry(self, strat: InventedStrategy) -> dict:
-        """Place one PAPER entry for the invented strategy. Never LIVE here."""
+        """Place one PAPER entry for the invented strategy (LIVE only via the
+        separately SEND-armed tiny path below — never auto)."""
         from segments import segment_manager
         if settings.trading_mode != "PAPER" and not strat.live_armed:
-            # During build we only paper-trade. If somehow LIVE globally but
-            # not armed for this strategy, refuse.
             return {"ok": False, "reason": "LIVE invent entry requires arm_live_tiny"}
         if segment_manager.killed(strat.segment):
             strat.gate_breaches += 1
@@ -347,68 +645,127 @@ class StrategyInventor:
             return {"ok": False, "reason": "window closed"}
         if strat.order_id and strat.symbol:
             return {"ok": False, "reason": "already in position"}
-        sym = self._pick_symbol(strat.segment)
+        sym = strat.symbol or getattr(strat, "planned_symbol", None) or self._pick_symbol(strat.segment)
         if not sym:
             return {"ok": False, "reason": "no symbol"}
-        qty = max(1, min(strat.max_qty, int(getattr(settings, "invent_live_tiny_qty_equity", 1))))
         tag = f"INVENTED-{strat.id}"
         try:
-            if strat.segment in ("BSE_EQ", "MCX", "CDS"):
-                from segment_engine import native_engine
-                # Ensure sim engine is running so prices exist
-                native_engine.ensure_running()
-                key = f"{sym}@{strat.segment}"
-                if key not in native_engine.contracts:
-                    return {"ok": False, "reason": f"no contract {key}"}
-                # 1 lot only
-                rec = native_engine.route_order(strat.segment, sym, strat.side, 1,
-                                               f"{tag} entry", strategy=f"invent:{strat.id}")
-                px = float(rec["price"])
-                oid = rec["order_id"]
-                simulated = True
-                # Track a synthetic position on the invent ledger (native book
-                # already has the order; we manage exit via invent loop using LTP)
+            if strat.segment in _NATIVE:
+                return self._native_entry(strat, sym, tag)
+            from kite_client import kite_client
+            if settings.trading_mode != "PAPER" and strat.live_armed:
+                # LIVE tiny path — 1 share, NSE only, all prechecks (unchanged)
+                if not self._live_precheck(strat):
+                    return {"ok": False, "reason": strat.last_error or "live precheck failed"}
+                qty = max(1, min(strat.max_qty, int(getattr(settings, "invent_live_tiny_qty_equity", 1))))
+                exchange = "NFO" if strat.segment == "NSE_FO" else "NSE"
+                oid = kite_client.place_order(
+                    tradingsymbol=sym, exchange=exchange,
+                    transaction_type=strat.side, quantity=qty,
+                    order_type="MARKET", product="MIS", tag=tag[:20],
+                )
+                px = self._ltp(sym, exchange) or 0.0
+                strat.live_fills += 1
+                strat.symbol, strat.entry_price, strat.order_id = sym, (float(px) if px else None), str(oid)
+                strat.qty, strat.simulated = qty, False
+                self._log("live_entry", strat.segment, f"{strat.side} {sym} qty={qty} @ {px} oid={oid}", strat.id)
+                return {"ok": True, "order_id": oid, "symbol": sym, "price": px, "quantity": qty,
+                        "simulated": False, "tag": tag}
+            # ── PAPER (kite_client paper ledger; never reaches Kite in PAPER) ──
+            fut = strat.segment == "NSE_FO" and sym.endswith("FUT")
+            und = _fut_underlying(sym) if fut else sym
+            px = self._ltp(und) or 0.0
+            if px <= 0:
+                return {"ok": False, "reason": f"no live price for {und}"}
+            risk, hard = self._risk_budget(strat.segment)
+            stop_amt = px * strat.stop_pct / 100.0
+            if fut:
+                lot = _lot_size(und)
+                lots = int(risk // (stop_amt * lot)) if stop_amt > 0 else 0
+                if lots < 1:
+                    if stop_amt * lot > hard:
+                        return {"ok": False, "reason": f"1 lot {sym} risks ₹{stop_amt * lot:,.0f} > ₹{hard:,.0f}"}
+                    lots = 1
+                qty = lots * lot
+                exchange, product = "NFO", "NRML"
+                notional = qty * px * float(getattr(settings, "futures_margin_pct", 20.0)) / 100.0
+                # paper model for futures = spot-marked (basis ≈ 0), as the futures agent
+                kite_client._paper_ltp[sym] = px
             else:
-                # NSE_EQ / NSE_FO paper via kite paper ledger
-                from kite_client import kite_client
-                exchange = "NSE" if strat.segment == "NSE_EQ" else "NSE"
-                # NSE_FO invent paper uses NSE cash underlying as a probe when
-                # no Kite NFO chain is available — still tagged NSE_FO in journal.
-                if settings.trading_mode != "PAPER" and strat.live_armed:
-                    # LIVE tiny path
-                    if not self._live_precheck(strat):
-                        return {"ok": False, "reason": strat.last_error or "live precheck failed"}
-                    exchange = "NFO" if strat.segment == "NSE_FO" else "NSE"
-                    oid = kite_client.place_order(
-                        tradingsymbol=sym, exchange=exchange,
-                        transaction_type=strat.side, quantity=qty,
-                        order_type="MARKET", product="MIS", tag=tag[:20],
-                    )
-                    simulated = False
-                    px = self._ltp(sym, exchange) or 0.0
-                    strat.live_fills += 1
-                else:
-                    oid = kite_client.place_order(
-                        tradingsymbol=sym, exchange=exchange,
-                        transaction_type=strat.side, quantity=qty,
-                        order_type="MARKET", product="MIS", tag=tag[:20],
-                    )
-                    simulated = True
-                    px = self._ltp(sym, exchange) or 0.0
-            strat.symbol = sym
-            strat.entry_price = float(px) if px else None
-            strat.order_id = str(oid)
-            strat.simulated = simulated
+                from segments import _limits
+                cap = _limits(strat.segment)["capital"]
+                qty = int(risk // stop_amt) if stop_amt > 0 else 0
+                qty = min(qty, int(cap * 0.25 // px))          # ≤25% of the segment per idea
+                if qty < 1:
+                    return {"ok": False, "reason": "size < 1 share"}
+                exchange, product, notional = "NSE", "MIS", qty * px
+            ok, why = segment_manager.entry_check(strat.segment, notional=notional,
+                                                  transaction_type=strat.side, symbol="")
+            if not ok:
+                strat.next_entry_ts = time.time() + 120
+                return {"ok": False, "reason": why}
+            oid = kite_client.place_order(
+                tradingsymbol=sym, exchange=exchange, transaction_type=strat.side, quantity=qty,
+                order_type="MARKET", product=product, tag=tag[:20],
+            )
+            src = self._price_source(und)
+            strat.symbol, strat.entry_price, strat.order_id = sym, float(px), str(oid)
+            strat.qty, strat.price_source = qty, src
+            strat.simulated = src != "KITE"
             strat.paper_fills += 1
             self._log("paper_entry", strat.segment,
-                      f"{strat.side} {sym} qty={qty} @ {px} oid={oid}", strat.id)
-            return {"ok": True, "order_id": oid, "symbol": sym, "price": px,
-                    "quantity": qty, "simulated": simulated, "tag": tag}
+                      f"{strat.side} {sym} qty={qty} @ {px} ({src}) oid={oid}", strat.id)
+            return {"ok": True, "order_id": oid, "symbol": sym, "price": px, "quantity": qty,
+                    "simulated": strat.simulated, "price_source": src, "tag": tag}
         except Exception as exc:
             strat.last_error = str(exc)[:200]
             strat.gate_breaches += 1
+            strat.next_entry_ts = time.time() + 120
             logger.warning("[invent] paper entry failed {}: {}", strat.id, exc)
             return {"ok": False, "reason": str(exc)[:200]}
+
+    def _native_entry(self, strat: InventedStrategy, sym: str, tag: str) -> dict:
+        from segment_engine import native_engine
+        native_engine.ensure_running()
+        key = f"{sym}@{strat.segment}"
+        if key not in native_engine.contracts:
+            return {"ok": False, "reason": f"no contract {key}"}
+        c = native_engine.contracts[key]
+        px = float(native_engine.price.get(key) or 0)
+        if px <= 0:
+            return {"ok": False, "reason": "no price"}
+        dist = px * strat.stop_pct / 100.0
+        tgt = px * strat.target_pct / 100.0
+        risk, _hard = self._risk_budget(strat.segment)
+        eng_lots, _m, why = native_engine.size_lots(key, dist)     # ≤ 1% risk + margin slot
+        if eng_lots < 1:
+            strat.next_entry_ts = time.time() + 120
+            return {"ok": False, "reason": why}
+        lots = max(1, min(eng_lots, int(risk // (dist * c.multiplier)) if dist > 0 else 1))
+        ttl = max(60, min(strat.ttl_left(), 60 * 60))
+        r = native_engine.open_external(strat.segment, sym, strat.side, strategy=f"invent:{strat.id}",
+                                        stop_dist=dist, target_dist=tgt, lots=lots,
+                                        time_stop_sec=ttl, reason=f"{tag} entry")
+        if not r.get("ok"):
+            strat.next_entry_ts = time.time() + 120
+            return r
+        strat.symbol, strat.entry_price, strat.order_id = sym, float(r["price"]), r["order_id"]
+        strat.qty, strat.price_source = int(r["lots"]), r["price_source"]
+        strat.simulated = r["price_source"] != "KITE"
+        strat.paper_fills += 1
+        self._log("paper_entry", strat.segment,
+                  f"{strat.side} {sym} lots={r['lots']} @ {r['price']} ({r['price_source']}) "
+                  f"risk ₹{r['risk']:,.0f} oid={r['order_id']}", strat.id)
+        return {"ok": True, "order_id": r["order_id"], "symbol": sym, "price": r["price"],
+                "quantity": r["lots"], "simulated": strat.simulated,
+                "price_source": r["price_source"], "tag": tag}
+
+    def _price_source(self, symbol: str) -> str:
+        try:
+            from tick_engine import tick_engine
+            return tick_engine.price_source(symbol) or "UNKNOWN"
+        except Exception:
+            return "UNKNOWN"
 
     def _ltp(self, symbol: str, exchange: str = "NSE") -> Optional[float]:
         try:
@@ -430,78 +787,91 @@ class StrategyInventor:
         return None
 
     def _check_paper_exit(self, strat: InventedStrategy) -> Optional[dict]:
-        if not strat.symbol or strat.entry_price is None:
+        if not strat.symbol or not strat.order_id:
             return None
-        if strat.segment in ("BSE_EQ", "MCX", "CDS"):
+        if strat.segment in _NATIVE:
+            # the native engine owns the position (SL / target / time stop / square-off)
             from segment_engine import native_engine
-            key = f"{strat.symbol}@{strat.segment}"
-            px = float(native_engine.price.get(key) or 0)
-        else:
-            px = self._ltp(strat.symbol) or 0.0
+            if native_engine.open_by_order(strat.order_id):
+                return None
+            t = native_engine.closed_by_order(strat.order_id)
+            pnl = float((t or {}).get("pnl") or 0.0)
+            reason = (t or {}).get("reason", "closed")
+            self._book_exit(strat, reason, pnl, (t or {}).get("exit"))
+            return {"id": strat.id, "reason": reason, "pnl": pnl}
+        if strat.entry_price is None:
+            return None
+        fut = strat.symbol.endswith("FUT")
+        px = self._ltp(_fut_underlying(strat.symbol) if fut else strat.symbol) or 0.0
         if px <= 0:
             return None
         entry = float(strat.entry_price)
         stop = strat.stop_pct / 100.0
         tgt = strat.target_pct / 100.0
         if strat.side == "BUY":
-            sl_hit = px <= entry * (1 - stop)
-            tp_hit = px >= entry * (1 + tgt)
-            pnl = (px - entry) * max(1, strat.max_qty)
+            sl_hit, tp_hit = px <= entry * (1 - stop), px >= entry * (1 + tgt)
         else:
-            sl_hit = px >= entry * (1 + stop)
-            tp_hit = px <= entry * (1 - tgt)
-            pnl = (entry - px) * max(1, strat.max_qty)
+            sl_hit, tp_hit = px >= entry * (1 + stop), px <= entry * (1 - tgt)
         if not (sl_hit or tp_hit):
             return None
         reason = "stop" if sl_hit else "target"
-        self._flatten_paper(strat, reason, px=px, pnl=pnl)
+        pnl = self._flatten_paper(strat, reason, px=px)
         return {"id": strat.id, "reason": reason, "pnl": pnl, "price": px}
 
+    def _book_exit(self, strat: InventedStrategy, reason: str, pnl: float, px=None) -> None:
+        strat.paper_pnl = round(float(strat.paper_pnl or 0) + float(pnl or 0), 2)
+        strat.order_id = None
+        strat.entry_price = None
+        strat.next_entry_ts = time.time() + 300      # 5-min cool-off before re-entry
+        self._log("paper_exit", strat.segment,
+                  f"{reason} {strat.symbol} @ {px} pnl ₹{float(pnl or 0):,.0f} (total ₹{strat.paper_pnl:,.0f})",
+                  strat.id)
+
     def _flatten_paper(self, strat: InventedStrategy, reason: str,
-                       px: Optional[float] = None, pnl: Optional[float] = None) -> None:
+                       px: Optional[float] = None, pnl: Optional[float] = None) -> Optional[float]:
+        """Close the strategy's PAPER position if it is still open. Position-
+        aware: a segment kill may already have flattened it — never send a
+        second (position-reversing) order."""
         if not strat.order_id or not strat.symbol:
             strat.order_id = None
-            return
+            return None
         try:
-            if strat.segment in ("BSE_EQ", "MCX", "CDS"):
+            if strat.segment in _NATIVE:
                 from segment_engine import native_engine
-                # Close via opposite side 1 lot
-                side = "SELL" if strat.side == "BUY" else "BUY"
-                rec = native_engine.route_order(strat.segment, strat.symbol, side, 1,
-                                               f"INVENTED-{strat.id} {reason}",
-                                               strategy=f"invent:{strat.id}")
-                if pnl is None and strat.entry_price is not None:
-                    fill = float(rec["price"])
-                    pnl = (fill - strat.entry_price) * (1 if strat.side == "BUY" else -1)
-                    # For SELL entries invert already handled above for BUY-close of short:
-                    if strat.side == "SELL":
-                        pnl = (strat.entry_price - fill)
-                if px is None:
-                    px = float(rec["price"])
-            else:
-                from kite_client import kite_client
-                side = "SELL" if strat.side == "BUY" else "BUY"
-                qty = max(1, strat.max_qty)
+                pos = native_engine.open_by_order(strat.order_id)
+                if pos:
+                    native_engine._close(pos["key"], f"INVENTED {reason}")
+                t = native_engine.closed_by_order(strat.order_id)
+                pnl = float((t or {}).get("pnl") or 0.0)
+                self._book_exit(strat, reason, pnl, (t or {}).get("exit"))
+                return pnl
+            from kite_client import kite_client
+            fut = strat.symbol.endswith("FUT")
+            if px is None:
+                px = self._ltp(_fut_underlying(strat.symbol) if fut else strat.symbol) or strat.entry_price
+            qty = int(getattr(strat, "qty", 0) or max(1, strat.max_qty))
+            sgn = 1 if strat.side == "BUY" else -1
+            open_q = 0
+            for p in list(getattr(kite_client, "_paper_positions", []) or []):
+                if p.get("tradingsymbol") == strat.symbol:
+                    open_q += int(p.get("quantity") or 0)
+            close_q = min(qty, abs(open_q)) if open_q * sgn > 0 else 0
+            if close_q and settings.trading_mode == "PAPER":
+                if fut:
+                    kite_client._paper_ltp[strat.symbol] = float(px)
                 kite_client.place_order(
-                    tradingsymbol=strat.symbol, exchange="NSE",
-                    transaction_type=side, quantity=qty,
-                    order_type="MARKET", product="MIS",
+                    tradingsymbol=strat.symbol, exchange="NFO" if fut else "NSE",
+                    transaction_type="SELL" if sgn > 0 else "BUY", quantity=close_q,
+                    order_type="MARKET", product="NRML" if fut else "MIS",
                     tag=f"INVX-{strat.id}"[:20],
                 )
-                if pnl is None and strat.entry_price is not None:
-                    ltp = self._ltp(strat.symbol) or strat.entry_price
-                    pnl = (ltp - strat.entry_price) * qty * (1 if strat.side == "BUY" else -1)
-                    if strat.side == "SELL":
-                        pnl = (strat.entry_price - ltp) * qty
+            if pnl is None and strat.entry_price is not None and px:
+                pnl = (float(px) - float(strat.entry_price)) * qty * sgn
         except Exception as exc:
             strat.last_error = str(exc)[:200]
             logger.warning("[invent] flatten failed {}: {}", strat.id, exc)
-        if pnl is not None:
-            strat.paper_pnl = round(strat.paper_pnl + float(pnl), 2)
-        strat.order_id = None
-        strat.entry_price = None
-        # Keep paper_active so it can re-enter until TTL / kill; mark done only on expire
-        self._log("paper_exit", strat.segment, f"{reason} pnl={strat.paper_pnl}", strat.id)
+        self._book_exit(strat, reason, float(pnl or 0.0), px)
+        return pnl
 
     # ── LIVE tiny arming ──────────────────────────────────────────────────
     def _kite_ready(self) -> bool:
@@ -581,7 +951,7 @@ class StrategyInventor:
         n = 0
         with self._lock:
             for s in self._strategies.values():
-                if s.segment == segment and s.status not in ("expired", "killed", "paper_done"):
+                if s.segment == segment and s.status not in _TERMINAL:
                     self._flatten_paper(s, "kill_switch")
                     s.status = "killed"
                     s.reason = reason
@@ -606,9 +976,11 @@ class StrategyInventor:
             doc = {
                 "version": 1,
                 "enabled": self._enabled,
-                "strategies": {k: asdict(v) for k, v in self._strategies.items()},
+                "strategies": {k: asdict(v) for k, v in self._strategies.items()
+                               if v.status not in _TERMINAL or (v.created_at or "") >= _cutoff()},
                 "last_invent_ts": self._last_invent_ts,
                 "journal": self._journal[-200:],
+                "approvals": getattr(self, "_approvals", [])[-300:],
             }
             set_kv(KV_KEY, json.dumps(doc, default=str))
         except Exception as exc:
@@ -624,6 +996,7 @@ class StrategyInventor:
             self._enabled = bool(doc.get("enabled", False))
             self._last_invent_ts = {k: float(v) for k, v in (doc.get("last_invent_ts") or {}).items()}
             self._journal = list(doc.get("journal") or [])
+            self._approvals = list(doc.get("approvals") or [])
             for k, v in (doc.get("strategies") or {}).items():
                 try:
                     self._strategies[k] = InventedStrategy(**{f: v[f] for f in InventedStrategy.__dataclass_fields__ if f in v})
@@ -639,7 +1012,28 @@ class StrategyInventor:
             "status": self.status(),
             "strategies": self.list_strategies(include_done=True),
             "journal": self.journal(40),
+            "approvals": self.approvals(60),
+            "segments": self._segment_summary(),
         }
+
+    def _segment_summary(self) -> list[dict]:
+        out = []
+        try:
+            from segments import SEGMENT_ORDER, segment_manager, _limits
+            for code in SEGMENT_ORDER:
+                lim = _limits(code)
+                act = [s for s in self._strategies.values()
+                       if s.segment == code and s.status not in _TERMINAL]
+                out.append({"code": code, "capital": lim["capital"],
+                            "max_daily_loss": lim["max_daily_loss"],
+                            "risk_per_trade": lim.get("risk_per_trade"),
+                            "pnl": segment_manager.pnl(code).get("total", 0.0),
+                            "killed": segment_manager.killed(code),
+                            "invented_active": len(act),
+                            "invented_pnl_today": self.realised_today(code)["realised"]})
+        except Exception as exc:
+            logger.debug("[invent] segment summary: {}", exc)
+        return out
 
 
 strategy_inventor = StrategyInventor()
