@@ -453,6 +453,9 @@ class StrategyInventor:
             t = native_engine.trend(key)
             if not t:
                 continue
+            lots, _m, _why = native_engine.size_lots(key, native_engine.stop_distance(key))
+            if lots < 1:
+                continue          # cannot be sized inside the segment's risk/margin budget
             rank = (t["price_source"] == "KITE", t["strength"])
             if best is None or rank > best[0]:
                 best = (rank, c, key, t)
