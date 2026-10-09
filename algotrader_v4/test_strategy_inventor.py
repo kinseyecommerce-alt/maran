@@ -257,6 +257,14 @@ def test_master_waits_for_kite_prices_when_live_data_on():
          mock.patch.object(inv, "_can_invent", return_value=(False, "x")):
         inv.evaluate()
     ok("strategy approved on SIMULATED prices retires once Kite data is on", old.status == "expired", old.status)
+    legacy = InventedStrategy(id="INV-NSE_EQ-LEG", segment="NSE_EQ", name="y", regime="BULL_TREND", side="BUY",
+                              style="pullback", stop_pct=0.8, target_pct=1.6, max_qty=1,
+                              status="paper_active", created_at=now_ist().isoformat(timespec="seconds"),
+                              expires_at=(now_ist() + timedelta(hours=1)).isoformat(timespec="seconds"))
+    inv._strategies[legacy.id] = legacy
+    with mock.patch.object(inv, "_can_invent", return_value=(False, "x")):
+        inv.evaluate()
+    ok("pre-master (unreviewed) strategy retires", legacy.status == "expired", legacy.status)
     calls = []
     with mock.patch.object(inv, "_regime", return_value="UNKNOWN"), \
          mock.patch.object(inv, "_can_invent", return_value=(True, "ok")), \

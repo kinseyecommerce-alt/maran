@@ -571,6 +571,15 @@ class StrategyInventor:
                     s.status = "expired"
                     summary["expired"].append(s.id)
                     self._log("expired", s.segment, "TTL", s.id)
+            # Strategies from before master approval existed (never reviewed) retire
+            for s in list(self._strategies.values()):
+                if s.status in ("paper_active", "live_eligible", "proposed") and not s.approved_by \
+                        and not s.live_armed:
+                    self._flatten_paper(s, "retired_unreviewed")
+                    s.status = "expired"
+                    s.reason = "created before master review — retired"
+                    summary["expired"].append(s.id)
+                    self._log("expired", s.segment, s.reason, s.id)
             # Strategies approved on SIMULATED prices retire once Kite live data is on
             if self._live_data_on():
                 for s in list(self._strategies.values()):
