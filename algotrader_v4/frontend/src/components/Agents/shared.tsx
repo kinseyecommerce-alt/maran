@@ -13,12 +13,12 @@ export const STRATEGY_META: Record<string, { displayName: string; strategy: stri
   mean_reversion:     { displayName: 'MEAN REV',     strategy: 'Mean Reversion',       id: 'AGN-07' },
   pairs:              { displayName: 'PAIRS ARB',    strategy: 'Statistical Arb',      id: 'AGN-08' },
   option_scalping:    { displayName: 'OPT SCALP',    strategy: 'Option Scalping',      id: 'AGN-09' },
-  bse_momentum:       { displayName: 'BSE MOMENTUM', strategy: 'EMA cross · simulated', id: 'BSE-01' },
-  bse_mean_reversion: { displayName: 'BSE MEAN REV', strategy: 'z-score · simulated',  id: 'BSE-02' },
-  mcx_trend:          { displayName: 'MCX TREND',    strategy: 'EMA cross · simulated', id: 'MCX-01' },
-  mcx_mean_reversion: { displayName: 'MCX MEAN REV', strategy: 'z-score · simulated',  id: 'MCX-02' },
-  cds_trend:          { displayName: 'CDS TREND',    strategy: 'EMA cross · simulated', id: 'CDS-01' },
-  cds_mean_reversion: { displayName: 'CDS MEAN REV', strategy: 'z-score · simulated',  id: 'CDS-02' },
+  bse_momentum:       { displayName: 'BSE MOMENTUM', strategy: 'EMA cross · Kite or sim', id: 'BSE-01' },
+  bse_mean_reversion: { displayName: 'BSE MEAN REV', strategy: 'z-score · Kite or sim',  id: 'BSE-02' },
+  mcx_trend:          { displayName: 'MCX TREND',    strategy: 'EMA cross · Kite or sim', id: 'MCX-01' },
+  mcx_mean_reversion: { displayName: 'MCX MEAN REV', strategy: 'z-score · Kite or sim',  id: 'MCX-02' },
+  cds_trend:          { displayName: 'CDS TREND',    strategy: 'EMA cross · Kite or sim', id: 'CDS-01' },
+  cds_mean_reversion: { displayName: 'CDS MEAN REV', strategy: 'z-score · Kite or sim',  id: 'CDS-02' },
 }
 
 export const SEGMENT_ORDER = ['NSE_EQ', 'NSE_FO', 'BSE_EQ', 'MCX', 'CDS'] as const
