@@ -246,6 +246,17 @@ def test_master_waits_for_kite_prices_when_live_data_on():
         r = inv.invent("MCX", force=True)
     ok("SIMULATED-price design rejected while Kite live data is on", r.get("ok") is False
        and "waiting for live Kite" in r.get("reason", ""), r)
+    from strategy_inventor import InventedStrategy
+    old = InventedStrategy(id="INV-MCX-OLD", segment="MCX", name="x", regime="UNKNOWN", side="BUY",
+                           style="trend_follow", stop_pct=0.3, target_pct=0.5, max_qty=1,
+                           status="paper_active", created_at=now_ist().isoformat(timespec="seconds"),
+                           expires_at=(now_ist() + timedelta(hours=1)).isoformat(timespec="seconds"),
+                           approval_rationale="...; SIMULATED price (no Kite quote); PAPER only")
+    inv._strategies[old.id] = old
+    with mock.patch.object(inv, "_live_data_on", return_value=True), \
+         mock.patch.object(inv, "_can_invent", return_value=(False, "x")):
+        inv.evaluate()
+    ok("strategy approved on SIMULATED prices retires once Kite data is on", old.status == "expired", old.status)
     calls = []
     with mock.patch.object(inv, "_regime", return_value="UNKNOWN"), \
          mock.patch.object(inv, "_can_invent", return_value=(True, "ok")), \

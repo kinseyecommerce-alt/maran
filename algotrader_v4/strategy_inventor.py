@@ -571,6 +571,15 @@ class StrategyInventor:
                     s.status = "expired"
                     summary["expired"].append(s.id)
                     self._log("expired", s.segment, "TTL", s.id)
+            # Strategies approved on SIMULATED prices retire once Kite live data is on
+            if self._live_data_on():
+                for s in list(self._strategies.values()):
+                    if (s.status in ("paper_active", "live_eligible", "proposed") and not s.order_id
+                            and "SIMULATED price" in (s.approval_rationale or "")):
+                        s.status = "expired"
+                        s.reason = "designed on simulated prices — retired (Kite live data on)"
+                        summary["expired"].append(s.id)
+                        self._log("expired", s.segment, s.reason, s.id)
             # Manage open paper positions (SL/target) and re-enter flat ones
             for s in list(self._strategies.values()):
                 if s.status not in ("paper_active", "live_eligible") or s.live_armed:

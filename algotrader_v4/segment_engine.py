@@ -351,6 +351,10 @@ class NativeEngine:
         from segments import segment_manager, _limits
         key = f"{c.symbol}@{c.segment}"
         px = self.price[key]
+        ok_px, why = self.tradable_price(key)
+        if not ok_px:
+            strat.state.last_signal = {"symbol": c.symbol, "action": side, "skipped": why}
+            return None
         dist = self.stop_distance(key)
         lots, margin_lot, why = self.size_lots(key, dist)
         if lots < 1:
@@ -421,6 +425,9 @@ class NativeEngine:
         if key in self.positions_:
             return {"ok": False, "reason": f"{symbol} already has an open position"}
         c = self.contracts[key]
+        ok_px, why = self.tradable_price(key)
+        if not ok_px:
+            return {"ok": False, "reason": why}
         if lots is None:
             lots, margin_lot, why = self.size_lots(key, stop_dist)
         else:
@@ -476,6 +483,16 @@ class NativeEngine:
                 "strength": abs(mv) / rng, "price_source": self.src.get(key, "SIMULATED")}
 
     # ── Kite quote overlay ────────────────────────────────────────────────
+    def tradable_price(self, key: str) -> tuple[bool, str]:
+        """With the Kite overlay on, entries need a fresh Kite quote for the
+        instrument (no trading on restored / simulated levels meanwhile)."""
+        if not self._kite_wanted():
+            return True, "simulator"
+        live = self.kite_px.get(key)
+        if self.src.get(key) == "KITE" and live and time.time() - live[1] <= KITE_FRESH_SEC:
+            return True, "kite"
+        return False, "waiting for a fresh Kite quote"
+
     def _kite_wanted(self) -> bool:
         if settings.trading_mode != "PAPER":
             return False          # LIVE never prices paper ledgers here (segments can't be armed)
@@ -809,11 +826,9 @@ class NativeEngine:
             for k, v in (data.get("price") or {}).items():
                 if k in self.contracts:
                     self.price[k] = float(v)
-            for k, v in (data.get("src") or {}).items():
-                if k in self.contracts and v in ("KITE", "SIMULATED"):
-                    # KITE positions survive a restart; the overlay re-confirms
-                    # (or falls back) on the first poll.
-                    self.src[k] = v
+            # Price sources are NOT restored: every instrument re-confirms on a
+            # fresh Kite quote (bars reset then), since the resolved contract may
+            # differ after a restart. Positions opened on KITE prices keep running.
             for k, v in (data.get("bars") or {}).items():
                 if k in self.contracts:
                     self.bars[k] = deque((float(x) for x in v), maxlen=240)

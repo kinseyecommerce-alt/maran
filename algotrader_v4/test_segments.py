@@ -663,6 +663,16 @@ def t_kite_overlay_labels_and_switch():
         import book
         rows = [p for p in book.positions() if p.get("tradingsymbol") == "COPPER-FUT"]
         assert rows and rows[0]["price_source"] == "KITE" and rows[0]["simulated"] is False
+        native_engine.flatten("MCX")
+        with mock.patch.object(native_engine, "_kite_wanted", return_value=True):
+            native_engine.kite_px[key] = (1012.5, _t.time() - 60)                      # aging quote
+            r = native_engine.open_external("MCX", "COPPER-FUT", "BUY", strategy="mcx_trend",
+                                            stop_dist=50.0, target_dist=50.0, lots=1)
+            assert not r["ok"] and "fresh Kite quote" in r["reason"], r
+            native_engine.kite_px[key] = (1012.5, _t.time())
+            r = native_engine.open_external("MCX", "COPPER-FUT", "BUY", strategy="mcx_trend",
+                                            stop_dist=50.0, target_dist=50.0, lots=1)
+            assert r["ok"], r
         native_engine.kite_px[key] = (1012.5, _t.time() - 500)                         # stale
         native_engine.step(1.0)
         assert native_engine.src[key] == "SIMULATED"
