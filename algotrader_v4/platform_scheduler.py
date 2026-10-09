@@ -181,6 +181,10 @@ class PlatformScheduler:
             return
         try:
             from self_learning import learning
+            last = (learning.store.kv_get("last_cycle", {}) or {}).get("ts") or ""
+            if last[:10] == now_ist().date().isoformat() and last[11:13] >= "15":
+                logger.info("[platform] learning cycle already ran after today's close ({}) — skipped", last)
+                return
             rep = await asyncio.to_thread(learning.run_cycle, True)
             acc = sum(1 for r in rep.get("retunes", []) if r.get("accepted"))
             logger.info("[platform] learning cycle: {} reviews, {} retunes ({} accepted), {}s",
