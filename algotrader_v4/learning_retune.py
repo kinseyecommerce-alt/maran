@@ -347,5 +347,126 @@ def retune_all(sl, segments: Optional[list[str]] = None, history: Optional[Histo
                              f"{g['params']} — re-enables on next /bot/start: {', '.join(g['passed'][:10])}")
             except Exception as exc:
                 out["errors"].append(f"{name}: {exc}")
+    try:
+        out["retunes"].extend(retune_scalpers(sl, segments))
+    except Exception as exc:
+        out["errors"].append(f"scalpers: {exc}")
     out["history_notes"] = history.notes
+    return out
+
+
+# ── fast scalper: replay on recorded Kite ticks ───────────────────────────
+def load_ticks(segment: str, days: int = 5, root: Optional[Path] = None) -> dict[str, list]:
+    """{key: [(ts, ltp, bid, ask, bq5, aq5, b0q, a0q, vol)]} from logs/ticks/<day>/<key>.csv."""
+    import csv as _csv
+    root = root or Path("logs/ticks")
+    out: dict[str, list] = {}
+    if not root.exists():
+        return out
+    for d in sorted(p for p in root.iterdir() if p.is_dir())[-days:]:
+        for f in d.glob(f"*@{segment}.csv"):
+            rows = out.setdefault(f.stem, [])
+            with open(f) as fh:
+                for r in _csv.reader(fh):
+                    try:
+                        rows.append(tuple(float(x) for x in r))
+                    except Exception:
+                        continue
+    return out
+
+
+def replay_scalper(rows: list[tuple], inst, params: dict, risk: float = 2_500.0) -> list[float]:
+    """Net ₹ per scalp on recorded ticks — same ScalpLogic as live."""
+    from fast_scalper import ScalpLogic, SState
+    from cost_model import total, kind_for
+    st = SState()
+    out: list[float] = []
+    kind = "EQ_INTRADAY" if inst.segment in ("NSE_EQ", "BSE_EQ") else kind_for(inst.segment, "", inst.symbol)
+    last_entry = -1e9
+    for (ts, ltp, bid, ask, bq, aq, b0, a0, vol) in rows:
+        t = {"ltp": ltp, "bid": bid, "ask": ask, "volume": int(vol), "recv_ts": ts,
+             "bids": [(bid, int(b0), 1), (0.0, int(max(bq - b0, 0)), 0)],
+             "asks": [(ask, int(a0), 1), (0.0, int(max(aq - a0, 0)), 0)]}
+        vd = max(0, int(vol) - st.last_vol) if st.last_vol is not None else 0
+        st.last_vol = int(vol)
+        st.ticks.append((ts, ltp))
+        if vd:
+            st.pv += ltp * vd
+            st.v += vd
+        if ts - st.bar_ts >= 15 or not st.bars:
+            st.bars.append(ltp); st.bar_ts = ts
+        else:
+            st.bars[-1] = ltp
+        if st.pos:
+            ex = ScalpLogic.exit_reason(st.pos, t, ts, params)
+            if ex:
+                p = st.pos
+                q = p["units"]
+                gross = (ex[1] - p["entry"]) * q * p["side"]
+                out.append(gross - total(kind, q, p["entry"], ex[1], "BUY" if p["side"] > 0 else "SELL",
+                                         inst.exchange))
+                st.pos = None
+            continue
+        if st.order:
+            if ScalpLogic.queue_fill(st.order, t, vd):
+                o = st.order
+                st.pos = {"side": o["side"], "entry": o["px"], "sl": o["px"] - o["side"] * o["sl_d"],
+                          "tp": o["px"] + o["side"] * o["tp_d"], "opened": ts, "units": o["units"]}
+                st.order = None
+                last_entry = ts
+            elif ts - st.order["ts"] > 6.0:
+                st.order = None
+            continue
+        if ts - last_entry < 30 or not bid or not ask:
+            continue
+        f = ScalpLogic.features(st, t, inst)
+        side = ScalpLogic.signal(f, params)
+        if not side:
+            continue
+        sl_d = float(params["sl_ticks"]) * inst.tick
+        lots = int(risk // (sl_d * inst.mult * inst.lot)) if sl_d > 0 else 0
+        if lots < 1:
+            continue
+        units = lots * inst.mult * inst.lot
+        px = bid if side > 0 else ask
+        okc, _tp, _need = ScalpLogic.cost_ok(inst, px, units, params, ask - bid)
+        if not okc:
+            continue
+        st.order = {"side": side, "px": px, "queue": int(b0 if side > 0 else a0), "ts": ts,
+                    "sl_d": sl_d, "tp_d": float(params["tp_ticks"]) * inst.tick, "units": units}
+    return out
+
+
+def retune_scalpers(sl, segments: Optional[list[str]] = None) -> list[dict]:
+    from fast_scalper import fast_scalper
+    from self_learning import SCALP
+    out = []
+    by_seg: dict[str, dict] = {}
+    for inst in fast_scalper.insts.values():
+        by_seg.setdefault(inst.segment, {})[inst.key] = inst
+    for seg in ("NSE_EQ", "NSE_FO", "BSE_EQ", "MCX", "CDS"):
+        if segments and seg not in segments:
+            continue
+        ticks = load_ticks(seg)
+        insts = by_seg.get(seg, {})
+        n_ticks = sum(len(v) for v in ticks.values())
+        if not ticks or not insts:
+            out.append({"strategy": f"scalp:{seg}", "accepted": False,
+                        "reason": f"no recorded Kite ticks yet ({n_ticks})", "data": "recorded ticks"})
+            continue
+
+        def ev(params: dict, part: str, _ticks=ticks, _insts=insts) -> list[float]:
+            res: list[float] = []
+            for key, rows in _ticks.items():
+                inst = _insts.get(key)
+                if not inst or len(rows) < 200:
+                    continue
+                k = int(len(rows) * TRAIN_FRAC)
+                res.extend(replay_scalper(rows[:k] if part == "train" else rows[k:], inst, params))
+            return res
+        cur = sl.params(f"scalp:{seg}")
+        cands = sl.grid(SCALP, cur, ("imb_entry", "sl_ticks", "tp_ticks"))
+        r = sl.retune(f"scalp:{seg}", ev, cands)
+        r["data"] = f"recorded Kite WS ticks ({n_ticks:,} ticks, {len(ticks)} instruments)"
+        out.append(r)
     return out

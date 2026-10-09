@@ -355,7 +355,7 @@ class NativeEngine:
 
     # ── orders (paper ledger only) ─────────────────────────────────────────
     def route_order(self, segment: str, symbol: str, side: str, lots: int, reason: str,
-                    strategy: Optional[str] = None) -> dict:
+                    strategy: Optional[str] = None, fill_price: Optional[float] = None) -> dict:
         from segments import segment_manager
         if segment_manager.effective_mode(segment) == "LIVE":
             # Unreachable by construction (segments cannot be armed); kept as a hard stop.
@@ -371,6 +371,8 @@ class NativeEngine:
         if ba and time.time() - ba[2] <= KITE_FRESH_SEC and ba[0] > 0 and ba[1] >= ba[0] \
                 and (ba[1] - ba[0]) <= 0.01 * px:
             px = ba[1] if side == "BUY" else ba[0]
+        if fill_price is not None and fill_price > 0:
+            px = float(fill_price)        # resting LIMIT filled by the scalper's queue model
         oid = f"PAPER-{segment}-{uuid.uuid4().hex[:8].upper()}"
         rec = {"order_id": oid, "segment": segment, "symbol": symbol, "side": side, "lots": lots,
                "price": round(px, 4), "ltp": round(ltp, 4), "ts": _now_iso(),
@@ -469,7 +471,7 @@ class NativeEngine:
     def open_external(self, segment: str, symbol: str, side: str, *, strategy: str,
                       stop_dist: float, target_dist: float, lots: Optional[int] = None,
                       time_stop_sec: int = TIME_STOP_SEC, reason: str = "",
-                      features: Optional[dict] = None) -> dict:
+                      features: Optional[dict] = None, fill_price: Optional[float] = None) -> dict:
         """Open a PAPER position owned by an outside strategy (the master-approved
         invented strategies). Same gates as native entries (segment
         entry_check: kill switch, hours, daily loss, positions, capital); the
@@ -493,7 +495,8 @@ class NativeEngine:
         ok, why = segment_manager.entry_check(segment, notional=lots * margin_lot, transaction_type=side)
         if not ok:
             return {"ok": False, "reason": why}
-        rec = self.route_order(segment, symbol, side, lots, reason or f"{strategy} entry", strategy)
+        rec = self.route_order(segment, symbol, side, lots, reason or f"{strategy} entry", strategy,
+                               fill_price=fill_price)
         sgn = 1 if side == "BUY" else -1
         pos = {"key": key, "symbol": symbol, "segment": segment, "strategy": strategy,
                "side": side, "lots": lots, "qty": sgn * lots, "entry": rec["price"],

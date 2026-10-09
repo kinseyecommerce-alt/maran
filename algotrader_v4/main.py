@@ -2663,6 +2663,30 @@ async def learning_run(req: LearningRunRequest):
         raise HTTPException(409, str(exc))
 
 
+@app.get("/scalper/status", tags=["Learning"])
+def scalper_status():
+    """Fast scalper (PAPER): Kite WS feed status, per-segment stats, open scalps,
+    tick→decision latency, active (learned) tick thresholds."""
+    from fast_scalper import fast_scalper
+    return fast_scalper.status()
+
+
+class ScalperEnableRequest(BaseModel):
+    enabled: bool
+
+
+@app.post("/scalper/enable", tags=["Learning"])
+def scalper_enable(req: ScalperEnableRequest):
+    from fast_scalper import fast_scalper
+    if req.enabled:
+        r = fast_scalper.start()
+        if not r.get("ok"):
+            raise HTTPException(409, r.get("reason", "cannot start"))
+        return r
+    fast_scalper.enabled = False
+    return {"ok": True, "enabled": False}
+
+
 @app.post("/invent/{strategy_id}/approve", tags=["Invent"])
 def invent_approve(strategy_id: str):
     """Approve a pending proposal for PAPER trading (only needed when master
@@ -4226,6 +4250,19 @@ async def on_startup():
                 except Exception as _lo_exc:
                     logger.debug("[learning] observer: {}", _lo_exc)
         asyncio.create_task(_learning_observer(), name="learning_observer").add_done_callback(_log_task_exc)
+
+        # Fast scalper on the Kite WebSocket (PAPER only, needs a Kite session).
+        async def _start_scalper() -> None:
+            await asyncio.sleep(20)
+            if settings.trading_mode != "PAPER" or not getattr(settings, "fast_scalper_enabled", True):
+                return
+            if kite_client._kite is None:
+                logger.info("[scalper] Kite not connected — fast scalper idle")
+                return
+            from fast_scalper import fast_scalper
+            r = await asyncio.to_thread(fast_scalper.start)
+            logger.info("[scalper] {}", r)
+        asyncio.create_task(_start_scalper(), name="fast_scalper_start").add_done_callback(_log_task_exc)
     except Exception as _le_exc:
         logger.warning("[startup] self-learning not started: {}", _le_exc)
 

@@ -506,6 +506,8 @@ class SelfLearning:
 
     def _strategy_for_order(self, o: dict) -> tuple[str, str]:
         tag = o.get("tag") or ""
+        if tag.startswith("SCALPX-"):
+            return f"scalp:{tag.split('-', 1)[1]}", "scalp"
         if tag.startswith("INV"):
             sid = tag.split("-", 1)[1] if "-" in tag else tag
             seg = next((x for x in ("NSE_EQ", "NSE_FO") if x in sid), "NSE")
@@ -563,6 +565,8 @@ class SelfLearning:
                     if s2 != "unknown" and (strat == "unknown" or not s2.endswith("-?")):
                         strat, fam = s2, f2
                 seg = "NSE_FO" if (o.get("exchange") == "NFO" or sym.endswith("FUT")) else "NSE_EQ"
+                if strat.startswith("scalp:"):
+                    seg = strat.split(":", 1)[1]
                 if strat.startswith("invent:") and "-NSE_FO-" in strat:
                     seg = "NSE_FO"
                 jid = f"{o.get('order_id')}:{eo.get('order_id')}"

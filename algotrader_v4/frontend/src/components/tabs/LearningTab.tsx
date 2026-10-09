@@ -27,11 +27,13 @@ function Card({ title, children, right }: { title: string; children: React.React
 export default function LearningTab() {
   const [r, setR] = useState<any>(null)
   const [err, setErr] = useState('')
+  const [sc, setSc] = useState<any>(null)
 
   const refresh = useCallback(async () => {
     try {
       const res = await api.learningReport()
       setR(res.data); setErr('')
+      try { const s2 = await api.scalperStatus(); setSc(s2.data) } catch { /* scalper optional */ }
     } catch (e: any) {
       setErr(e?.response?.data?.detail || e.message || 'refresh failed')
     }
@@ -105,6 +107,34 @@ export default function LearningTab() {
           )}
         </Card>
       </div>
+
+
+      <Card title="Fast scalper — Kite WebSocket, per-tick decisions (PAPER)">
+        {!sc ? <div className="text-slate-500">Scalper status unavailable.</div> : (
+          <div className="grid grid-cols-4 gap-3">
+            <div>
+              <div className="text-slate-400">Feed</div>
+              <div className={sc.feed?.connected ? 'text-emerald-400' : 'text-rose-400'}>{sc.feed?.connected ? 'WS connected' : 'WS down'} · {sc.feed?.subscribed ?? 0} tokens</div>
+              <div className="text-slate-500">{(sc.feed?.ticks ?? 0).toLocaleString('en-IN')} ticks{sc.feed?.last_error ? ` · ${sc.feed.last_error}` : ''}</div>
+            </div>
+            <div>
+              <div className="text-slate-400">Tick → decision latency</div>
+              <div className="font-mono">{sc.latency ? `p50 ${sc.latency.p50_ms} ms · p95 ${sc.latency.p95_ms} ms` : '—'}</div>
+              <div className="text-slate-500">{sc.latency ? `${sc.latency.n} ticks` : 'no ticks yet'}</div>
+            </div>
+            <div>
+              <div className="text-slate-400">Activity</div>
+              <div className="font-mono">{sc.stats?.signals ?? 0} signals · {sc.stats?.fills ?? 0} fills · {sc.stats?.exits ?? 0} exits</div>
+              <div className="text-slate-500">skips: cost {sc.stats?.cost_skips ?? 0} · caps {sc.stats?.cap_skips ?? 0} · gates {sc.stats?.gate_skips ?? 0}</div>
+            </div>
+            <div>
+              <div className="text-slate-400">Scalp P&L today (paper)</div>
+              <div className={`font-mono ${pnlCls(sc.stats?.pnl)}`}>{inr(sc.stats?.pnl)}</div>
+              <div className="text-slate-500">{sc.instruments} instruments · {Object.entries(sc.by_segment_instruments || {}).map(([k, v]: any) => `${k} ${v}`).join(' · ')}</div>
+            </div>
+          </div>
+        )}
+      </Card>
 
       <Card title="Strategies — stats after costs, active params, status">
         <table className="w-full font-mono">

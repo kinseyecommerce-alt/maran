@@ -323,12 +323,80 @@ def test_report_shape():
         ok(f"report has {k}", k in r)
 
 
+def test_kite_ws_parser():
+    import struct
+    from kite_ws_feed import parse_binary
+    tok = (12345 << 8) | 7          # MCX segment → price / 100
+    pk = struct.pack(">I", tok) + struct.pack(">i", 560000) + struct.pack(">9i", 1, 559900, 1000, 10, 20, 555000, 561000, 554000, 556000)
+    pk += struct.pack(">5i", 0, 0, 0, 0, 0)
+    for k in range(10):
+        pk += struct.pack(">iiHH", 10 + k, 559900 - 100 * k if k < 5 else 560100 + 100 * (k - 5), 1, 0)
+    frame = struct.pack(">H", 1) + struct.pack(">H", len(pk)) + pk
+    t = parse_binary(frame)[0]
+    ok("full packet: ltp / best bid / best ask", t["ltp"] == 5600.0 and t["bid"] == 5599.0 and t["ask"] == 5601.0, t)
+    ok("5-level depth both sides", len(t["bids"]) == 5 and len(t["asks"]) == 5 and t["bids"][0][1] == 10)
+    cds = (777 << 8) | 3
+    f2 = struct.pack(">H", 1) + struct.pack(">H", 8) + struct.pack(">I", cds) + struct.pack(">i", 885000000)
+    ok("CDS divisor 1e7", abs(parse_binary(f2)[0]["ltp"] - 88.5) < 1e-9)
+
+
+def _inst(seg="MCX", tick=1.0, mult=10.0):
+    from fast_scalper import Inst
+    return Inst(f"CRUDEOILM-FUT@{seg}", seg, "CRUDEOILM-FUT", 1, tick, mult, 1, "native", "MCX")
+
+
+def test_scalp_logic():
+    from fast_scalper import ScalpLogic
+    p = fresh().params("scalp:MCX")
+    o = {"side": 1, "px": 100.0, "queue": 50}
+    ok("queue: not filled while ahead of us", not ScalpLogic.queue_fill(o, {"ltp": 100.0, "bid": 100.0, "ask": 101.0}, 30))
+    ok("queue: filled when traded volume exhausts the queue", ScalpLogic.queue_fill(o, {"ltp": 100.0, "bid": 100.0, "ask": 101.0}, 25))
+    o2 = {"side": 1, "px": 100.0, "queue": 999}
+    ok("queue: filled when ask comes to our price", ScalpLogic.queue_fill(o2, {"ltp": 100.5, "bid": 99.5, "ask": 100.0}, 0))
+    pos = {"side": 1, "entry": 100.0, "sl": 94.0, "tp": 109.0, "opened": 0.0}
+    ok("long target marked on the bid", ScalpLogic.exit_reason(pos, {"ltp": 110, "bid": 109.0, "ask": 110.0}, 1, p)[0] == "target")
+    ok("long not at target while only the ask touches", ScalpLogic.exit_reason(pos, {"ltp": 109, "bid": 108.0, "ask": 109.0}, 1, p) is None)
+    ok("time stop in seconds", ScalpLogic.exit_reason(pos, {"ltp": 100, "bid": 100, "ask": 101}, p["time_stop_sec"] + 1, p)[0] == "time_stop")
+    # cost gate: a 9-tick target on a ₹0.0025-tick instrument with ₹1 costs/unit is skipped
+    tiny = _inst("CDS", tick=0.0025, mult=1000.0)
+    okc, tp, need = ScalpLogic.cost_ok(tiny, 88.5, 1000.0, p, 0.0025)
+    ok("cost-aware gate skips edge < costs + spread", not okc and tp < need, (tp, need))
+    big = _inst("MCX", tick=1.0, mult=10.0)
+    okc2, tp2, need2 = ScalpLogic.cost_ok(big, 5600.0, 10.0, {**p, "tp_ticks": 20}, 1.0)
+    ok("cost-aware gate allows a target well above costs", okc2, (tp2, need2))
+    f = {"imbalance": 0.5, "spread_ticks": 1, "tick_mom": 5, "vwap_dev": 0, "bar_mom_ticks": 1}
+    ok("signal long on bid imbalance + up-ticks", ScalpLogic.signal(f, p) == 1)
+    ok("no signal on a wide spread", ScalpLogic.signal({**f, "spread_ticks": 5}, p) == 0)
+
+
+def test_scalper_paper_only_and_replay():
+    from fast_scalper import FastScalper
+    from learning_retune import replay_scalper
+    old = settings.trading_mode
+    try:
+        settings.trading_mode = "LIVE"
+        ok("fast scalper refuses to start outside PAPER", FastScalper().start().get("ok") is False)
+    finally:
+        settings.trading_mode = old
+    rnd = random.Random(3)
+    rows, px, vol, ts = [], 5600.0, 0, 0.0
+    for k in range(4000):
+        drift = 1 if (k // 300) % 2 == 0 else -1
+        px += drift * (1 if rnd.random() < 0.6 else -1)
+        vol += rnd.randint(1, 20)
+        ts += 0.5
+        b0, a0 = (300, 50) if drift > 0 else (50, 300)
+        rows.append((ts, px, px - 1, px, b0 * 3, a0 * 3, b0, a0, vol))
+    tr = replay_scalper(rows, _inst(), {**fresh().params("scalp:MCX"), "tp_ticks": 12})
+    ok("scalper replay on recorded ticks produces costed trades", len(tr) > 3, len(tr))
+
+
 if __name__ == "__main__":
     print("\n  SELF-LEARNING TESTS")
     for fn in (test_cost_model, test_journal_net_and_idempotent, test_stats, test_retune_accept_and_reject,
                test_grid_is_bounded, test_retirement_and_probation, test_drawdown_retire, test_cooloff,
                test_rollback, test_guardrails, test_readiness_display_only, test_native_replay_and_lessons,
-               test_report_shape):
+               test_report_shape, test_kite_ws_parser, test_scalp_logic, test_scalper_paper_only_and_replay):
         print(f"\n  — {fn.__name__}")
         try:
             fn()

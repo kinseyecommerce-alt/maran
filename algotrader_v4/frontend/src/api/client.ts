@@ -79,6 +79,7 @@ export const api = {
   // ── Self-improvement (PAPER only) ───────────────────────────────────────────
   learningReport:    () => ax().get('/learning/report'),
   learningJournal:   (limit = 100) => ax().get('/learning/journal', { params: { limit } }),
+  scalperStatus:     () => ax().get('/scalper/status'),
 
 // ── Market ──────────────────────────────────────────────────────────────────
   marketLive:       () => ax().get('/market/live'),
