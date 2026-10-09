@@ -574,13 +574,26 @@ def me(request: Request):
 
 @app.get("/auth/kite/status", tags=["Auth"])
 def kite_status():
-    """Check whether a valid Kite access token is loaded."""
+    """Check whether a valid Kite access token is loaded.
+
+    Reports the REAL broker session in every mode. kite_client.profile() returns
+    a "PAPER" stub in PAPER mode, which made the dashboard show "Kite Connected"
+    before any Zerodha login — so the daily login looked unnecessary and paper
+    prices silently stayed simulated. profile() is a read-only call; orders
+    remain simulated in PAPER regardless of this status."""
+    paper = settings.trading_mode == "PAPER"
+    extra = {"paper_mode": paper,
+             "live_prices": bool(not paper or getattr(settings, "paper_use_live_data", False))}
+    if kite_client._kite is None or not settings.kite_access_token:
+        return {"connected": False, **extra,
+                "message": "No valid Kite session. Use Connect Kite Account."}
     try:
-        profile = kite_client.profile()
-        return {"connected": True, "account_id": profile.get("user_id", ""),
+        profile = kite_client.kite.profile()
+        return {"connected": True, **extra, "account_id": profile.get("user_id", ""),
                 "name": profile.get("user_name", ""), "email": profile.get("email", "")}
     except Exception:
-        return {"connected": False, "message": "No valid Kite session. Use Connect Kite Account."}
+        return {"connected": False, **extra,
+                "message": "No valid Kite session (token expired?). Use Connect Kite Account."}
 
 @app.get("/auth/kite/balance", tags=["Auth"])
 def kite_balance():

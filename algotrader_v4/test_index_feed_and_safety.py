@@ -343,6 +343,64 @@ def t_paper_never_calls_kite_orders():
 
 run("PAPER place/modify/cancel never touch Kite order endpoints", t_paper_never_calls_kite_orders)
 
+
+class _ConnectedTripwireKite(_TripwireKite):
+    """A REAL-looking Kite session (daily login done): read-only data calls
+    work, every order endpoint trips."""
+    def profile(self):
+        return {"user_id": "AB1234", "user_name": "Test User", "email": ""}
+
+
+def t_paper_live_data_with_kite_session_still_paper():
+    """kite_ready (session + key/secret) + PAPER_USE_LIVE_DATA must switch only
+    the price source — orders, modifies, cancels and square-offs stay simulated."""
+    trip = _ConnectedTripwireKite()
+    orig = (kite_client._kite, kite_client._place_live_reconcile, settings.paper_use_live_data,
+            settings.kite_access_token, settings.kite_api_key, settings.kite_api_secret)
+    live_calls = []
+    kite_client._place_live_reconcile = lambda *a, **k: live_calls.append(a) or "LIVE"
+    try:
+        settings.paper_use_live_data = True
+        settings.kite_access_token = "x" * 32
+        settings.kite_api_key, settings.kite_api_secret = "k" * 16, "s" * 32
+        kite_client._kite = trip
+        assert settings.trading_mode == "PAPER"
+        assert kite_client._paper_data_stub() is False      # prices now come from Kite
+        from strategy_inventor import strategy_inventor as _inv
+        assert _inv._kite_ready() is True
+        oid = kite_client.place_order(tradingsymbol="SBIN", exchange="NSE", transaction_type="BUY",
+                                      quantity=1, order_type="MARKET", price=800.0, tag="t")
+        assert str(oid).startswith("PAPER-"), oid
+        sl = kite_client.place_order(tradingsymbol="SBIN", exchange="NSE", transaction_type="SELL",
+                                     quantity=1, order_type="SL-M", trigger_price=780.0, tag="t-SL")
+        kite_client.modify_order(order_id=sl, trigger_price=785.0)
+        kite_client.cancel_order(sl)
+        kite_client.squareoff_all_positions()
+        assert trip.calls == [] and live_calls == [], (trip.calls, live_calls)
+    finally:
+        (kite_client._kite, kite_client._place_live_reconcile, settings.paper_use_live_data,
+         settings.kite_access_token, settings.kite_api_key, settings.kite_api_secret) = orig
+
+
+def t_kite_status_reports_real_session_in_paper():
+    """/auth/kite/status must not claim 'connected' from the PAPER profile stub."""
+    orig = (kite_client._kite, settings.kite_access_token)
+    hdr = {"X-API-Key": "unit-test-local-only"}
+    try:
+        kite_client._kite, settings.kite_access_token = None, ""
+        r = _client.get("/auth/kite/status", headers=hdr).json()
+        assert r["connected"] is False and "No valid" in r["message"], r
+        kite_client._kite, settings.kite_access_token = _ConnectedTripwireKite(), "x" * 32
+        r = _client.get("/auth/kite/status", headers=hdr).json()
+        assert r["connected"] is True and r["account_id"] == "AB1234" and r["paper_mode"] is True, r
+    finally:
+        kite_client._kite, settings.kite_access_token = orig
+
+
+run("PAPER + live data + Kite session: orders still never reach Kite",
+    t_paper_live_data_with_kite_session_still_paper)
+run("/auth/kite/status reflects the real Kite session in PAPER", t_kite_status_reports_real_session_in_paper)
+
 # ════════════════════════════════════════════════════════════════════
 section("D. PAPER AUTONOMY HELPERS")
 from agents.base_agent import BaseAgent, _premium_trigger
