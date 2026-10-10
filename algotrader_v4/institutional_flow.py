@@ -26,6 +26,7 @@ from loguru import logger
 
 from ist_clock import now_ist as _now_ist
 from market_data import nse_client
+from ist_clock import today_ist as _today_ist
 
 # ── NSE API endpoints ──────────────────────────────────────────────────────────
 NSE_BASE             = "https://www.nseindia.com"
@@ -373,7 +374,7 @@ async def refresh_daily(symbols: Optional[list[str]] = None) -> None:
         with _cache_lock:
             _cache.update(new_entries)
             if delivery_map or combined_deal_map:
-                _last_refresh_date = date.today()
+                _last_refresh_date = _today_ist()
 
         if not (delivery_map or combined_deal_map):
             logger.warning(
@@ -397,7 +398,7 @@ def get_cached_score(symbol: str) -> dict:
     """
     sym_upper = symbol.upper()
     with _cache_lock:
-        today_fresh = _last_refresh_date == date.today()
+        today_fresh = _last_refresh_date == _today_ist()
         entry = _cache.get(sym_upper) if today_fresh else None
     return entry if entry else _default_entry(symbol)
 
@@ -427,7 +428,7 @@ async def get_institutional_score(symbol: str) -> dict:
     sym_upper = symbol.upper()
 
     with _cache_lock:
-        today_fresh = _last_refresh_date == date.today()
+        today_fresh = _last_refresh_date == _today_ist()
         entry = _cache.get(sym_upper) if today_fresh else None
     if entry:
         return entry

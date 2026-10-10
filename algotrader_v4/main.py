@@ -69,6 +69,7 @@ app.add_middleware(
 
 # Swagger UI 4.x only supports OpenAPI ≤3.0.x; override to 3.0.3
 from fastapi.openapi.utils import get_openapi
+from ist_clock import today_ist as _today_ist
 def _custom_openapi():
     if app.openapi_schema:
         return app.openapi_schema
@@ -3874,7 +3875,7 @@ async def options_chain(symbol: str, expiry_offset_days: int = Query(default=0))
     strikes = [atm_strike + (i - 5) * step for i in range(11)]  # 5 ITM, ATM, 5 OTM
 
     # Nearest expiry: next Thursday for indices
-    today = date.today()
+    today = _today_ist()
     days_to_expiry = (3 - today.weekday()) % 7 + expiry_offset_days * 7
     if days_to_expiry == 0:
         days_to_expiry = 7
@@ -4191,7 +4192,7 @@ def symbol_constituent_history(symbol: str):
     return {
         "symbol": symbol.upper(),
         "periods": index_universe.constituent_periods(symbol),
-        "is_current_member": index_universe.was_constituent(symbol, date.today().isoformat()),
+        "is_current_member": index_universe.was_constituent(symbol, _today_ist().isoformat()),
     }
 
 

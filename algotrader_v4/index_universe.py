@@ -11,6 +11,7 @@ from datetime import date, datetime
 from pathlib import Path
 from typing import Optional
 from loguru import logger
+from ist_clock import today_ist as _today_ist
 
 _CSV_PATH = Path(__file__).parent / "data" / "nifty100_history.csv"
 
@@ -102,12 +103,12 @@ class IndexUniverse:
         Return all symbols that were constituents on check_date_str.
         If check_date_str is empty, returns current universe (today).
         """
-        d = self._parse_date(check_date_str) or date.today()
+        d = self._parse_date(check_date_str) or _today_ist()
         return sorted({r["symbol"] for r in self._records if self._was_member(r["symbol"], d)})
 
     def get_current_universe(self, index: str = "NIFTY100") -> list[str]:
         """Return today's index universe."""
-        return self.get_universe(date.today().isoformat())
+        return self.get_universe(_today_ist().isoformat())
 
     def constituent_periods(self, symbol: str) -> list[dict]:
         """Return all membership periods for a symbol."""

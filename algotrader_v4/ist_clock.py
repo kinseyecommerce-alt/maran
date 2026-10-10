@@ -32,9 +32,23 @@ NSE_HOLIDAYS: frozenset[date] = frozenset({
 })
 
 
+_FROZEN: "datetime | None" = None     # test hook ONLY (freeze_clock); never set in production
+
+
 def now_ist() -> datetime:
     """Current datetime in IST (Asia/Kolkata)."""
+    if _FROZEN is not None:
+        return _FROZEN
     return datetime.now(_IST)
+
+
+def freeze_clock(dt: "datetime | None") -> None:
+    """Deterministic tests: pin now_ist() (and everything built on it — segment hours,
+    risk-manager hours, policy windows) to `dt` (naive = IST). None = real clock."""
+    global _FROZEN
+    if dt is not None and dt.tzinfo is None:
+        dt = dt.replace(tzinfo=_IST)
+    _FROZEN = dt
 
 
 def is_nse_holiday(d: date | None = None) -> bool:
@@ -99,3 +113,9 @@ def entry_session_time(outside_standin: dtime | None = None) -> dtime:
     if paper_after_hours_active() and (t < _MARKET_OPEN or t >= _MARKET_CLOSE):
         return outside_standin
     return t
+
+
+def today_ist() -> date:
+    """Today's date in IST. Use instead of date.today() — the server/box clock may be UTC,
+    which is the PREVIOUS day between 00:00 and 05:30 IST."""
+    return now_ist().date()

@@ -29,14 +29,16 @@ def main() -> int:
         ok("no remap when flag off", _hm(entry_session_time()) == _hm(now_ist().time()))
 
         settings.segment_paper_after_hours = True
-        ok("helper True in PAPER+flag", paper_after_hours_active() is True)
-        # Outside NSE cash hours → mid-session stand-in (this box runs evenings IST)
-        wall = now_ist().time().replace(tzinfo=None)
-        if wall < time(9, 15) or wall >= time(15, 30):
-            ok("remaps outside hours to 11:00", entry_session_time() == time(11, 0))
-        else:
-            ok("inside hours keeps real clock", _hm(entry_session_time()) == _hm(wall))
-
+        # audit X1 (2026-10-10): after-hours PAPER trading is DISABLED — the flag is ignored,
+        # PAPER respects real exchange hours. Deterministic at any wall-clock time.
+        ok("helper False in PAPER+flag (after-hours disabled, audit X1)", paper_after_hours_active() is False)
+        from unittest import mock
+        import ist_clock as _ic
+        from datetime import datetime as _dt
+        for hh, mm in ((20, 0), (8, 0), (11, 30)):
+            fake = _dt(2026, 10, 6, hh, mm, tzinfo=_ic._IST)
+            with mock.patch.object(_ic, "now_ist", lambda f=fake: f):
+                ok(f"no remap at {hh:02d}:{mm:02d} (real clock kept)", _ic.entry_session_time() == time(hh, mm))
         settings.trading_mode = "LIVE"
         ok("LIVE helper False even with flag", paper_after_hours_active() is False)
         ok("LIVE no remap", _hm(entry_session_time()) == _hm(now_ist().time()))
@@ -50,7 +52,7 @@ def main() -> int:
         settings.segment_paper_after_hours = saved_flag
         settings.trading_mode = saved_mode
 
-    total = 10
+    total = 12
     print(f"\n  RESULTS: {total - fails} tests -- {total - fails} passed  {fails} failed")
     return 1 if fails else 0
 

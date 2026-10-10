@@ -125,7 +125,7 @@ class NewsGate:
         now_ts = time.monotonic()
         blocked_out = {sym: reason for sym, (ts, reason) in blocked_copy.items() if ts > now_ts}
         last_poll_iso = (
-            (datetime.now() - timedelta(seconds=now_ts - self._last_poll)).isoformat(timespec="seconds")
+            (_now_ist() - timedelta(seconds=now_ts - self._last_poll)).isoformat(timespec="seconds")
             if self._last_poll else ""
         )
         return {"blocked": blocked_out, "last_poll": last_poll_iso, "use_news_gate": settings.use_news_gate}

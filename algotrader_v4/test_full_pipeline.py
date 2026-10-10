@@ -40,6 +40,8 @@ _iso_dir = _tf_iso.mkdtemp(prefix="algotrader-test-")
 _os_iso.environ.setdefault("DATABASE_PATH", _os_iso.path.join(_iso_dir, "algotrader.db"))
 _os_iso.environ.setdefault("ADAPTIVE_DATA_DIR", _os_iso.path.join(_iso_dir, "adaptive"))
 _os_iso.environ.setdefault("SEBI_AUDIT_DIR", _iso_dir)
+_os_iso.environ["LEARNING_DB"] = _os_iso.path.join(_iso_dir, "learning.db")   # never the real logs/learning.db
+_os_iso.environ["OWNER_UNIVERSE_PATH"] = _os_iso.path.join(_iso_dir, "owner_universe.json")  # explicit universe: no owner focus/pauses
 _os_iso.environ.setdefault("SEGMENT_PAPER_AFTER_HOURS", "true")   # segment hours are tested explicitly in test_segments.py
 
 import asyncio
@@ -74,6 +76,12 @@ settings.min_hold_before_indicator_exit_sec = 0
 # real INFY results date (first hit: 2026-07-13, Q1 results Jul 15).
 from alt_data import alt_data_engine as _alt_engine
 _alt_engine.is_earnings_period = lambda *a, **k: False
+# No live NSE network in a deterministic suite: bulk-deal / announcement fetches
+# took 3–8 s each (HTTP 403/404 from nseindia.com) and pushed order placement past
+# the stage's 3 s wait, so entries "never happened" depending on the network.
+_alt_engine.get_bulk_deals = lambda *a, **k: []
+_alt_engine._fetch_announcements = lambda *a, **k: []
+_alt_engine.refresh_fii_dii = lambda *a, **k: {}
 from tick_engine import (
     tick_engine, MarketSnapshot, Tick, LiveIndicators, Candle, TickBuffer,
 )
@@ -151,6 +159,11 @@ def summary() -> int:
 
 # ── Snapshot builder (same shape as test_pipeline._make_snap) ─────────────────
 MKT = datetime(2026, 5, 29, 10, 30, 0)   # Friday, mid-session IST
+# Freeze the ONE IST clock (segment hours, risk-manager hours, policy windows) at MKT so
+# the suite is deterministic on weekends/evenings — patching only strategy_agents.now_ist
+# left risk_manager refusing every entry with "NSE Stocks closed" outside real hours.
+import ist_clock as _ist_clock
+_ist_clock.freeze_clock(MKT)
 
 
 def mk(symbol, ltp, *, rsi=55.0, trend="UP", vwap=None, macd_hist=1.5,

@@ -47,6 +47,7 @@ from typing import Optional
 from loguru import logger
 
 from config import settings
+from ist_clock import today_ist as _today_ist
 
 
 @dataclass
@@ -123,7 +124,7 @@ def resolve_front_future(instruments: list[dict], name: str, today: Optional[_dt
                          roll_days: int = 2) -> Optional[dict]:
     """Nearest-expiry FUT row for `name`; rolls to the next contract when the
     nearest expires within `roll_days` (no last-day expiry trading)."""
-    today = today or _dt.date.today()
+    today = today or _today_ist()
     rows = []
     for r in instruments:
         if r.get("instrument_type") != "FUT" or r.get("name") != name:

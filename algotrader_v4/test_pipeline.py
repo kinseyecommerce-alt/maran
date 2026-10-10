@@ -343,7 +343,7 @@ def t_retry_success():
 
 def t_fno_lot_sizes():
     assert len(_FON_LOT_SIZES) >= 20
-    assert _FON_LOT_SIZES["NIFTY"] == 75
+    assert _FON_LOT_SIZES["NIFTY"] == 65          # NSE revised NIFTY lot 75 → 65
     assert _FON_LOT_SIZES["BANKNIFTY"] == 30
 
 def t_paper_place_order():
@@ -388,9 +388,9 @@ def t_qty_zero_raises():
 
 def t_fno_qty_snapped():
     kc = KiteClient()
-    # NIFTY lot=75; 80 → snap DOWN to 75 (never inflate past risk-approved qty)
+    # NIFTY lot=65; 80 → snap DOWN to 65 (never inflate past risk-approved qty)
     snapped = kc._validated_quantity("NIFTY", "NFO", "NRML", 80)
-    assert snapped == 75, f"Expected 75, got {snapped}"
+    assert snapped == 65, f"Expected 65, got {snapped}"
 
 def t_fno_qty_below_lot_rejected():
     kc = KiteClient()
@@ -557,7 +557,7 @@ def t_paper_option_bs_mark_to_market():
 run("_TokenBucket.acquire() no raise",          t_bucket_acquire)
 run("_TokenBucket throttle within 2s for 5",    t_bucket_throttle)
 run("_with_retry returns value on success",      t_retry_success)
-run("F&O lot sizes: >=20 entries, NIFTY=75",     t_fno_lot_sizes)
+run("F&O lot sizes: >=20 entries, NIFTY=65",     t_fno_lot_sizes)
 run("paper place_order returns PAPER-* id",      t_paper_place_order)
 run("tag auto-truncated to 20 chars",            t_tag_truncated)
 run("paper orders() returns list",               t_paper_orders_list)
@@ -992,16 +992,16 @@ def t_sebi_record_executed():
 def t_sebi_audit_log_today():
     sc = SEBICompliance()
     sc.pre_order_check("intraday","RELIANCE","NSE","BUY",1,"MARKET",100.0,"sig","RANGING")
-    import datetime as dt
-    recs = sc.query_audit_log(dt.date.today().isoformat())
+    from ist_clock import now_ist          # the audit log is keyed by the IST date, not the box date
+    recs = sc.query_audit_log(now_ist().date().isoformat())
     assert len(recs) >= 1
 
 def t_sebi_audit_filter_strategy():
     sc = SEBICompliance()
     sc.pre_order_check("intraday","RELIANCE","NSE","BUY",1,"MARKET",100.0,"sig","RANGING")
     sc.pre_order_check("swing","TCS","NSE","BUY",1,"LIMIT",3500.0,"sig","RANGING")
-    import datetime as dt
-    recs = sc.query_audit_log(dt.date.today().isoformat(), strategy="intraday")
+    from ist_clock import now_ist
+    recs = sc.query_audit_log(now_ist().date().isoformat(), strategy="intraday")
     assert all(r["strategy"] == "intraday" for r in recs)
 
 def t_sebi_strategy_disclosure():

@@ -24,6 +24,7 @@ import threading
 import time
 from datetime import date, timedelta
 from typing import Optional
+from ist_clock import today_ist as _today_ist
 
 W_MIN, W_MAX = 0.25, 1.0
 PRIOR_N = 5.0
@@ -89,7 +90,7 @@ class Allocator:
         from agent_policy import journal_patterns
         from self_learning import is_evidence
         pats = journal_patterns(agent)
-        since = (date.today() - timedelta(days=int(LOOKBACK_DAYS * 7 / 5) + 2)).isoformat()
+        since = (_today_ist() - timedelta(days=int(LOOKBACK_DAYS * 7 / 5) + 2)).isoformat()
         sql = ("SELECT net, regime, segment, price_source, entry_ts, exit_ts, day FROM journal WHERE ("
                + " OR ".join("strategy LIKE ?" for _ in pats) + ") AND day>=? ORDER BY exit_ts")
         return [r for r in self._st().q(sql, tuple(pats) + (since,)) if is_evidence(r)]

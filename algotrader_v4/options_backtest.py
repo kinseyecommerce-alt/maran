@@ -31,6 +31,7 @@ from zoneinfo import ZoneInfo
 from loguru import logger
 
 from option_chain import OptionChain, UNDERLYINGS, option_chain as live_chain
+from ist_clock import today_ist as _today_ist
 
 IST = ZoneInfo("Asia/Kolkata")
 CACHE = Path("logs/opt_history")
@@ -88,7 +89,7 @@ class ReplayChain(OptionChain):
         self.fetches = 0
         for und in base._chains:
             self._chains[und] = base._chains[und]
-            self._loaded_day[und] = date.today().isoformat()
+            self._loaded_day[und] = _today_ist().isoformat()
         self._by_sym = dict(base._by_sym)
         self._by_token = dict(base._by_token)
 

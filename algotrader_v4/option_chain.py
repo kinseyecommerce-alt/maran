@@ -16,6 +16,7 @@ import threading
 import time
 from datetime import date, datetime, timedelta
 from typing import Callable, Optional
+from ist_clock import today_ist as _today_ist
 
 UNDERLYINGS: dict[str, dict] = {
     "NIFTY":     {"exchange": "NFO", "index": "NSE:NIFTY 50"},
@@ -55,7 +56,7 @@ def public_instruments(exchange: str, fetch: bool = True) -> list:
     import io
     import os
     os.makedirs(_INST_CACHE_DIR, exist_ok=True)
-    f = os.path.join(_INST_CACHE_DIR, f"{exchange}_{date.today():%Y%m%d}.csv")
+    f = os.path.join(_INST_CACHE_DIR, f"{exchange}_{_today_ist():%Y%m%d}.csv")
     text = None
     if os.path.exists(f):
         text = open(f, encoding="utf-8").read()
@@ -193,7 +194,7 @@ class OptionChain:
 
     def load(self, und: str, force: bool = False) -> dict:
         und = und.upper()
-        today = date.today().isoformat()
+        today = _today_ist().isoformat()
         with self._lock:
             if not force and und in self._chains and self._loaded_day.get(und) == today:
                 return self._chains[und]

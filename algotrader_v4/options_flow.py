@@ -20,6 +20,7 @@ from datetime import date as _date
 from typing import Literal, Optional
 
 from loguru import logger
+from ist_clock import today_ist as _today_ist
 
 UNUSUAL_VOL_RATIO   = 5.0     # volume/OI > 5× is unusual
 BLOCK_LOT_MIN       = 500     # lots ≥ 500 = block trade
@@ -63,7 +64,7 @@ class OptionsFlow:
 
 _cache:            dict[str, OptionsFlow] = {}
 _iv_history:       dict[str, dict[str, list[float]]] = {}   # sym → "strike_CE" → [iv, ...]
-_iv_history_date:  _date = _date.today()
+_iv_history_date:  _date = _today_ist()
 _flow_lock = threading.Lock()   # guards _iv_history, _iv_history_date, and _cache writes
 
 
@@ -80,7 +81,7 @@ def analyze_flow(symbol: str, chain: list[dict], spot: float) -> OptionsFlow:
     """
     global _iv_history, _iv_history_date
     symbol = symbol.upper()
-    today = _date.today()
+    today = _today_ist()
     # Acquire lock for date rollover AND sym_hist initialisation to prevent
     # two concurrent callers racing on _iv_history.clear() vs .setdefault().
     with _flow_lock:

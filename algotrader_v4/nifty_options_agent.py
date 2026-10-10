@@ -33,6 +33,7 @@ from pathlib import Path
 from typing import Optional
 
 from loguru import logger
+from ist_clock import today_ist as _today_ist
 
 AGENT_NAME = "nifty_options_intraday"
 FOCUS_MODE = "nifty_intraday_options"
@@ -227,7 +228,7 @@ class NiftyOptionsIntradayAgent:
     def _prev_close(self, engine) -> Optional[float]:
         try:
             from nifty_options_research import load_daily
-            today = (self._day or datetime.now().date())
+            today = (self._day or _today_ist())
             prev = [c for d, c in load_daily() if d < today]
             return prev[-1] if prev else None
         except Exception:

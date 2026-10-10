@@ -43,6 +43,7 @@ from loguru import logger
 
 from market_data import yf_client
 from strategy_signals import SIGNAL_REGISTRY, STRATEGY_CONFIG, GATE_THRESHOLDS
+from ist_clock import today_ist as _today_ist
 
 
 NIFTY_50 = [
@@ -96,7 +97,7 @@ class BacktestResult:
     worst_trade:     float = 0.0
     score:           float = 0.0
     fail_reasons:    list  = field(default_factory=list)
-    run_date:        str   = field(default_factory=lambda: date.today().isoformat())
+    run_date:        str   = field(default_factory=lambda: _today_ist().isoformat())
 
     def to_dict(self) -> dict:
         return {
@@ -393,7 +394,7 @@ class AutoBacktestRunner:
             by_strategy[strat] = {"passed": [r.to_dict() for r in leaderboard],
                 "failed": [r.to_dict() for r in failed_res[:10]],
                 "leaderboard": [r.to_dict() for r in leaderboard[:top_n]]}
-        return BatchReport(run_date=date.today().isoformat(), run_time_sec=elapsed,
+        return BatchReport(run_date=_today_ist().isoformat(), run_time_sec=elapsed,
             total_tested=total_passed+total_failed, total_passed=total_passed,
             total_failed=total_failed, by_strategy=by_strategy, approved=approved)
 

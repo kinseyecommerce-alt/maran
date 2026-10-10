@@ -25,6 +25,13 @@ from pathlib import Path
 from typing import Optional
 
 from loguru import logger
+from ist_clock import today_ist as _today_ist
+from ist_clock import now_ist as _now_ist
+
+
+def _now_ist_naive():
+    return _now_ist().replace(tzinfo=None)
+
 
 TRAIN_FRAC = 0.70
 SLIP_BPS = {"BSE_EQ": 3.0, "MCX": 2.0, "CDS": 1.0, "NSE_EQ": 2.0, "NSE_FO": 1.0}
@@ -84,7 +91,7 @@ class HistoryProvider:
         row = resolve_front_future(self._inst[exch], _underlying(symbol))
         if not row:
             raise RuntimeError("no front-month contract")
-        to = datetime.now()
+        to = _now_ist_naive()
         rec = kite_client.kite.historical_data(row["instrument_token"], to - timedelta(days=self.days + 10), to,
                                                "minute")
         if not rec:
@@ -431,7 +438,7 @@ def _groups_for(seg: str, n_ticks: int, today: Optional[str] = None) -> list[tup
     if n_ticks <= ALL_GROUPS_MAX_TICKS:
         return gs
     from datetime import date
-    d = date.fromisoformat(today) if today else date.today()
+    d = date.fromisoformat(today) if today else _today_ist()
     return [gs[d.toordinal() % len(gs)]]
 
 

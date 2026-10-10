@@ -50,6 +50,7 @@ from loguru import logger
 
 from config import settings
 from ist_clock import now_ist, paper_after_hours_active
+from ist_clock import today_ist as _today_ist
 
 LIVE_CONFIRM_PHRASE = "SEND"
 KV_KEY = "invent_journal_v1"
@@ -85,7 +86,7 @@ def _fut_symbol(underlying: str) -> str:
             exp = _nse_monthly_expiry(ny, nm)
         return f"{underlying}{exp.strftime('%y%b').upper()}FUT"
     except Exception:
-        d = date.today()
+        d = _today_ist()
         return f"{underlying}{d.strftime('%y%b').upper()}FUT"
 
 

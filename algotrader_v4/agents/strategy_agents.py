@@ -17,6 +17,7 @@ from agents.base_agent import BaseAgent
 from tick_engine import MarketSnapshot, LiveIndicators, Tick, IndicatorCalc
 from risk_manager import risk_manager
 from config import settings
+from ist_clock import today_ist as _today_ist
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -1864,7 +1865,7 @@ class OptionsAgent(BaseAgent):
         Returns 0 ON the expiry day itself (0-DTE) — callers must floor
         time-to-expiry at a small epsilon in BS formulas, not fake the DTE."""
         from datetime import date
-        today = date.today()
+        today = _today_ist()
         if underlying not in self._INDEX_UNDERLYINGS:
             expiry = _nse_monthly_expiry(today.year, today.month)
             if expiry < today:
@@ -1979,7 +1980,7 @@ class OptionsAgent(BaseAgent):
         MONTHLY (stocks always, index monthlies): SYMBOL + YY + MON + strike + CE/PE
         """
         from datetime import date, timedelta
-        today = date.today()
+        today = _today_ist()
 
         if underlying not in self._INDEX_UNDERLYINGS:
             # Stock options have NO weekly contracts — nearest expiry is the

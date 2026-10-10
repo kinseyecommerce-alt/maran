@@ -18,6 +18,8 @@ _iso_dir = _tf_iso.mkdtemp(prefix="algotrader-test-")
 _os_iso.environ.setdefault("DATABASE_PATH", _os_iso.path.join(_iso_dir, "algotrader.db"))
 _os_iso.environ.setdefault("ADAPTIVE_DATA_DIR", _os_iso.path.join(_iso_dir, "adaptive"))
 _os_iso.environ.setdefault("SEBI_AUDIT_DIR", _iso_dir)
+_os_iso.environ["LEARNING_DB"] = _os_iso.path.join(_iso_dir, "learning.db")   # never the real logs/learning.db
+_os_iso.environ["OWNER_UNIVERSE_PATH"] = _os_iso.path.join(_iso_dir, "owner_universe.json")  # explicit universe: no owner focus/pauses
 _os_iso.environ.setdefault("SEGMENT_PAPER_AFTER_HOURS", "true")   # segment hours are tested explicitly in test_segments.py
 _os_iso.environ["API_KEY"] = "unit-test-local-only"
 _os_iso.environ["TRADING_MODE"] = "PAPER"
