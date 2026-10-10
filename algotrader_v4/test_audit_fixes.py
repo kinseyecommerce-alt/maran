@@ -512,6 +512,70 @@ run("evaluate() manages LIVE-armed open positions", t_evaluate_manages_live_posi
 
 
 # ════════════════════════════════════════════════════════════════════════════
+section("6. learning uses only KITE, in-session evidence; sim-based retirements undone")
+
+
+def _sl():
+    from self_learning import SelfLearning
+    sl = SelfLearning(_os_iso.path.join(_iso_dir, f"learn-{time.time_ns()}.db"))
+    sl.active = True
+    return sl
+
+
+def _jrow(sl, strat, gross, i, ts, src="KITE", seg="MCX"):
+    return sl.record({"id": f"{strat}-{i}-{time.time_ns()}", "segment": seg, "strategy": strat,
+                      "symbol": "X", "side": "BUY", "qty_units": 1, "entry": 100.0, "exit": 100.0 + gross,
+                      "gross": gross, "regime": "RANGING", "exit_ts": ts, "price_source": src,
+                      "cost_kind": "CDS_FUT"})
+
+
+def t_evidence_filter():
+    from self_learning import is_evidence
+    base = {"segment": "MCX", "price_source": "KITE", "exit_ts": "2026-10-07T14:00:00+05:30"}
+    assert is_evidence(base)
+    assert not is_evidence({**base, "price_source": "SIMULATED"})
+    assert not is_evidence({**base, "price_source": "MIXED"})
+    assert not is_evidence({**base, "exit_ts": "2026-10-10T14:00:00+05:30"}), "Saturday row counted"
+    assert not is_evidence({**base, "exit_ts": "2026-10-07T23:45:00+05:30"}), "after MCX close counted"
+    assert not is_evidence({**base, "segment": "NSE_EQ", "exit_ts": "2026-10-07T16:30:00+05:30"})
+    assert not is_evidence({**base, "segment": "NSE_EQ", "exit_ts": "2026-10-02T11:00:00+05:30"}), "holiday"
+    assert not is_evidence({**base, "entry_ts": "2026-10-06T23:58:00+05:30"}), "overnight-entry row counted"
+
+
+def t_sim_losses_do_not_retire():
+    sl = _sl()
+    for i in range(30):          # heavy SIM losses + after-hours KITE losses
+        _jrow(sl, "mcx_trend", -500, i, f"2026-10-07T10:{i:02d}:00+05:30", src="SIMULATED")
+        _jrow(sl, "mcx_trend", -500, 100 + i, f"2026-10-10T10:{i:02d}:00+05:30")
+    for i in range(5):
+        _jrow(sl, "mcx_trend", +700, 200 + i, f"2026-10-08T11:{i:02d}:00+05:30")
+    act = sl.review("mcx_trend", "MCX")
+    assert act["action"] != "retired" and not sl.st("mcx_trend").get("retired"), act
+    assert act["stats"]["n"] == 5, act["stats"]
+
+
+def t_unretire_sim_based_retirement():
+    sl = _sl()
+    for i in range(5):
+        _jrow(sl, "mcx_trend", +700, i, f"2026-10-08T11:{i:02d}:00+05:30")
+    sl.st("mcx_trend").update(retired=True, retired_reason="sim losses")      # legacy retirement
+    sl.st("bse_momentum").update(retired=True, retired_reason="old")
+    for i in range(25):
+        _jrow(sl, "bse_momentum", -300, 50 + i, f"2026-10-08T10:{i:02d}:00+05:30", seg="BSE")
+    un = sl.reevaluate_retirements()
+    assert [u["strategy"] for u in un] == ["mcx_trend"], un
+    assert not sl.st("mcx_trend")["retired"]
+    assert sl.params("mcx_trend").get("size_factor") == 0.5, sl.params("mcx_trend")
+    assert sl.st("bse_momentum")["retired"] and sl.st("bse_momentum")["retire_basis"] == "evidence"
+    assert sl.reevaluate_retirements() == []          # idempotent
+
+
+run("evidence = KITE-priced and inside the real session (weekday, non-holiday, hours)", t_evidence_filter)
+run("SIM / weekend losses never retire a strategy", t_sim_losses_do_not_retire)
+run("retirement made on sim data is re-evaluated → probation 0.5×; real losers stay retired", t_unretire_sim_based_retirement)
+
+
+# ════════════════════════════════════════════════════════════════════════════
 if __name__ == "__main__":
     passed = sum(1 for _, ok, _ in _results if ok)
     failed = len(_results) - passed

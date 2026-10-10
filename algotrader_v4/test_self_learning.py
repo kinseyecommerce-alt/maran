@@ -274,11 +274,16 @@ def test_readiness_display_only():
     import datetime as dt
     d0 = dt.date(2026, 6, 1)
     i = 0
-    for k in range(25):
-        day = (d0 + dt.timedelta(days=k)).isoformat()
+    # 25 real trading days (weekdays only — weekend rows never count, audit X5)
+    wdays = [d for d in (d0 + dt.timedelta(days=k) for k in range(40)) if d.weekday() < 5][:25]
+    for k, dd in enumerate(wdays):
+        day = dd.isoformat()
         for j in range(3):
             trade(sl, "mcx_trend", 300 if j < 2 else -50 + k, seg="MCX", i=i, day=day)
             i += 1
+    for j in range(3):                      # Saturday frozen-price rows: ignored entirely
+        trade(sl, "mcx_trend", 5000, seg="MCX", i=900 + j, day="2026-06-06")
+    ok("weekend rows excluded from readiness days", sl.readiness()["MCX"]["criteria"][0]["value"] == 25)
     rd = sl.readiness()
     from segments import segment_manager
     ok("perfect live-price record → READY", rd["MCX"]["status"] == "READY", rd["MCX"]["criteria"])

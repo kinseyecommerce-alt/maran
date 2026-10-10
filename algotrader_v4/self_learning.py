@@ -283,6 +283,55 @@ def strategy_registry() -> dict[str, dict]:
     return reg
 
 
+def _to_ist(ts: Any) -> Optional[datetime]:
+    if not ts:
+        return None
+    try:
+        d = ts if isinstance(ts, datetime) else datetime.fromisoformat(str(ts))
+    except Exception:
+        return None
+    from zoneinfo import ZoneInfo
+    ist = ZoneInfo("Asia/Kolkata")
+    return d.replace(tzinfo=ist) if d.tzinfo is None else d.astimezone(ist)
+
+
+def in_session(segment: str, ts: Any) -> bool:
+    """True when *ts* falls inside the segment's REAL trading session: a
+    weekday, not an exchange holiday, between open and close (IST)."""
+    d = _to_ist(ts)
+    if d is None or d.weekday() >= 5:
+        return False
+    try:
+        from segments import SEGMENTS
+        spec = SEGMENTS.get(segment or "")
+    except Exception:
+        spec = None
+    if spec is None:
+        return True
+    if spec.nse_holidays:
+        from ist_clock import NSE_HOLIDAYS
+        if d.date() in NSE_HOLIDAYS:
+            return False
+    t = d.time().replace(tzinfo=None)
+    return spec.open_t <= t <= spec.close_t
+
+
+def is_evidence(r: dict) -> bool:
+    """A journal row counts as EVIDENCE for learning / readiness only when
+    both fills were priced by Kite (price_source='KITE' — SIMULATED and MIXED
+    splices are excluded) and the trade lived inside the segment's real
+    session (weekend / holiday / after-hours rows on frozen prices excluded,
+    audit X4/X5)."""
+    if str(r.get("price_source") or "").upper() != "KITE":
+        return False
+    seg = r.get("segment") or ""
+    if not in_session(seg, r.get("exit_ts") or r.get("day")):
+        return False
+    if r.get("entry_ts") and not in_session(seg, r.get("entry_ts")):
+        return False
+    return True
+
+
 def learning_key(strategy: str, segment: str) -> str:
     """Journal strategy → param owner (invented ideas share their segment's family)."""
     if strategy.startswith("invent:") or strategy.startswith("INV-") or strategy.startswith("invented:"):
@@ -316,6 +365,12 @@ class SelfLearning:
         """Called once at server start: live hooks use learned params, and
         accepted built-in NSE params are mirrored into runtime settings."""
         self.active = True
+        try:
+            un = self.reevaluate_retirements()
+            if un:
+                logger.warning("[learning] un-retired on live-price evidence: {}", [u["strategy"] for u in un])
+        except Exception as exc:
+            logger.warning("[learning] retirement re-evaluation failed: {}", exc)
         applied = {}
         for name in BUILTIN_NSE:
             p = self._params.get(name)
@@ -745,7 +800,8 @@ class SelfLearning:
         if since:
             sql += " AND exit_ts>=?"
             args.append(since)
-        return self.store.q(sql + " ORDER BY exit_ts", tuple(args))
+        # evidence only: KITE-priced, in-session rows (audit X4)
+        return [r for r in self.store.q(sql + " ORDER BY exit_ts", tuple(args)) if is_evidence(r)]
 
     def check_rollbacks(self, only: Optional[str] = None) -> list[dict]:
         out = []
@@ -870,7 +926,7 @@ class SelfLearning:
         if not st.get("retired") and ((s["n"] >= RETIRE_MIN_N and s["expectancy"] < 0) or s["max_dd"] >= dd_lim):
             why = (f"after-cost expectancy ₹{s['expectancy']:,.0f}/trade over {s['n']} trades"
                    if s["max_dd"] < dd_lim else f"drawdown ₹{s['max_dd']:,.0f} ≥ limit ₹{dd_lim:,.0f}")
-            st.update(retired=True, retired_reason=why, retired_at=_iso())
+            st.update(retired=True, retired_reason=why, retired_at=_iso(), retire_basis="evidence")
             self.event("retire", segment, name, why)
             act["action"], act["why"] = "retired", why
         elif (s["n"] >= PROMOTE_MIN_N and s["expectancy"] > 0 and s["profit_factor"] >= 1.3
@@ -889,9 +945,46 @@ class SelfLearning:
         self._save()
         return act
 
+    def reevaluate_retirements(self) -> list[dict]:
+        """Retirements decided on simulated / after-hours rows are re-checked
+        on EVIDENCE rows only (audit X4: mcx_trend was retired on SIM data
+        while its KITE trades were +₹3,581). A strategy whose evidence does not
+        justify retirement is re-enabled on probation (size factor 0.5)."""
+        out = []
+        reg = strategy_registry()
+        for name, st in list(self._state.items()):
+            if not st.get("retired") or st.get("retire_basis") == "evidence":
+                continue
+            seg = (reg.get(name) or {}).get("segment") or (name.split(":", 1)[1] if ":" in name else "")
+            rows = self._rows_for(name)
+            nets = [float(r["net"]) for r in rows]
+            s = stats(nets, [float(r["gross"]) for r in rows], [float(r["costs"]) for r in rows])
+            try:
+                from segments import _limits
+                cap = float(_limits(seg)["capital"]) if seg else 1_000_000.0
+            except Exception:
+                cap = 1_000_000.0
+            justified = (s["n"] >= RETIRE_MIN_N and s["expectancy"] < 0) or s["max_dd"] >= cap * DD_LIMIT_PCT / 100
+            if justified:
+                st["retire_basis"] = "evidence"
+                continue
+            st.update(retired=False, retired_reason="", unretired_at=_iso())
+            why = (f"un-retired: retirement was based on simulated/after-hours rows; live-price in-session "
+                   f"evidence {s['n']} trades, net ₹{s['net']:,.0f} — back on probation (0.5× size)")
+            try:
+                self.set_params(name, {"size_factor": 0.5}, why, "reenable")
+            except Exception:
+                pass
+            self.event("unretire", seg, name, why)
+            out.append({"strategy": name, "n": s["n"], "net": s["net"], "why": why})
+        if out:
+            self._save()
+        return out
+
     def lessons(self) -> dict:
         """(segment, regime, idea) → stats for invented ideas; avoid / favour."""
-        rows = self.store.q("SELECT segment, regime, family, net FROM journal WHERE strategy LIKE 'invent:%'")
+        rows = [r for r in self.store.q("SELECT segment, regime, family, net, price_source, entry_ts, exit_ts, day "
+                                        "FROM journal WHERE strategy LIKE 'invent:%'") if is_evidence(r)]
         agg: dict[tuple, list] = {}
         for r in rows:
             agg.setdefault((r["segment"], r["regime"] or "UNKNOWN", r["family"]), []).append(float(r["net"]))
@@ -928,6 +1021,7 @@ class SelfLearning:
                                "rollbacks": [], "lessons": {}, "errors": []}
         try:
             rep["journal_sync"] = self.sync_journal()
+            rep["unretired"] = self.reevaluate_retirements()
             reg = strategy_registry()
             names = [n for n, r in reg.items() if (not segments or r["segment"] in segments)]
             for n in names:
@@ -986,8 +1080,9 @@ class SelfLearning:
                                 ((today - timedelta(days=14)).isoformat(),))
         for code in SEGMENT_ORDER:
             cap = float(_limits(code)["capital"])
-            rows = self.store.q("SELECT day, net FROM journal WHERE segment=? AND price_source='KITE' "
-                                "ORDER BY exit_ts", (code,))
+            rows = [r for r in self.store.q("SELECT day, net, segment, price_source, entry_ts, exit_ts FROM journal "
+                                            "WHERE segment=? AND price_source='KITE' ORDER BY exit_ts", (code,))
+                    if is_evidence(r)]        # real trading days only (no weekend/after-hours rows)
             days = sorted({r["day"] for r in rows})
             window = set(days[-30:])
             rows = [r for r in rows if r["day"] in window]
@@ -1038,8 +1133,9 @@ class SelfLearning:
         cap = float(_limits(segment)["capital"])
         out = {}
         for fam in OPTION_FAMILIES:
-            rows = self.store.q("SELECT day, net FROM journal WHERE segment=? AND strategy=? AND price_source='KITE' "
-                                "ORDER BY exit_ts", (segment, fam))
+            rows = [r for r in self.store.q("SELECT day, net, segment, price_source, entry_ts, exit_ts FROM journal "
+                                            "WHERE segment=? AND strategy=? AND price_source='KITE' ORDER BY exit_ts",
+                                            (segment, fam)) if is_evidence(r)]
             nets = [float(r["net"]) for r in rows]
             daily: dict[str, float] = {}
             for r in rows:
