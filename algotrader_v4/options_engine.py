@@ -63,7 +63,13 @@ ENTRY_START, ENTRY_END = dtime(9, 45), dtime(13, 30)
 EXIT_TIME = dtime(15, 0)
 EXPIRY_DAY_EXIT = dtime(11, 30)
 BUY_START, BUY_END, BUY_FLATTEN = dtime(9, 30), dtime(14, 0), dtime(14, 30)
+# per-signal overrides (params "flat_by" "HH:MM" / "sl_pct") are clamped to these hard bounds:
+# a buy is never held past 15:09 (before the 15:10 system square-off; agent flat-by 15:15),
+# and the premium stop is 15–60% (sizing is always 1% risk AT the stop, so a wider stop = fewer lots).
+BUY_FLAT_MIN, BUY_FLAT_MAX = dtime(9, 45), dtime(15, 9)
+BUY_SL_BOUNDS = (15.0, 60.0)
 DECIDE_EVERY_SEC = 300
+PER_LEG_SL_BOUNDS = (0.10, 1.00)   # per-short-leg stop: premium >= entry x (1 + sl); bounded
 ENTRY_QUOTE_MAX_AGE = 3.0      # s, by exchange timestamp — entries never fill on an older quote
 EXIT_QUOTE_MAX_AGE = 30.0      # exits/unwinds tolerate a little more (getting flat beats waiting)
 MIN_CREDIT_FRAC = {"IRON_CONDOR": 0.15, "IRON_FLY": 0.40, "BULL_PUT": 0.25, "BEAR_CALL": 0.25}
@@ -290,6 +296,17 @@ def buy_decision(bars: list) -> tuple:
     return None, "no fresh cross"
 
 
+def clamp_flat(v) -> dtime:
+    """Per-signal flatten time: default 14:30; any override clamped to 09:45..15:09."""
+    if not v:
+        return BUY_FLATTEN
+    try:
+        t = v if isinstance(v, dtime) else dtime.fromisoformat(str(v)[:5])
+    except ValueError:
+        return BUY_FLATTEN
+    return max(BUY_FLAT_MIN, min(BUY_FLAT_MAX, t))
+
+
 # ── data classes ─────────────────────────────────────────────────────────────
 @dataclass
 class Leg:
@@ -396,6 +413,7 @@ class BuyPos:
     gate: dict = field(default_factory=dict)
     replay: bool = False
     reason: str = ""
+    flat_at: str = ""              # HH:MM per-signal flatten (clamped to BUY_FLAT_MIN..BUY_FLAT_MAX)
 
     def d(self) -> dict:
         x = {k: getattr(self, k) for k in self.__dataclass_fields__ if k != "leg"}
@@ -688,6 +706,9 @@ class OptionsEngine:
         b.rules = {"target_frac": float(p.get("target_frac", 0.5)), "stop_mult": float(p.get("stop_mult", 2.0)),
                    "exit_time": EXIT_TIME.strftime("%H:%M"), "expiry_day_exit": EXPIRY_DAY_EXIT.strftime("%H:%M"),
                    "short_put": sp, "short_call": sc, "atm_iv": round(iv, 4)}
+        pls = p.get("per_leg_sl")
+        if pls:                                  # per-short-leg premium stop (frac of entry), bounded
+            b.rules["per_leg_sl"] = max(PER_LEG_SL_BOUNDS[0], min(PER_LEG_SL_BOUNDS[1], float(pls)))
         return b, "ok"
 
     def defined_risk_from_strangle(self, und: str, spot: float, short_put: float, short_call: float,
@@ -752,7 +773,7 @@ class OptionsEngine:
         spot = spot or self.chain.spot(und)
         if spot <= 0:
             return {"ok": False, "why": f"no {und} spot"}
-        b, why = self.build(structure, und, spot, expiry, short_strikes=short_strikes)
+        b, why = self.build(structure, und, spot, expiry, params=self.params(family), short_strikes=short_strikes)
         if not b:
             self.stats["baskets_rejected"] += 1
             return {"ok": False, "why": why}
@@ -854,6 +875,10 @@ class OptionsEngine:
     def mark_basket(self, b: Basket, qs: dict, spot: float) -> None:
         mtm = mtm_mid = 0.0
         for x in b.legs:
+            if x.closed:                          # per-leg exit already realised
+                mtm += x.side * (x.exit - x.entry) * x.qty
+                mtm_mid += x.side * ((x.exit_mid or x.exit) - x.entry) * x.qty
+                continue
             q = qs.get(x.symbol)
             if not q or not q.get("bid") or not q.get("ask"):
                 continue
@@ -871,7 +896,7 @@ class OptionsEngine:
                     pass
         b.mtm, b.mtm_mid = round(mtm, 2), round(mtm_mid, 2)
         q = b.lots * b.lot_size
-        b.greeks = {k: round(sum(x.side * getattr(x, k) for x in b.legs) * q, 2)
+        b.greeks = {k: round(sum(x.side * getattr(x, k) for x in b.legs if not x.closed) * q, 2)
                     for k in ("delta", "gamma", "theta", "vega")}
 
     def exit_reason(self, b: Basket, spot: float, now: datetime) -> Optional[str]:
@@ -884,16 +909,103 @@ class OptionsEngine:
         if b.max_loss > 0 and -b.mtm >= b.max_loss * 0.9:
             return "stop: 90% of max loss"
         sp, sc = r.get("short_put"), r.get("short_call")
-        if sp is not None and spot <= sp:
-            return f"short put {sp:g} breached (spot {spot:,.1f})"
-        if sc is not None and spot >= sc:
-            return f"short call {sc:g} breached (spot {spot:,.1f})"
+        open_short = {x.opt_type for x in b.legs if x.side < 0 and x.filled and not x.closed}
+        if sp is not None and sc is not None and sp == sc:
+            # iron fly: the shorts ARE at-the-money, so "spot crossed the short strike"
+            # is noise. Exit on a breakeven breach (strike ± credit) instead; the
+            # per-leg premium stops / k×credit stop / 90%-max-loss stop still apply.
+            lo, hi = sp - max(b.credit, 0.0), sc + max(b.credit, 0.0)
+            if "PE" in open_short and spot <= lo:
+                return f"iron fly lower breakeven {lo:,.1f} breached (spot {spot:,.1f})"
+            if "CE" in open_short and spot >= hi:
+                return f"iron fly upper breakeven {hi:,.1f} breached (spot {spot:,.1f})"
+        else:
+            if sp is not None and "PE" in open_short and spot <= sp:
+                return f"short put {sp:g} breached (spot {spot:,.1f})"
+            if sc is not None and "CE" in open_short and spot >= sc:
+                return f"short call {sc:g} breached (spot {spot:,.1f})"
         t = now.time()
         if now.date().isoformat() == b.expiry and t >= EXPIRY_DAY_EXIT:
             return "expiry-day gamma exit"
         if t >= EXIT_TIME:
             return f"time exit {EXIT_TIME.strftime('%H:%M')}"
         return None
+
+    # ── per-leg exits (never leave a naked short) ───────────────────────────
+    def _close_one(self, b: Basket, x: Leg, q: Optional[dict], why: str) -> bool:
+        act = "SELL" if x.side > 0 else "BUY"
+        r = self.broker.execute(x, act, x.qty, q, f"OBASK-{b.id[3:]}-L", entry=False)
+        if not r.get("ok"):
+            if r.get("guard"):
+                self.stats["guard_blocks"] += 1
+            b.events.append({"ts": self._iso(), "event": "close_leg_failed", "leg": x.symbol, "why": r.get("why")})
+            return False
+        x.exit, x.exit_mid, x.exit_order_id, x.closed = r["price"], r["mid"], r["order_id"], True
+        b.events.append({"ts": self._iso(), "event": "leg_closed", "leg": x.symbol,
+                         "detail": f"{act} {x.qty} @ {x.exit:.2f} — {why}"})
+        return True
+
+    def close_leg(self, b: Basket, symbol: str, reason: str) -> bool:
+        """Close ONE leg of an open basket.
+        • short leg: bought back on its own; the wings stay (still hedged, now long-only on that side).
+        • long wing: every still-open short of the same type/expiry is bought back FIRST; if any
+          of them fails the wing is kept (a naked short is never left behind)."""
+        x = next((lg for lg in b.legs if lg.symbol == symbol), None)
+        if x is None or not x.filled or x.closed or b.status != "OPEN":
+            return False
+        todo = [x]
+        if x.side > 0:
+            todo = [s for s in b.legs if s.side < 0 and s.filled and not s.closed
+                    and s.opt_type == x.opt_type and s.expiry == x.expiry] + [x]
+        qs = self.chain.quotes([y.symbol for y in todo])
+        for y in todo:                              # shorts first, wing last
+            if not self._close_one(b, y, qs.get(y.symbol), reason):
+                return False
+        self._finalize_if_flat(b, reason)
+        self._save()
+        return True
+
+    def leg_stops(self, b: Basket, qs: dict) -> list:
+        """Per-short-leg premium stop: ask >= entry × (1 + per_leg_sl) → buy that short back.
+        Its same-type wing is then sold only if no other short of that type still needs it
+        (rules['close_wing_with_short'], default True). Returns the closed symbols."""
+        sl = b.rules.get("per_leg_sl")
+        if not sl or b.status != "OPEN":
+            return []
+        out = []
+        for x in [y for y in b.legs if y.side < 0 and y.filled and not y.closed]:
+            q = qs.get(x.symbol) or {}
+            ask = q.get("ask") or 0
+            lvl = x.entry * (1 + float(sl))
+            if ask <= 0 or ask < lvl:
+                continue
+            why = f"per-leg stop {x.opt_type} {x.strike:g}: ask {ask:.2f} >= {lvl:.2f} ({float(sl):.0%})"
+            if not self._close_one(b, x, q, why):
+                continue
+            out.append(x.symbol)
+            if b.rules.get("close_wing_with_short", True):
+                still_short = any(s.side < 0 and not s.closed and s.opt_type == x.opt_type for s in b.legs)
+                for w in [y for y in b.legs if y.side > 0 and y.filled and not y.closed and y.opt_type == x.opt_type]:
+                    if not still_short and self._close_one(b, w, qs.get(w.symbol), f"wing closed with {x.symbol}"):
+                        out.append(w.symbol)
+        if out:
+            self._finalize_if_flat(b, "all legs stopped (per-leg)")
+            self._save()
+        return out
+
+    def _finalize_if_flat(self, b: Basket, reason: str) -> bool:
+        if b.status != "OPEN" or any(not x.closed for x in b.legs if x.filled):
+            return False
+        b.costs_exit = legs_costs([{"side": "SELL" if x.side > 0 else "BUY", "qty": x.qty, "price": x.exit,
+                                    "exchange": x.exchange} for x in b.legs if x.filled])
+        b.pnl_gross = round(sum(x.side * (x.exit - x.entry) * x.qty for x in b.legs if x.filled), 2)
+        b.pnl_net = round(b.pnl_gross - b.costs_entry.get("total", 0) - b.costs_exit["total"], 2)
+        b.status, b.exit_reason, b.closed = "CLOSED", reason, self._iso()
+        b.mtm = b.pnl_gross
+        b.events.append({"ts": b.closed, "event": "closed", "detail": f"{reason} | net Rs {b.pnl_net:,.0f}"})
+        self._journal_basket(b)
+        logger.info("[options] CLOSE {} {} net {:,.0f} ({})", b.id, b.structure, b.pnl_net, reason)
+        return True
 
     def close_basket(self, b: Basket, reason: str) -> bool:
         """Buy back shorts first, then sell the wings (never naked in between)."""
@@ -911,16 +1023,8 @@ class OptionsEngine:
             x.exit, x.exit_mid, x.exit_order_id, x.closed = r["price"], r["mid"], r["order_id"], True
         if any(not x.closed for x in b.legs if x.filled):
             return False
-        b.costs_exit = legs_costs([{"side": "SELL" if x.side > 0 else "BUY", "qty": x.qty, "price": x.exit,
-                                    "exchange": x.exchange} for x in b.legs])
-        b.pnl_gross = round(sum(x.side * (x.exit - x.entry) * x.qty for x in b.legs), 2)
-        b.pnl_net = round(b.pnl_gross - b.costs_entry.get("total", 0) - b.costs_exit["total"], 2)
-        b.status, b.exit_reason, b.closed = "CLOSED", reason, self._iso()
-        b.mtm = b.pnl_gross
-        b.events.append({"ts": b.closed, "event": "closed", "detail": f"{reason} | net Rs {b.pnl_net:,.0f}"})
-        self._journal_basket(b)
+        self._finalize_if_flat(b, reason)
         self._save()
-        logger.info("[options] CLOSE {} {} net {:,.0f} ({})", b.id, b.structure, b.pnl_net, reason)
         return True
 
     def close_all(self, reason: str = "manual") -> list:
@@ -992,6 +1096,8 @@ class OptionsEngine:
         self._greeks(leg, q, spot, now)
         prem = q["ask"]
         sl_pct, tgt_pct, hold = float(p["sl_pct"]), float(p["tgt_pct"]), int(p["max_hold_min"])
+        sl_pct = max(BUY_SL_BOUNDS[0], min(BUY_SL_BOUNDS[1], sl_pct))
+        flat_at = clamp_flat(p.get("flat_by"))
         budget = self.risk_budget(factor)
         per_lot_risk = prem * sl_pct / 100.0 * leg.lot_size
         lots = int(budget // per_lot_risk) if per_lot_risk > 0 else 0
@@ -1035,7 +1141,7 @@ class OptionsEngine:
                      spot_entry=spot, sl=round(leg.entry * (1 - sl_pct / 100), 2),
                      tgt=round(leg.entry * (1 + tgt_pct / 100), 2), max_hold_min=hold, opened=self._iso(),
                      opened_ts=now.timestamp(), costs_entry=f["costs"], gate=gate, replay=self.replay,
-                     reason=f"{reason} | {gwhy}")
+                     reason=f"{reason} | {gwhy}", flat_at=flat_at.strftime("%H:%M"))
         with self._lock:
             self.buys[pid] = pos
         if not self.replay:
@@ -1055,8 +1161,9 @@ class OptionsEngine:
             return f"premium target {p.tgt}"
         if (now.timestamp() - p.opened_ts) / 60 >= p.max_hold_min:
             return f"theta time-stop {p.max_hold_min} min"
-        if now.time() >= BUY_FLATTEN:
-            return "14:30 flatten (theta)"
+        fl = clamp_flat(p.flat_at or None)
+        if now.time() >= fl:
+            return f"{fl:%H:%M} flatten" + (" (theta)" if fl == BUY_FLATTEN else " (per-signal)")
         if now.date().isoformat() == p.leg.expiry:
             return "expiry day"
         return None
@@ -1091,7 +1198,12 @@ class OptionsEngine:
                 self.push_spot(und, s, now)
         for b in [b for b in self.baskets.values() if b.status == "OPEN"]:
             sp = spots.get(b.underlying, b.spot_entry)
-            self.mark_basket(b, self.chain.quotes([x.symbol for x in b.legs]), sp)
+            qs = self.chain.quotes([x.symbol for x in b.legs if not x.closed])
+            self.leg_stops(b, qs)
+            if b.status != "OPEN":
+                out["closed"].append(b.id)
+                continue
+            self.mark_basket(b, qs, sp)
             rsn = self.exit_reason(b, sp, now)
             if rsn and self.close_basket(b, rsn):
                 out["closed"].append(b.id)

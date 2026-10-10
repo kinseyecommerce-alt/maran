@@ -108,8 +108,11 @@ def t_naked_flag_and_never_wired():
         assert g[m.name]["status"] == "blocked", "published/research rule sets never trade directly"
     for k in ("STRADDLE_920_SL25_NAKED", "EXPIRY_IC_0DTE"):
         assert not next(x for x in M.METHODS if x.name == k).agent_legal
-    # every wired (agent-executable) variant is a BUY — no short option ever comes from the methods
-    assert all(v.kind == "buy" for v in M.AGENT_EXEC.values())
+    # every wired (agent-executable) variant is a BUY, except the hedged iron fly which runs
+    # THROUGH the live OptionsEngine (wings first, option_guard, per-leg stops never leave a naked short)
+    assert all(v.kind == "buy" for k, v in M.AGENT_EXEC.items() if k != "IFLY_920_SL25_HEDGED")
+    assert M.AGENT_EXEC["IFLY_920_SL25_HEDGED"].run is M.x_ifly_engine
+    assert M.IFLY_ENGINE_PARAMS["wing_steps"] >= 1 and 0 < M.IFLY_ENGINE_PARAMS["per_leg_sl"] <= 1
 
 
 def t_gate_only_variants_can_trade():
@@ -117,10 +120,18 @@ def t_gate_only_variants_can_trade():
                                  "oos_uncond": {"trades": 40, "net": 1, "pf": 1.3, "dsr": 0.1}},
          "ST_VWAP_BUY": {"variant": "X_ST_VWAP_BUY", "verdict": "blocked",
                          "oos_uncond": {"trades": 40, "net": -1, "pf": 0.9, "dsr": 0.0}},
-         "IFLY_920_SL25_HEDGED": {"variant": None, "verdict": "blocked"}}
+         "IFLY_920_SL25_HEDGED": {"variant": "X_IFLY_920", "verdict": "blocked",
+                                  "oos_uncond": {"trades": 39, "net": -4e4, "pf": 0.4, "dsr": 0.0}},
+         "ORB15_BUY_SELECT": {"variant": "X_ORB15_SEL", "verdict": "probation", "chosen_now": "sl30_1429",
+                              "oos_uncond": {"trades": 30, "net": 0.5, "pf": 1.0, "dsr": 0.0}}}
     g = M.method_gate({"methods": {}}, x)
     assert g["X_ORB15_BUY"]["status"] == "probation" and g["X_ST_VWAP_BUY"]["status"] == "blocked"
     assert "IFLY_920_SL25_HEDGED" not in g
+    assert g["X_IFLY_920"]["status"] == "blocked" and g["X_IFLY_920"]["kind"] == "sell"
+    assert g["X_IFLY_920"]["structure"] == "IRON_FLY"
+    # the train-selected ORB variant only trades if it ALSO beats the fixed variant OOS
+    assert g["X_ORB15_SEL"]["status"] == "blocked"
+    assert g["X_ORB15_SEL"]["exits"]["flat"] == "14:29" and g["X_ORB15_SEL"]["exits"]["sl"] == 0.30
 
 
 def t_live_events_latest_bar_only_once():
@@ -136,9 +147,28 @@ def t_live_events_latest_bar_only_once():
 
 def t_agent_method_params_bounded():
     import nifty_options_agent as A
-    assert A._clamp(0.99 * 100, "sl_pct", A.METHOD_BUY_SPEC) == 40.0, "premium stop never wider than 40%"
+    assert A._clamp(0.99 * 100, "sl_pct", A.METHOD_BUY_SPEC) == 60.0, "method premium stop never wider than 60%"
+    assert A._clamp(0.99 * 100, "sl_pct") == 40.0, "non-method signals keep the 40% bound"
     assert A._clamp(9999, "max_hold_min", A.METHOD_BUY_SPEC) == 315
     assert A._clamp(9999, "max_hold_min") == 45, "non-method signals keep the 45-min bound"
+
+
+def t_orb_variant_selection_uses_train_folds_only():
+    """Changing TEST-fold trades never changes which variant a fold chose."""
+    import random
+    bars = [_bars(day=date(2026, 7, 1) + timedelta(days=k), seed=k, drift=(0.9 if k % 3 else -0.9)) for k in range(40)]
+    ctxs = [_ctx(b) for b in bars]
+    w = {}
+    v = {"a": M.x_orb_variant(0.30, dtime(14, 29)), "b": M.x_orb_variant(0.60, dtime(15, 9))}
+    r1 = M.walk_forward_select(v, ctxs, 65, w)
+    for f, (tr, te) in zip(r1["folds"], R.folds(len(ctxs))):
+        # recompute the choice from the train fold alone
+        best, bnet = None, 0.0
+        for name, fn in v.items():
+            tt = [t for t in M.run_method(M.Method(name, "buy", True, "", "", fn), ctxs, tr, 65, w)]
+            if len(tt) >= M.MIN_TRAIN and sum(t["net"] for t in tt) > bnet:
+                best, bnet = name, sum(t["net"] for t in tt)
+        assert f["chosen"] == best
 
 
 def t_write_gate_keeps_method_rows():

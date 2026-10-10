@@ -805,15 +805,73 @@ def x_cpr_narrow(ctx, prev, lot, iv, st):
             for t in [buy_sim(ctx, j + 1, s, lot, iv=iv, flat_t=ENGINE_BUY_FLAT)] if t]
 
 
+# hedged 9:20 iron fly THROUGH the live OptionsEngine (per-short-leg 25% stop with
+# its wing, breakeven-based fly exit, 2×credit / 90%-max-loss stops, 15:00 exit)
+IFLY_ENGINE_PARAMS = {"wing_steps": 4, "per_leg_sl": 0.25, "target_frac": 1.0}
+
+
+def x_ifly_engine(ctx, prev, lot, iv, st):
+    import engine_model_replay as E
+    if ctx.expiry_day and ctx.exp_buy == ctx.d:
+        return []
+    return E.run_day(ctx, lot, "IRON_FLY", dtime(9, 20), IFLY_ENGINE_PARAMS, "noi_sell:X_IFLY_920", iv=iv)
+
+
+# ORB15 buy with per-signal stop width / flatten time (engine bounds: SL 15–60%,
+# flat ≤ 15:09). The variant is chosen on TRAIN folds only (walk_forward_select).
+ORB_GRID = [(sl, ft) for sl in (0.30, 0.40, 0.50, 0.60) for ft in (dtime(14, 29), dtime(15, 0), dtime(15, 9))]
+
+
+def x_orb_variant(sl: float, ft: dtime) -> Callable:
+    def f(ctx, prev, lot, iv, st):
+        return [t for j, s in sig_orb15(ctx.bars, prev)
+                for t in [buy_sim(ctx, j + 1, s, lot, sl_pct=sl, trail=None, iv=iv, flat_t=ft)] if t]
+    return f
+
+
+def walk_forward_select(variants: dict, ctxs, lot, widths) -> dict:
+    """Per fold: pick the variant with the best TRAIN net (≥MIN_TRAIN trades, net>0);
+    its TEST-fold trades are the OOS record. The test folds never influence a choice."""
+    by = {}
+    for name, fn in variants.items():
+        allt = run_method(Method(name, "buy", True, "", "", fn), ctxs, list(range(len(ctxs))), lot, widths)
+        d: dict = {}
+        for t in allt:
+            d.setdefault(t["d"], []).append(t)
+        by[name] = d
+    oos, folds_out = [], []
+    for tr, te in R.folds(len(ctxs)):
+        best, bnet = None, 0.0
+        for name, d in by.items():
+            tt = [t for i in tr for t in d.get(ctxs[i].d, [])]
+            net = sum(t["net"] for t in tt)
+            if len(tt) >= MIN_TRAIN and net > bnet:
+                best, bnet = name, net
+        te_tr = [t for i in te for t in by[best].get(ctxs[i].d, [])] if best else []
+        folds_out.append({"chosen": best, "train_net": round(bnet), "test_n": len(te_tr),
+                          "test_net": round(sum(t["net"] for t in te_tr))})
+        oos += te_tr
+    test_days = [ctxs[i].d for _, te in R.folds(len(ctxs)) for i in te]
+    n_all = len(ctxs)
+    best_full, bf = None, 0.0
+    for name, d in by.items():
+        tt = [t for i in range(n_all) for t in d.get(ctxs[i].d, [])]
+        if len(tt) >= MIN_TRAIN and sum(t["net"] for t in tt) > bf:
+            best_full, bf = name, sum(t["net"] for t in tt)
+    return {"oos_gated": oos, "oos_uncond": oos, "folds": folds_out, "test_days": test_days,
+            "latest_train_ok": bool(folds_out and folds_out[-1]["chosen"]), "chosen_now": best_full}
+
+
 AGENT_EXEC = {
     "ORB15_BUY_PUBLISHED": Method("X_ORB15_BUY", "buy", True, "ORB15 buy, 40% SL (engine max), flat 14:30", "", x_orb_buy),
     "ST_VWAP_BUY": Method("X_ST_VWAP_BUY", "buy", True, "Supertrend+TWAP buy, flip exit / 30% SL, flat 14:30", "", x_st_vwap),
     "CPR_NARROW_BREAK_BUY": Method("X_CPR_NARROW", "buy", True, "narrow-CPR breakout buy, 30% SL + trail, flat 14:30", "", x_cpr_narrow),
+    "IFLY_920_SL25_HEDGED": Method("X_IFLY_920", "sell", True,
+                                   "9:20 iron fly (ATM shorts, 200-pt wings) through the LIVE engine: per-short-leg 25% "
+                                   "stop (wing closed with it), breakeven exit, 2x-credit / 90%-max-loss stops, 15:00 exit",
+                                   "", x_ifly_engine),
 }
-NOT_EXECUTABLE = {
-    "IFLY_920_SL25_HEDGED": "needs per-short-leg stops; the engine closes baskets only as a whole and its "
-                            "short-strike-breach rule trips an iron fly at once (short put = short call = ATM)",
-}
+NOT_EXECUTABLE: dict = {}
 
 
 def run_agent_exec(res: dict, ctxs=None, lot=None, widths=None) -> dict:
@@ -829,9 +887,27 @@ def run_agent_exec(res: dict, ctxs=None, lot=None, widths=None) -> dict:
                      "latest_train_ok": wf["latest_train_ok"], "verdict": verdict(m, wf, s),
                      "exit_reasons": {r: sum(1 for t in wf["oos_uncond"] if t["exit_reason"] == r)
                                       for r in sorted({t["exit_reason"] for t in wf["oos_uncond"]})}}
+    # ORB15 with per-signal stop / flatten time chosen on train folds only
+    variants = {f"sl{int(sl*100)}_{ft:%H%M}": x_orb_variant(sl, ft) for sl, ft in ORB_GRID}
+    wf = walk_forward_select(variants, ctxs, lot, widths)
+    m = Method("X_ORB15_SEL", "buy", True, "", "", None)
+    s = summarize(wf["oos_uncond"], res["n_trials"] + len(AGENT_EXEC) + len(variants), wf["test_days"])
+    out["ORB15_BUY_SELECT"] = {"variant": "X_ORB15_SEL", "desc": "ORB15 buy; stop 30–60% / flat 14:29–15:09 picked on train folds",
+                               "oos_uncond": s, "folds": wf["folds"], "latest_train_ok": wf["latest_train_ok"],
+                               "chosen_now": wf["chosen_now"], "verdict": verdict(m, wf, s),
+                               "exit_reasons": {r: sum(1 for t in wf["oos_uncond"] if t["exit_reason"] == r)
+                                                for r in sorted({t["exit_reason"] for t in wf["oos_uncond"]})}}
     for k, why in NOT_EXECUTABLE.items():
         out[k] = {"variant": None, "verdict": "blocked", "why": why}
     return out
+
+
+def _orb_sel_exits(chosen: Optional[str]) -> dict:
+    if not chosen:
+        return dict(LIVE_EXITS["X_ORB15_BUY"])
+    sl = int(chosen[2:4]) / 100
+    ft = f"{chosen[-4:-2]}:{chosen[-2:]}"
+    return {"sl": sl, "tgt": 3.0, "h": 315, "trail": False, "st_flip": False, "flat": ft}
 
 
 # ── live wiring: the agent calls these on COMPLETED 1m bars only ────────────
@@ -876,11 +952,14 @@ def live_events(bars: list, st: dict) -> list:
     fired = st.setdefault("_fired_methods", set())
 
     def fire(name, j, side):
-        if j == i and (name, side) not in fired and (name not in ("X_ORB15_BUY", "X_CPR_NARROW") or name not in {n for n, _ in fired}):
+        if j == i and (name, side) not in fired and (name not in ("X_ORB15_BUY", "X_ORB15_SEL", "X_CPR_NARROW", "X_IFLY_920") or name not in {n for n, _ in fired}):
             fired.add((name, side))
             out.append(R.Event(name, i, side, {"method": True}))
     for j, s in sig_orb15(probe, None):
         fire("X_ORB15_BUY", j, s)
+        fire("X_ORB15_SEL", j, s)
+    if bars[i].ts.time() >= dtime(9, 19) and bars[i].ts.time() < dtime(9, 30):
+        fire("X_IFLY_920", i, "IRON_FLY")
     for j, s in st_vwap_entries(probe):
         if bars[j].ts.time() < dtime(14, 0):
             fire("X_ST_VWAP_BUY", j, s)
@@ -906,7 +985,24 @@ def method_gate(res: dict, xres: dict) -> dict:
             continue
         s = v["oos_uncond"]
         st = v["verdict"] if v["verdict"] in ("pass", "probation") else "blocked"
-        g[v["variant"]] = {"status": st, "kind": "buy", "method": True, "exits": LIVE_EXITS[v["variant"]],
+        if v["variant"] == "X_IFLY_920":
+            g["X_IFLY_920"] = {"status": st, "kind": "sell", "method": True, "structure": "IRON_FLY",
+                               "params": dict(IFLY_ENGINE_PARAMS),
+                               "why": f"engine-replayed {base}: OOS {s['trades']} tr net ₹{s['net']:,.0f} PF {s['pf']} DSR {s['dsr']} — {v['verdict']}"}
+            continue
+        if v["variant"] == "X_ORB15_SEL":
+            # same ORB15 signal as X_ORB15_BUY: tradable only if its train-fold-selected
+            # stop/flatten variant ALSO beats the fixed X_ORB15_BUY out of sample.
+            fixed = (xres.get("ORB15_BUY_PUBLISHED") or {}).get("oos_uncond") or {}
+            better = st != "blocked" and s["net"] > (fixed.get("net") or 0)
+            g["X_ORB15_SEL"] = {"status": st if better else "blocked", "kind": "buy", "method": True,
+                                "exits": _orb_sel_exits(v.get("chosen_now")),
+                                "why": (f"ORB15 stop/flatten chosen on train folds (now {v.get('chosen_now')}): OOS "
+                                        f"{s['trades']} tr net ₹{s['net']:,.0f} PF {s['pf']} DSR {s['dsr']} — {v['verdict']}"
+                                        + ("" if better else f"; not better than X_ORB15_BUY (₹{fixed.get('net', 0):,.0f}) → research only"))}
+            continue
+        ex = LIVE_EXITS[v["variant"]]
+        g[v["variant"]] = {"status": st, "kind": "buy", "method": True, "exits": ex,
                            "why": f"agent-executable {base}: OOS {s['trades']} tr net ₹{s['net']:,.0f} PF {s['pf']} DSR {s['dsr']} — {v['verdict']}"}
     return g
 

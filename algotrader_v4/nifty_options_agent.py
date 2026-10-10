@@ -53,9 +53,10 @@ NOI_BUY_SPEC = {"sl_pct": (30.0, 15.0, 40.0), "tgt_pct": (60.0, 20.0, 80.0), "ma
                 "edge_cost_mult": (2.0, 1.5, 4.0), "size_factor": (1.0, 0.25, 1.0)}
 
 
-# published-method variants (options_methods_research): longer holds allowed (the
-# engine still flattens buys at 14:30); premium stop never wider than 40%.
-METHOD_BUY_SPEC = {"sl_pct": (30.0, 15.0, 40.0), "tgt_pct": (300.0, 20.0, 300.0), "max_hold_min": (315, 5, 315)}
+# published-method variants (options_methods_research): longer holds allowed; per-signal
+# flatten time (engine clamps to ≤15:09) and premium stop 15–60% (engine BUY_SL_BOUNDS;
+# sizing stays 1% risk AT the stop, so a wider stop means fewer lots, never more risk).
+METHOD_BUY_SPEC = {"sl_pct": (30.0, 15.0, 60.0), "tgt_pct": (300.0, 20.0, 300.0), "max_hold_min": (315, 5, 315)}
 
 
 def load_gate() -> dict:
@@ -252,6 +253,8 @@ class NiftyOptionsIntradayAgent:
                 "tgt_pct": _clamp(100 * float(ex.get("tgt", 0.60)), "tgt_pct", spec),
                 "max_hold_min": int(_clamp(int(ex.get("h", 15)), "max_hold_min", spec)),
                 "edge_cost_mult": NOI_BUY_SPEC["edge_cost_mult"][0], "size_factor": size}
+            if ex.get("flat"):
+                engine.params_override[fam]["flat_by"] = str(ex["flat"])
             r = engine.open_buy(UNDERLYING, ev.side, fam, ev.sig, reason=f"{AGENT_NAME} {ev.sig} ({g['status']})",
                                 agent=AGENT_NAME)
             if r.get("ok"):
@@ -264,8 +267,8 @@ class NiftyOptionsIntradayAgent:
                 return {"ok": True, "id": pid}
             return r
         fam = FAMILY_SELL + ev.sig
-        engine.params_override[fam] = {"size_factor": size}
-        r = engine.open_basket(ev.side, UNDERLYING, reason=f"{AGENT_NAME} {ev.sig} ({g['status']})",
+        engine.params_override[fam] = {**(g.get("params") or {}), "size_factor": size}
+        r = engine.open_basket(g.get("structure") or ev.side, UNDERLYING, reason=f"{AGENT_NAME} {ev.sig} ({g['status']})",
                                agent=AGENT_NAME, family=fam)
         if r.get("ok"):
             bid = r["basket"]["id"]
