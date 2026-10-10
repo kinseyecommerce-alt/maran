@@ -14,13 +14,22 @@ PAPER only, Sunday 11 Oct 2026 (IST), Kite not logged in. No orders placed, no L
 | 9 | Log scan | 221 KiteTicker handshake timeouts on 9 Oct left feed dead; most ERROR lines are test pollution | Ticker self-heal (fresh WS after 60s, max 5/IST day, only with access token) | baed466 | full suite |
 | 10 | Health check | — | /health ok PAPER; /bot/status, /options/status, /learning/report, /research/pipeline, /owner/universe 200; /auth/kite/login 302 → kite.zerodha.com; dashboard headless Chrome: 0 console errors, 0 page errors, 0 5xx | — | — |
 
+## Follow-up (11 Oct 2026, ~01:50–02:25 IST)
+
+| # | Issue | Cause | Fix | Commit | Test |
+|---|---|---|---|---|---|
+| 11 | full_pipeline options 25/26, all_agents_e2e options+pairs 36/39 | Suites still expected OptionsAgent to place single INFY legs; since 9 Oct it hands index ideas to options_engine and drops stock ideas. Pairs single-leg trading is intentionally off since 4a84d8d (audit #19) | Options: NIFTY idea must reach options_engine.submit_agent_signal (recorded), agent places NO order itself, INFY stock idea dropped, SELL ideas route only to IRON_CONDOR/BULL_PUT/BEAR_CALL baskets. Pairs: expect `pairs_single_leg_enabled=False` → HOLD; z-score mechanics still checked with the flag on (signal only). Real entry/SL/TSL checks for the other 6 agents unchanged | 8c62268 | full_pipeline 31/31, all_agents_e2e 46/46 |
+| 12 | Test noise in logs/*.log | Tests importing main.py added the real file sink | main.py `_runtime_log_dir()`: test_*.py entry / pytest / ALGOTRADER_TEST=1 → $TMP/algotrader-test-logs; ALGOTRADER_LOG_DIR overrides | 84784b1 | Full run: 0 test lines reached logs/ |
+| 13 | **Found during 12:** server stopped writing logs/algotrader_*.log right after startup | main.py on_startup imports historical_learner, whose module-level `logger.remove()` wiped every sink (file + stderr) and left a console-only sink. Download_historical/generate_sim_data had the same pattern | Moved to `_cli_logging()` called only under `__main__` | 84784b1 | test_audit_fixes "importing CLI modules never removes the server's log sinks"; server now logs runtime events after startup |
+| 14 | 'Queue full' tick drops | Fri 9 Oct: about 13.5M drops per agent queue from the pre-2f47d2e drop-oldest FIFO (size 2000). The current code coalesced only once the 5000-item queue was full, so a lagging consumer still worked through seconds-old snaps | Subscriber queues are now a `CoalescingQueue`: latest snapshot per symbol replaces the waiting one in place, bounded by maxsize. bench/tick_queue_bench.py (150 NIFTY option symbols, 1500 ticks/s, 3 stuck subscribers): lagging consumer p50 latency **803→52 ms**, p99 **1593→102 ms**, backlog 2361→130; unloaded consumer unchanged (p50 2 ms, every tick processed) | a56d658 | test_audit_fixes mailbox test |
+
+Server restarted with these fixes; /bot/start → engine running, master running, mode PAPER, owner focus on (NSE_FO NIFTY only, everything else PAUSED (focus)), nifty_options_intraday running with 4 probation signals. Kite WS returns 403 (not logged in), as expected.
+
 ## Final test run (all suites)
-pipeline 1282/1282 · options 123/123 · self_learning 88/88 · strategy_inventor 49/49 · all_agents_policy 45/45 · audit_fixes 44/44 · index_feed_and_safety 25/25 · segments 22/22 · book_consistency 17/17 · scalper_backtest 17/17 · owner_universe 16/16 · sim_orders_flow 13/13 · after_hours 12/12 · dashboard_status 12/12 · nifty_options_agent 12/12 · options_methods 11/11 · options_per_leg 9/9 · buttons 8/8 · book 7/7 · safety_properties 12/12
-**Failing:** full_pipeline 25/26 (options entry), all_agents_e2e 36/39 (options + pairs HOLD).
+pipeline 1282/1282 · options 123/123 · self_learning 88/88 · strategy_inventor 49/49 · all_agents_policy 45/45 · index_feed_and_safety 25/25 · segments 22/22 · book_consistency 17/17 · scalper_backtest 17/17 · owner_universe 16/16 · sim_orders_flow 13/13 · after_hours 12/12 · dashboard_status 12/12 · nifty_options_agent 12/12 · options_methods 11/11 · options_per_leg 9/9 · buttons 8/8 · book 7/7 · safety_properties 12/12
+full_pipeline 31/31 · all_agents_e2e 46/46 · audit_fixes 46/46 — **all 22 suites green** (final run 11 Oct ~02:10–02:25 IST).
 
 ## Remaining
-- e2e/full_pipeline options recipes are stale since OptionsAgent hands off to options_engine (9 Oct redesign); pairs HOLD not diagnosed.
-- ~1,400 "Queue full" tick drops in Friday's live hour (designed drop-oldest) — not changed.
-- Tests still write into the real log file (pollutes log scans).
 - strategy_inventor itself unchanged (library feeds the research loop; inventor is focus-paused).
 - Backtests use Black-Scholes modelled option prices on 63/64 days, so treat the numbers as estimates.
+- Agent stop paths (focus pauses, regime) call agent.stop() without tick_engine.remove_subscriber; with the coalescing mailbox, a dead subscriber costs at most one snap per symbol (not fixed further).
