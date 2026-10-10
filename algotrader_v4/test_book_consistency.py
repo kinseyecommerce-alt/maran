@@ -56,6 +56,10 @@ def section(t):
 
 
 from config import settings
+# these suites pin pre-existing behaviour; the all-agents policy gate and smart
+# exits are covered by test_all_agents_policy.py
+settings.use_agent_policy_gate = False
+settings.use_smart_exits = False
 settings.trading_mode = "PAPER"
 # book-accounting tests open GOLDM/COPPER lots: relax the (separately
 # tested, test_audit_fixes.py) notional caps and edge-vs-cost gate here

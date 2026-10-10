@@ -3,6 +3,10 @@ from __future__ import annotations
 import sys
 from datetime import time
 from config import settings
+# these suites pin pre-existing behaviour; the all-agents policy gate and smart
+# exits are covered by test_all_agents_policy.py
+settings.use_agent_policy_gate = False
+settings.use_smart_exits = False
 from ist_clock import entry_session_time, paper_after_hours_active, now_ist
 
 def _hm(t):
