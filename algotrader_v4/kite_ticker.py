@@ -162,10 +162,42 @@ class KiteTicker:
         logger.warning("[KiteTicker] Reconnecting… attempt {}", attempts_count)
         self.reset_volume_baseline()
 
+    _REVIVE_AFTER_S = 60.0
+    _REVIVE_MAX_PER_DAY = 5
+
     def _on_noreconnect(self, ws) -> None:
+        """The SDK gave up (Oct 9: 221 handshake timeouts → 'feed is dead' for the rest of
+        the session, REST polling only). Self-heal: a fresh WebSocket after 60 s, at most
+        5 times per IST day, only while an access token is configured."""
         with self._state_lock:
             self._connected = False
-        logger.error("[KiteTicker] WebSocket exhausted reconnect attempts — feed is dead")
+        day = now_ist().date()
+        if getattr(self, "_revive_day", None) != day:
+            self._revive_day, self._revive_n = day, 0
+        if self._revive_n >= self._REVIVE_MAX_PER_DAY or not settings.kite_access_token or not self._callback:
+            logger.error("[KiteTicker] WebSocket exhausted reconnect attempts — feed is dead "
+                         "(REST polling continues; {} revive(s) used today)", self._revive_n)
+            return
+        self._revive_n += 1
+        logger.error("[KiteTicker] WebSocket exhausted reconnect attempts — reviving with a fresh "
+                     "connection in {:.0f}s (revive {}/{} today)", self._REVIVE_AFTER_S, self._revive_n,
+                     self._REVIVE_MAX_PER_DAY)
+        t = threading.Timer(self._REVIVE_AFTER_S, self._revive)
+        t.daemon = True
+        t.start()
+
+    def _revive(self) -> None:
+        try:
+            if self.is_connected:
+                return
+            try:
+                if self._kws:
+                    self._kws.stop()
+            except Exception:
+                pass
+            self.start(list(self._token_map.keys()), self._callback, self._loop)
+        except Exception as exc:
+            logger.error("[KiteTicker] revive failed: {}", exc)
 
     def _on_ticks(self, ws, ticks: list[dict]) -> None:
         if not self._callback or not self._loop:
