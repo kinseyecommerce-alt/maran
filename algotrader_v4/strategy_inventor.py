@@ -96,6 +96,26 @@ def _fut_underlying(sym: str) -> str:
     return sym[:-8] if sym.endswith("FUT") else sym
 
 
+_FO_STOCKS = {"RELIANCE", "INFY", "TCS", "HDFCBANK", "ICICIBANK", "SBIN", "ITC", "LT"}
+
+
+def _fo_instrument(sym: str) -> Optional[str]:
+    """NSE_FO invented trades are futures only: an index or F&O stock maps to
+    its current monthly future; anything else (cash names, unknown) → None.
+    The inventor traded the BANKNIFTY *index* (qty 1) and INFY *cash* under
+    NSE_FO on 2026-10-09 (audit #12)."""
+    if not sym:
+        return None
+    s = sym.upper()
+    if s.endswith("FUT"):
+        return s
+    if s in _INDEXES or s in _FO_STOCKS or s in ("NIFTY", "BANKNIFTY", "FINNIFTY", "MIDCPNIFTY"):
+        if s in ("INDIAVIX", "INDIA VIX", "SENSEX", "BANKEX"):
+            return None                 # not NFO-tradable here
+        return _fut_symbol(s)
+    return None
+
+
 def _lot_size(underlying: str) -> int:
     try:
         from kite_client import _FON_LOT_SIZES
@@ -139,6 +159,8 @@ class InventedStrategy:
     approved_at: str = ""
     approval_rationale: str = ""
     next_entry_ts: float = 0.0
+    sl_order_id: Optional[str] = None      # LIVE: exchange SL-M protecting the entry
+    live_open: bool = False                # LIVE: a real position is open at the broker
 
     def to_dict(self) -> dict:
         d = asdict(self)
@@ -629,6 +651,12 @@ class StrategyInventor:
                         self._log("expired", s.segment, s.reason, s.id)
             # Manage open paper positions (SL/target) and re-enter flat ones
             for s in list(self._strategies.values()):
+                if s.live_armed and s.live_open and s.order_id:
+                    # LIVE-armed: manage the real position (exchange SL-M + target)
+                    ex = self._check_live_exit(s)
+                    if ex:
+                        summary["exits"].append(ex)
+                    continue
                 if s.status not in ("paper_active", "live_eligible") or s.live_armed:
                     continue
                 if s.order_id:
@@ -670,7 +698,7 @@ class StrategyInventor:
         if segment == "NSE_EQ":
             return _NSE_SYMBOLS[int(time.time()) % len(_NSE_SYMBOLS)]
         if segment == "NSE_FO":
-            return _NFO_UNDERLYINGS[int(time.time()) % len(_NFO_UNDERLYINGS)]
+            return _fo_instrument(_NFO_UNDERLYINGS[int(time.time()) % len(_NFO_UNDERLYINGS)])
         from segment_engine import native_engine, UNIVERSE
         contracts = UNIVERSE.get(segment) or []
         if not contracts:
@@ -705,44 +733,45 @@ class StrategyInventor:
         if segment_manager.killed(strat.segment):
             strat.gate_breaches += 1
             return {"ok": False, "reason": "kill switch"}
-        if not segment_manager.window_ok(strat.segment):
-            return {"ok": False, "reason": "window closed"}
+        okw, whyw = segment_manager.entry_window_ok(strat.segment)
+        if not okw:
+            return {"ok": False, "reason": f"window closed: {whyw}"}
         if strat.order_id and strat.symbol:
             return {"ok": False, "reason": "already in position"}
+        # TTL: never open a trade the TTL would force-close within the minimum
+        # hold (ttl_expired exits at the entry price paid full costs, audit e)
+        min_hold = int(getattr(settings, "invent_min_hold_sec", 900) or 0)
+        if strat.ttl_left() < max(min_hold, 60):
+            strat.next_entry_ts = time.time() + 60
+            return {"ok": False, "reason": f"TTL {strat.ttl_left()}s < minimum hold {min_hold}s — no new entry"}
         sym = strat.symbol or getattr(strat, "planned_symbol", None) or self._pick_symbol(strat.segment)
         if not sym:
             return {"ok": False, "reason": "no symbol"}
+        if strat.segment == "NSE_FO":
+            fo = _fo_instrument(sym)
+            if not fo:
+                return {"ok": False, "reason": f"{sym} is not an NFO future — NSE_FO trades futures only"}
+            sym = fo
+        elif strat.segment == "NSE_EQ" and sym.upper() in _INDEXES:
+            return {"ok": False, "reason": f"{sym} is an index, not a tradable stock"}
         tag = f"INVENTED-{strat.id}"
         try:
             if strat.segment in _NATIVE:
                 return self._native_entry(strat, sym, tag)
             from kite_client import kite_client
             if settings.trading_mode != "PAPER" and strat.live_armed:
-                # LIVE tiny path — 1 share, NSE only, all prechecks (unchanged)
-                if not self._live_precheck(strat):
-                    return {"ok": False, "reason": strat.last_error or "live precheck failed"}
-                qty = max(1, min(strat.max_qty, int(getattr(settings, "invent_live_tiny_qty_equity", 1))))
-                exchange = "NFO" if strat.segment == "NSE_FO" else "NSE"
-                oid = kite_client.place_order(
-                    tradingsymbol=sym, exchange=exchange,
-                    transaction_type=strat.side, quantity=qty,
-                    order_type="MARKET", product="MIS", tag=tag[:20],
-                )
-                px = self._ltp(sym, exchange) or 0.0
-                strat.live_fills += 1
-                strat.symbol, strat.entry_price, strat.order_id = sym, (float(px) if px else None), str(oid)
-                strat.qty, strat.simulated = qty, False
-                self._log("live_entry", strat.segment, f"{strat.side} {sym} qty={qty} @ {px} oid={oid}", strat.id)
-                return {"ok": True, "order_id": oid, "symbol": sym, "price": px, "quantity": qty,
-                        "simulated": False, "tag": tag}
+                return self._live_entry(strat, sym, tag)
             # ── PAPER (kite_client paper ledger; never reaches Kite in PAPER) ──
             fut = strat.segment == "NSE_FO" and sym.endswith("FUT")
             und = _fut_underlying(sym) if fut else sym
-            px = self._ltp(und) or 0.0
-            if px <= 0:
+            spot = self._ltp(und) or 0.0
+            if spot <= 0:
                 return {"ok": False, "reason": f"no live price for {und}"}
+            px = self._fut_px(sym, spot) if fut else spot
             risk, hard = self._risk_budget(strat.segment)
             stop_amt = px * strat.stop_pct / 100.0
+            from segments import _limits
+            cap = _limits(strat.segment)["capital"]
             if fut:
                 lot = _lot_size(und)
                 lots = int(risk // (stop_amt * lot)) if stop_amt > 0 else 0
@@ -750,19 +779,29 @@ class StrategyInventor:
                     if stop_amt * lot > hard:
                         return {"ok": False, "reason": f"1 lot {sym} risks ₹{stop_amt * lot:,.0f} > ₹{hard:,.0f}"}
                     lots = 1
+                # notional cap: one futures position ≤ X × segment capital
+                from segments import notional_caps
+                max_n = notional_caps(strat.segment)[0]
+                lots = min(lots, int(max_n // (px * lot)) if px * lot > 0 else 0)
+                if lots < 1:
+                    return {"ok": False, "reason": f"1 lot {sym} notional ₹{px * lot:,.0f} > "
+                                                   f"position notional cap ₹{max_n:,.0f}"}
                 qty = lots * lot
                 exchange, product = "NFO", "NRML"
                 notional = qty * px * float(getattr(settings, "futures_margin_pct", 20.0)) / 100.0
-                # paper model for futures = spot-marked (basis ≈ 0), as the futures agent
+                # paper fill at the FUTURES price (spot + basis), not at spot
                 kite_client._paper_ltp[sym] = px
             else:
-                from segments import _limits
-                cap = _limits(strat.segment)["capital"]
                 qty = int(risk // stop_amt) if stop_amt > 0 else 0
                 qty = min(qty, int(cap * 0.25 // px))          # ≤25% of the segment per idea
                 if qty < 1:
                     return {"ok": False, "reason": "size < 1 share"}
                 exchange, product, notional = "NSE", "MIS", qty * px
+            okc, whyc = self._edge_vs_costs(strat, sym, qty, px, product)
+            if not okc:
+                strat.next_entry_ts = time.time() + 300
+                strat.last_error = f"entry skipped: {whyc}"[:200]
+                return {"ok": False, "reason": whyc}
             ok, why = segment_manager.entry_check(strat.segment, notional=notional,
                                                   transaction_type=strat.side, symbol="")
             if not ok:
@@ -789,6 +828,86 @@ class StrategyInventor:
             strat.next_entry_ts = time.time() + 120
             logger.warning("[invent] paper entry failed {}: {}", strat.id, exc)
             return {"ok": False, "reason": str(exc)[:200]}
+
+    def _fut_px(self, contract: str, spot: float) -> float:
+        """Futures price for paper fills/exits: the live futures quote when
+        Kite data is on, else spot + last known basis (else spot)."""
+        try:
+            from kite_client import kite_client
+            px = kite_client.refresh_fut_basis(contract, spot) if self._live_data_on() else None
+            if isinstance(px, (int, float)) and px > 0:
+                return float(px)
+        except Exception:
+            pass
+        return self._mark_fut(contract, spot)
+
+    def _edge_vs_costs(self, strat: InventedStrategy, sym: str, qty: int, px: float,
+                       product: str) -> tuple[bool, str]:
+        """Expected gross edge at target ≥ native_min_edge_cost_ratio × costs."""
+        ratio = float(getattr(settings, "native_min_edge_cost_ratio", 0.0) or 0.0)
+        if ratio <= 0 or qty < 1 or px <= 0:
+            return True, "ok"
+        try:
+            from cost_model import costs, kind_for
+            tgt = px * strat.target_pct / 100.0
+            sgn = 1 if strat.side == "BUY" else -1
+            cost = float(costs(kind_for(strat.segment, product, sym), qty, px, px + sgn * tgt,
+                               strat.side, "NFO" if sym.endswith("FUT") else "NSE")["total"])
+            edge = qty * tgt
+        except Exception:
+            return True, "ok"
+        if edge < ratio * cost:
+            return False, f"edge ₹{edge:,.0f} at target < {ratio:g}× round-trip costs ₹{cost:,.0f}"
+        return True, "ok"
+
+    def _live_entry(self, strat: InventedStrategy, sym: str, tag: str) -> dict:
+        """LIVE tiny entry (only after global SEND + segment SEND + per-strategy
+        SEND arm + warm-up): goes through the segment entry gate, then an
+        exchange SL-M is placed immediately. If the stop cannot be placed the
+        position is closed at once — never an unprotected live position."""
+        from kite_client import kite_client
+        from segments import segment_manager
+        if not self._live_precheck(strat):
+            return {"ok": False, "reason": strat.last_error or "live precheck failed"}
+        exchange = "NFO" if strat.segment == "NSE_FO" else "NSE"
+        und = _fut_underlying(sym) if sym.endswith("FUT") else sym
+        px = self._ltp(und) or 0.0
+        if px <= 0:
+            return {"ok": False, "reason": f"no live price for {und}"}
+        qty = max(1, min(strat.max_qty, int(getattr(settings, "invent_live_tiny_qty_equity", 1))))
+        ok, why = segment_manager.entry_check(strat.segment, notional=qty * px,
+                                              transaction_type=strat.side, symbol="")
+        if not ok:
+            strat.last_error = f"LIVE entry blocked: {why}"[:200]
+            return {"ok": False, "reason": why}
+        oid = kite_client.place_order(
+            tradingsymbol=sym, exchange=exchange,
+            transaction_type=strat.side, quantity=qty,
+            order_type="MARKET", product="MIS", tag=tag[:20],
+        )
+        strat.live_fills += 1
+        strat.symbol, strat.entry_price, strat.order_id = sym, float(px), str(oid)
+        strat.qty, strat.simulated, strat.live_open = qty, False, True
+        exit_side = "SELL" if strat.side == "BUY" else "BUY"
+        trig = px * (1 - strat.stop_pct / 100.0) if strat.side == "BUY" else px * (1 + strat.stop_pct / 100.0)
+        trig = round(round(trig / 0.05) * 0.05, 2)
+        try:
+            strat.sl_order_id = str(kite_client.place_order(
+                tradingsymbol=sym, exchange=exchange, transaction_type=exit_side, quantity=qty,
+                order_type="SL-M", product="MIS", trigger_price=trig, tag=f"INVSL-{strat.id}"[:20]))
+        except Exception as exc:
+            logger.error("[invent] LIVE SL placement failed for {} — closing the entry: {}", strat.id, exc)
+            strat.last_error = f"SL placement failed — position closed: {exc}"[:200]
+            self._flatten_paper(strat, "sl_place_failed")
+            self.disarm_live(strat.id)
+            strat.live_armed = False
+            if strat.status == "live_armed":
+                strat.status = "live_eligible" if strat.warm_up_ok() else "paper_active"
+            return {"ok": False, "reason": "exchange stop could not be placed — entry closed"}
+        self._log("live_entry", strat.segment,
+                  f"{strat.side} {sym} qty={qty} @ {px} oid={oid} SL-M {trig} ({strat.sl_order_id})", strat.id)
+        return {"ok": True, "order_id": oid, "symbol": sym, "price": px, "quantity": qty,
+                "simulated": False, "tag": tag, "sl_order_id": strat.sl_order_id, "sl_trigger": trig}
 
     def _native_entry(self, strat: InventedStrategy, sym: str, tag: str) -> dict:
         from segment_engine import native_engine
@@ -876,6 +995,8 @@ class StrategyInventor:
         px = self._ltp(_fut_underlying(strat.symbol) if fut else strat.symbol) or 0.0
         if px <= 0:
             return None
+        if fut:
+            px = self._mark_fut(strat.symbol, px)
         entry = float(strat.entry_price)
         stop = strat.stop_pct / 100.0
         tgt = strat.target_pct / 100.0
@@ -888,6 +1009,78 @@ class StrategyInventor:
         reason = "stop" if sl_hit else "target"
         pnl = self._flatten_paper(strat, reason, px=px)
         return {"id": strat.id, "reason": reason, "pnl": pnl, "price": px}
+
+    def _mark_fut(self, contract: str, spot: float) -> float:
+        try:
+            from kite_client import kite_client
+            v = kite_client.futures_mark(contract, spot)
+            return float(v) if isinstance(v, (int, float)) and v > 0 else spot
+        except Exception:
+            return spot
+
+    def _check_live_exit(self, strat: InventedStrategy) -> Optional[dict]:
+        """LIVE-armed position management: the exchange SL-M protects the
+        downside; this books the stop fill or takes the target."""
+        if not strat.live_open or not strat.symbol:
+            return None
+        from kite_client import kite_client
+        if strat.sl_order_id:
+            try:
+                hist = kite_client.order_history(strat.sl_order_id) or []
+                st = str((hist[-1] if hist else {}).get("status") or "").upper()
+                if st == "COMPLETE":
+                    fill = float((hist[-1] or {}).get("average_price") or 0) or None
+                    sgn = 1 if strat.side == "BUY" else -1
+                    pnl = ((fill - float(strat.entry_price)) * strat.qty * sgn
+                           if fill and strat.entry_price else 0.0)
+                    strat.live_open, strat.sl_order_id = False, None
+                    self._book_exit(strat, "stop (exchange SL-M)", pnl, fill)
+                    return {"id": strat.id, "reason": "stop", "pnl": pnl, "price": fill}
+            except Exception as exc:
+                logger.debug("[invent] LIVE SL status {}: {}", strat.id, exc)
+        und = _fut_underlying(strat.symbol) if strat.symbol.endswith("FUT") else strat.symbol
+        px = self._ltp(und) or 0.0
+        if px <= 0 or strat.entry_price is None:
+            return None
+        entry, tgt = float(strat.entry_price), strat.target_pct / 100.0
+        tp_hit = px >= entry * (1 + tgt) if strat.side == "BUY" else px <= entry * (1 - tgt)
+        if not tp_hit:
+            return None
+        pnl = self._flatten_paper(strat, "target", px=px)
+        return {"id": strat.id, "reason": "target", "pnl": pnl, "price": px}
+
+    def _flatten_live(self, strat: InventedStrategy, reason: str) -> None:
+        """Close a LIVE invented position at the broker: cancel the exchange
+        stop, then send the closing MARKET order for what is actually still
+        open (never a position-reversing order)."""
+        from kite_client import kite_client
+        exchange = "NFO" if strat.symbol.endswith("FUT") else "NSE"
+        if strat.sl_order_id:
+            try:
+                hist = kite_client.order_history(strat.sl_order_id) or []
+                if str((hist[-1] if hist else {}).get("status") or "").upper() == "COMPLETE":
+                    strat.live_open, strat.sl_order_id = False, None     # stop already closed it
+                    return
+                kite_client.cancel_order(strat.sl_order_id)
+            except Exception as exc:
+                logger.warning("[invent] LIVE SL cancel {} failed: {}", strat.sl_order_id, exc)
+        sgn = 1 if strat.side == "BUY" else -1
+        open_q = None
+        try:
+            for p in (kite_client.positions() or {}).get("net", []):
+                if p.get("tradingsymbol") == strat.symbol and p.get("product", "MIS") == "MIS":
+                    open_q = (open_q or 0) + int(p.get("quantity") or 0)
+        except Exception as exc:
+            logger.warning("[invent] LIVE positions read failed ({}): closing booked qty", exc)
+        qty = int(strat.qty or 0)
+        close_q = qty if open_q is None else (min(qty, abs(open_q)) if open_q * sgn > 0 else 0)
+        if close_q > 0:
+            kite_client.place_order(
+                tradingsymbol=strat.symbol, exchange=exchange,
+                transaction_type="SELL" if sgn > 0 else "BUY", quantity=close_q,
+                order_type="MARKET", product="MIS", tag=f"INVX-{strat.id}"[:20])
+            self._log("live_exit", strat.segment, f"{reason} {strat.symbol} qty={close_q}", strat.id)
+        strat.live_open, strat.sl_order_id = False, None
 
     def _book_exit(self, strat: InventedStrategy, reason: str, pnl: float, px=None) -> None:
         strat.paper_pnl = round(float(strat.paper_pnl or 0) + float(pnl or 0), 2)
@@ -920,6 +1113,17 @@ class StrategyInventor:
             fut = strat.symbol.endswith("FUT")
             if px is None:
                 px = self._ltp(_fut_underlying(strat.symbol) if fut else strat.symbol) or strat.entry_price
+                if fut and px:
+                    px = self._mark_fut(strat.symbol, float(px))
+            if strat.live_open or (settings.trading_mode != "PAPER" and not strat.simulated
+                                   and strat.live_fills > 0):
+                # LIVE position: the closing order MUST reach the broker
+                self._flatten_live(strat, reason)
+                if pnl is None and strat.entry_price is not None and px:
+                    sgn = 1 if strat.side == "BUY" else -1
+                    pnl = (float(px) - float(strat.entry_price)) * int(strat.qty or 0) * sgn
+                self._book_exit(strat, reason, float(pnl or 0.0), px)
+                return pnl
             qty = int(getattr(strat, "qty", 0) or max(1, strat.max_qty))
             sgn = 1 if strat.side == "BUY" else -1
             open_q = 0
@@ -1010,6 +1214,9 @@ class StrategyInventor:
             s = self._strategies.get(strategy_id)
             if not s:
                 return {"ok": False, "reason": "unknown strategy"}
+            if s.live_open:
+                # never orphan a real position: close it at the broker first
+                self._flatten_paper(s, "disarmed")
             s.live_armed = False
             if s.status == "live_armed":
                 s.status = "live_eligible" if s.warm_up_ok() else "paper_active"

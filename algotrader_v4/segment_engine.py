@@ -502,15 +502,13 @@ class NativeEngine:
         """Lots allowed by the notional caps: one position ≤ capital ×
         segment_max_position_notional_x, all open positions together ≤
         capital × segment_max_gross_notional_x."""
-        from segments import _limits
+        from segments import notional_caps
         c = self.contracts[key]
         px = float(self.price.get(key) or 0)
         n_lot = px * c.multiplier
         if n_lot <= 0:
             return 0
-        cap = _limits(c.segment)["capital"]
-        per_pos = cap * float(getattr(settings, "segment_max_position_notional_x", 1.0) or 1.0)
-        gross = cap * float(getattr(settings, "segment_max_gross_notional_x", 3.0) or 3.0)
+        per_pos, gross = notional_caps(c.segment)
         room = max(0.0, gross - self.notional_open(c.segment))
         return int(min(per_pos, room) // n_lot)
 

@@ -164,7 +164,11 @@ class ScalpLogic:
         if inst.segment in ("NSE_EQ", "BSE_EQ"):
             cap_n = capital * EQ_MAX_NOTIONAL_FRAC
         else:
-            cap_n = capital * float(getattr(settings, "segment_max_position_notional_x", 1.0) or 1.0)
+            try:
+                from segments import notional_caps, _limits
+                cap_n = capital * notional_caps(inst.segment)[0] / _limits(inst.segment)["capital"]
+            except Exception:
+                cap_n = capital
         lots = int(cap_n // n_lot)
         hard = MAX_LOTS.get(inst.segment)
         if hard:

@@ -1052,7 +1052,7 @@ class TickEngine:
 
         # Paper-mode: update P&L and check SL/SL-M triggers on each tick
         if settings.trading_mode == "PAPER":
-            kite_client.update_paper_pnl(symbol, tick.ltp)
+            kite_client.update_paper_pnl(symbol, tick.ltp, source=source)
             # Re-mark open F&O positions on this underlying (contracts have no
             # tick feed) and run trigger checks against the fresh marks:
             # contract-keyed SL-M/LIMIT paper orders otherwise NEVER fire,

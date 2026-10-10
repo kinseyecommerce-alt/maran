@@ -787,6 +787,8 @@ class Settings(BaseSettings):
     # all open positions together ≤ Y × segment capital (margin is NOT exposure)
     segment_max_position_notional_x: float = Field(default=1.0, gt=0, le=5)
     segment_max_gross_notional_x:    float = Field(default=3.0, gt=0, le=10)
+    # NSE_FO: one NIFTY/BANKNIFTY lot is ~₹16–17L notional on a ₹10L segment
+    segment_max_position_notional_x_nse_fo: float = Field(default=2.0, gt=0, le=5)
     # a quote is fresh for an ENTRY only if its EXCHANGE timestamp is this young
     quote_entry_max_age_sec: float = Field(default=20.0, gt=0)
     # native/invented entries: expected edge at target ≥ N × round-trip costs

@@ -492,7 +492,10 @@ class SelfLearning:
                 "regime": (pos.get("features") or {}).get("regime"),
                 "features": pos.get("features") or {}, "live_entry_px": le, "live_exit_px": lx,
                 "slippage": round(slip, 2), "gross": (float(rec["price"]) - float(pos["entry"])) * lots * mult * sgn,
-                "reason": rec.get("reason"), "price_source": pos.get("price_source"),
+                "reason": rec.get("reason"),
+                # per fill: KITE only if entry AND exit filled on Kite prices
+                "price_source": (pos.get("price_source") if not rec.get("price_source")
+                                 or rec.get("price_source") == pos.get("price_source") else "MIXED"),
                 "cost_kind": "EQ_INTRADAY" if seg == "BSE_EQ" else None,
                 "exchange": {"BSE_EQ": "BSE", "MCX": "MCX", "CDS": "CDS"}.get(seg, ""),
                 "param_version": pos.get("param_version"), "source": "native"})
@@ -604,7 +607,7 @@ class SelfLearning:
                     "features": feats, "regime": feats.get("regime"),
                     "live_entry_px": feats.get("ltp"), "slippage": None,
                     "gross": (px - e["px"]) * take * e["sgn"], "reason": o.get("tag"),
-                    "price_source": "KITE" if self._kite_live() else "SIMULATED",
+                    "price_source": self._fill_source(eo, o),
                     "product": o.get("product"), "exchange": "NSE", "source": "kite_paper"})
                 n += int(ok)
                 e["left"] -= take
@@ -614,6 +617,20 @@ class SelfLearning:
             if remain > 0:
                 opens.setdefault(sym, []).append({"o": o, "left": remain, "sgn": sgn, "px": px})
         return n
+
+    def _fill_source(self, entry_order: dict, exit_order: dict) -> str:
+        """Journal label from the fills themselves (kite_client stamps each
+        paper fill with the feed that priced it): KITE only when BOTH the entry
+        and the exit filled on real prices. A trade opened on SIMULATED prices
+        and closed on KITE is a splice, not evidence (audit X3). Orders from
+        before per-fill stamping fall back to the connection state."""
+        srcs = [str(x.get("price_source") or "").upper() for x in (entry_order, exit_order)]
+        if all(srcs):
+            return "KITE" if all(x in ("KITE", "TRUEDATA") for x in srcs) else (
+                "MIXED" if any(x in ("KITE", "TRUEDATA") for x in srcs) else "SIMULATED")
+        if any(x in ("SIMULATED", "PAPER") for x in srcs if x):
+            return "SIMULATED"
+        return "KITE" if self._kite_live() else "SIMULATED"
 
     def _kite_live(self) -> bool:
         try:

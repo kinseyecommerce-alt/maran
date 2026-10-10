@@ -138,6 +138,18 @@ def _limits(code: str) -> dict:
     }
 
 
+def notional_caps(code: str) -> tuple[float, float]:
+    """(max notional of ONE position, max gross notional of all open
+    positions) in ₹ for the segment — exposure caps on top of margin and
+    per-trade risk (audit X10). Per-segment override:
+    segment_max_position_notional_x_<code>."""
+    cap = _limits(code)["capital"]
+    x = getattr(settings, f"segment_max_position_notional_x_{code.lower()}", None)
+    x = float(x if x else getattr(settings, "segment_max_position_notional_x", 1.0) or 1.0)
+    g = float(getattr(settings, "segment_max_gross_notional_x", 3.0) or 3.0)
+    return cap * x, cap * max(g, x)
+
+
 class SegmentModeError(Exception):
     def __init__(self, status: int, detail: str):
         super().__init__(detail)

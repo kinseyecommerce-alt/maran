@@ -160,6 +160,14 @@ class KiteClient:
         # Option contract → {underlying, entry_spot, delta} for PAPER Black-Scholes
         # mark-to-market (option contracts have no tick feed of their own).
         self._paper_option_meta: dict[str, dict] = {}
+        # sym → price source of its latest PAPER mark ("KITE" | "SIMULATED");
+        # stamped on every paper fill so the journal labels each fill by the
+        # feed that priced it, never by the connection state at sync time.
+        self._paper_src: dict[str, str] = {}
+        # NFO futures contract → (basis = futures LTP − underlying spot, epoch):
+        # paper futures are marked at spot + basis, not at spot (audit #12/MED)
+        self._fut_basis: dict[str, tuple] = {}
+        self._fut_basis_inflight: set = set()
 
     # ── Auth ───────────────────────────────────────────────────────────────
 
@@ -192,6 +200,14 @@ class KiteClient:
         except Exception as exc:
             logger.warning("[kite] Failed to persist access token to state_store: {}", exc)
         logger.info("Kite auth OK (orders-only, rate-limited mode)")
+        if settings.trading_mode == "PAPER":
+            try:
+                n = self.reconcile_sim_positions(reason="kite_connect")
+                if n:
+                    logger.warning("[PAPER] Kite connected — {} position(s) opened on SIMULATED prices "
+                                   "closed at their simulated marks (no sim→live splice)", n)
+            except Exception as exc:
+                logger.warning("[PAPER] sim-position reconcile on Kite connect failed: {}", exc)
         return token
 
     @property
@@ -930,6 +946,8 @@ class KiteClient:
             "tag":              tag,
             "placed_at":        datetime.now(tz=_IST).isoformat(),
             "placed_ts":        time.time(),   # epoch — used for terminal-order pruning
+            # feed that priced this order (fills overwrite it at fill time)
+            "price_source":     self.paper_price_source(tradingsymbol),
         }
         with self._paper_orders_lock:
             self._paper_orders[order_id] = record
@@ -1066,11 +1084,14 @@ class KiteClient:
                         self._record_fill_pnl(order, realised)
                     if new_qty != 0 and abs(qty_delta) > 0:
                         if old_qty == 0:
+                            pos["price_source"] = order.get("price_source") or "SIMULATED"
                             # Re-entering a flat position — reset average to this fill price.
                             # Without this branch average_price retained the previous-trade
                             # value, causing phantom instant P&L on every second entry.
                             pos["average_price"] = fill_price
                         elif (old_qty > 0 and qty_delta > 0) or (old_qty < 0 and qty_delta < 0):
+                            if (order.get("price_source") or "SIMULATED") != pos.get("price_source"):
+                                pos["price_source"] = "MIXED"
                             # Adding to existing position — weighted average
                             pos["average_price"] = round(
                                 (pos["average_price"] * abs(old_qty) + fill_price * abs(qty_delta))
@@ -1079,6 +1100,7 @@ class KiteClient:
                         elif (old_qty > 0 and new_qty < 0) or (old_qty < 0 and new_qty > 0):
                             # Position reversed — new average is the reversal fill price
                             pos["average_price"] = fill_price
+                            pos["price_source"] = order.get("price_source") or "SIMULATED"
                     pos["quantity"] = new_qty
                     return
             self._paper_positions.append({
@@ -1089,6 +1111,7 @@ class KiteClient:
                 "average_price": fill_price,
                 "last_price":    fill_price,
                 "pnl":           0.0,
+                "price_source":  order.get("price_source") or "SIMULATED",
             })
 
     def _record_fill_pnl(self, order: dict, realised: float) -> None:
@@ -1133,6 +1156,8 @@ class KiteClient:
                     continue
                 if not self._fill_time_guard_ok(order):
                     continue
+                if not self._feed_guard_ok(order):
+                    continue
                 # CAS: only fill if still TRIGGER PENDING — snapshot under lock prevents double-fill race
                 with self._paper_orders_lock:
                     if order["status"] != "TRIGGER PENDING":
@@ -1141,6 +1166,7 @@ class KiteClient:
                         continue
                     order["status"] = "COMPLETE"
                     order["price"]  = ltp  # filled at market after trigger
+                    order["price_source"] = self.paper_price_source(symbol)
                     self._paper_filled_ids.add(order["order_id"])
                     order_copy = dict(order)
                 self._update_paper_position(order_copy)
@@ -1160,6 +1186,8 @@ class KiteClient:
                     continue
                 if not self._fill_time_guard_ok(order):
                     continue
+                if not self._feed_guard_ok(order):
+                    continue
                 # CAS: only fill if still OPEN — snapshot under lock prevents double-fill race
                 with self._paper_orders_lock:
                     if order["status"] != "OPEN":
@@ -1169,6 +1197,7 @@ class KiteClient:
                     order["status"]        = "COMPLETE"
                     order["price"]         = limit_px   # LIMIT fills at limit price
                     order["average_price"] = limit_px
+                    order["price_source"]  = self.paper_price_source(symbol)
                     self._paper_filled_ids.add(order["order_id"])
                     order_copy = dict(order)
                 self._update_paper_position(order_copy)
@@ -1194,11 +1223,139 @@ class KiteClient:
                            order.get("tradingsymbol"), exc)
             return False
 
-    def update_paper_pnl(self, symbol: str, ltp: float) -> None:
+    # ── PAPER price-source tracking (no SIM→live splice, audit X3) ─────────
+    _REAL_SOURCES = ("KITE", "TRUEDATA")
+
+    @classmethod
+    def _norm_src(cls, src: Optional[str]) -> Optional[str]:
+        if not src:
+            return None
+        r = str(src).upper()
+        if r.startswith("KITE") or r.startswith("TRUEDATA") or r == "REAL":
+            return "KITE"
+        if r == "PAPER" or r.startswith("SIM"):
+            return "SIMULATED"
+        return r
+
+    def paper_price_source(self, tradingsymbol: str) -> str:
+        """Feed that prices *tradingsymbol* right now: its own mark source, else
+        the underlying's (F&O contracts are marked off the underlying), else
+        KITE when live data + a Kite session are on, else SIMULATED."""
+        src = self._paper_src.get(tradingsymbol)
+        if src:
+            return src
+        best = ""
+        for und in list(self._paper_src):
+            if tradingsymbol.startswith(und) and len(und) > len(best):
+                best = und
+        if best:
+            return self._paper_src[best]
+        if getattr(settings, "paper_use_live_data", False) and self._kite is not None:
+            return "KITE"
+        return "SIMULATED"
+
+    def _derived_contracts(self, underlying: str) -> list[str]:
+        """Open paper F&O contracts marked off *underlying* (futures + options)."""
+        out = []
+        with self._paper_positions_lock:
+            for p in self._paper_positions:
+                ts = p.get("tradingsymbol", "")
+                if ts != underlying and ts.startswith(underlying) and p.get("quantity") \
+                        and (ts.endswith("FUT") or ts.endswith("CE") or ts.endswith("PE")):
+                    out.append(ts)
+        return out
+
+    def note_paper_price_source(self, symbol: str, source: Optional[str]) -> int:
+        """Record the feed of *symbol*'s latest mark (called BEFORE the mark is
+        applied). On a SIMULATED → real switch, every position on the symbol
+        (and its derived F&O contracts) that was opened on simulated prices is
+        closed at its last SIMULATED mark and its resting stop/limit orders are
+        cancelled — the first real price must never fill a stop that was set
+        on simulated prices (NESTLEIND −₹7,602, 2026-10-09). Returns #closed."""
+        new = self._norm_src(source)
+        if not new:
+            return 0
+        prev = self._paper_src.get(symbol)
+        self._paper_src[symbol] = new
+        for c in self._derived_contracts(symbol):
+            self._paper_src[c] = new
+        if new == "KITE" and prev != "KITE" and settings.trading_mode == "PAPER":
+            return self._close_sim_positions([symbol] + self._derived_contracts(symbol),
+                                             reason="feed_switch_to_kite")
+        return 0
+
+    def reconcile_sim_positions(self, reason: str = "kite_connect") -> int:
+        """Close every open PAPER position that was opened on SIMULATED prices
+        (at its simulated mark) — run when the Kite session connects."""
+        with self._paper_positions_lock:
+            syms = [p["tradingsymbol"] for p in self._paper_positions if p.get("quantity")]
+        return self._close_sim_positions(syms, reason=reason)
+
+    def _close_sim_positions(self, symbols: list[str], reason: str) -> int:
+        if settings.trading_mode != "PAPER":
+            return 0
+        n = 0
+        for sym in dict.fromkeys(symbols):
+            with self._paper_positions_lock:
+                rows = [dict(p) for p in self._paper_positions
+                        if p.get("tradingsymbol") == sym and p.get("quantity")
+                        and p.get("price_source") not in ("KITE",)]
+            if not rows:
+                continue
+            # cancel resting stops/limits first (they were priced on sim levels)
+            with self._paper_orders_lock:
+                for o in self._paper_orders.values():
+                    if o.get("tradingsymbol") == sym and o.get("status") in ("OPEN", "TRIGGER PENDING"):
+                        o["status"] = "CANCELLED"
+                        o["status_message"] = f"{reason}: priced on simulated levels"
+            for p in rows:
+                q = int(p["quantity"])
+                mark = float(self._paper_ltp.get(sym) or p.get("last_price") or p.get("average_price") or 0)
+                if mark <= 0:
+                    continue
+                oid = f"PAPER-{uuid.uuid4().hex[:8].upper()}"
+                rec = {"order_id": oid, "tradingsymbol": sym, "exchange": p.get("exchange", "NSE"),
+                       "transaction_type": "SELL" if q > 0 else "BUY", "quantity": abs(q),
+                       "order_type": "MARKET", "product": p.get("product", "MIS"), "price": mark,
+                       "average_price": mark, "trigger_price": 0.0, "disclosed_quantity": 0,
+                       "status": "COMPLETE", "tag": "FEED-SWITCH", "placed_at": datetime.now(tz=_IST).isoformat(),
+                       "placed_ts": time.time(), "price_source": "SIMULATED", "reason": reason}
+                with self._paper_orders_lock:
+                    self._paper_orders[oid] = rec
+                    self._journal_locked(rec)
+                self._update_paper_position(rec)
+                n += 1
+                logger.warning("[PAPER] {} {} qty={} closed at SIMULATED mark ₹{} ({})",
+                               rec["transaction_type"], sym, abs(q), mark, reason)
+            try:
+                from trailing_sl_engine import trailing_sl_engine
+                trailing_sl_engine.deregister_symbol(sym)
+            except Exception:
+                pass
+        return n
+
+    def _feed_guard_ok(self, order: dict) -> bool:
+        """A resting stop/limit placed while the symbol was priced SIMULATED
+        never fills on a real price — it is cancelled (the position it protects
+        is closed at its simulated mark by note_paper_price_source)."""
+        if order.get("price_source") != "SIMULATED":
+            return True
+        if self.paper_price_source(order.get("tradingsymbol", "")) != "KITE":
+            return True
+        with self._paper_orders_lock:
+            if order.get("status") in ("OPEN", "TRIGGER PENDING"):
+                order["status"] = "CANCELLED"
+                order["status_message"] = "placed on simulated prices — not filled on a real price"
+        return False
+
+    def update_paper_pnl(self, symbol: str, ltp: float, source: Optional[str] = None) -> None:
         """
         Update last_price and P&L for every paper position matching *symbol*.
         Also keeps _paper_ltp current so MARKET order fill prices are realistic.
+        `source` (tick feed) is recorded first — see note_paper_price_source.
         """
+        if source:
+            self.note_paper_price_source(symbol, source)
         if ltp > 0:
             self._paper_ltp[symbol] = ltp
         with self._paper_positions_lock:
@@ -1254,6 +1411,39 @@ class KiteClient:
                 repriced.append((contract, premium))
         return repriced
 
+    def refresh_fut_basis(self, contract: str, spot: float) -> Optional[float]:
+        """Fetch the futures quote (Kite, exchange-timestamped) and store the
+        basis vs *spot*. Returns the futures LTP, or None when unavailable
+        (no live data / no session / stale quote)."""
+        if spot <= 0 or self._paper_data_stub() or self._kite is None:
+            return None
+        try:
+            q = (self.quote_kite([f"NFO:{contract}"]) or {}).get(f"NFO:{contract}") or {}
+            px = float(q.get("last_price") or 0)
+            from option_chain import quote_exchange_ts
+            ex = quote_exchange_ts(q)
+            if px <= 0 or not ex or time.time() - ex > 120:
+                return None
+            self._fut_basis[contract] = (px - spot, time.time())
+            return px
+        except Exception as exc:
+            logger.debug("[PAPER] futures basis {}: {}", contract, exc)
+            return None
+        finally:
+            self._fut_basis_inflight.discard(contract)
+
+    def futures_mark(self, contract: str, spot: float) -> float:
+        """Paper mark for an NFO future: spot + last known basis (spot when no
+        basis is known yet). A stale basis (>60 s) is refreshed in the
+        background — never a blocking REST call on the tick path."""
+        b = self._fut_basis.get(contract)
+        if (b is None or time.time() - b[1] > 60) and contract not in self._fut_basis_inflight \
+                and self._kite is not None and not self._paper_data_stub():
+            self._fut_basis_inflight.add(contract)
+            import threading as _th
+            _th.Thread(target=self.refresh_fut_basis, args=(contract, spot), daemon=True).start()
+        return round(spot + (b[0] if b else 0.0), 2)
+
     def reprice_paper_futures(self, underlying: str, spot: float) -> list:
         """Mark open futures paper positions on *underlying* at the current
         spot (paper model: basis ≈ 0). Futures contracts have no tick feed —
@@ -1270,10 +1460,11 @@ class KiteClient:
                         or not contract.startswith(underlying)
                         or pos.get("quantity", 0) == 0):
                     continue
-                pos["last_price"] = spot
-                pos["pnl"] = round((spot - pos["average_price"]) * pos["quantity"], 2)
-                self._paper_ltp[contract] = spot
-                repriced.append((contract, spot))
+                mark = self.futures_mark(contract, spot)
+                pos["last_price"] = mark
+                pos["pnl"] = round((mark - pos["average_price"]) * pos["quantity"], 2)
+                self._paper_ltp[contract] = mark
+                repriced.append((contract, mark))
         return repriced
 
 
