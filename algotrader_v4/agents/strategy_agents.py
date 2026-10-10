@@ -1138,6 +1138,7 @@ class OptionsAgent(BaseAgent):
         return "HOLD", None
 
     def _engine_handoff(self, engine, und, opt_type, pattern, score, is_sell) -> None:
+        from loguru import logger      # module has no global logger: NameError killed every hand-off log
         try:
             res = engine.submit_agent_signal(und, opt_type, pattern, score=score, is_sell=is_sell)
             logger.info("[{}] options hand-off {} {} {} -> {}", self.name, und, pattern,

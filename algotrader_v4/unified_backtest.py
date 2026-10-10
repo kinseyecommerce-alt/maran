@@ -84,7 +84,7 @@ MCX_SQ = dtime(23, 15)
 WARMUP_BARS = 260
 MIN_OOS_TRADES = 20
 DSR_MIN = 0.95
-GEN_VERSION = "1"            # bump when gen_symbol_day / _snapshot change
+GEN_VERSION = "2"            # bump when gen_symbol_day / _snapshot change
 
 
 # ═════════════════════════════════════════════════════════════════════════════
@@ -255,6 +255,13 @@ def gen_symbol_day(symbol: str, segment: str, agents: list[str], day: str, prior
         except Exception:
             pass
     tf = {a: _decision_tf(o) for a, o in objs.items()}
+    # options agents decide inside evaluate_tick but hand the trade to the
+    # options engine on a thread; capture that hand-off as the agent's signal
+    handoffs: list = []
+    for a, o in objs.items():
+        if a in ("options", "option_scalping"):
+            o._engine_handoff = (lambda engine, und, opt_type, pattern, score, is_sell, _a=a:
+                                 handoffs.append((_a, opt_type, pattern, score, is_sell)))
     sig: dict[str, list] = {a: [] for a in objs}
     inds: list = []
     window = list(prior[-(WARMUP_BARS - 1):]) if prior else []
@@ -278,6 +285,16 @@ def gen_symbol_day(symbol: str, segment: str, agents: list[str], day: str, prior
             try:
                 action, signal = o.evaluate_tick(snap)
             except Exception:
+                continue
+            if a in ("options", "option_scalping"):
+                import threading as _thr
+                for th in list(_thr.enumerate()):
+                    if th.name.startswith("opt-handoff-"):
+                        th.join(timeout=2.0)
+                while handoffs:
+                    _a, opt_type, pattern, score, is_sell = handoffs.pop(0)
+                    if not is_sell and str(opt_type).upper() in ("CE", "PE"):
+                        sig[_a].append((i, str(opt_type).upper(), {"pattern": pattern, "score": score}))
                 continue
             if action and str(action).upper() in _ENTRY and signal:
                 keep = {k: v for k, v in signal.items() if isinstance(v, (int, float, str, bool)) or v is None}
