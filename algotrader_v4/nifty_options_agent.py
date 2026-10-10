@@ -53,6 +53,11 @@ NOI_BUY_SPEC = {"sl_pct": (30.0, 15.0, 40.0), "tgt_pct": (60.0, 20.0, 80.0), "ma
                 "edge_cost_mult": (2.0, 1.5, 4.0), "size_factor": (1.0, 0.25, 1.0)}
 
 
+# published-method variants (options_methods_research): longer holds allowed (the
+# engine still flattens buys at 14:30); premium stop never wider than 40%.
+METHOD_BUY_SPEC = {"sl_pct": (30.0, 15.0, 40.0), "tgt_pct": (300.0, 20.0, 300.0), "max_hold_min": (315, 5, 315)}
+
+
 def load_gate() -> dict:
     try:
         return json.loads(GATE_PATH.read_text())
@@ -60,9 +65,16 @@ def load_gate() -> dict:
         return {"signals": {}, "note": "no research gate yet — run nifty_options_research"}
 
 
-def write_gate(res: dict) -> dict:
-    """Persist the research verdict (signals: pass / probation / blocked)."""
-    g = {"generated": res.get("generated"), "sessions": res.get("sessions"), "signals": res.get("gate", {}),
+def write_gate(res: dict, methods: Optional[dict] = None) -> dict:
+    """Persist the research verdict (signals: pass / probation / blocked).
+    `methods` = options_methods_research.method_gate rows (merged; if omitted the
+    previous method rows are kept so a nightly signal re-run never drops them)."""
+    prev = load_gate().get("signals") or {}
+    sig = dict(res.get("gate", {}))
+    if methods is None:
+        methods = {k: v for k, v in prev.items() if v.get("method")}
+    sig.update(methods)
+    g = {"generated": res.get("generated"), "sessions": res.get("sessions"), "signals": sig,
          "oos_agent": res.get("oos_agent"), "iv_calibration": res.get("iv_calibration"),
          "pricing": res.get("pricing")}
     GATE_PATH.parent.mkdir(parents=True, exist_ok=True)
@@ -72,8 +84,8 @@ def write_gate(res: dict) -> dict:
     return g
 
 
-def _clamp(v: float, key: str) -> float:
-    _, lo, hi = NOI_BUY_SPEC[key]
+def _clamp(v: float, key: str, spec: Optional[dict] = None) -> float:
+    _, lo, hi = (spec or NOI_BUY_SPEC)[key]
     return max(lo, min(hi, float(v)))
 
 
@@ -190,6 +202,13 @@ class NiftyOptionsIntradayAgent:
             prev_close = self._prev_close(engine)
             self._st.setdefault("expiry_day", self._is_expiry_day(engine, now))
             evs = detect(bars, i, prev_close, self._st)
+            try:
+                import options_methods_research as OM
+                if "cpr" not in self._st:
+                    self._st["cpr"] = OM.cpr_state_live(now.date())
+                evs = evs + OM.live_events(bars, self._st)
+            except Exception as exc:              # a research-module error never blocks exits/other signals
+                self.last_error = f"methods: {exc}"
             sigs = self.tradable_signals()
             for ev in evs:
                 g = sigs.get(ev.sig)
@@ -227,10 +246,11 @@ class NiftyOptionsIntradayAgent:
             return {"ok": False, "why": "expiry-day contracts are never sold"}
         if g.get("kind") == "buy":
             fam = FAMILY_BUY + ev.sig
+            spec = METHOD_BUY_SPEC if g.get("method") else None
             engine.params_override[fam] = {
-                "sl_pct": _clamp(100 * float(ex.get("sl", 0.30)), "sl_pct"),
-                "tgt_pct": _clamp(100 * float(ex.get("tgt", 0.60)), "tgt_pct"),
-                "max_hold_min": int(_clamp(int(ex.get("h", 15)), "max_hold_min")),
+                "sl_pct": _clamp(100 * float(ex.get("sl", 0.30)), "sl_pct", spec),
+                "tgt_pct": _clamp(100 * float(ex.get("tgt", 0.60)), "tgt_pct", spec),
+                "max_hold_min": int(_clamp(int(ex.get("h", 15)), "max_hold_min", spec)),
                 "edge_cost_mult": NOI_BUY_SPEC["edge_cost_mult"][0], "size_factor": size}
             r = engine.open_buy(UNDERLYING, ev.side, fam, ev.sig, reason=f"{AGENT_NAME} {ev.sig} ({g['status']})",
                                 agent=AGENT_NAME)
@@ -238,7 +258,9 @@ class NiftyOptionsIntradayAgent:
                 pid = r["position"]["id"]
                 self.positions[pid] = {"sig": ev.sig, "kind": "buy", "peak": r["position"]["leg"].get("entry", 0)
                                        if isinstance(r["position"].get("leg"), dict) else 0,
-                                       "act": NOI_BUY_SPEC["trail_act_pct"][0], "gap": NOI_BUY_SPEC["trail_gap_pct"][0]}
+                                       "act": NOI_BUY_SPEC["trail_act_pct"][0], "gap": NOI_BUY_SPEC["trail_gap_pct"][0],
+                                       "trail": bool(ex.get("trail", True)), "st_flip": bool(ex.get("st_flip")),
+                                       "side": ev.side}
                 return {"ok": True, "id": pid}
             return r
         fam = FAMILY_SELL + ev.sig
@@ -269,7 +291,9 @@ class NiftyOptionsIntradayAgent:
                 act = p.leg.entry * (1 + meta["act"] / 100)
                 trail = meta["peak"] * (1 - meta["gap"] / 100)
                 rsn = None
-                if meta["peak"] >= act and mark <= trail:
+                if meta.get("st_flip") and self._st_flipped(engine, now, meta.get("side")):
+                    rsn = "supertrend flipped against the trade"
+                elif meta.get("trail", True) and meta["peak"] >= act and mark <= trail:
                     rsn = f"trailing stop {trail:.2f} (peak {meta['peak']:.2f})"
                 elif now.time() >= FLAT_BY:
                     rsn = "flat by 15:15"
@@ -286,6 +310,21 @@ class NiftyOptionsIntradayAgent:
                     continue
                 if now.time() >= FLAT_BY and engine.close_basket(b, "flat by 15:15"):
                     out["closed"].append(pid)
+
+    def _st_flipped(self, engine, now: datetime, side: Optional[str]) -> bool:
+        """Supertrend(10,3) on completed 5m bars now points against `side`."""
+        try:
+            from nifty_options_research import Bar
+            import options_methods_research as OM
+            m = now.replace(second=0, microsecond=0)
+            bars = [Bar(ts, o, h, lo, c) for ts, o, h, lo, c in (engine.bars.get(UNDERLYING) or [])
+                    if ts < m and ts.date() == now.date()]
+            if len(bars) < 60:
+                return False
+            d = OM.supertrend(OM.resample5(bars, len(bars) - 1))
+            return bool(d) and d[-1] == (-1 if side == "CE" else 1)
+        except Exception:
+            return False
 
     # ── dashboard ───────────────────────────────────────────────────────────
     def dashboard_row(self, master_running: bool) -> dict:
@@ -334,7 +373,14 @@ def nightly(sl=None) -> dict:
     gate thresholds; a signal only trades if its OOS record earns it."""
     from nifty_options_research import run
     res = run(out_json=str(Path(__file__).parent / "logs" / "nifty_options_research.json"))
-    g = write_gate(res)
+    methods = None
+    try:
+        import options_methods_research as OM
+        mres = OM.run(out_json=str(Path(__file__).parent / "logs" / "options_methods_research.json"))
+        methods = OM.method_gate(mres, OM.run_agent_exec(mres))
+    except Exception as exc:
+        logger.warning(f"options methods research failed (method gate rows kept): {exc}")
+    g = write_gate(res, methods)
     if sl is not None:
         try:
             sl.store.kv_set("nifty_options_gate", g)
