@@ -219,6 +219,13 @@ class Settings(BaseSettings):
     # autonomously on the simulator. Symbols that FAIL a real backtest are
     # still rejected; LIVE always keeps the strict gate.
     paper_approve_untested: bool = True
+    # Untested (no backtest evidence) symbols approved in PAPER trade on
+    # PROBATION at this size factor until they have evidence (audit X12).
+    paper_block_sim_entries_when_live_wanted: bool = True   # audit X3
+    paper_untested_size_factor: float = Field(default=0.5, ge=0.0, le=1.0)
+    # Cash-equity single-position notional cap as a fraction of segment capital
+    # (MIS leverage widens affordability, never past this) — audit X9/X10.
+    nse_eq_max_position_notional_frac: float = Field(default=0.25, gt=0, le=5.0)
     # PAPER + GBM simulator only: when Kite 1-min history is unavailable, seed
     # candle buffers with SYNTHETIC warm-up bars drawn from the simulator's
     # own GBM, so agents can evaluate immediately instead of after 10-50 min.
@@ -638,14 +645,17 @@ class Settings(BaseSettings):
     # ₹2L slice → ~₹66k notional, then compounded down by Kelly/conviction/gate,
     # so the ₹10L pools sat barely used. 2.0% ~4× the risk budget; ATR sizing
     # still caps each position at the pool slice, so it can't overshoot capital.
-    risk_per_trade_pct: float = Field(default=2.0, gt=0, le=50)
+    # Audit X9 (2026-10-10): back to 1% — and _compute_qty now clamps the FINAL
+    # quantity (after Kelly / conviction / consensus / gate multipliers) to this
+    # rupee risk at the stop and to the notional cap.
+    risk_per_trade_pct: float = Field(default=1.0, gt=0, le=50)
     use_conviction_sizing: bool = True  # score-proportional size (floor loosened: low=0.75×, mid=1.0×, high=1.25×)
     # Conviction concentration: a signal that reaches sizing with a FULL gate
     # size-factor (top score bucket AND gate-confident) earns a doubled capital
     # slice — the "manual trader" concentration on the highest-probability
     # setups (replay win rates at top scores run 60-96%). Scales the proven
     # edge linearly; caps at max_position_size and 2x the per-agent slice.
-    conviction_2x_enabled: bool = True
+    conviction_2x_enabled: bool = False   # audit X9: off by default; even when on, the final risk/notional clamp binds
     conviction_2x_mult: float = Field(default=2.0, ge=1.0, le=3.0)
     # MIS intraday leverage: Zerodha margins equity intraday at min 20%
     # (SEBI VAR+ELM floor) = up to 5x buying power on the MIS list. Sizing

@@ -486,6 +486,14 @@ class SegmentManager:
             used += v
         return round(used, 2)
 
+    def futures_notional(self, code: str) -> float:
+        """Full contract notional of open futures positions in the segment."""
+        tot = 0.0
+        for p in self.positions(code):
+            if str(p.get("symbol") or "").endswith("FUT"):
+                tot += abs(p["qty"]) * float(p["ltp"] or p["avg"] or 0)
+        return round(tot, 2)
+
     def _roll_day(self) -> None:
         d = self.now().date()
         if self._entries_day != d:
@@ -500,7 +508,7 @@ class SegmentManager:
     # ── the per-segment entry gate (paper gate + typed-SEND gate + risk) ──
     def entry_check(self, code: Optional[str], *, notional: float = 0.0,
                     transaction_type: str = "BUY", count: bool = True,
-                    symbol: str = "") -> tuple[bool, str]:
+                    symbol: str = "", contract_notional: float = 0.0) -> tuple[bool, str]:
         if not code or code not in SEGMENTS:
             return True, "OK"
         self.expire_daily_halts()
@@ -533,6 +541,15 @@ class SegmentManager:
                 return False, f"{spec.label} max trades/day ({lim['max_trades_per_day']}) reached"
         if self.position_count(code) >= lim["max_positions"]:
             return False, f"{spec.label} max open positions ({lim['max_positions']}) reached"
+        if contract_notional > 0:
+            # futures: margin is not exposure — cap the CONTRACT notional of this
+            # position and of all open futures in the segment (audit X10)
+            one, gross = notional_caps(code)
+            if contract_notional > one:
+                return False, (f"{spec.label} position notional ₹{contract_notional:,.0f} > cap ₹{one:,.0f}")
+            if self.futures_notional(code) + contract_notional > gross:
+                return False, (f"{spec.label} gross futures notional cap ₹{gross:,.0f} reached "
+                               f"(open ₹{self.futures_notional(code):,.0f} + ₹{contract_notional:,.0f})")
         if notional > 0 and self.capital_used(code) + notional > lim["capital"]:
             return False, (f"{spec.label} capital ₹{lim['capital']:,.0f} exhausted "
                            f"(used ₹{self.capital_used(code):,.0f} + ₹{notional:,.0f})")

@@ -10,6 +10,7 @@ _iso_dir = _tf_iso.mkdtemp(prefix="algotrader-audit-test-")
 _os_iso.environ.setdefault("DATABASE_PATH", _os_iso.path.join(_iso_dir, "algotrader.db"))
 _os_iso.environ.setdefault("ADAPTIVE_DATA_DIR", _os_iso.path.join(_iso_dir, "adaptive"))
 _os_iso.environ.setdefault("SEBI_AUDIT_DIR", _iso_dir)
+_os_iso.environ["LEARNING_DB"] = _os_iso.path.join(_iso_dir, "learning.db")   # never the real logs/learning.db
 _os_iso.environ["SEGMENT_PAPER_AFTER_HOURS"] = "true"      # must be IGNORED now
 _os_iso.environ["API_KEY"] = "unit-test-local-only"
 _os_iso.environ["TRADING_MODE"] = "PAPER"
@@ -573,6 +574,169 @@ def t_unretire_sim_based_retirement():
 run("evidence = KITE-priced and inside the real session (weekday, non-holiday, hours)", t_evidence_filter)
 run("SIM / weekend losses never retire a strategy", t_sim_losses_do_not_retire)
 run("retirement made on sim data is re-evaluated → probation 0.5×; real losers stay retired", t_unretire_sim_based_retirement)
+
+
+# ════════════════════════════════════════════════════════════════════════════
+section("7. built-in NSE agents: risk/notional clamp, probation, learning gate, test-order, futures notional")
+
+
+def _bsnap(symbol="RELIANCE", ltp=2800.0, atr=15.0):
+    from tick_engine import MarketSnapshot, Tick, LiveIndicators
+    now = datetime.now()
+    tick = Tick(symbol=symbol, ltp=ltp, bid=ltp - 0.5, ask=ltp + 0.5, volume=500000, change=0.0,
+                change_pct=0.0, high=ltp + 10, low=ltp - 10, open=ltp - 5, timestamp=now)
+    ind = LiveIndicators(symbol=symbol, ltp=ltp, bid=ltp - 0.5, ask=ltp + 0.5, spread=1.0, ema9=ltp, ema21=ltp,
+                         ema50=ltp, ema200=ltp, vwap=ltp, rsi_14=55, rsi_7=55, macd=1, macd_signal=0.5,
+                         macd_hist=0.5, bb_upper=ltp * 1.02, bb_lower=ltp * 0.98, bb_mid=ltp, atr_14=atr,
+                         volume_ratio=1.5, obv=1e6, day_high=ltp + 50, day_low=ltp - 50, day_open=ltp,
+                         change_pct=0.5, trend="UP", momentum="UP", volatility="NORMAL", computed_at=now)
+    return MarketSnapshot(symbol=symbol, tick=tick, indicators=ind, candles_1min=[], candles_5min=[])
+
+
+@contextmanager
+def _settings(**kw):
+    from config import settings
+    old = {k: getattr(settings, k) for k in kw}
+    try:
+        for k, v in kw.items():
+            setattr(settings, k, v)
+        yield settings
+    finally:
+        for k, v in old.items():
+            setattr(settings, k, v)
+
+
+def t_qty_never_exceeds_risk_or_notional():
+    from agents.strategy_agents import ScalpingAgent
+    from risk_manager import risk_manager as rm
+    from config import settings
+    assert settings.risk_per_trade_pct == 1.0 and settings.conviction_2x_enabled is False   # defaults
+    a = ScalpingAgent()
+    snap = _bsnap(ltp=500.0, atr=1.0)
+    with _settings(conviction_2x_enabled=True, use_kelly_sizing=False), \
+            mock.patch("signal_aggregator.signal_aggregator.get_consensus_boost", return_value=0.5), \
+            mock.patch.object(rm, "calendar_size_factor", return_value=1.0):
+        for sf in (1.0, 2.0):
+            sig = {"stop_loss_pct": 0.5, "score": 10, "_gate_size_factor": sf}
+            q = a._compute_qty(snap, "BUY", sig)
+            risk = q * 500.0 * 0.005
+            budget = rm.max_capital_for_agent("scalping") * settings.risk_per_trade_pct / 100
+            assert risk <= budget + 1e-6, (q, risk, budget)
+            assert q * 500.0 <= 1_000_000 * settings.nse_eq_max_position_notional_frac + 1e-6, q
+
+
+def t_futures_qty_lot_aligned_and_capped():
+    from agents.strategy_agents import FuturesAgent
+    from segments import notional_caps
+    a = FuturesAgent()
+    snap = _bsnap("NIFTY", ltp=25000.0, atr=60.0)
+    q = a._compute_qty(snap, "BUY", {"lot_size": 75, "futures_symbol": "NIFTY26OCTFUT",
+                                     "stop_loss_pct": 0.4, "score": 10, "_gate_size_factor": 2.0})
+    sent = (max(1, round(q / 75)) * 75) if q >= 37.5 else 0   # _try_enter lot rounding (≥½ lot → 1 lot)
+    assert sent * 25000.0 <= notional_caps("NSE_FO")[0], q
+    assert sent * 25000.0 * 0.004 <= 10_000 + 1e-6, q          # 1% of ₹10L NSE_FO
+    # an over-sized ask is floored to whole lots inside the cap
+    q2 = a._clamp_risk_notional(snap, {"lot_size": 75, "futures_symbol": "NIFTY26OCTFUT",
+                                       "stop_loss_pct": 0.4}, 750)
+    assert q2 == 75, q2
+
+
+def t_probation_half_size():
+    from agents.strategy_agents import ScalpingAgent
+    from risk_manager import risk_manager as rm
+    a = ScalpingAgent()
+    snap = _bsnap(ltp=500.0, atr=1.0)
+    sig = {"stop_loss_pct": 0.5, "score": 6, "_gate_size_factor": 1.0}
+    with mock.patch.object(rm, "calendar_size_factor", return_value=1.0), \
+            mock.patch("signal_aggregator.signal_aggregator.get_consensus_boost", return_value=0.0), \
+            mock.patch("signal_aggregator.signal_aggregator.register", return_value=0.0):
+        q_full = a._compute_qty(snap, "BUY", dict(sig))
+        a.add_symbols(["RELIANCE"])
+        assert "RELIANCE" in a._probation
+        q_prob = a._compute_qty(snap, "BUY", dict(sig))
+    assert 0 < q_prob <= q_full // 2 + 1, (q_full, q_prob)
+
+
+def t_learning_gate_blocks_retired_agent():
+    from agents.strategy_agents import ScalpingAgent
+    from self_learning import learning
+    a = ScalpingAgent()
+    snap = _bsnap()
+    was_active = learning.active
+    learning.active = True
+    learning.st("scalping").update(retired=True, retired_reason="unit test")
+    try:
+        with mock.patch.object(type(a), "_pre_claim_checks") as pc:
+            asyncio.run(a._try_enter(snap, "BUY", {"stop_loss_pct": 0.5, "score": 8}))
+            assert not pc.called, "retired agent reached the order path"
+        learning.st("scalping").update(retired=False)
+        learning.set_params("scalping", {"size_factor": 0.5}, "unit test", "retune")
+        seen = {}
+
+        async def _pc(self, snap, action, loop, signal):
+            seen.update(signal)
+            return False
+        with mock.patch.object(type(a), "_pre_claim_checks", _pc):
+            asyncio.run(a._try_enter(snap, "BUY", {"stop_loss_pct": 0.5, "score": 8}))
+        assert abs(seen.get("_learn_size_factor", 0) - 0.5) < 1e-9, seen
+    finally:
+        learning.st("scalping").update(retired=False)
+        learning.active = was_active
+
+
+def t_test_order_never_market():
+    import main
+    from kite_client import kite_client
+    from segments import segment_manager
+    calls = []
+
+    def _place(**kw):
+        calls.append(kw)
+        return "T1"
+    with _settings(trading_mode="LIVE"), \
+            mock.patch.object(segment_manager, "mode", return_value="LIVE"), \
+            mock.patch.object(kite_client, "place_order", side_effect=_place), \
+            mock.patch.object(kite_client, "cancel_order", return_value="T1") as canc, \
+            mock.patch.object(kite_client, "order_history", return_value=[{"status": "CANCELLED"}]), \
+            mock.patch.object(kite_client, "quote_kite", return_value={"NSE:SBIN": {"last_price": 800.0}}):
+        r = asyncio.run(main.test_order(symbol="SBIN", qty=5))
+    assert len(calls) == 1 and calls[0]["order_type"] == "LIMIT", calls
+    assert calls[0]["quantity"] == 1 and calls[0]["price"] <= 720.0, calls
+    assert canc.called and r["flatten_order"] is None
+
+
+def t_futures_notional_gate():
+    with clock(at(*WED, 11, 0)):
+        _futures_notional_gate()
+
+
+def _futures_notional_gate():
+    from segments import segment_manager, notional_caps
+    one, gross = notional_caps("NSE_FO")
+    with mock.patch.object(segment_manager, "positions", return_value=[]), \
+            mock.patch.object(segment_manager, "pnl", return_value={"total": 0.0}):
+        ok, why = segment_manager.entry_check("NSE_FO", notional=1000, count=False,
+                                              symbol="NIFTY26OCTFUT", contract_notional=one + 1)
+        assert not ok and "notional" in why, why
+        ok, why = segment_manager.entry_check("NSE_FO", notional=1000, count=False,
+                                              symbol="NIFTY26OCTFUT", contract_notional=one * 0.9)
+        assert ok, why
+    held = [{"symbol": "BANKNIFTY26OCTFUT", "qty": 35, "ltp": gross / 35, "avg": gross / 35, "pnl": 0.0}]
+    with mock.patch.object(segment_manager, "positions", return_value=held), \
+            mock.patch.object(segment_manager, "position_count", return_value=0), \
+            mock.patch.object(segment_manager, "capital_used", return_value=0.0), \
+            mock.patch.object(segment_manager, "pnl", return_value={"total": 0.0}):
+        ok, why = segment_manager.entry_check("NSE_FO", notional=1000, count=False,
+                                              symbol="NIFTY26OCTFUT", contract_notional=one * 0.5)
+        assert not ok and "gross" in why, why
+
+
+run("NSE sizing: final qty ≤ 1% risk and ≤ notional cap after Kelly/conviction/2x/consensus", t_qty_never_exceeds_risk_or_notional)
+run("NSE futures qty lot-aligned, ≤ notional cap and 1% segment risk", t_futures_qty_lot_aligned_and_capped)
+run("untested PAPER symbol trades on probation (half size)", t_probation_half_size)
+run("built-in NSE agent obeys learning.entry_gate (retired → no order; size factor passed)", t_learning_gate_blocks_retired_agent)
+run("/bot/test-order in LIVE: 1-share far LIMIT then cancel — never MARKET", t_test_order_never_market)
+run("NSE_FO futures: per-position and gross CONTRACT notional caps", t_futures_notional_gate)
 
 
 # ════════════════════════════════════════════════════════════════════════════

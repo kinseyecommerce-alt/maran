@@ -13,6 +13,7 @@ from unittest import mock
 # Isolate DB before imports that touch state_store
 _TMP = tempfile.mkdtemp(prefix="invent_test_")
 os.environ["DATABASE_PATH"] = os.path.join(_TMP, "t.db")
+os.environ["LEARNING_DB"] = os.path.join(_TMP, "learning.db")   # never the real logs/learning.db
 os.environ.setdefault("TRADING_MODE", "PAPER")
 
 from config import settings

@@ -1219,26 +1219,64 @@ async def test_order(
     symbol: str = Query(default="SBIN"),
     qty: int = Query(default=1, gt=0, le=10),
 ):
-    """Place 1-share MARKET BUY to verify Kite connectivity, then immediately cancel."""
+    """Connectivity check that can NEVER leave a position (audit X16): a
+    1-share BUY LIMIT ~10% BELOW the last price (cannot fill; the exchange may
+    also reject it outside the price band — equally harmless), then cancel.
+    LIVE is forced to 1 share. A MARKET test order is never sent."""
     if sebi_compliance._state.value == "KILLED":
         raise HTTPException(status_code=503, detail="Kill switch active — test order blocked")
     symbol = _clean_symbol(symbol)
     from segments import segment_manager
-    if settings.trading_mode == "LIVE" and segment_manager.mode("NSE_EQ") != "LIVE":
+    live = settings.trading_mode == "LIVE"
+    if live and segment_manager.mode("NSE_EQ") != "LIVE":
         raise HTTPException(status_code=409, detail="NSE Stocks segment is PAPER-gated — arm it "
                                                     "with typed SEND before a live test order")
+    if live:
+        qty = 1
+    ltp = 0.0
+    try:
+        t, _ = tick_engine.latest(symbol)
+        ltp = float(getattr(t, "ltp", 0) or 0) if t else 0.0
+    except Exception:
+        ltp = 0.0
+    if live or ltp <= 0:
+        try:
+            q = kite_client.quote_kite([f"NSE:{symbol}"]) or {}
+            ltp = float((q.get(f"NSE:{symbol}") or {}).get("last_price") or 0) or ltp
+        except Exception:
+            pass
+    if ltp <= 0:
+        raise HTTPException(status_code=503, detail=f"No price for {symbol} — test order not sent")
+    px = max(0.05, round(int(ltp * 0.90 / 0.05) * 0.05, 2))
     order_id = kite_client.place_order(
         tradingsymbol=symbol, exchange="NSE",
         transaction_type="BUY", quantity=qty,
-        order_type="MARKET", product="MIS", tag="TestOrder",
+        order_type="LIMIT", price=px, product="MIS", tag="TestOrder",
     )
-    if settings.trading_mode == "LIVE":
+    status = "UNKNOWN"
+    try:
+        kite_client.cancel_order(order_id)
+    except Exception:
+        pass
+    try:
+        hist = kite_client.order_history(order_id) or []
+        status = str((hist[-1] if hist else {}).get("status") or "UNKNOWN")
+    except Exception:
+        pass
+    flattened = None
+    if status == "COMPLETE":
+        # Should be impossible at a limit 10% under the market — but never
+        # leave a position behind: close it immediately.
         try:
-            kite_client.cancel_order(order_id)
-        except Exception:
-            pass
+            flattened = kite_client.place_order(
+                tradingsymbol=symbol, exchange="NSE", transaction_type="SELL", quantity=qty,
+                order_type="MARKET", product="MIS", tag="TestOrderFlat")
+        except Exception as exc:
+            logger.error("test-order filled and flatten FAILED: {}", exc)
+            flattened = f"FAILED: {exc}"
     return {"status": "ok", "order_id": order_id, "mode": settings.trading_mode,
-            "note": "PAPER: simulated. LIVE: placed then cancelled."}
+            "limit_price": px, "ltp": ltp, "final_status": status, "flatten_order": flattened,
+            "note": "BUY LIMIT ~10% below market, then cancelled — never fills."}
 
 @app.get("/bot/status", tags=["Bot"])
 def bot_status():
