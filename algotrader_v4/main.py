@@ -4213,7 +4213,25 @@ _install_log_redaction()
 
 # Add file sink so logs survive across restarts (redaction patcher already applied above)
 import os as _os
-_log_dir = _os.path.join(_os.path.dirname(__file__), "logs")
+
+
+def _runtime_log_dir() -> str:
+    """logs/ holds REAL runtime events only. Test runs (a test_*.py entry
+    script, pytest, or ALGOTRADER_TEST=1) log to a temp dir instead — test
+    kill-switches / LIVE refusals used to land in logs/algotrader_*.log and
+    pollute every log scan. ALGOTRADER_LOG_DIR overrides both."""
+    import sys as _sys, tempfile as _tf
+    explicit = _os.environ.get("ALGOTRADER_LOG_DIR")
+    if explicit:
+        return explicit
+    entry = _os.path.basename(str(_sys.argv[0] if _sys.argv else ""))
+    if (entry.startswith("test_") or "pytest" in _sys.modules
+            or _os.environ.get("ALGOTRADER_TEST") == "1"):
+        return _os.path.join(_tf.gettempdir(), "algotrader-test-logs")
+    return _os.path.join(_os.path.dirname(__file__), "logs")
+
+
+_log_dir = _runtime_log_dir()
 _os.makedirs(_log_dir, exist_ok=True)
 logger.add(
     _os.path.join(_log_dir, "algotrader_{time:YYYY-MM-DD}.log"),

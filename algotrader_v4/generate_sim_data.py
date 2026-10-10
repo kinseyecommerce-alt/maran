@@ -30,8 +30,12 @@ import pandas as pd
 import numpy as np
 
 from loguru import logger
-logger.remove()
-logger.add(sys.stderr, format="<green>{time:HH:mm:ss}</green> | {message}", level="INFO")
+def _cli_logging() -> None:
+    """Console format for CLI runs ONLY. Must not run at import: the server
+    imports it (main.py on_startup → historical_learner), and a module-level logger.remove()
+    wiped the server's logs/algotrader_*.log sink for the rest of the run."""
+    logger.remove()
+    logger.add(sys.stderr, format="<green>{time:HH:mm:ss}</green> | {message}", level="INFO")
 
 # ── Output directory ───────────────────────────────────────────────────────────
 
@@ -359,4 +363,5 @@ def main() -> None:
 
 
 if __name__ == "__main__":
+    _cli_logging()
     main()
