@@ -131,6 +131,18 @@ def _with_retry(fn, bucket: _TokenBucket = _rest_bucket, label: str = ""):
 
 # ── Main client ────────────────────────────────────────────────────────────
 
+def _session_now() -> datetime:
+    """The ONE IST clock for paper-ledger dates (journal day, placed_at,
+    filled_at): segment_manager.now() — real IST in production, the pinned
+    session clock in tests — so book.py's "today" filter (which uses the same
+    clock) always agrees with the ledger (fixes test_book's date mismatch)."""
+    try:
+        from segments import segment_manager
+        return segment_manager.now()
+    except Exception:
+        return datetime.now(tz=_IST)
+
+
 class KiteClient:
     """
     Thin wrapper around KiteConnect — orders and portfolio only.
@@ -944,7 +956,7 @@ class KiteClient:
             "disclosed_quantity": disclosed_quantity,
             "status":           status,
             "tag":              tag,
-            "placed_at":        datetime.now(tz=_IST).isoformat(),
+            "placed_at":        _session_now().isoformat(),
             "placed_ts":        time.time(),   # epoch — used for terminal-order pruning
             # feed that priced this order (fills overwrite it at fill time)
             "price_source":     self.paper_price_source(tradingsymbol),
@@ -963,7 +975,7 @@ class KiteClient:
 
     def _journal_locked(self, record: dict) -> None:
         """Caller holds _paper_orders_lock. New IST day → fresh journal."""
-        day = datetime.now(tz=_IST).date().isoformat()
+        day = _session_now().date().isoformat()
         if getattr(self, "_paper_journal_day", "") != day or not hasattr(self, "_paper_journal"):
             self._paper_journal_day = day
             self._paper_journal = {}
@@ -973,7 +985,7 @@ class KiteClient:
         """Every paper order placed today (IST), including ones pruned from
         the 30-min hot list. Same dict objects → live status / fill / pnl."""
         with self._paper_orders_lock:
-            day = datetime.now(tz=_IST).date().isoformat()
+            day = _session_now().date().isoformat()
             if getattr(self, "_paper_journal_day", "") != day:
                 return []
             return list(getattr(self, "_paper_journal", {}).values())
@@ -1184,7 +1196,7 @@ class KiteClient:
                     order["status"] = "COMPLETE"
                     order["price"]  = fill  # market after trigger (gap-through) + sweep slippage
                     order["average_price"] = fill
-                    order["filled_at"] = datetime.now(tz=_IST).isoformat()
+                    order["filled_at"] = _session_now().isoformat()
                     order["filled_ts"] = time.time()
                     order["price_source"] = self.paper_price_source(symbol)
                     self._paper_filled_ids.add(order["order_id"])
@@ -1217,7 +1229,7 @@ class KiteClient:
                     order["status"]        = "COMPLETE"
                     order["price"]         = limit_px   # LIMIT fills at limit price
                     order["average_price"] = limit_px
-                    order["filled_at"]     = datetime.now(tz=_IST).isoformat()
+                    order["filled_at"]     = _session_now().isoformat()
                     order["filled_ts"]     = time.time()
                     order["price_source"]  = self.paper_price_source(symbol)
                     self._paper_filled_ids.add(order["order_id"])
@@ -1340,7 +1352,7 @@ class KiteClient:
                        "transaction_type": "SELL" if q > 0 else "BUY", "quantity": abs(q),
                        "order_type": "MARKET", "product": p.get("product", "MIS"), "price": mark,
                        "average_price": mark, "trigger_price": 0.0, "disclosed_quantity": 0,
-                       "status": "COMPLETE", "tag": "FEED-SWITCH", "placed_at": datetime.now(tz=_IST).isoformat(),
+                       "status": "COMPLETE", "tag": "FEED-SWITCH", "placed_at": _session_now().isoformat(),
                        "placed_ts": time.time(), "price_source": "SIMULATED", "reason": reason}
                 with self._paper_orders_lock:
                     self._paper_orders[oid] = rec
