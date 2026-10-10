@@ -80,6 +80,11 @@ export const api = {
   learningReport:    () => ax().get('/learning/report'),
   learningJournal:   (limit = 100) => ax().get('/learning/journal', { params: { limit } }),
   scalperStatus:     () => ax().get('/scalper/status'),
+  scalperBacktest:   () => ax().get('/scalper/backtest'),
+  scalperBacktestRun: (body: { days?: string[]; latency_ms?: number; use_windows?: boolean; use_whitelist?: boolean } = {}) =>
+                       ax().post('/scalper/backtest', { ...body, wait: false }),
+  scalperWhitelist:  () => ax().get('/scalper/whitelist'),
+  scalperTicks:      () => ax().get('/scalper/ticks'),
 
   // ── Options engine (PAPER only) ─────────────────────────────────────────────
   optionsStatus:     () => ax().get('/options/status'),

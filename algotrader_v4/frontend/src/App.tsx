@@ -3,7 +3,7 @@ import {
   Activity, Terminal, Cpu, WifiOff, ShieldCheck,
   TrendingUp, TrendingDown, BarChart3,
   Zap, Play, Square, Database, Crosshair,
-  LayoutDashboard, ClipboardList, Target, Scale, History, Brain, Lightbulb, GraduationCap, Layers,
+  LayoutDashboard, ClipboardList, Target, Scale, History, Brain, Lightbulb, GraduationCap, Layers, Gauge,
 } from 'lucide-react'
 import Header from './components/Header'
 import IndexStrip from './components/IndexStrip'
@@ -22,6 +22,7 @@ import ClaudeGateTab from './components/tabs/ClaudeGateTab'
 import InventedTab from './components/tabs/InventedTab'
 import LearningTab from './components/tabs/LearningTab'
 import OptionsTab from './components/tabs/OptionsTab'
+import ScalperTab from './components/tabs/ScalperTab'
 import { connectWS } from './ws/websocket'
 import { useStore } from './store'
 import { api } from './api/client'
@@ -41,6 +42,7 @@ const TAB_COMPONENTS: Record<string, React.ComponentType> = {
   invented:  InventedTab,
   learning:  LearningTab,
   options:   OptionsTab,
+  scalper:   ScalperTab,
 }
 
 const SIDEBAR_NAV: { id: PageId; label: string; Icon: React.ComponentType<{ className?: string }> }[] = [
@@ -53,6 +55,7 @@ const SIDEBAR_NAV: { id: PageId; label: string; Icon: React.ComponentType<{ clas
   { id: 'invented',  label: 'Invented',      Icon: Lightbulb       },
   { id: 'learning',  label: 'Learning',      Icon: GraduationCap   },
   { id: 'options',   label: 'Options',       Icon: Layers          },
+  { id: 'scalper',   label: 'Scalper',       Icon: Gauge           },
   { id: 'sebi',      label: 'SEBI',          Icon: Scale           },
   { id: 'history',   label: 'Trade History', Icon: History         },
   { id: 'gate',      label: 'Claude Gate',   Icon: Brain           },
