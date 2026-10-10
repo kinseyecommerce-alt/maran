@@ -85,7 +85,7 @@ app.openapi = _custom_openapi
 _EXEMPT_PATHS = frozenset({"/health", "/readiness", "/openapi.json", "/auth/login-url", "/config/validate"})
 _EXEMPT_PREFIXES = ("/swagger-static",)
 _SENSITIVE_GETS = frozenset({
-    "/portfolio/positions", "/portfolio/orders", "/sebi/audit-log",
+    "/portfolio/positions", "/portfolio/orders", "/portfolio/book", "/sebi/audit-log",
     "/docs", "/redoc",
     "/gate/log", "/agents/activity", "/brackets", "/trailing-sl/status", "/metrics",
     "/portfolio/performance-report",   # full P&L history — requires auth
@@ -120,11 +120,31 @@ _SENSITIVE_GETS = frozenset({
     "/macro/status",                   # macro risk gate state
 })
 
+def _request_authed(request) -> bool:
+    """X-API-Key (programmatic) OR JWT Bearer / HttpOnly cookie (browser UI)."""
+    api_key = request.headers.get("X-API-Key", "")
+    auth_hdr = request.headers.get("Authorization", "")
+    has_key = bool(settings.api_key) and hmac.compare_digest(
+        api_key.encode(), settings.api_key.encode()
+    )
+    if has_key:
+        return True
+    if settings.jwt_secret_key:
+        if auth_hdr.startswith("Bearer ") and decode_token(auth_hdr[7:]) is not None:
+            return True
+        cookie_jwt = request.cookies.get("jwt", "")
+        if cookie_jwt and decode_token(cookie_jwt) is not None:
+            return True
+    return False
+
+
 @app.middleware("http")
 async def _api_key_gate(request: Request, call_next):
     mutates = request.method in ("POST", "PUT", "PATCH", "DELETE")
     is_sensitive_get = (request.url.path in _SENSITIVE_GETS
-                        or request.url.path.startswith("/admin/"))
+                        or request.url.path.startswith("/admin/")
+                        or request.url.path == "/segments"
+                        or request.url.path.startswith("/segments/"))   # P&L, capital, positions
     needs_auth = mutates or is_sensitive_get
     is_exempt = (
         request.url.path in _EXEMPT_PATHS
@@ -135,21 +155,7 @@ async def _api_key_gate(request: Request, call_next):
     # SECURITY: fail-closed — if no auth credentials are configured, block ALL
     # mutating requests (do not allow "open by default" even in PAPER mode).
     if needs_auth and not is_exempt:
-        # Accept X-API-Key (programmatic) OR JWT Bearer (browser/UI)
-        api_key = request.headers.get("X-API-Key", "")
-        auth_hdr = request.headers.get("Authorization", "")
-        has_key = bool(settings.api_key) and hmac.compare_digest(
-            api_key.encode(), settings.api_key.encode()
-        )
-        has_jwt = False
-        if settings.jwt_secret_key:
-            # Accept Bearer token (API clients) OR HttpOnly cookie (browser dashboard)
-            if auth_hdr.startswith("Bearer "):
-                has_jwt = decode_token(auth_hdr[7:]) is not None
-            if not has_jwt:
-                cookie_jwt = request.cookies.get("jwt", "")
-                has_jwt = bool(cookie_jwt) and decode_token(cookie_jwt) is not None
-        if not has_key and not has_jwt:
+        if not _request_authed(request):
             return JSONResponse({"detail": "Unauthorized: provide X-API-Key or Bearer token"}, status_code=401)
     return await call_next(request)
 
@@ -179,6 +185,16 @@ async def _security_headers(request: Request, call_next):
     response.headers["X-Content-Type-Options"] = "nosniff"
     response.headers["Referrer-Policy"]        = "strict-origin-when-cross-origin"
     response.headers["Content-Security-Policy"] = _CSP
+    # Live data must never come from a browser/proxy cache; the SPA shell is
+    # revalidated on every load so a rebuilt bundle is picked up (hashed
+    # /assets/* files stay cacheable).
+    path = request.url.path
+    if path.startswith("/assets/"):
+        response.headers.setdefault("Cache-Control", "public, max-age=31536000, immutable")
+    elif path in ("/", "/dashboard", "/login") or path.endswith(".html"):
+        response.headers["Cache-Control"] = "no-cache"
+    elif "application/json" in (response.headers.get("content-type") or ""):
+        response.headers["Cache-Control"] = "no-store"
     if request.url.scheme == "https":
         response.headers["Strict-Transport-Security"] = "max-age=31536000; includeSubDomains"
     return response
@@ -390,6 +406,12 @@ class AgentEnablesRequest(BaseModel):
     momentum:        bool | None = None
     mean_reversion:  bool | None = None
     pairs:           bool | None = None
+    bse_momentum:       bool | None = None
+    bse_mean_reversion: bool | None = None
+    mcx_trend:          bool | None = None
+    mcx_mean_reversion: bool | None = None
+    cds_trend:          bool | None = None
+    cds_mean_reversion: bool | None = None
 
 class CapitalAllocationRequest(BaseModel):
     capital_per_agent:       float | None = Field(None, ge=10000, le=10_000_000)
@@ -552,13 +574,26 @@ def me(request: Request):
 
 @app.get("/auth/kite/status", tags=["Auth"])
 def kite_status():
-    """Check whether a valid Kite access token is loaded."""
+    """Check whether a valid Kite access token is loaded.
+
+    Reports the REAL broker session in every mode. kite_client.profile() returns
+    a "PAPER" stub in PAPER mode, which made the dashboard show "Kite Connected"
+    before any Zerodha login — so the daily login looked unnecessary and paper
+    prices silently stayed simulated. profile() is a read-only call; orders
+    remain simulated in PAPER regardless of this status."""
+    paper = settings.trading_mode == "PAPER"
+    extra = {"paper_mode": paper,
+             "live_prices": bool(not paper or getattr(settings, "paper_use_live_data", False))}
+    if kite_client._kite is None or not settings.kite_access_token:
+        return {"connected": False, **extra,
+                "message": "No valid Kite session. Use Connect Kite Account."}
     try:
-        profile = kite_client.profile()
-        return {"connected": True, "account_id": profile.get("user_id", ""),
+        profile = kite_client.kite.profile()
+        return {"connected": True, **extra, "account_id": profile.get("user_id", ""),
                 "name": profile.get("user_name", ""), "email": profile.get("email", "")}
     except Exception:
-        return {"connected": False, "message": "No valid Kite session. Use Connect Kite Account."}
+        return {"connected": False, **extra,
+                "message": "No valid Kite session (token expired?). Use Connect Kite Account."}
 
 @app.get("/auth/kite/balance", tags=["Auth"])
 def kite_balance():
@@ -947,6 +982,117 @@ async def kite_token_refresh():
 # Phases: "idle" | "scanning_instruments" | "loading_instruments" | "started" | "error"
 _bot_start_status: dict = {"phase": "idle", "error": None}
 
+_ENGINE_STARTING_LABELS = {
+    "scanning_instruments": "Scanning instruments…",
+    "loading_instruments":  "Loading instruments…",
+}
+
+
+def engine_status() -> dict:
+    """THE single source of truth for every engine / bot status indicator.
+
+    state: "starting" (background start in progress — scanning/loading
+    instruments), "running" (master agent live), "error" (last start failed),
+    "stopped". The dashboard header button, agents panel, footer and agent
+    cards all render this one object (served by /health, /bot/status,
+    /bot/start, /bot/stop and pushed over WS as event "engine")."""
+    from segments import segment_manager
+    phase = _bot_start_status.get("phase", "idle")
+    if phase in _ENGINE_STARTING_LABELS:
+        state, label = "starting", _ENGINE_STARTING_LABELS[phase]
+    elif master_agent.running:
+        state, label = "running", "Running"
+    elif phase == "error":
+        state, label = "error", "Start failed"
+    else:
+        state, label = "stopped", "Stopped"
+    # Per-strategy and per-segment state come from ONE place (segments.py);
+    # the dashboard panel, Agents tab cards, badges, Pause/Resume buttons and
+    # toggles all render these records.
+    import book as _book
+    _b = _book.build()                     # ONE snapshot: positions, orders, P&L
+    strategies = segment_manager.strategy_states(phase, bool(master_agent.running),
+                                                 _b["strategies"])
+    segs = segment_manager.segment_states(phase, bool(master_agent.running), strategies)
+    book_summary = _b["summary"]
+    for s in segs:                         # segment cards: same numbers as the book
+        bs = book_summary["by_segment"].get(s["code"])
+        if bs:
+            s["pnl"] = {**(s.get("pnl") or {}), "realised": bs["realised"],
+                        "unrealised": bs["unrealised"], "total": bs["pnl"], "closed": bs["closed"]}
+            s["positions"] = bs["positions"]
+    agents_on = {n: v["on"] for n, v in strategies.items()}
+    listed = [n for n, v in strategies.items() if not v["hidden"]]
+    return {
+        "state": state,
+        "label": label,
+        "phase": phase,
+        "error": _bot_start_status.get("error") if state == "error" else None,
+        "master_running": bool(master_agent.running),
+        "agents": agents_on,
+        "agents_running": sum(1 for n in listed if agents_on[n]),
+        "agents_total": len(listed),
+        "strategies": strategies,
+        "segments": segs,
+        "segments_running": sum(1 for s in segs if s["on"]),
+        # header counters + Today P&L (all segments) — same rows as /portfolio/*
+        "book": book_summary,
+        "tick_feed": "running" if tick_engine._running else "stopped",
+        "ts_ms": int(time.time() * 1000),
+    }
+
+
+def _engine_signature(e: dict) -> tuple:
+    return (e["state"], e["phase"], e["tick_feed"],
+            tuple(sorted((n, v["state"], v["reason"], v["enabled"], v["trades_today"])
+                         for n, v in e["strategies"].items())),
+            tuple((s["code"], s["state"], s["reason"], s["mode"], s["killed"], s["positions"],
+                   round(s["pnl"]["total"])) for s in e["segments"]),
+            (e["book"]["total"]["positions"], e["book"]["total"]["orders"], round(e["book"]["total"]["pnl"])))
+
+
+_engine_last_sig: Optional[tuple] = None
+
+
+async def broadcast_engine(force: bool = False) -> dict:
+    """Push the engine status to every WS client when it changed."""
+    global _engine_last_sig
+    e = engine_status()
+    sig = _engine_signature(e)
+    if force or sig != _engine_last_sig:
+        _engine_last_sig = sig
+        try:
+            await broadcast({"event": "engine", "data": e})
+        except Exception:
+            pass
+    return e
+
+
+async def _engine_watch_loop() -> None:
+    from segments import segment_manager
+    from segment_engine import native_engine
+    import paper_store
+    _last_save = 0.0
+    while True:
+        try:
+            native_engine.ensure_running()        # SIMULATED BSE/MCX/CDS feed
+            segment_manager.supervise()           # hours windows / kill switches
+            await broadcast_engine()
+            if time.monotonic() - _last_save >= 2.0:   # paper book → SQLite (if changed)
+                _last_save = time.monotonic()
+                await asyncio.get_running_loop().run_in_executor(None, paper_store.save)
+            try:
+                from strategy_inventor import strategy_inventor
+                if strategy_inventor.enabled:
+                    await asyncio.get_running_loop().run_in_executor(None, strategy_inventor.evaluate)
+            except Exception as _inv_exc:
+                logger.debug("[invent] evaluate: {}", _inv_exc)
+        except asyncio.CancelledError:
+            break
+        except Exception as exc:
+            logger.debug("[engine] watch error: {}", exc)
+        await asyncio.sleep(1.0)
+
 
 async def _do_start_bg(req: BotStartRequest, strategies: list[str]) -> None:
     """
@@ -973,6 +1119,7 @@ async def _do_start_bg(req: BotStartRequest, strategies: list[str]) -> None:
         # ── Symbol scanner (async — does NOT block the event loop) ─────────────
         if not watchlist:
             _bot_start_status["phase"] = "scanning_instruments"
+            await broadcast_engine()
             await symbol_scanner.run(strategies=strategies, force=req.force_scan)
             watchlist = symbol_scanner.all_selected_flat()
             if not watchlist:
@@ -985,6 +1132,7 @@ async def _do_start_bg(req: BotStartRequest, strategies: list[str]) -> None:
         # filter_watchlist calls backtest_engine.run() → bhavcopy HTTP downloads.
         # Running each one in the thread executor keeps the event loop responsive.
         _bot_start_status["phase"] = "loading_instruments"
+        await broadcast_engine()
         loop = asyncio.get_event_loop()
         prefiltered: dict[str, list[dict]] = {}
         for strat in strategies:
@@ -1005,14 +1153,24 @@ async def _do_start_bg(req: BotStartRequest, strategies: list[str]) -> None:
         tick_engine.subscribe(_IDX)
         logger.info("[bot/start] Index symbols subscribed: {}", [i["symbol"] for i in _IDX])
 
+        # ── Segment-native paper strategies (BSE / MCX / CDS, SIMULATED feed) ─
+        from segment_engine import native_engine
+        native_engine.ensure_running()
+        _native = native_engine.start_strategies()
+        logger.info("[bot/start] segment-native strategies started: {}", _native)
+        from segments import segment_manager
+        segment_manager.supervise(force=True)
+
         _bot_start_status["phase"] = "started"
         logger.info("[bot/start] Background start complete — agents running")
+        await broadcast_engine()
 
     except Exception as exc:
         logger.error("[bot/start] Background start failed: {}", exc)
         _bot_start_status["phase"] = "error"
         _bot_start_status["error"] = str(exc)
         master_agent.running = False
+        await broadcast_engine()
 
 
 @app.post("/bot/start", tags=["Bot"])
@@ -1044,6 +1202,7 @@ async def start_bot(req: BotStartRequest):
             "message": "Bot start is in progress. Poll GET /bot/status for updates.",
             "start_phase": _bot_start_status["phase"],
             "trading_mode": settings.trading_mode,
+            "engine": engine_status(),
         },
         status_code=202,
     )
@@ -1053,35 +1212,86 @@ async def stop_bot():
     global _bot_start_status
     _bot_start_status = {"phase": "idle", "error": None}
     await master_agent.stop()
-    return {"status": "stopped"}
+    return {"status": "stopped", "engine": await broadcast_engine(force=True)}
 
 @app.post("/bot/test-order", tags=["Bot"])
 async def test_order(
     symbol: str = Query(default="SBIN"),
     qty: int = Query(default=1, gt=0, le=10),
 ):
-    """Place 1-share MARKET BUY to verify Kite connectivity, then immediately cancel."""
+    """Connectivity check that can NEVER leave a position (audit X16): a
+    1-share BUY LIMIT ~10% BELOW the last price (cannot fill; the exchange may
+    also reject it outside the price band — equally harmless), then cancel.
+    LIVE is forced to 1 share. A MARKET test order is never sent."""
     if sebi_compliance._state.value == "KILLED":
         raise HTTPException(status_code=503, detail="Kill switch active — test order blocked")
     symbol = _clean_symbol(symbol)
+    from segments import segment_manager
+    live = settings.trading_mode == "LIVE"
+    if live and segment_manager.mode("NSE_EQ") != "LIVE":
+        raise HTTPException(status_code=409, detail="NSE Stocks segment is PAPER-gated — arm it "
+                                                    "with typed SEND before a live test order")
+    if live:
+        qty = 1
+    ltp = 0.0
+    try:
+        t, _ = tick_engine.latest(symbol)
+        ltp = float(getattr(t, "ltp", 0) or 0) if t else 0.0
+    except Exception:
+        ltp = 0.0
+    if live or ltp <= 0:
+        try:
+            q = kite_client.quote_kite([f"NSE:{symbol}"]) or {}
+            ltp = float((q.get(f"NSE:{symbol}") or {}).get("last_price") or 0) or ltp
+        except Exception:
+            pass
+    if ltp <= 0:
+        raise HTTPException(status_code=503, detail=f"No price for {symbol} — test order not sent")
+    px = max(0.05, round(int(ltp * 0.90 / 0.05) * 0.05, 2))
     order_id = kite_client.place_order(
         tradingsymbol=symbol, exchange="NSE",
         transaction_type="BUY", quantity=qty,
-        order_type="MARKET", product="MIS", tag="TestOrder",
+        order_type="LIMIT", price=px, product="MIS", tag="TestOrder",
     )
-    if settings.trading_mode == "LIVE":
+    status = "UNKNOWN"
+    try:
+        kite_client.cancel_order(order_id)
+    except Exception:
+        pass
+    try:
+        hist = kite_client.order_history(order_id) or []
+        status = str((hist[-1] if hist else {}).get("status") or "UNKNOWN")
+    except Exception:
+        pass
+    flattened = None
+    if status == "COMPLETE":
+        # Should be impossible at a limit 10% under the market — but never
+        # leave a position behind: close it immediately.
         try:
-            kite_client.cancel_order(order_id)
-        except Exception:
-            pass
+            flattened = kite_client.place_order(
+                tradingsymbol=symbol, exchange="NSE", transaction_type="SELL", quantity=qty,
+                order_type="MARKET", product="MIS", tag="TestOrderFlat")
+        except Exception as exc:
+            logger.error("test-order filled and flatten FAILED: {}", exc)
+            flattened = f"FAILED: {exc}"
     return {"status": "ok", "order_id": order_id, "mode": settings.trading_mode,
-            "note": "PAPER: simulated. LIVE: placed then cancelled."}
+            "limit_price": px, "ltp": ltp, "final_status": status, "flatten_order": flattened,
+            "note": "BUY LIMIT ~10% below market, then cancelled — never fills."}
 
 @app.get("/bot/status", tags=["Bot"])
 def bot_status():
     status = master_agent.get_status()
     status["start_phase"] = _bot_start_status.get("phase", "idle")
     status["start_error"] = _bot_start_status.get("error")
+    status["engine"] = engine_status()
+    try:
+        from owner_universe import owner_universe
+        _u = owner_universe.status()
+        status["owner_universe"] = {k: _u[k] for k in ("restricted", "segments", "nse_eq_universe",
+                                                       "nse_fo_underlyings", "reason", "updated_at",
+                                                       "focus", "focus_reason")}
+    except Exception as exc:
+        status["owner_universe"] = {"error": str(exc)}
     return status
 
 @app.get("/bot/directives", tags=["Bot"])
@@ -1228,6 +1438,34 @@ async def market_status():
         status["data_source"] = "GBM simulator (PAPER, no live feed)"
     return status
 
+@app.get("/market/indices", tags=["Market"])
+async def market_indices(refresh: bool = False):
+    """Live index levels — NIFTY, BANKNIFTY, FINNIFTY, MIDCPNIFTY, INDIA VIX,
+    SENSEX. Each row carries ``source`` (KITE / NSE / SIMULATED / UNAVAILABLE)
+    and ``stale``. Works without Kite credentials via the NSE public feed;
+    ``refresh=true`` forces an immediate re-fetch instead of the cached value."""
+    from index_feed import index_feed as _index_feed
+    if refresh or _index_feed.refresh_count == 0:
+        try:
+            data = await asyncio.wait_for(_index_feed.refresh(), timeout=15.0)
+        except Exception:
+            data = _index_feed.snapshot()
+    else:
+        data = _index_feed.snapshot()
+    return {"indices": data, "market_open": is_market_open(),
+            "trading_mode": settings.trading_mode, **{"feed": _index_feed.status()}}
+
+@app.get("/market/overview", tags=["Market"])
+async def market_overview_endpoint(symbols: str = "", limit: int = Query(default=20, ge=0, le=60)):
+    """Prices for the dashboard Market overview, each with an honest ``source``:
+    indices from the live index feed (KITE / NSE / SIMULATED / UNAVAILABLE,
+    with ``stale``); stocks KITE / TRUEDATA when a real feed exists, otherwise
+    SIMULATED (PAPER simulator) with the real NSE end-of-day close as a
+    reference; ``chart`` = NIFTY daily closes + today's real level."""
+    from market_overview import market_overview as _mo
+    syms = [_clean_symbol(s) for s in symbols.split(",") if s.strip()][:60] if symbols else None
+    return await _mo.build(syms, limit=limit)
+
 @app.get("/market/option-chain/{symbol}", tags=["Market"])
 async def option_chain(symbol: str):
     symbol = _clean_symbol(symbol)
@@ -1311,24 +1549,56 @@ def market_depth(symbol: str):
 
 # ── Agents ────────────────────────────────────────────────────────────────────
 @app.get("/agents", tags=["Agents"])
-def agents(): return {n: a.get_status() for n, a in ALL_AGENTS.items()}
+def agents():
+    from segment_engine import native_engine
+    from segments import STRATEGY_SEGMENT
+    out = {n: {**a.get_status(), "segment": STRATEGY_SEGMENT.get(n)} for n, a in ALL_AGENTS.items()}
+    out.update({n: s.get_status() for n, s in native_engine.strategies.items()})
+    return out
 
 @app.post("/agents/{name}/pause", tags=["Agents"])
-def pause_agent(name: str):
-    a = ALL_AGENTS.get(name)
-    if not a: raise HTTPException(404, "Not found")
-    a.stop()
+async def pause_agent(name: str):
+    from segment_engine import native_engine
+    from segments import segment_manager
+    if name in native_engine.strategies:
+        native_engine.strategies[name].stop()
+    else:
+        a = ALL_AGENTS.get(name)
+        if not a: raise HTTPException(404, "Not found")
+        a.stop()
+        # Drop the agent's tick queue too — a paused agent's queue otherwise
+        # keeps filling (same as the regime-plan pause path).
+        tick_engine.remove_subscriber(f"agent_{name}")
     # Persist the pause — a deliberately halted agent must not be silently
     # resumed by auto-start after a deploy restart (bit us live 2026-07-13).
     bot_state.set_agent_enabled(name, False)
-    return {"status": "paused"}
+    segment_manager._held.pop(name, None)
+    return {"status": "paused", "engine": await broadcast_engine(force=True)}
 
 @app.post("/agents/{name}/resume", tags=["Agents"])
 async def resume_agent(name: str):
-    a = ALL_AGENTS.get(name)
+    from segment_engine import native_engine
+    from segments import segment_manager, STRATEGY_SEGMENT, SEGMENTS
+    a = ALL_AGENTS.get(name) or native_engine.strategies.get(name)
     if not a: raise HTTPException(404, "Not found")
+    code = STRATEGY_SEGMENT.get(name)
+    if code and segment_manager.killed(code):
+        raise HTTPException(409, f"{SEGMENTS[code].label} kill switch is active — re-arm the segment first")
+    if code and not segment_manager.window_ok(code):
+        raise HTTPException(409, f"{SEGMENTS[code].label} is closed ({segment_manager.hours_text(code)})")
+    from owner_universe import owner_universe as _ou
+    if code and not _ou.segment_enabled(code):
+        raise HTTPException(409, f"{SEGMENTS[code].label} is PAUSED (owner) — change it via POST /owner/universe")
     # An explicit manual resume overrides (and clears) a persisted pause/disable.
     bot_state.set_agent_enabled(name, True)
+    master_agent.regime_paused.discard(name)
+    master_agent.directive_paused.discard(name)
+    if a.state.running:
+        return {"status": "running", "engine": await broadcast_engine(force=True)}
+    if name in native_engine.strategies:
+        native_engine.ensure_running()
+        a.start()
+        return {"status": "resumed", "segment": code, "engine": await broadcast_engine(force=True)}
 
     wl = master_agent._agent_watchlists.get(name, [])
     if not wl:
@@ -1340,6 +1610,7 @@ async def resume_agent(name: str):
     # Populate approved symbols directly — skip the backtest gate for manual
     # resume.  filter_watchlist is a /bot/start quality gate; here the user
     # is explicitly starting an agent and we should respect that intent.
+    wl = _ou.filter_agent_items(name, wl)
     for item in wl:
         a._approved.add(item["symbol"])
     a.state.approved_symbols = [item["symbol"] for item in wl]
@@ -1358,7 +1629,77 @@ async def resume_agent(name: str):
 
     q = tick_engine.add_subscriber(f"agent_{name}")
     a.start(q)
-    return {"status": "resumed", "symbols": [w["symbol"] for w in wl]}
+    return {"status": "resumed", "symbols": [w["symbol"] for w in wl],
+            "engine": await broadcast_engine(force=True)}
+
+
+# ── Market-segment agents ───────────────────────────────────────────────────────
+class SegmentModeRequest(BaseModel):
+    mode: str
+    confirm: bool = False
+    confirm_text: str = Field(default="", max_length=32)
+
+
+class SegmentKillRequest(BaseModel):
+    reason: str = Field(default="manual", max_length=80)
+    flatten: bool = True
+
+
+def _seg_code(code: str) -> str:
+    from segments import SEGMENTS
+    c = (code or "").upper()
+    if c not in SEGMENTS:
+        raise HTTPException(404, f"Unknown segment {code!r}. Valid: {list(SEGMENTS)}")
+    return c
+
+
+@app.get("/segments", tags=["Segments"])
+def list_segments():
+    """All segment agents (same records as engine.segments) + Kite stubs."""
+    from segments import KITE_STUBS
+    e = engine_status()
+    return {"segments": e["segments"], "strategies": e["strategies"], "kite_stubs": KITE_STUBS,
+            "trading_mode": settings.trading_mode}
+
+
+@app.get("/segments/{code}", tags=["Segments"])
+def segment_detail(code: str):
+    from segment_engine import native_engine
+    from segments import segment_manager, SEGMENTS
+    c = _seg_code(code)
+    e = engine_status()
+    row = next(s for s in e["segments"] if s["code"] == c)
+    detail = {**row, "positions_detail": segment_manager.positions(c)}
+    if SEGMENTS[c].native:
+        snap = native_engine.snapshot(c)
+        detail.update({"orders": snap["orders"], "closed_trades": snap["closed"]})
+    return detail
+
+
+@app.post("/segments/{code}/kill", tags=["Segments"])
+async def segment_kill(code: str, req: SegmentKillRequest = SegmentKillRequest()):
+    from segments import segment_manager
+    r = segment_manager.kill(_seg_code(code), reason=req.reason or "manual", flatten=req.flatten)
+    return {**r, "engine": await broadcast_engine(force=True)}
+
+
+@app.post("/segments/{code}/rearm", tags=["Segments"])
+async def segment_rearm(code: str):
+    from segments import segment_manager
+    r = segment_manager.rearm(_seg_code(code))
+    return {**r, "engine": await broadcast_engine(force=True)}
+
+
+@app.post("/segments/{code}/mode", tags=["Segments"])
+async def segment_mode(code: str, req: SegmentModeRequest):
+    """Per-segment paper gate. LIVE needs the global mode LIVE + confirm=true +
+    typed confirm_text="SEND", and a segment whose live routing is supported."""
+    from segments import segment_manager, SegmentModeError
+    try:
+        r = segment_manager.set_mode(_seg_code(code), req.mode, req.confirm, req.confirm_text)
+    except SegmentModeError as exc:
+        raise HTTPException(exc.status, exc.detail)
+    return {**r, "engine": await broadcast_engine(force=True)}
 
 
 # ── Backtest ────────────────────────────────────────────────────────────────────
@@ -1756,18 +2097,38 @@ async def multi_leg_order(req: MultiLegRequest):
 
 # HIGH-6: generic error messages, raw exceptions logged server-side only
 @app.get("/portfolio/positions", tags=["Portfolio"])
-def positions():
-    try: return kite_client.positions()
+def positions(segment: Optional[str] = None):
+    """Every open position across ALL segments (NSE/NFO Kite book + BSE/MCX/CDS
+    segment ledgers), Kite-shaped rows + segment / strategy / price_source."""
+    import book as _book
+    try:
+        b = _book.build()
+        rows = b["positions"]
+        if segment:
+            rows = [r for r in rows if r.get("segment") == segment.upper()]
+        return {"net": rows, "day": rows, "summary": b["summary"]}
     except Exception as e:
         logger.error("Portfolio positions error: {}", e)
         raise HTTPException(500, "Unable to fetch positions")
 
 @app.get("/portfolio/orders", tags=["Portfolio"])
-def orders():
-    try: return kite_client.orders()
+def orders(segment: Optional[str] = None):
+    """Today's orders across ALL segments (oldest first)."""
+    import book as _book
+    try:
+        rows = _book.build()["orders"]
+        if segment:
+            rows = [r for r in rows if r.get("segment") == segment.upper()]
+        return rows
     except Exception as e:
         logger.error("Portfolio orders error: {}", e)
         raise HTTPException(500, "Unable to fetch orders")
+
+@app.get("/portfolio/book", tags=["Portfolio"])
+def portfolio_book():
+    """Positions + orders + per-segment / per-strategy P&L in one snapshot."""
+    import book as _book
+    return _book.snapshot()
 
 
 # ── Claude Gate Log (dashboard) ──────────────────────────────────────────────
@@ -2005,9 +2366,12 @@ def set_agent_enables(req: AgentEnablesRequest):
     for name, val in updates.items():
         bot_state.set_agent_enabled(name, val)
         if not val:
-            a = ALL_AGENTS.get(name)
+            from segment_engine import native_engine
+            a = ALL_AGENTS.get(name) or native_engine.strategies.get(name)
             if a and a.state.running:
                 a.stop()
+                if name in ALL_AGENTS:
+                    tick_engine.remove_subscriber(f"agent_{name}")
     return dict(bot_state._agent_enabled)
 
 
@@ -2226,26 +2590,567 @@ def patch_pattern_toggle(req: PatternToggleRequest):
     return {"agent": req.agent, "pattern": req.pattern, "enabled": req.enabled}
 
 
+
+# ── Strategy inventor (trend-driven short-lived strategies) ───────────────────
+class InventToggleRequest(BaseModel):
+    enabled: bool
+
+class InventForceRequest(BaseModel):
+    segment: str
+    regime: str | None = None
+
+class InventArmLiveRequest(BaseModel):
+    confirm: bool = False
+    confirm_text: str = Field(default="", max_length=32)
+
+
+@app.get("/invent/status", tags=["Invent"])
+def invent_status():
+    from strategy_inventor import strategy_inventor
+    return strategy_inventor.snapshot()
+
+
+@app.post("/invent/enabled", tags=["Invent"])
+def invent_set_enabled(req: InventToggleRequest):
+    """Toggle the trend-driven strategy inventor. Off by default."""
+    from strategy_inventor import strategy_inventor
+    return strategy_inventor.set_enabled(req.enabled)
+
+
+@app.post("/invent/propose", tags=["Invent"])
+def invent_propose(req: InventForceRequest):
+    """Force-propose a PAPER invented strategy for a segment (invent mode must be on)."""
+    from strategy_inventor import strategy_inventor
+    from segments import SEGMENTS
+    if req.segment not in SEGMENTS:
+        raise HTTPException(400, f"unknown segment {req.segment!r}")
+    r = strategy_inventor.invent(req.segment, regime=req.regime, force=True)
+    if not r.get("ok"):
+        raise HTTPException(409, r.get("reason", "invent refused"))
+    return r
+
+
+@app.post("/invent/{strategy_id}/arm-live-tiny", tags=["Invent"])
+def invent_arm_live_tiny(strategy_id: str, req: InventArmLiveRequest):
+    """Arm one invented strategy for a min-lot/1-share LIVE order.
+    Requires confirm=true + confirm_text='SEND'. Never auto-armed."""
+    from strategy_inventor import strategy_inventor
+    r = strategy_inventor.arm_live_tiny(strategy_id, req.confirm, req.confirm_text)
+    if not r.get("ok"):
+        raise HTTPException(400, r.get("reason", "arm refused"))
+    return r
+
+
+@app.post("/invent/{strategy_id}/disarm-live", tags=["Invent"])
+def invent_disarm_live(strategy_id: str):
+    from strategy_inventor import strategy_inventor
+    r = strategy_inventor.disarm_live(strategy_id)
+    if not r.get("ok"):
+        raise HTTPException(404, r.get("reason", "not found"))
+    return r
+
+
+@app.get("/invent/strategies", tags=["Invent"])
+def invent_list(segment: str | None = None, include_done: bool = True):
+    from strategy_inventor import strategy_inventor
+    return {"strategies": strategy_inventor.list_strategies(segment, include_done)}
+
+
+@app.get("/invent/journal", tags=["Invent"])
+def invent_journal(limit: int = 50):
+    from strategy_inventor import strategy_inventor
+    return {"journal": strategy_inventor.journal(limit)}
+
+
+@app.get("/invent/approvals", tags=["Invent"])
+def invent_approvals(limit: int = 100):
+    """Audit log of master-agent decisions on invented strategies (PAPER scope)."""
+    from strategy_inventor import strategy_inventor
+    return {"approvals": strategy_inventor.approvals(limit)}
+
+
+# ── Self-improvement (PAPER only) ─────────────────────────────────────────────
+@app.get("/learning/report", tags=["Learning"])
+def learning_report():
+    """What each agent changed, why, and the effect; journal summary; go-live
+    readiness scorecard per segment (display-only — never arms LIVE)."""
+    from self_learning import learning
+    return learning.report()
+
+
+@app.get("/learning/summary", tags=["Learning"])
+def learning_summary():
+    """Compact view for the 15:35 daily close report."""
+    from self_learning import learning
+    r = learning.report()
+    return {"mode": r["mode"], "summary": r["summary"],
+            "readiness": {k: {"status": v["status"], "passed": v["passed"], "of": v["of"]}
+                          for k, v in r["readiness"].items()},
+            "recent_changes": [{"ts": v["ts"], "strategy": v["strategy"], "kind": v["kind"],
+                                "status": v["status"], "changed": v.get("changed"), "reason": v["reason"]}
+                               for v in r["changes"][:10]],
+            "latency": r["latency"]}
+
+
+@app.get("/learning/journal", tags=["Learning"])
+def learning_journal(limit: int = 100, segment: str | None = None):
+    from self_learning import learning
+    return {"journal": learning.journal(min(max(limit, 1), 1000), segment)}
+
+
+class LearningRunRequest(BaseModel):
+    retune: bool = True
+    segments: Optional[list[str]] = None
+
+
+@app.post("/learning/run", tags=["Learning"])
+async def learning_run(req: LearningRunRequest):
+    """Run one learning cycle now (PAPER only). Retune can take a few minutes."""
+    from self_learning import learning, GuardViolation
+    try:
+        return await asyncio.to_thread(learning.run_cycle, req.retune, req.segments)
+    except GuardViolation as exc:
+        raise HTTPException(409, str(exc))
+
+
+class OwnerRetireRequest(BaseModel):
+    segment: str
+    strategy: str
+    reason: str = ""
+
+
+def _owner_actor(request: Request) -> str:
+    """Owner pin endpoints: X-API-Key, or a JWT for the admin user only."""
+    if bool(settings.api_key) and hmac.compare_digest(
+            request.headers.get("X-API-Key", "").encode(), settings.api_key.encode()):
+        return "owner(api-key)"
+    auth_hdr = request.headers.get("Authorization", "")
+    tok = auth_hdr[7:] if auth_hdr.startswith("Bearer ") else request.cookies.get("jwt", "")
+    user = decode_token(tok) if tok and settings.jwt_secret_key else None
+    if not user:
+        raise HTTPException(401, "Not authenticated")
+    if user != settings.admin_username:
+        raise HTTPException(403, "Admin access required")
+    return f"owner({user})"
+
+
+@app.post("/learning/retire", tags=["Learning"])
+def learning_owner_retire(req: OwnerRetireRequest, request: Request):
+    """Owner pin: retire a strategy; nightly cycle / startup re-check never un-retire it."""
+    from self_learning import learning
+    actor = _owner_actor(request)
+    try:
+        return learning.owner_retire(req.segment, req.strategy, req.reason, actor)
+    except ValueError as exc:
+        raise HTTPException(400, str(exc))
+
+
+@app.post("/learning/unretire", tags=["Learning"])
+def learning_owner_unretire(req: OwnerRetireRequest, request: Request):
+    """The only way to lift an owner pin (back on 0.5x probation, PAPER)."""
+    from self_learning import learning
+    actor = _owner_actor(request)
+    try:
+        return learning.owner_unretire(req.segment, req.strategy, req.reason, actor)
+    except ValueError as exc:
+        raise HTTPException(400, str(exc))
+
+
+class OwnerUniverseRequest(BaseModel):
+    preset: Optional[str] = None                     # "jag" → jag's 2026-10-10 policy
+    segments: Optional[dict[str, bool]] = None
+    nse_eq_universe: Optional[str] = None            # ALL | NIFTY50
+    nse_fo_underlyings: Optional[list[str]] = None   # e.g. ["NIFTY"]; [] = all
+    restricted: bool = True
+    reason: str = ""
+
+
+class OwnerFocusRequest(BaseModel):
+    focus: Optional[str] = None                      # "nifty_intraday_options" | null/"" to clear
+    reason: str = ""
+
+
+@app.post("/owner/focus", tags=["Owner"])
+def owner_focus_set(req: OwnerFocusRequest, request: Request):
+    """Owner-only FOCUS mode (persistent, reversible). While set, only the focus
+    agent opens new entries; everything else shows PAUSED (focus). Exits allowed."""
+    from owner_universe import owner_universe
+    try:
+        st = owner_universe.set_focus(req.focus, _owner_actor(request), req.reason)
+    except ValueError as exc:
+        raise HTTPException(400, str(exc))
+    try:
+        from fast_scalper import fast_scalper
+        fast_scalper.apply_owner_universe()
+    except Exception:
+        pass
+    try:
+        from segments import segment_manager
+        segment_manager.supervise(force=True)
+    except Exception:
+        pass
+    return st
+
+
+@app.get("/agents/nifty_options_intraday", tags=["Owner"])
+def nifty_options_agent_status():
+    from nifty_options_agent import nifty_options_agent
+    return nifty_options_agent.status()
+
+
+@app.get("/owner/universe", tags=["Owner"])
+def owner_universe_get():
+    from owner_universe import owner_universe
+    return owner_universe.status()
+
+
+@app.post("/owner/universe", tags=["Owner"])
+def owner_universe_set(req: OwnerUniverseRequest, request: Request):
+    """Owner-only trading universe (persistent). Automation never changes it.
+    New entries outside it are refused everywhere; exits are always allowed."""
+    from owner_universe import owner_universe
+    actor = _owner_actor(request)
+    try:
+        if (req.preset or "").lower() == "jag":
+            st = owner_universe.apply_jag_policy(actor)
+        else:
+            st = owner_universe.set_policy(req.segments, req.nse_eq_universe, req.nse_fo_underlyings,
+                                           req.reason, actor, restricted=req.restricted)
+    except ValueError as exc:
+        raise HTTPException(400, str(exc))
+    applied = {}
+    try:
+        from fast_scalper import fast_scalper
+        applied["scalper"] = fast_scalper.apply_owner_universe()
+    except Exception as exc:
+        applied["scalper"] = f"error: {exc}"
+    try:
+        from segments import segment_manager
+        segment_manager.supervise(force=True)        # stop strategies in paused segments
+    except Exception as exc:
+        applied["supervise"] = f"error: {exc}"
+    return {**st, "applied": applied}
+
+
+@app.get("/learning/owner-actions", tags=["Learning"])
+def learning_owner_actions(limit: int = 50):
+    from self_learning import learning
+    return {"owner_actions": learning.owner_actions(min(max(limit, 1), 500))}
+
+
+@app.get("/scalper/status", tags=["Learning"])
+def scalper_status():
+    """Fast scalper (PAPER): Kite WS feed status, per-segment stats, open scalps,
+    tick→decision latency, active (learned) tick thresholds."""
+    from fast_scalper import fast_scalper
+    return fast_scalper.status()
+
+
+class ScalperEnableRequest(BaseModel):
+    enabled: bool
+
+
+@app.post("/scalper/enable", tags=["Learning"])
+def scalper_enable(req: ScalperEnableRequest):
+    from fast_scalper import fast_scalper
+    if req.enabled:
+        fast_scalper.user_disabled = False
+        r = fast_scalper.start()
+        if not r.get("ok"):
+            raise HTTPException(409, r.get("reason", "cannot start"))
+        return r
+    fast_scalper.enabled = False
+    fast_scalper.user_disabled = True
+    return {"ok": True, "enabled": False}
+
+
+# ── Fast scalper: real-tick backtest, liquidity whitelist, windows (PAPER) ──
+class ScalperBacktestRequest(BaseModel):
+    days: Optional[list[str]] = None
+    latency_ms: Optional[float] = None
+    use_windows: bool = True
+    use_whitelist: bool = True
+    wait: bool = False
+
+
+# ── all-agents research (jag 2026-10-10) ─────────────────────────────────────
+class ResearchRunRequest(BaseModel):
+    days: int = 20
+    workers: int = 6
+    agents: Optional[list[str]] = None
+    wait: bool = False
+
+
+@app.get("/research/pipeline", tags=["Learning"])
+def research_pipeline():
+    """Research view: proposed → backtested → probation → promoted / retired,
+    each with its plain-English reason, plus the last real-data backtest per
+    agent and the allocator's weights."""
+    from research_loop import research
+    return research.pipeline()
+
+
+@app.post("/research/run", tags=["Learning"])
+async def research_run(req: ResearchRunRequest):
+    """Run one research cycle now (PAPER only; places no orders)."""
+    from research_loop import research
+    from self_learning import GuardViolation
+    kw = dict(days=max(5, min(int(req.days), 60)), workers=max(1, min(int(req.workers), 7)), agents=req.agents)
+    try:
+        if req.wait:
+            return await asyncio.to_thread(research.run_cycle, **kw)
+        from self_learning import Guard
+        Guard.require_paper()
+        return research.start(**kw)
+    except GuardViolation as exc:
+        raise HTTPException(409, str(exc))
+
+
+@app.get("/agents/policy", tags=["Learning"])
+def agents_policy():
+    """Per-agent policy: params (bounded learning), hard caps, windows, today's gate state, allocation."""
+    import agent_policy as ap
+    from allocator import allocator
+    out = {}
+    for a in ap.AGENTS:
+        out[a] = {"params": ap.live_params(a), "hard_daily_cap": ap.HARD_DAILY_CAP[a],
+                  "hard_symbol_cap": ap.HARD_SYMBOL_CAP[a],
+                  "windows": [f"{x.strftime('%H:%M')}-{y.strftime('%H:%M')}" for x, y in ap.windows_for(a)],
+                  "segment": ap.AGENT_SEGMENT[a]}
+    return {"agents": out, "gate": ap.agent_gate.status(), "allocator": allocator.snapshot(),
+            "enabled": {"policy_gate": bool(getattr(settings, "use_agent_policy_gate", True)),
+                        "smart_exits": bool(getattr(settings, "use_smart_exits", True))}}
+
+
+@app.get("/backtest/unified", tags=["Learning"])
+def backtest_unified(trades: bool = False):
+    """Last unified real-data backtest (all agents, live decision code, costs, walk-forward OOS)."""
+    import unified_backtest as ub
+    p = ub.RESULT_PATH
+    from research_loop import OUT_PATH
+    src = max((x for x in (p, OUT_PATH) if x.exists()), key=lambda x: x.stat().st_mtime, default=None)
+    if src is None:
+        return {"ok": False, "why": "no unified backtest yet — POST /research/run"}
+    import json as _json
+    d = _json.loads(src.read_text())
+    if not trades:
+        for v in (d.get("agents") or {}).values():
+            v.pop("sample_trades", None)
+            v.pop("equity", None)
+    return {"ok": True, "source": src.name, **d}
+
+
+@app.get("/scalper/backtest", tags=["Learning"])
+def scalper_backtest_get(trades: bool = True):
+    """Last tick-replay backtest of the fast scalper on REAL recorded Kite
+    ticks (same decision code as live): walk-forward OOS, in-sample reference,
+    previous-rules comparison, per symbol / window / hour stats, costs."""
+    import scalper_backtest as sb
+    r = sb.last_result() or {"ok": False, "why": "no backtest run yet — POST /scalper/backtest"}
+    if not trades:
+        for k in ("walk_forward", "in_sample"):
+            if isinstance(r.get(k), dict):
+                r[k] = {x: v for x, v in r[k].items() if x != "trades"}
+    return {**r, "runner": {"running": sb.runner.running, "started": sb.runner.started,
+                            "last_error": sb.runner.last_error}}
+
+
+@app.post("/scalper/backtest", tags=["Learning"])
+async def scalper_backtest_run(req: ScalperBacktestRequest):
+    """Run the tick-replay backtest (read-only research; places no orders)."""
+    import scalper_backtest as sb
+    kw = dict(days=req.days, latency_ms=req.latency_ms, use_windows=req.use_windows,
+              use_whitelist=req.use_whitelist, save=True)
+    if req.wait:
+        if sb.runner.running:
+            raise HTTPException(409, "a backtest is already running")
+        return await asyncio.to_thread(sb.run, **kw)
+    return sb.runner.start(**kw)
+
+
+@app.get("/scalper/whitelist", tags=["Learning"])
+def scalper_whitelist_get():
+    from scalper_whitelist import whitelist
+    return whitelist.get()
+
+
+@app.post("/scalper/whitelist/rebuild", tags=["Learning"])
+def scalper_whitelist_rebuild():
+    from scalper_whitelist import whitelist
+    return whitelist.rebuild()
+
+
+@app.get("/scalper/config", tags=["Learning"])
+def scalper_config_get():
+    from scalper_config import scalper_config
+    return scalper_config.get()
+
+
+class ScalperConfigRequest(BaseModel):
+    windows: Optional[dict] = None
+    whitelist: Optional[dict] = None
+    hard_caps: Optional[dict] = None
+    symbol_hard_cap: Optional[int] = None
+
+
+@app.post("/scalper/config", tags=["Learning"])
+def scalper_config_set(req: ScalperConfigRequest):
+    """Owner (API key) changes entry windows / whitelist rules, or LOWERS the
+    hard daily ceilings (they can never be raised above the built-in ones)."""
+    from scalper_config import scalper_config
+    patch = {k: v for k, v in req.dict().items() if v is not None}
+    try:
+        return scalper_config.update(patch, actor="owner(api-key)")
+    except ValueError as exc:
+        raise HTTPException(400, str(exc))
+
+
+@app.get("/scalper/ticks", tags=["Learning"])
+def scalper_ticks():
+    """Recorded tick inventory (day/instrument/ticks/span/depth format) + recorder status."""
+    from tick_recorder import depth_recorder
+    from tick_replayer import inventory
+    inv = inventory()
+    return {"recorder": depth_recorder.status(), "files": len(inv), "ticks": sum(r["ticks"] for r in inv),
+            "inventory": inv}
+
+
+# ── Options engine (PAPER): defined-risk baskets, option buying, option scalps ──
+@app.get("/options/status", tags=["Options"])
+def options_status():
+    """Options engine: open/today baskets (legs, credit, max loss/profit,
+    breakevens, Greeks, margin), option buys, per-family backtest gate /
+    probation, guards, recent decisions."""
+    from options_engine import options_engine
+    st = options_engine.status()
+    try:
+        from self_learning import learning
+        st["readiness"] = learning.readiness_families("NSE_FO")
+    except Exception as exc:
+        st["readiness"] = {"error": str(exc)}
+    return st
+
+
+@app.get("/options/scalper", tags=["Options"])
+def options_scalper():
+    """Option scalper on Kite WS depth: ATM window, stats, open/recent scalps."""
+    from fast_scalper import fast_scalper
+    return fast_scalper.opt_status()
+
+
+@app.get("/options/demo", tags=["Options"])
+def options_demo_get():
+    """Last DRY-RUN demo (iron condor basket + option scalp on last session's Kite data)."""
+    from self_learning import learning
+    return learning.store.kv_get("options_demo", {}) or {"ok": False, "why": "no demo run yet"}
+
+
+class OptionsDemoRequest(BaseModel):
+    day: Optional[str] = None
+    underlying: str = "NIFTY"
+    ic_time: str = "10:30"
+
+
+_options_demo_running = {"on": False}
+
+
+@app.post("/options/demo", tags=["Options"])
+async def options_demo_run(req: OptionsDemoRequest):
+    """DRY-RUN replay of a past session through the live engine code. Isolated:
+    never touches the paper ledger or the learning journal."""
+    if settings.trading_mode != "PAPER":
+        raise HTTPException(409, "PAPER only")
+    if _options_demo_running["on"]:
+        raise HTTPException(409, "demo already running")
+    import options_backtest
+    from datetime import date as _d
+    day = _d.fromisoformat(req.day) if req.day else None
+    _options_demo_running["on"] = True
+    try:
+        return await asyncio.to_thread(options_backtest.demo, day, req.underlying.upper(), req.ic_time)
+    finally:
+        _options_demo_running["on"] = False
+
+
+@app.post("/options/backtest", tags=["Options"])
+async def options_backtest_run():
+    """Real-Kite-history replay of the option families -> backtest gate
+    (pass / insufficient=PAPER probation 0.5x / fail=blocked). Same as nightly."""
+    if settings.trading_mode != "PAPER":
+        raise HTTPException(409, "PAPER only")
+    import options_backtest
+    from self_learning import learning
+    return await asyncio.to_thread(options_backtest.nightly, learning)
+
+
+class OptionsEnableRequest(BaseModel):
+    enabled: bool
+
+
+@app.post("/options/enable", tags=["Options"])
+def options_enable(req: OptionsEnableRequest):
+    """Pause/resume NEW option entries (open baskets keep being managed)."""
+    from options_engine import options_engine
+    options_engine.enabled = bool(req.enabled)
+    return {"ok": True, "enabled": options_engine.enabled}
+
+
+@app.post("/options/close_all", tags=["Options"])
+def options_close_all():
+    """Close every open basket (shorts bought back first) and option buy."""
+    from options_engine import options_engine
+    return {"ok": True, "closed": options_engine.close_all("manual close_all")}
+
+
+@app.post("/invent/{strategy_id}/approve", tags=["Invent"])
+def invent_approve(strategy_id: str):
+    """Approve a pending proposal for PAPER trading (only needed when master
+    auto-approve is off). Never arms LIVE."""
+    from strategy_inventor import strategy_inventor
+    r = strategy_inventor.approve(strategy_id, approver="jag")
+    if not r.get("ok"):
+        raise HTTPException(409, r.get("reason", "approve refused"))
+    return r
+
+
+# Typed confirmation phrase required (exactly, case-sensitive) to arm LIVE.
+LIVE_CONFIRM_PHRASE = "SEND"
+
+
 class TradingModeRequest(BaseModel):
     mode: str          # "PAPER" or "LIVE"
     confirm: bool = False
+    # The operator must TYPE the phrase — a boolean alone is one click / one
+    # scripted field away from real-money orders.
+    confirm_text: str = Field(default="", max_length=32)
 
 
 @app.post("/settings/trading-mode", tags=["Settings"])
 def set_trading_mode(req: TradingModeRequest):
     """Switch trading mode between PAPER and LIVE at runtime.
-    Requires confirm=true when switching to LIVE as a safety gate.
+    Switching to LIVE requires BOTH confirm=true AND confirm_text="SEND"
+    (typed, exact). Switching back to PAPER is always allowed.
     The change is in-memory only; update .env to make it permanent.
     """
     from fastapi import HTTPException
     mode = req.mode.upper()
     if mode not in ("PAPER", "LIVE"):
         raise HTTPException(status_code=400, detail="mode must be PAPER or LIVE")
-    if mode == "LIVE" and not req.confirm:
-        raise HTTPException(status_code=400, detail="confirm=true required to switch to LIVE mode")
+    if mode == "LIVE":
+        if not req.confirm:
+            raise HTTPException(status_code=400, detail="confirm=true required to switch to LIVE mode")
+        if not hmac.compare_digest(req.confirm_text.strip().encode(), LIVE_CONFIRM_PHRASE.encode()):
+            logger.warning("Trading mode LIVE switch REFUSED — typed confirmation missing/incorrect")
+            raise HTTPException(
+                status_code=400,
+                detail=f'Type {LIVE_CONFIRM_PHRASE} (confirm_text) to switch to LIVE mode — real orders will be sent',
+            )
     prev = settings.trading_mode
     settings.trading_mode = mode
     logger.warning("Trading mode changed: {} → {} (in-memory only; update .env to persist)", prev, mode)
+    if mode == "PAPER":
+        from segments import segment_manager
+        segment_manager.disarm_all()
     return {
         "status": "ok",
         "trading_mode": mode,
@@ -2657,14 +3562,35 @@ def whitelist_ip(req: WhitelistIPRequest):
 
 
 # ── Health ────────────────────────────────────────────────────────────────────
+_PUBLIC_STRATEGY_KEYS = ("segment", "state", "reason", "on", "running", "enabled", "native",
+                         "hidden", "display", "desc", "can_resume")
+_PUBLIC_SEGMENT_KEYS = ("code", "label", "kite_exchange", "state", "reason", "on", "open", "hours",
+                        "mode", "effective_mode", "live_supported", "live_stub_reason", "feed",
+                        "killed", "kill_reason", "strategies", "strategies_running")
+
+
+def _public_engine(e: dict) -> dict:
+    """Unauthenticated /health: states only — no P&L, capital, positions or
+    orders (those are sensitive like /portfolio/*)."""
+    out = {k: v for k, v in e.items() if k not in ("strategies", "segments", "book")}
+    out["strategies"] = {n: {k: v[k] for k in _PUBLIC_STRATEGY_KEYS if k in v}
+                         for n, v in e.get("strategies", {}).items()}
+    out["segments"] = [{k: s[k] for k in _PUBLIC_SEGMENT_KEYS if k in s} for s in e.get("segments", [])]
+    out["redacted"] = True
+    return out
+
+
 @app.get("/health", tags=["System"])
-def health():
+def health(request: Request):
+    e = engine_status()
     return {"status": "ok", "version": "4.0.0", "mode": settings.trading_mode,
             "architecture": f"tick-driven {settings.tick_interval_ms}ms",
             "market_data_source": "KiteConnect (WebSocket + REST quote; orders + market data)",
             "market_open": is_market_open(),
             "master": "running" if master_agent.running else "stopped",
             "tick_engine": "running" if tick_engine._running else "stopped",
+            # full engine (book, P&L, capital) only for an authenticated caller
+            "engine": e if _request_authed(request) else _public_engine(e),
             "agents": {n: a.state.running for n, a in ALL_AGENTS.items()},
             "agent_enabled": dict(bot_state._agent_enabled),
             "subscribed_symbols": tick_engine.symbols(),
@@ -3521,11 +4447,35 @@ async def _prewarm_gate() -> None:
         logger.debug("[startup] Gate pre-warm skipped: {}", _e)
 
 
+def _boot_mode_guard() -> str:
+    """Audit #21: a process started with TRADING_MODE=LIVE in its env boots in
+    PAPER unless the operator ALSO typed the confirmation phrase into
+    TRADING_MODE_BOOT_CONFIRM. Runtime switching still needs /settings/
+    trading-mode with typed SEND, and every segment still needs its own SEND."""
+    if settings.trading_mode == "LIVE":
+        import os as _osb
+        typed = _osb.environ.get("TRADING_MODE_BOOT_CONFIRM", "").strip()
+        if not hmac.compare_digest(typed.encode(), LIVE_CONFIRM_PHRASE.encode()):
+            settings.trading_mode = "PAPER"
+            logger.warning("[startup] TRADING_MODE=LIVE from env WITHOUT typed boot confirmation — "
+                           "booting in PAPER (switch via /settings/trading-mode with typed {})",
+                           LIVE_CONFIRM_PHRASE)
+    return settings.trading_mode
+
+
 @app.on_event("startup")
 async def on_startup():
+    _boot_mode_guard()
     # Initialise SQLite state store
     from state_store import init_db, get_daily_pnl, get_kv
     init_db()
+    # Restore today's PAPER book (positions, orders, segment ledgers, P&L)
+    # before any engine loop runs.
+    try:
+        import paper_store
+        paper_store.restore()
+    except Exception as _pe:
+        logger.warning("[startup] paper book restore failed: {}", _pe)
     # Restore persisted kill-switch state AFTER the DB is guaranteed to exist
     # (a restart must never silently clear an emergency halt). Also re-halts
     # risk_manager when KILLED was restored.
@@ -3626,9 +4576,20 @@ async def on_startup():
     # These are needed for the dashboard chart and regime detection regardless
     # of whether the bot has been started. tick_engine.subscribe is idempotent.
     from nifty100 import INDEX_SYMBOLS as _IDX
+    # Prime live index levels first (Kite → NSE public fallback, no creds
+    # needed) so the PAPER simulator seeds NIFTY/BANKNIFTY at the real level
+    # instead of a placeholder. Bounded: never delays boot by more than ~6s.
+    from index_feed import index_feed as _index_feed
+    if settings.index_feed_enabled:
+        try:
+            await asyncio.wait_for(_index_feed.refresh(), timeout=6.0)
+        except Exception as _ie:
+            logger.warning("[startup] index feed prime failed ({}) — continuing", _ie)
     tick_engine.subscribe(_IDX)
     tick_engine.start_loop()
     logger.info("[startup] Index symbols subscribed: {}", [i["symbol"] for i in _IDX])
+    _index_feed.start(broadcast)
+    asyncio.create_task(_engine_watch_loop(), name="engine_watch")
 
     # Load SEBI IP whitelist from env at startup so restarts don't reset it
     if settings.sebi_whitelisted_ips:
@@ -3707,6 +4668,72 @@ async def on_startup():
         asyncio.create_task(_prewarm_gate(), name="prewarm_gate").add_done_callback(_log_task_exc)
     from platform_scheduler import platform_scheduler
     platform_scheduler.start()
+
+    # Self-improvement loop (PAPER only): learned params live, journal observer.
+    try:
+        from self_learning import learning
+        learning.activate()
+
+        async def _learning_observer() -> None:
+            while True:
+                await asyncio.sleep(20)
+                try:
+                    await asyncio.to_thread(learning.observe)
+                except Exception as _lo_exc:
+                    logger.debug("[learning] observer: {}", _lo_exc)
+        asyncio.create_task(_learning_observer(), name="learning_observer").add_done_callback(_log_task_exc)
+
+        # Fast scalper on the Kite WebSocket (PAPER only, needs a Kite session).
+        # Supervisor: retries every minute so a Kite login made AFTER boot (e.g.
+        # Monday 08:50 with a weekend-expired token) still starts the scalper —
+        # and with it the depth tick recording — before the open; also rebuilds
+        # the universe/whitelist on a new IST day and flushes the recorder.
+        async def _start_scalper() -> None:
+            await asyncio.sleep(20)
+            from fast_scalper import fast_scalper
+            try:
+                from scalper_whitelist import whitelist as _wl
+                from ist_clock import now_ist as _ni
+                if (_wl.get() or {}).get("as_of") != _ni().date().isoformat():
+                    await asyncio.to_thread(_wl.rebuild)
+            except Exception as _we:
+                logger.debug("[scalper] whitelist rebuild: {}", _we)
+            last = None
+            while True:
+                try:
+                    r = await asyncio.to_thread(fast_scalper.ensure_running)
+                    msg = str(r)
+                    if msg != last:
+                        logger.info("[scalper] {}", r)
+                        last = msg
+                    await asyncio.to_thread(fast_scalper.flush)
+                except Exception as _se:
+                    logger.debug("[scalper] supervisor: {}", _se)
+                await asyncio.sleep(60)
+        asyncio.create_task(_start_scalper(), name="fast_scalper_start").add_done_callback(_log_task_exc)
+
+        # Options engine loop (PAPER only): manage baskets/buys every ~3 s,
+        # decide entries every 5 min, reconcile with the paper ledger.
+        async def _options_loop() -> None:
+            await asyncio.sleep(30)
+            from options_engine import options_engine
+            while True:
+                await asyncio.sleep(3)
+                if settings.trading_mode != "PAPER":
+                    continue
+                try:
+                    await asyncio.to_thread(options_engine.reconcile_ledger)
+                    if kite_client._kite is not None:
+                        await asyncio.to_thread(options_engine.step)
+                        # focused agent (owner focus nifty_intraday_options) — PAPER only
+                        from nifty_options_agent import nifty_options_agent
+                        await asyncio.to_thread(nifty_options_agent.step, options_engine)
+                except Exception as _oe_exc:
+                    options_engine.last_error = f"loop: {_oe_exc}"
+                    logger.debug("[options] loop: {}", _oe_exc)
+        asyncio.create_task(_options_loop(), name="options_engine_loop").add_done_callback(_log_task_exc)
+    except Exception as _le_exc:
+        logger.warning("[startup] self-learning not started: {}", _le_exc)
 
     # Reload persisted agent enables/pauses BEFORE any auto-start path runs —
     # without this a deploy restart silently re-enabled manually paused agents.
@@ -3796,6 +4823,11 @@ async def on_shutdown():
     squareoff explicitly via /orders/squareoff before stopping the service.
     """
     logger.warning("FastAPI shutdown: stopping all agents and tick engine…")
+    try:
+        import paper_store
+        paper_store.save(force=True)
+    except Exception as _pe:
+        logger.warning("Shutdown: paper book save failed: {}", _pe)
 
     # 1. Stop all running agents gracefully
     try:
@@ -3809,7 +4841,12 @@ async def on_shutdown():
     except Exception as _e:
         logger.warning("Shutdown: could not stop agents: {}", _e)
 
-    # 2. Stop tick engine (cancels poll loop, stops WebSocket)
+    # 2. Stop tick engine (cancels poll loop, stops WebSocket) + index feed
+    try:
+        from index_feed import index_feed as _index_feed
+        _index_feed.stop()
+    except Exception:
+        pass
     try:
         tick_engine.stop()
     except Exception as _te:

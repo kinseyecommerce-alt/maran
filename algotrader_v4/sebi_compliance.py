@@ -33,7 +33,7 @@ from typing import Awaitable, Callable, Optional
 from loguru import logger
 from config import settings
 
-_AUDIT_LOG_DIR = Path("logs")
+_AUDIT_LOG_DIR = Path(os.environ.get("SEBI_AUDIT_DIR", "logs"))
 
 
 # ── Reg 1: Approved algo registry ─────────────────────────────────────────────

@@ -8,18 +8,28 @@ from datetime import datetime, timedelta
 from playwright.sync_api import sync_playwright, Page
 
 BASE     = os.getenv("E2E_BASE", "http://127.0.0.1:8000")
-CHROMIUM = "/opt/pw-browsers/chromium-1194/chrome-linux/chrome"
+CHROMIUM = os.getenv("CHROMIUM_PATH") or next(
+    (p for p in (
+        "/opt/google/chrome/chrome",
+        "/opt/pw-browsers/chromium-1194/chrome-linux/chrome",
+        "/usr/bin/google-chrome",
+        "/usr/bin/chromium",
+    ) if os.path.exists(p)),
+    "/opt/google/chrome/chrome",
+)
 SHOTS    = "/tmp/btn_screenshots"
 os.makedirs(SHOTS, exist_ok=True)
 
 # Load credentials from .env
 _env = os.path.join(os.path.dirname(__file__), ".env")
-API_KEY = ""; JWT_SECRET = ""; KS_SECRET = ""
+API_KEY = os.getenv("API_KEY", "localdev-jag"); JWT_SECRET = ""; KS_SECRET = ""
 if os.path.exists(_env):
     for line in open(_env):
         if line.startswith("API_KEY="):             API_KEY   = line.split("=",1)[1].strip()
         elif line.startswith("JWT_SECRET_KEY="):     JWT_SECRET = line.split("=",1)[1].strip()
         elif line.startswith("KILL_SWITCH_RESET_SECRET="): KS_SECRET = line.split("=",1)[1].strip()
+if not API_KEY:
+    API_KEY = "localdev-jag"
 
 def make_jwt() -> str:
     from jose import jwt as _jwt
@@ -56,7 +66,7 @@ def goto_dashboard(page: Page, jwt: str):
         localStorage.setItem('jwtToken', '{jwt}');
         localStorage.setItem('apiKey', '{API_KEY}');
     """)
-    page.goto(f"{BASE}/dashboard", wait_until="networkidle")
+    page.goto(f"{BASE}/dashboard", wait_until="domcontentloaded")
     page.wait_for_timeout(1200)
 
 def toast_visible(page: Page) -> str:
@@ -104,7 +114,7 @@ def reset_kill_switch(page: Page):
 
 def test_login_page(page: Page):
     print("\n── 1. LOGIN PAGE BUTTONS ─────────────────────────")
-    page.goto(f"{BASE}/login", wait_until="networkidle")
+    page.goto(f"{BASE}/login", wait_until="domcontentloaded")
     snap(page, "01a_login_page")
 
     # Wrong password → error status message
@@ -149,6 +159,43 @@ def test_login_page(page: Page):
         snap(page, "01d_set_token_empty")
     else:
         warn("Set Token button/input", "not found")
+
+
+def _is_modern_spa(page: Page) -> bool:
+    """True when the React desk UI (sidebar labels) is served instead of legacy .nav-item tabs."""
+    try:
+        return page.get_by_role("button", name="Dashboard").count() > 0 or page.locator("text=Invented").count() > 0
+    except Exception:
+        return False
+
+
+def test_modern_spa_smoke(page: Page, jwt: str):
+    """Lightweight smoke for the redesigned SPA — legacy .nav-item tabs are gone.
+    Caller must already have a logged-in dashboard page."""
+    print("\n── MODERN SPA SMOKE (redesigned UI) ─────────────")
+    if "/dashboard" not in page.url:
+        page.goto(f"{BASE}/dashboard", wait_until="domcontentloaded", timeout=30000)
+        page.wait_for_timeout(2000)
+    snap(page, "modern_dashboard")
+    for label in ("Dashboard", "Positions", "Orders", "Agents", "Invented", "Risk"):
+        btn = page.locator(f"button:has-text('{label}')").first
+        try:
+            if btn.count() == 0:
+                fail(f"Sidebar '{label}'", "button not found")
+                continue
+            btn.click()
+            page.wait_for_timeout(700)
+            ok(f"Sidebar '{label}' clickable")
+        except Exception as exc:
+            fail(f"Sidebar '{label}'", str(exc)[:80])
+    page.locator("button:has-text('Invented')").first.click()
+    page.wait_for_timeout(1000)
+    if page.locator("[data-testid=invent-toggle]").count() > 0:
+        ok("Invented tab panel rendered")
+    else:
+        fail("Invented tab panel", "invent-toggle not found")
+    snap(page, "modern_invented")
+
 
 
 def test_tab_navigation(page: Page, jwt: str):
@@ -569,13 +616,43 @@ def main():
             login_ctx.close()
 
         try:
-            test_tab_navigation(page, jwt)
-            test_topbar_kill_switch(page, jwt)
-            test_botcontrol_tab(page, jwt)
-            test_risk_sebi_tab(page, jwt)
-            test_settings_tab(page, jwt)
-            test_confirm_dialog_cancel(page, jwt)
-            test_agent_enable_toggles(page, jwt)
+            # Dashboard context carries X-API-Key; use a clean context for login
+            # so /auth/me does not short-circuit the login form.
+            auth_ctx = browser.new_context(viewport={"width": 1440, "height": 900})
+            auth = auth_ctx.new_page()
+            auth.set_default_timeout(20000)
+            auth.goto(f"{BASE}/login", wait_until="domcontentloaded", timeout=30000)
+            auth.wait_for_selector("#username", timeout=10000)
+            auth.fill("#username", "admin")
+            auth.fill("#password", os.getenv("ADMIN_PASSWORD", "localview-2026"))
+            auth.keyboard.press("Enter")
+            auth.wait_for_url("**/dashboard**", timeout=20000)
+            auth.wait_for_timeout(1500)
+            # Copy storage state (jwt cookie + localStorage token) into the API-key context
+            state = auth_ctx.storage_state()
+            auth_ctx.close()
+            ctx.close()
+            ctx = browser.new_context(
+                viewport={"width": 1440, "height": 900},
+                extra_http_headers={"X-API-Key": API_KEY},
+                storage_state=state,
+            )
+            page = ctx.new_page()
+            page.set_default_timeout(15000)
+            page.goto(f"{BASE}/dashboard", wait_until="domcontentloaded", timeout=30000)
+            page.wait_for_timeout(1500)
+            legacy = page.locator(".nav-item[data-tab]").count()
+            if legacy == 0 or _is_modern_spa(page):
+                print("\n  (modern SPA detected — running redesigned-UI smoke; legacy .nav-item suite skipped)")
+                test_modern_spa_smoke(page, jwt)
+            else:
+                test_tab_navigation(page, jwt)
+                test_topbar_kill_switch(page, jwt)
+                test_botcontrol_tab(page, jwt)
+                test_risk_sebi_tab(page, jwt)
+                test_settings_tab(page, jwt)
+                test_confirm_dialog_cancel(page, jwt)
+                test_agent_enable_toggles(page, jwt)
         except Exception as exc:
             import traceback
             fail("UNEXPECTED CRASH", str(exc))

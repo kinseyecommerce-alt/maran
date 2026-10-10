@@ -13,6 +13,13 @@ _agent_enabled: dict[str, bool] = {
     "mean_reversion":  True,
     "pairs":           True,
     "option_scalping": True,
+    # segment-native paper strategies (segment_engine.py)
+    "bse_momentum":       True,
+    "bse_mean_reversion": True,
+    "mcx_trend":          True,
+    "mcx_mean_reversion": True,
+    "cds_trend":          True,
+    "cds_mean_reversion": True,
 }
 
 # Pattern toggles — all enabled by default; runtime-mutable via /settings/pattern-toggles

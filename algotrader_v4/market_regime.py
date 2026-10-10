@@ -153,12 +153,18 @@ REGIME_PLANS: dict[Regime, StrategyPlan] = {
                      "FALLING=protect/puts, STABILIZING=ladder mean-reversion, RECOVERING=IV crush+bounce",
         regime     = Regime.BLACK_SWAN,
     ),
+    # Audit (master agent): UNKNOWN used to run "scalping only" — and scalping
+    # often has no approved symbols, so NSE sat idle all day. Fall back to the
+    # defensive RANGING roster at HALF size (the regime label stays UNKNOWN,
+    # so the UNKNOWN row of regime_blocked_agents still benches options /
+    # momentum / mean_reversion / pairs / swing).
     Regime.UNKNOWN: StrategyPlan(
-        active     = ["scalping"],
-        paused     = ["swing", "intraday", "options"],
-        allocation = {"scalping":100, "swing":0, "intraday":0, "options":0},
+        active     = ["scalping", "intraday", "futures"],
+        paused     = ["swing", "options", "momentum", "mean_reversion", "pairs"],
+        allocation = {"scalping":40, "intraday":40, "futures":20, "swing":0, "options":0},
         size_factor= 0.5,
-        reasoning  = "Could not determine market regime. Running only scalping at reduced size.",
+        reasoning  = "Regime undetermined — falling back to the defensive RANGING roster "
+                     "(scalping/intraday/futures) at 0.5× size until a regime is confirmed.",
         regime     = Regime.UNKNOWN,
     ),
 }
@@ -380,6 +386,18 @@ class MarketRegimeDetector:
 
             s.nifty_ltp       = float(close.iloc[-1])
             s.nifty_1d_chg_pct= float((close.iloc[-1]-close.iloc[-2])/close.iloc[-2]*100) if close.iloc[-2] != 0 else 0.0
+            # Daily bars end at the last close; during the session overlay the
+            # live index level (Kite / NSE via index_feed — never simulated).
+            try:
+                from index_feed import index_feed as _ixf
+                from ist_clock import now_ist as _now
+                _live = _ixf.last_price("NIFTY")
+                _last_day = pd.Timestamp(df_d["date"].iloc[-1]).date()
+                if _live and close.iloc[-1] > 0 and _last_day < _now().date():
+                    s.nifty_1d_chg_pct = float((_live - close.iloc[-1]) / close.iloc[-1] * 100)
+                    s.nifty_ltp = float(_live)
+            except Exception:
+                pass
             s.nifty_5d_chg_pct= float((close.iloc[-1]-close.iloc[-6])/close.iloc[-6]*100) if len(close)>=6 and close.iloc[-6] != 0 else 0.0
 
             if len(close) >= 20:

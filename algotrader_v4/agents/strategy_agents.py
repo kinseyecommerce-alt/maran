@@ -12,7 +12,7 @@ from typing import Optional
 import pandas as pd
 from pathlib import Path
 
-from ist_clock import now_ist
+from ist_clock import now_ist, entry_session_time, paper_after_hours_active
 from agents.base_agent import BaseAgent
 from tick_engine import MarketSnapshot, LiveIndicators, Tick, IndicatorCalc
 from risk_manager import risk_manager
@@ -163,7 +163,7 @@ class IntradayAgent(BaseAgent):
         sym = snap.symbol
         ltp = snap.tick.ltp
         now = now_ist()
-        t   = now.time().replace(tzinfo=None)
+        t   = entry_session_time()  # remaps outside hours when PAPER after-hours sim
 
         if time(14, 50) <= t:
             # Roll prev-state forward so the first tick tomorrow morning doesn't
@@ -797,8 +797,13 @@ class IntradayAgent(BaseAgent):
             return False, ""
 
         atr      = ind.atr_14 or entry * 0.005
-        sl_dist  = max(atr * self.SL_ATR,  entry * self.SL_MIN_PCT  / 100)
-        tgt_dist = max(atr * self.TGT_ATR, entry * self.TGT_MIN_PCT / 100)
+        # Same floors as the bracket placed at entry (evaluate_tick uses
+        # settings.sl_pct_intraday / tgt_pct_intraday). Before 2026-10-10 the
+        # exit used SL_MIN_PCT 0.5 / TGT_MIN_PCT 0.8, so the "brain" stop and
+        # target fired at ~⅓ of the placed stop and ~¼ of the placed target —
+        # the position was sized for one bracket and managed by another.
+        sl_dist  = max(atr * self.SL_ATR,  entry * settings.sl_pct_intraday  / 100)
+        tgt_dist = max(atr * self.TGT_ATR, entry * settings.tgt_pct_intraday / 100)
 
         if side == "BUY":
             sl_price = entry - sl_dist
@@ -852,7 +857,7 @@ class IntradayAgent(BaseAgent):
                 return True, "EMA9 reclaim exit"
 
         now = now_ist().time().replace(tzinfo=None)
-        if now.hour >= 15:
+        if now.hour >= 15 and not paper_after_hours_active():
             return True, "Auto square-off 3:00 PM"
         return False, ""
 
@@ -905,8 +910,10 @@ class OptionsAgent(BaseAgent):
     product = "NRML"
     min_candles_1min = 10
 
-    LOT_SIZES: dict = {"NIFTY": 75, "BANKNIFTY": 15, "MIDCPNIFTY": 75,
-                       "FINNIFTY": 40, "SENSEX": 10}
+    # Fallback only — live lot sizes come from the Kite instrument master
+    # (kite_client.refresh_lot_sizes). NIFTY is 65 / BANKNIFTY 30 since 2025.
+    LOT_SIZES: dict = {"NIFTY": 65, "BANKNIFTY": 30, "MIDCPNIFTY": 140,
+                       "FINNIFTY": 65, "SENSEX": 20}
     MIN_SCORE    = 4        # minimum score to fire at 0.25× size
     MAX_IV_BUY   = 72       # hard block above this IV rank
     COOL_S       = 120      # 2-min per symbol per direction
@@ -988,7 +995,7 @@ class OptionsAgent(BaseAgent):
         sym = snap.symbol
         ltp = snap.tick.ltp
         now = now_ist()
-        t   = now.time().replace(tzinfo=None)
+        t   = entry_session_time()  # remaps outside hours when PAPER after-hours sim
 
         # Hard stop at 14:00 — no options entries after this (theta decay too aggressive)
         if t >= time(14, 0):
@@ -1111,6 +1118,45 @@ class OptionsAgent(BaseAgent):
             return "HOLD", None
         cools[best_opt] = now
 
+        # ── Options-engine hand-off (2026-10-09 options upgrade) ──────────────
+        # This agent no longer places single option legs itself:
+        #   • SELL ideas (STRANGLE_SELL / IRON_CONDOR / CE_SELL / PE_SELL) are
+        #     executed ONLY as defined-risk baskets (iron condor / credit
+        #     spread) by options_engine — a naked short leg is impossible.
+        #   • BUY ideas on index underlyings go to the engine's cost/theta-
+        #     aware buyer (liquid weekly/monthly strikes, Greek sizing, real
+        #     bid/ask fills, lot size from the Kite instrument master).
+        #   • Stock-option ideas are dropped: spreads/OI fail the liquidity
+        #     gate and the old path sized option qty off the stock price.
+        self._update_state(sym, ind, ltp)
+        try:
+            from options_engine import options_engine, ENGINE_UNDERLYINGS
+        except Exception:
+            return "HOLD", None
+        if sym.upper() not in ENGINE_UNDERLYINGS:
+            return "HOLD", None
+        _opt = best_opt.replace("_SELL", "") if is_sell_signal else best_opt
+        import threading as _thr
+        _thr.Thread(target=self._engine_handoff,
+                    args=(options_engine, sym.upper(), _opt, best_pattern, best_score, is_sell_signal),
+                    daemon=True, name=f"opt-handoff-{sym}").start()
+        return "HOLD", None
+
+    def _engine_handoff(self, engine, und, opt_type, pattern, score, is_sell) -> None:
+        from loguru import logger      # module has no global logger: NameError killed every hand-off log
+        try:
+            res = engine.submit_agent_signal(und, opt_type, pattern, score=score, is_sell=is_sell)
+            logger.info("[{}] options hand-off {} {} {} -> {}", self.name, und, pattern,
+                        "SELL(basket)" if is_sell else "BUY", (res or {}).get("result") or res)
+        except Exception as exc:
+            logger.warning("[{}] options hand-off failed: {}", self.name, exc)
+
+    def _legacy_single_leg_signal(self, sym, snap, ind, ltp, now, best_opt, best_score,
+                                  best_pattern, is_sell_signal, iv_rank, atm_iv):
+        """Pre-2026-10-09 single-leg path, kept for reference/replays only —
+        evaluate_tick no longer reaches it. Lot size comes from the Kite
+        instrument master (_FON_LOT_SIZES refreshed on load), never the stale
+        hardcoded table."""
         # SL / TGT from IV regime
         sl_pct, tgt_pct = self._iv_sl_tgt(iv_rank)
 
@@ -1144,7 +1190,7 @@ class OptionsAgent(BaseAgent):
         strike  = self._target_delta_strike(ltp, actual_opt, atm_iv, target_delta, dte)
         opt_sym = self._nfo_symbol(sym, strike, actual_opt)
         from kite_client import _FON_LOT_SIZES as _kite_lots
-        lot_sz = self.LOT_SIZES.get(sym) or _kite_lots.get(sym)
+        lot_sz = _kite_lots.get(sym) or self.LOT_SIZES.get(sym)
         if not lot_sz:
             # No real listed F&O contract for this underlying (most Nifty 500
             # names have none) — defaulting to lot=1 would fabricate an order
@@ -2065,6 +2111,9 @@ class OptionsAgent(BaseAgent):
 
         if order_guard.is_symbol_active_anywhere(underlying):
             return
+        from owner_universe import owner_universe
+        if not owner_universe.allows(opt_sym, exchange=exch)[0]:
+            return
         # Atomic claim — reserves the slot before placing, mirroring base_agent.
         claimed, _ = order_guard.try_claim(underlying, self.name, action)
         if not claimed:
@@ -2159,6 +2208,12 @@ class OptionsAgent(BaseAgent):
         # _on_sl_hit immediately, and a missing entry there falls back to pos.symbol
         # (the underlying equity, NSE/MIS) — wrong instrument for option exits.
         _setup_tsl_callbacks()
+        _opt_type_pm = str(signal.get("option_type", "CE")).upper()
+        try:
+            _delta_pm = abs(float(signal.get("entry_delta", 0.5) or 0.5))
+        except (TypeError, ValueError):
+            _delta_pm = 0.5
+        _delta_pm = max(min(_delta_pm, 1.0), 0.05)
         with _tsl_sl_orders_lock:
             _tsl_sl_orders[order_id] = {
                 "sl_order_id":   sl_order_id,
@@ -2166,6 +2221,13 @@ class OptionsAgent(BaseAgent):
                 "exchange":      exch,
                 "tradingsymbol": opt_sym,
                 "lot_size":      lot_size,
+                # TSL trails the UNDERLYING; the SL-M rests on the contract.
+                # _on_sl_moved maps the underlying stop to a premium trigger.
+                "premium_map": {
+                    "entry_premium":    float(opt_price),
+                    "entry_underlying": float(S),
+                    "delta": _delta_pm if _opt_type_pm == "CE" else -_delta_pm,
+                },
             }
         # Keyed by the UNDERLYING with the underlying entry price (snap.ltp), so
         # profit/SL percentages track underlying moves consistently. Registering
@@ -2321,6 +2383,11 @@ class OptionsAgent(BaseAgent):
                 "exchange":      exch,
                 "tradingsymbol": pe_sym,
                 "lot_size":      signal.get("lot_size", 1),
+                "premium_map": {   # ATM put: delta ≈ −0.5
+                    "entry_premium":    float(pe_price),
+                    "entry_underlying": float(S),
+                    "delta": -0.5,
+                },
             }
         # Long PE = bearish exposure → trails as SELL on the underlying; the
         # contract itself is still closed by SELLing it (exit_side).
@@ -2379,7 +2446,7 @@ class OptionsAgent(BaseAgent):
             _t0 = self._entry_clock.setdefault(_csym, _now_m)
             _held_min = (_now_m - _t0) / 60.0
             _now_clock = now_ist().time()
-            if _now_clock >= self.FLATTEN_AFTER:
+            if _now_clock >= self.FLATTEN_AFTER and not paper_after_hours_active():
                 self._entry_clock.pop(_csym, None)
                 return True, f"Late-day theta flatten (>{self.FLATTEN_AFTER.strftime('%H:%M')}) ₹{prem:.1f}"
             if _held_min >= self.MAX_HOLD_MIN and chg < self.MIN_HOLD_PROFIT:
@@ -3142,7 +3209,7 @@ class ScalpingAgent(BaseAgent):
         ind = snap.indicators
         ltp = snap.tick.ltp
         now = now_ist()
-        t   = now.time().replace(tzinfo=None)
+        t   = entry_session_time()  # remaps outside hours when PAPER after-hours sim
 
         if not ind.ema9 or ind.ema9 != ind.ema9:
             return "HOLD", None
@@ -3793,7 +3860,7 @@ class ScalpingAgent(BaseAgent):
                 return True, "VWAP breakout exit"
 
         # Hard auto-exit well before close (leave 15 min for TSL to close)
-        if now_ist().time() >= time(14, 55):
+        if now_ist().time().replace(tzinfo=None) >= time(14, 55) and not paper_after_hours_active():
             return True, "Auto square-off 2:55 PM"
 
         return False, ""
@@ -3845,8 +3912,11 @@ class FuturesAgent(BaseAgent):
     # settings.futures_stock_symbols (lot sizes resolved from kite_client's
     # _FON_LOT_SIZES table) — indices alone proved to be the binding
     # constraint: two efficient charts leave no selection edge.
-    LOT_SIZES: dict = {"NIFTY": 75, "BANKNIFTY": 15, "MIDCPNIFTY": 75,
-                       "FINNIFTY": 40, "SENSEX": 10, "BANKEX": 15}
+    # Fallback only — the Kite instrument master (kite_client._FON_LOT_SIZES,
+    # refreshed on load) wins in _tradeable_lots(). NIFTY 75 here was stale
+    # (NSE revised it to 65) → futures quantities that were not lot multiples.
+    LOT_SIZES: dict = {"NIFTY": 65, "BANKNIFTY": 30, "MIDCPNIFTY": 120,
+                       "FINNIFTY": 65, "SENSEX": 20, "BANKEX": 30}
     MIN_SCORE = 4
     COOL_S    = 180
 
@@ -3855,13 +3925,15 @@ class FuturesAgent(BaseAgent):
         stock set can be pruned at runtime on live evidence; a stock missing
         from the kite lot table is silently skipped (never guess a lot size)."""
         from kite_client import _FON_LOT_SIZES
-        lots = dict(self.LOT_SIZES)
+        lots = {k: int(_FON_LOT_SIZES.get(k) or v) for k, v in self.LOT_SIZES.items()}
         raw = getattr(settings, "futures_stock_symbols", "") or ""
         for s in raw.split(","):
             s = s.strip().upper()
             if s and s in _FON_LOT_SIZES:
                 lots[s] = _FON_LOT_SIZES[s]
-        return lots
+        # OWNER universe (jag): only allowed NSE_FO underlyings (e.g. NIFTY)
+        from owner_universe import owner_universe
+        return {k: v for k, v in lots.items() if owner_universe.fo_underlying_allowed(k)}
 
     def filter_watchlist(self, watchlist: list[dict]) -> list[dict]:
         """Approve the tradeable futures underlyings: index symbols (always —
@@ -3911,7 +3983,7 @@ class FuturesAgent(BaseAgent):
         sym = snap.symbol
         ltp = snap.tick.ltp
         now = now_ist()
-        t   = now.time().replace(tzinfo=None)
+        t   = entry_session_time()  # remaps outside hours when PAPER after-hours sim
 
         # Tradeable guard: index futures always; stock futures per
         # settings.futures_stock_symbols (lots from kite_client's table —
@@ -4587,8 +4659,7 @@ class FuturesAgent(BaseAgent):
     def _is_rollover_period(self) -> bool:
         """True if today is within 3 calendar days BEFORE NSE monthly futures expiry
         (last Tuesday since the 2025 SEBI expiry standardization)."""
-        from datetime import date
-        today = date.today()
+        today = now_ist().date()          # IST (replay-pinned); date.today() is host-local (UTC)
         for month_offset in (0, 1):
             y, m = today.year, today.month + month_offset
             if m > 12:
@@ -4660,8 +4731,7 @@ class FuturesAgent(BaseAgent):
 
     def _futures_symbol(self, underlying: str, rollover: bool = False) -> str:
         """Build NFO futures symbol. During rollover window, trade the far (next) month."""
-        from datetime import date
-        today = date.today()
+        today = now_ist().date()          # IST (replay-pinned); date.today() is host-local (UTC)
 
         near_exp = _nse_monthly_expiry(today.year, today.month)
         if today > near_exp or rollover:
@@ -4718,7 +4788,7 @@ class FuturesAgent(BaseAgent):
             return True, "Rollover period — exit before 14:00 cutoff"
 
         # 7. Auto square-off 14:55 (hard cutoff for all futures)
-        if now_ist().time().replace(tzinfo=None) >= time(14, 55):
+        if now_ist().time().replace(tzinfo=None) >= time(14, 55) and not paper_after_hours_active():
             return True, "Auto square-off 14:55"
 
         return False, ""
@@ -4781,7 +4851,7 @@ class MeanReversionAgent(BaseAgent):
         sym = snap.symbol
         ltp = snap.tick.ltp
         now = now_ist()
-        t   = now.time().replace(tzinfo=None)
+        t   = entry_session_time()  # remaps outside hours when PAPER after-hours sim
 
         if t >= time(14, 45) or time(9, 15) <= t < time(9, 25):
             # Roll prev-state forward so the first tick after the guard window
@@ -5129,7 +5199,7 @@ class MeanReversionAgent(BaseAgent):
             if ind.rsi_14 <= 50 and entry > 0 and ltp < entry:
                 return True, f"RSI normalised {ind.rsi_14:.0f} — exit"
 
-        if now_ist().time().replace(tzinfo=None) >= time(14, 55):
+        if now_ist().time().replace(tzinfo=None) >= time(14, 55) and not paper_after_hours_active():
             return True, "Auto square-off 2:55 PM"
         return False, ""
 
@@ -5190,7 +5260,7 @@ class MomentumAgent(BaseAgent):
         sym = snap.symbol
         ltp = snap.tick.ltp
         now = now_ist()
-        t   = now.time().replace(tzinfo=None)
+        t   = entry_session_time()  # remaps outside hours when PAPER after-hours sim
 
         if t >= time(14, 50) or time(9, 15) <= t < time(9, 30):
             # Roll prev-state forward so the first tick after the guard window
@@ -5631,7 +5701,7 @@ class MomentumAgent(BaseAgent):
             if ind.rsi_14 <= 22 and ind.macd_hist > 0:
                 return True, f"RSI exhaustion {ind.rsi_14:.0f}"
 
-        if now_ist().time().replace(tzinfo=None) >= time(14, 55):
+        if now_ist().time().replace(tzinfo=None) >= time(14, 55) and not paper_after_hours_active():
             return True, "Auto square-off 2:55 PM"
         return False, ""
 
@@ -5782,8 +5852,14 @@ class PairsAgent(BaseAgent):
         # stale 14:30 price from the previous session.
         self._prices[sym] = snap.tick.ltp
 
+        # Audit #19: this agent opens only ONE leg of a pair (an unhedged
+        # directional bet labelled stat-arb). Disabled until both legs are
+        # placed atomically; exits of any open leg are still managed.
+        if not getattr(settings, "pairs_single_leg_enabled", False):
+            return "HOLD", None
+
         now = now_ist()
-        t   = now.time().replace(tzinfo=None)
+        t   = entry_session_time()  # remaps outside hours when PAPER after-hours sim
         if not (time(9, 30) <= t <= time(14, 30)):
             return "HOLD", None
 
@@ -5941,7 +6017,7 @@ class PairsAgent(BaseAgent):
             if abs(zscore) >= self.ZSCORE_CUT:
                 return True, f"Pairs far-diverge z={zscore:.2f}"
 
-        if now_ist().time().replace(tzinfo=None) >= time(14, 30):
+        if now_ist().time().replace(tzinfo=None) >= time(14, 30) and not paper_after_hours_active():
             return True, "Pairs auto-square 2:30 PM"
         return False, ""
 

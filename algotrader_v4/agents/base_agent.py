@@ -17,6 +17,7 @@ import httpx
 from loguru import logger
 
 from config import settings
+from ist_clock import paper_after_hours_active
 from kite_client import kite_client
 from broker_router import broker_router
 from risk_manager import risk_manager
@@ -50,6 +51,18 @@ _tsl_sl_orders_lock = __import__("threading").Lock()
 _tsl_callbacks_installed: bool = False
 
 
+def _premium_trigger(pm: dict, underlying_sl: float) -> float:
+    """Map a TSL stop expressed on the UNDERLYING to an SL-M trigger on the
+    option CONTRACT: premium ≈ entry_premium + signed_delta × ΔS, floored at
+    one tick and rounded to the ₹0.05 F&O tick size. Without this the option
+    stop was modified to the underlying's spot level (e.g. ₹1770 on a ₹24
+    premium) — an instant fill in PAPER, a rejected/mis-placed stop in LIVE."""
+    prem = float(pm["entry_premium"]) + float(pm["delta"]) * (
+        float(underlying_sl) - float(pm["entry_underlying"]))
+    prem = max(prem, 0.05)
+    return round(round(prem / 0.05) * 0.05, 2)
+
+
 def _setup_tsl_callbacks() -> None:
     """Wire global TSL callbacks once (idempotent). Must be called before first register()."""
     global _tsl_callbacks_installed
@@ -76,6 +89,8 @@ def _setup_tsl_callbacks() -> None:
         # (captured at entry) — offset the trigger so "breakeven at spot" is
         # breakeven on the CONTRACT, not a basis-sized locked-in loss.
         _trig = round(pos.current_sl + float(entry.get("basis") or 0.0), 2)
+        if entry.get("premium_map"):
+            _trig = _premium_trigger(entry["premium_map"], pos.current_sl)
         try:
             await _loop.run_in_executor(
                 None, lambda: kite_client.modify_order(order_id=sl_oid, trigger_price=_trig)
@@ -520,6 +535,8 @@ class BaseAgent(ABC):
         self._queue: Optional[asyncio.Queue] = None
         self._task:  Optional[asyncio.Task]  = None
         self._approved: set[str] = set()
+        # PAPER-approved symbols with NO backtest evidence: probation size (audit X12)
+        self._probation: set[str] = set()
         # Phase 3E: adaptive engine feedback — refreshed every 300s
         self._last_adaptive_refresh: float = 0.0
         self._adaptive_min_score_override: Optional[int] = None
@@ -607,16 +624,21 @@ class BaseAgent(ABC):
                         # symbols don't trade real money on zero history.
                         _have = {i["symbol"] for i in approved}
                         approved = approved + [i for i in watchlist if i["symbol"] not in _have]
+                        self._prob_set().update({i["symbol"] for i in watchlist if i["symbol"] not in _have})
                         label = (f"PAPER: {len(_have)} pre-approved + "
                                  f"{len(approved) - len(_have)} untested — trading full watchlist")
                 else:
                     # Agent not in seed file (new agent added after historical_learner ran).
                     # Approve all watchlist symbols so the agent can start immediately.
                     approved = list(watchlist)
+                    if settings.trading_mode == "PAPER":
+                        self._prob_set().update({i["symbol"] for i in watchlist})
                     label = "agent not in seed file — approving all watchlist symbols"
             else:
                 # No file yet — approve everything (user trusts their watchlist)
                 approved = list(watchlist)
+                if settings.trading_mode == "PAPER":
+                    self._prob_set().update({i["symbol"] for i in watchlist})
                 label = "skip_backtest=true, no seed file — approving all"
 
             # Book cap: the full-year breadth test (30-symbol book, tf15,
@@ -638,6 +660,7 @@ class BaseAgent(ABC):
 
         # Normal path: run backtest per symbol (first-time setup)
         approved = []
+        untested: list[str] = []
         for item in watchlist:
             sym, exch = item["symbol"], item.get("exchange", "NSE")
             res = backtest_engine.run(sym, exch, self.name)
@@ -646,11 +669,42 @@ class BaseAgent(ABC):
                 self._approved.add(sym)
                 logger.info("[{}] {} PASS (win={:.0f}% sharpe={:.2f})",
                             self.name, sym, res.win_rate, res.sharpe_ratio)
+            elif self._paper_untested_ok(res):
+                # PAPER with NO history to backtest (no Kite/TrueData session):
+                # the backtest could not run at all — it did not fail on
+                # evidence. Without this, a credential-less PAPER install
+                # approved 0 symbols and every agent sat idle, never placing
+                # a single autonomous order. Same philosophy as the PAPER
+                # top-up above: paper is where untested symbols earn evidence.
+                # Symbols that FAILED a real backtest stay rejected, and LIVE
+                # never takes this branch.
+                approved.append(item)
+                self._approved.add(sym)
+                self._prob_set().add(sym)      # half size until evidence (audit X12)
+                untested.append(sym)
             else:
                 logger.info("[{}] {} FAIL: {}", self.name, sym,
                             ", ".join(res.fail_reasons))
+        if untested:
+            logger.info("[{}] PAPER: {} symbol(s) approved untested (no history to "
+                        "backtest): {}", self.name, len(untested), untested)
+        _cap = int(getattr(settings, "max_symbols_per_agent", 30) or 0)
+        if untested and _cap > 0 and len(approved) > _cap:
+            approved = approved[:_cap]
+            self._approved = {a["symbol"] for a in approved}
         self.state.approved_symbols = [a["symbol"] for a in approved]
         return approved
+
+    @staticmethod
+    def _paper_untested_ok(res) -> bool:
+        """True when a backtest result is a no-data non-result (not a loss on
+        evidence) and PAPER mode allows trading untested symbols."""
+        if settings.trading_mode != "PAPER":
+            return False
+        if not getattr(settings, "paper_approve_untested", True):
+            return False
+        reasons = list(getattr(res, "fail_reasons", []) or [])
+        return bool(reasons) and all(str(r).startswith("Insufficient data") for r in reasons)
 
     def add_symbols(self, symbols: list[str]) -> int:
         """Promote intraday scanner picks into this agent's tradeable book.
@@ -670,15 +724,20 @@ class BaseAgent(ABC):
                 live_ok = set()   # no book → accept nothing in LIVE
         _cap = int(getattr(settings, "max_symbols_per_agent", 30) or 0)
         added = 0
+        from owner_universe import owner_universe
         for sym in symbols:
             if sym in self._approved:
                 continue
+            if not owner_universe.agent_symbol_allowed(self.name, sym):
+                continue                       # outside jag's owner universe
             if live_ok is not None and sym not in live_ok:
                 continue
             if _cap > 0 and len(self._approved) >= _cap:
                 logger.info("[{}] book at cap ({}) — scan promotion stopped", self.name, _cap)
                 break
             self._approved.add(sym)
+            if live_ok is None:
+                self._prob_set().add(sym)      # PAPER scan pick, no evidence yet
             if sym not in self.state.approved_symbols:
                 self.state.approved_symbols.append(sym)
             added += 1
@@ -750,9 +809,15 @@ class BaseAgent(ABC):
             # prices that no longer exist, creating phantom entries.
             import time as _time_chk
             _snap_age = _time_chk.monotonic() - getattr(snap.tick, "_monotonic_ts", 0)
-            if _snap_age > 5.0 and getattr(snap.tick, "_monotonic_ts", 0) > 0:
-                logger.debug("[{}] {} dropped stale snap ({:.1f}s old)",
-                             self.name, snap.symbol, _snap_age)
+            # After-hours PAPER ticks every paper_offhours_tick_sec (default 5s);
+            # a 5s stale cut would discard nearly every snap under load. Loosen
+            # only in that mode — LIVE / daytime PAPER keep the tight 5s bound.
+            _stale_lim = 5.0
+            if paper_after_hours_active():
+                _stale_lim = max(15.0, float(getattr(settings, "paper_offhours_tick_sec", 5.0)) * 3.0)
+            if _snap_age > _stale_lim and getattr(snap.tick, "_monotonic_ts", 0) > 0:
+                logger.debug("[{}] {} dropped stale snap ({:.1f}s old, lim={:.1f})",
+                             self.name, snap.symbol, _snap_age, _stale_lim)
                 continue
 
             self.state.ticks_processed += 1
@@ -1160,6 +1225,20 @@ class BaseAgent(ABC):
         # futures signal carries a futures_symbol + lot_size.
         _lot_size = signal.get("lot_size", 1)
         if _lot_size > 1 and signal.get("futures_symbol"):
+            # The exchange lot comes from the Kite instrument master
+            # (kite_client._FON_LOT_SIZES, refreshed on load), never an
+            # agent's static table: FuturesAgent.LOT_SIZES carried NIFTY=75
+            # after NSE's revision to 65 → quantities not a lot multiple.
+            try:
+                from kite_client import _FON_LOT_SIZES as _kl
+                _und = str(signal.get("underlying") or snap.symbol).upper()
+                if int(_kl.get(_und) or 0) > 1 and int(_kl[_und]) != int(_lot_size):
+                    logger.warning("[{}] {} lot_size {} → {} (instrument master)", self.name, _und,
+                                   _lot_size, _kl[_und])
+                    _lot_size = int(_kl[_und])
+                    signal["lot_size"] = _lot_size
+            except Exception:
+                pass
             qty = risk_manager.calculate_futures_qty(ltp, _lot_size, agent=self.name)
         elif getattr(settings, "use_atr_sizing", False) and atr_14 > 0:
             # When the signal carries the stop that will actually be placed,
@@ -1271,6 +1350,83 @@ class BaseAgent(ABC):
             except Exception:
                 pass
 
+        # Learned size factor (self_learning.entry_gate) — shrink/boost within
+        # the learner's bounds; the final clamp below still binds.
+        _lsf = float(signal.pop("_learn_size_factor", 1.0) or 0.0)
+        if qty > 0 and _lsf != 1.0:
+            qty = int(qty * max(0.0, _lsf))
+
+        qty = self._clamp_risk_notional(snap, signal, qty)
+        # Probation: an untested PAPER symbol trades at a fraction of the
+        # ALLOWED size (applied after the clamp so it always bites).
+        if qty > 0 and snap.symbol in (getattr(self, "_probation", None) or ()):
+            pf = float(getattr(settings, "paper_untested_size_factor", 0.5))
+            qty = int(qty * pf)
+        return qty
+
+    def _prob_set(self) -> set:
+        p = getattr(self, "_probation", None)
+        if p is None:
+            p = self._probation = set()
+        return p
+
+    def _learning_segment(self, signal: dict) -> str:
+        if self.name == "futures" or (int(signal.get("lot_size", 1) or 1) > 1
+                                      and signal.get("futures_symbol")):
+            return "NSE_FO"
+        return "NSE_EQ"
+
+    def _clamp_risk_notional(self, snap: MarketSnapshot, signal: dict, qty: int) -> int:
+        """FINAL clamp (audit X9/X10): whatever Kelly / conviction / consensus
+        / gate multipliers did, the order may never risk more than
+        risk_per_trade_pct of the agent's cash slice (futures: the NSE_FO
+        segment's risk_per_trade) at its stop, nor exceed the single-position
+        notional cap (cash: min(max_position_size, buying power, fraction of
+        NSE_EQ capital); futures: segments.notional_caps('NSE_FO')). Futures
+        quantities are floored to whole lots. Only ever SHRINKS qty."""
+        if qty <= 0:
+            return 0
+        ltp = float(snap.tick.ltp or 0)
+        if ltp <= 0:
+            return 0
+        lot = int(signal.get("lot_size", 1) or 1)
+        is_fut = lot > 1 and bool(signal.get("futures_symbol"))
+        # stop distance actually used (signal stop → pct → ATR → default pct)
+        sl_abs = signal.get("stop_loss")
+        slp = signal.get("stop_loss_pct")
+        atr = float(getattr(snap.indicators, "atr_14", 0) or 0)
+        if sl_abs and float(sl_abs) > 0 and abs(ltp - float(sl_abs)) > 0:
+            dist = abs(ltp - float(sl_abs))
+        elif slp and float(slp) > 0:
+            dist = ltp * float(slp) / 100
+        elif atr > 0:
+            dist = max(atr * 1.5, ltp * 0.003)
+        else:
+            dist = ltp * float(settings.stop_loss_pct) / 100
+        dist = max(dist, ltp * 0.001)
+        try:
+            from segments import _limits, notional_caps
+            if is_fut:
+                risk_budget = float(_limits("NSE_FO")["risk_per_trade"])
+                notional_cap = notional_caps("NSE_FO")[0]
+            else:
+                risk_budget = (risk_manager.max_capital_for_agent(self.name)
+                               * min(float(settings.risk_per_trade_pct),
+                                     float(getattr(settings, "risk_per_trade_hard_cap_pct", 1.0))) / 100)
+                notional_cap = min(float(settings.max_position_size),
+                                   risk_manager.buying_power_for_agent(self.name),
+                                   _limits("NSE_EQ")["capital"]
+                                   * float(getattr(settings, "nse_eq_max_position_notional_frac", 0.25)))
+        except Exception as exc:
+            logger.warning("[{}] risk/notional clamp unavailable ({}) — skipping entry", self.name, exc)
+            return 0
+        cap_q = min(int(risk_budget / dist), int(notional_cap // ltp))
+        if is_fut:
+            cap_q = (cap_q // lot) * lot
+        if qty > cap_q:
+            logger.info("[{}] {} size clamp qty {}→{} (risk ₹{:,.0f} @ stop {:.2f}, notional ≤ ₹{:,.0f})",
+                        self.name, snap.symbol, qty, cap_q, risk_budget, dist, notional_cap)
+            qty = max(0, cap_q)
         return qty
 
     def _apply_l2_fill_gate(self, snap: MarketSnapshot, action: str, qty: int) -> int:
@@ -1414,6 +1570,14 @@ class BaseAgent(ABC):
             if _final_extra >= 99:
                 raise RuntimeError(f"market_closed:{_final_bucket}")
 
+        # OWNER universe (jag): new entries only inside the allowed universe
+        from owner_universe import owner_universe
+        _ou_ok, _ou_why = owner_universe.agent_allowed(self.name)
+        if _ou_ok:
+            _ou_ok, _ou_why = owner_universe.allows(trade_sym, exchange=exch)
+        if not _ou_ok:
+            raise RuntimeError(f"owner_universe:{_ou_why}")
+
         claimed, _ = order_guard.try_claim(sym, self.name, action)
         if not claimed:
             raise RuntimeError("claim_denied")
@@ -1457,6 +1621,7 @@ class BaseAgent(ABC):
             raise RuntimeError("catalyst_negative")
         if catalyst > 0.3:
             qty = min(int(qty * 1.2), int(settings.max_position_size // ltp))
+            qty = self._clamp_risk_notional(snap, signal, qty)   # bump never beats the 1% / notional caps
             logger.debug("[{}] {} positive catalyst {:.2f} → qty bumped to {}", self.name, sym, catalyst, qty)
 
         # Re-align to the lot boundary AFTER the macro/catalyst adjustments:
@@ -1492,7 +1657,8 @@ class BaseAgent(ABC):
         except Exception:
             pass
 
-        allowed, _ = risk_manager.check_before_order(sym, qty, ltp, action, exchange=exch)
+        allowed, _ = risk_manager.check_before_order(sym, qty, ltp, action, exchange=exch,
+                                                     agent=self.name)
         if not allowed:
             order_guard.release_claim(sym, self.name, action)
             raise RuntimeError("risk_denied")
@@ -1899,6 +2065,65 @@ class BaseAgent(ABC):
                          self.name, snap.symbol, _pat)
             return
 
+        # Audit #14: an overnight CNC position in LIVE has no exchange stop
+        # after the day's SL-M expires (no GTT/OCO implemented). Refuse NEW
+        # LIVE CNC entries until a GTT stop path exists; PAPER unaffected.
+        if (settings.trading_mode == "LIVE"
+                and str(signal.get("product", self.product)).upper() == "CNC"
+                and not getattr(settings, "live_cnc_gtt_enabled", False)):
+            logger.warning("[{}] {} LIVE CNC entry refused — no GTT overnight stop path", self.name, snap.symbol)
+            return
+
+        # Self-learning gate (audit X7): built-in NSE agents obey retirement,
+        # cool-off and the learned size factor exactly like native/invented
+        # strategies. Only ever blocks or shrinks.
+        try:
+            from self_learning import learning as _learning
+            _ok, _why, _lmult = _learning.entry_gate(self.name, self._learning_segment(signal),
+                                                     _bs.get_current_regime() or "")
+            if not _ok:
+                logger.info("[{}] {} learning gate: {}", self.name, snap.symbol, _why)
+                return
+            signal["_learn_size_factor"] = float(_lmult)
+        except Exception as exc:
+            logger.debug("[{}] learning gate unavailable: {}", self.name, exc)
+
+        # Sim/live mixing guard (audit X3): in PAPER with live data wanted, a
+        # symbol still priced by the simulator must not open a position (its
+        # fill would later be marked against real Kite prices).
+        if (settings.trading_mode == "PAPER"
+                and getattr(settings, "paper_use_live_data", False)
+                and getattr(settings, "paper_block_sim_entries_when_live_wanted", True)):
+            try:
+                from tick_engine import tick_engine as _te
+                if _te.price_source(snap.symbol) == "SIMULATED":
+                    logger.debug("[{}] {} priced by simulator while live data wanted — skip",
+                                 self.name, snap.symbol)
+                    return
+            except Exception:
+                pass
+
+        # All-agents policy gate (jag 2026-10-10 "trade less, better"): session
+        # windows, liquidity whitelist, daily/symbol caps, cool-downs, loss
+        # stops, event/VIX/spread filters, regime/meta-learner allocation.
+        # Only blocks or shrinks (size multiplier ≤ 1).
+        try:
+            from agent_policy import live_pre_check, POLICY_SPECS as _PS
+            if self.name in _PS:
+                _seg = "NSE_FO" if int(signal.get("lot_size", 1) or 1) > 1 else "NSE_EQ"
+                _dec = live_pre_check(self.name, snap.symbol, _seg, float(snap.tick.bid or 0),
+                                      float(snap.tick.ask or 0))
+                if not _dec.ok:
+                    self._policy_skips = getattr(self, "_policy_skips", 0) + 1
+                    if self._policy_skips % 20 == 1:
+                        logger.info("[{}] {} policy gate: {} (skip #{})", self.name, snap.symbol, _dec.why,
+                                    self._policy_skips)
+                    return
+                if _dec.size_mult < 1.0:
+                    signal["_learn_size_factor"] = float(signal.get("_learn_size_factor", 1.0)) * _dec.size_mult
+        except Exception as exc:
+            logger.debug("[{}] policy gate unavailable: {}", self.name, exc)
+
         if not await self._pre_claim_checks(snap, action, loop, signal):
             return
 
@@ -1967,11 +2192,38 @@ class BaseAgent(ABC):
                     order_guard.release_claim(snap.symbol, self.name, action)
                     return
 
+        # Policy cost-edge gate: expected move × qty ≥ k × (round-trip costs +
+        # spread × qty), k a bounded per-agent learning param (≥ the global floor).
+        try:
+            from agent_policy import live_edge_ok, POLICY_SPECS as _PS
+            if self.name in _PS:
+                _ltp = float(snap.tick.ltp or 0)
+                _ta, _tp = signal.get("target"), signal.get("target_pct")
+                _td = (abs(_ta - _ltp) if _ta and _ta > 0 else _ltp * _tp / 100 if _tp and _tp > 0 else 0.0)
+                if _td > 0 and _ltp > 0:
+                    from risk_manager import compute_round_trip_cost
+                    _prod = ("NRML" if signal.get("lot_size", 1) > 1 else "CNC" if self.name == "swing" else "MIS")
+                    _c = compute_round_trip_cost(snap.symbol, qty, _ltp, product=_prod)
+                    _sp = max(0.0, float(snap.tick.ask or 0) - float(snap.tick.bid or 0)) if snap.tick.bid else 0.0
+                    _ok, _why = live_edge_ok(self.name, qty, _td, _c, _sp)
+                    if not _ok:
+                        self._cost_gate_skips += 1
+                        logger.info("[{}] {} policy edge skip: {}", self.name, snap.symbol, _why)
+                        order_guard.release_claim(snap.symbol, self.name, action)
+                        return
+        except Exception as exc:
+            logger.debug("[{}] policy edge check unavailable: {}", self.name, exc)
+
         _order_t0 = _time.monotonic()
         try:
             order_id, sl_order_id, qty = await self._place_orders(snap, action, signal, qty, loop)
         except RuntimeError:
             return
+        try:
+            from agent_policy import live_on_entry
+            live_on_entry(self.name, snap.symbol)
+        except Exception:
+            pass
 
         latency_ms = (_time.monotonic() - _order_t0) * 1000
         self._last_order_latency_ms = latency_ms
@@ -2033,6 +2285,18 @@ class BaseAgent(ABC):
             should, reason = self.should_exit_position(pos, ind)
             if not should:
                 continue
+            # Policy: discretionary indicator exits (Supertrend/MACD/RSI/EMA
+            # flips) only when this agent's walk-forward-chosen signal_exits=1.
+            # Mandatory exits (own SL/target/square-off/rollover) always pass;
+            # the TSL/exit_policy stop, breakeven, trail and time stop still run.
+            try:
+                from agent_policy import live_params as _lp, POLICY_SPECS as _PS
+                from exit_policy import is_mandatory_exit as _mand
+                if (self.name in _PS and not int(_lp(self.name).get("signal_exits", 1))
+                        and not _mand(str(reason))):
+                    continue
+            except Exception:
+                pass
             exit_side  = "SELL" if pos["quantity"] > 0 else "BUY"
             entry_side = "BUY" if pos["quantity"] > 0 else "SELL"
             qty  = abs(pos["quantity"])

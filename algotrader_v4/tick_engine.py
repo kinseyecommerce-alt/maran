@@ -685,6 +685,20 @@ def _detect_walls(ltp: float, bid_depth: list, ask_depth: list) -> tuple[bool, b
 
 # ── Tick Engine ───────────────────────────────────────────────────────────────
 
+def normalize_price_source(raw: Optional[str]) -> Optional[str]:
+    """Map a raw tick-ingest source to the label shown next to a price."""
+    if not raw:
+        return None
+    r = str(raw).upper()
+    if r == "PAPER" or r.startswith("SIM"):
+        return "SIMULATED"
+    if r.startswith("TRUEDATA"):
+        return "TRUEDATA"
+    if r.startswith("KITE"):
+        return "KITE"
+    return r
+
+
 class TickEngine:
     """
     In LIVE mode: KiteConnect WebSocket (true real-time sub-second ticks) with
@@ -704,6 +718,8 @@ class TickEngine:
 
         self._latest_tick: dict[str, Tick]            = {}
         self._latest_ind:  dict[str, LiveIndicators]  = {}
+        # Raw ingest source of each symbol's latest tick (PAPER / KITE_WS / ...)
+        self._latest_src:  dict[str, str]             = {}
 
         self._subscribers:  dict[str, asyncio.Queue]  = {}
         self._queue_drop_count: dict[str, int]        = {}  # dropped-tick counter per subscriber
@@ -763,6 +779,16 @@ class TickEngine:
 
     def subscribe(self, watchlist: list[dict]) -> None:
         _new_syms: list[str] = []
+        # OWNER universe (jag): don't stream paused instruments (bandwidth).
+        # Index spots always stay (regime / futures & options underlyings).
+        try:
+            from owner_universe import owner_universe
+            _idx = {"NIFTY", "BANKNIFTY", "FINNIFTY", "MIDCPNIFTY", "SENSEX", "BANKEX", "INDIAVIX", "NIFTY 50"}
+            watchlist = [i for i in (watchlist or [])
+                         if i["symbol"] in _idx or i["symbol"] in self._exchange
+                         or owner_universe.allows(i["symbol"], exchange=i.get("exchange", "NSE"))[0]]
+        except Exception:
+            pass
         for item in watchlist:
             sym  = item["symbol"]
             exch = item.get("exchange", "NSE")
@@ -892,14 +918,56 @@ class TickEngine:
     # ── Subscriber management ─────────────────────────────────────────
 
     def add_subscriber(self, name: str) -> asyncio.Queue:
-        q: asyncio.Queue = asyncio.Queue(maxsize=2000)
+        q: asyncio.Queue = asyncio.Queue(maxsize=5000)
         self._subscribers[name] = q
         return q
 
     def remove_subscriber(self, name: str) -> None:
         self._subscribers.pop(name, None)
 
+    def reset_symbol(self, symbol: str) -> None:
+        """Drop one symbol's candle history + indicator cache (keeps the
+        subscription). Used when the PAPER simulator is re-anchored to a real
+        level far from its seed, so indicators never see an artificial gap."""
+        for bufs in (self._bufs_1min, self._bufs_5min):
+            buf = bufs.get(symbol)
+            if buf is not None:
+                buf.reset()
+        for d in (self._last_tick_ltp, self._last_tick_ts, self._dedup_pending_vol,
+                  self._ind_cache_count, self._ind_cache_ltp, self._ind_cache,
+                  self._latest_tick, self._latest_ind, self._latest_src):
+            d.pop(symbol, None)
+
     # ── Shared tick processing ────────────────────────────────────────
+
+    def _fanout(self, name: str, q: asyncio.Queue, snap) -> None:
+        try:
+            q.put_nowait(snap)
+        except asyncio.QueueFull:
+            # Coalesce (audit #17): keep only the LATEST snapshot per
+            # symbol — a lagging agent catches up on current prices for
+            # every symbol instead of dropping whole symbols' last ticks.
+            try:
+                pending = []
+                while True:
+                    try:
+                        pending.append(q.get_nowait())
+                    except asyncio.QueueEmpty:
+                        break
+                pending.append(snap)
+                latest: dict = {}
+                for it in pending:
+                    k = getattr(it, "symbol", None) or id(it)
+                    latest.pop(k, None)
+                    latest[k] = it
+                for it in list(latest.values())[-q.maxsize:]:
+                    q.put_nowait(it)
+            except (asyncio.QueueEmpty, asyncio.QueueFull):
+                pass
+            cnt = self._queue_drop_count.get(name, 0) + 1
+            self._queue_drop_count[name] = cnt
+            if cnt % 100 == 1:
+                logger.warning("[TickEngine] Queue full for '{}': {} oldest ticks dropped (size={})", name, cnt, q.maxsize)
 
     async def _process_tick(self, symbol: str, tick: Tick, source: str = "KITE") -> None:
         """Candle buffer push → indicator calc → snapshot broadcast. Used by both WS and REST paths."""
@@ -1019,10 +1087,11 @@ class TickEngine:
 
         self._latest_tick[symbol] = tick
         self._latest_ind[symbol]  = ind
+        self._latest_src[symbol]  = source
 
         # Paper-mode: update P&L and check SL/SL-M triggers on each tick
         if settings.trading_mode == "PAPER":
-            kite_client.update_paper_pnl(symbol, tick.ltp)
+            kite_client.update_paper_pnl(symbol, tick.ltp, source=source)
             # Re-mark open F&O positions on this underlying (contracts have no
             # tick feed) and run trigger checks against the fresh marks:
             # contract-keyed SL-M/LIMIT paper orders otherwise NEVER fire,
@@ -1041,6 +1110,16 @@ class TickEngine:
         # alongside running agents.
         try:
             from trailing_sl_engine import trailing_sl_engine as _tsl_eng
+            # spread EWMA (spread-widening filter) + top-5 book imbalance
+            # (adverse book-flip exit) — observation only, no decisions here.
+            if tick.bid > 0 and tick.ask >= tick.bid:
+                from market_filters import spread_tracker as _spt
+                _spt.observe(symbol, tick.ask - tick.bid)
+            if tick.bid_depth and tick.ask_depth:
+                _bq = sum(float(q) for _p, q, *_r in tick.bid_depth[:5])
+                _aq = sum(float(q) for _p, q, *_r in tick.ask_depth[:5])
+                if _bq + _aq > 0:
+                    _tsl_eng.observe_book(symbol, _bq / (_bq + _aq))
             if _tsl_eng.has_active_for(symbol):
                 asyncio.create_task(
                     _tsl_eng.on_tick(symbol, tick.ltp, ind.atr_14 or 0.0))
@@ -1072,20 +1151,7 @@ class TickEngine:
                 logger.warning("[TickEngine] Tick recording error for {}: {}", symbol, exc)
 
         for name, q in list(self._subscribers.items()):
-            try:
-                q.put_nowait(snap)
-            except asyncio.QueueFull:
-                # Drop the OLDEST tick, keep the newest: a lagging agent should
-                # catch up on current prices, not replay a stale backlog.
-                try:
-                    q.get_nowait()
-                    q.put_nowait(snap)
-                except (asyncio.QueueEmpty, asyncio.QueueFull):
-                    pass
-                cnt = self._queue_drop_count.get(name, 0) + 1
-                self._queue_drop_count[name] = cnt
-                if cnt % 100 == 1:
-                    logger.warning("[TickEngine] Queue full for '{}': {} oldest ticks dropped (size={})", name, cnt, q.maxsize)
+            self._fanout(name, q, snap)
 
         if self.ws_broadcast:
             try:
@@ -1116,6 +1182,8 @@ class TickEngine:
                     "ichimoku_kijun":  round(ind.ichimoku_kijun,  2),
                     "ichimoku_cloud":  ind.ichimoku_cloud_dir,
                     "source":          source,
+                    "price_source":    normalize_price_source(source),
+                    "simulated":       normalize_price_source(source) == "SIMULATED",
                     "ts":         tick.timestamp.isoformat(),
                 })
             except Exception as exc:
@@ -1191,9 +1259,17 @@ class TickEngine:
                 tasks = [self._fetch_and_process(sym) for sym in self._symbols]
                 await asyncio.gather(*tasks, return_exceptions=True)
 
-            # Sleep the remainder of the configured tick interval
+            # Sleep the remainder of the configured tick interval. After NSE
+            # hours the PAPER simulator only keeps prices alive (the NSE
+            # agents are held by segment hours): 4 ticks/s × every symbol,
+            # each rebuilding indicator frames on the event loop, pinned the
+            # server at 100% CPU and made every API call take ~1 s.
+            interval = settings.tick_interval_ms / 1000
+            if (not self._live_data_enabled() and not is_market_open()
+                    and not settings.segment_paper_after_hours):
+                interval = max(interval, settings.paper_offhours_tick_sec)
             elapsed = time.monotonic() - t_start
-            await asyncio.sleep(max(0, settings.tick_interval_ms / 1000 - elapsed))
+            await asyncio.sleep(max(0, interval - elapsed))
 
     async def _fetch_and_process(self, symbol: str) -> None:
         """PAPER mode only — generate next GBM tick and process it."""
@@ -1236,6 +1312,11 @@ class TickEngine:
 
     # ── Query helpers ─────────────────────────────────────────────────
 
+    def price_source(self, symbol: str) -> Optional[str]:
+        """Honest label for the latest price of *symbol*: "SIMULATED" (GBM
+        paper simulator), "KITE", "TRUEDATA", or None when never ticked."""
+        return normalize_price_source(self._latest_src.get(symbol))
+
     def latest(self, symbol: str) -> tuple[Optional[Tick], Optional[LiveIndicators]]:
         return self._latest_tick.get(symbol), self._latest_ind.get(symbol)
 
@@ -1272,6 +1353,10 @@ class TickEngine:
                     "macd_hist":      round(ind.macd_hist, 4),
                     "vol_ratio":      round(ind.volume_ratio, 2),
                     "source":         "NSE" if settings.trading_mode == "LIVE" else "PAPER",
+                    # Where this price actually came from — "source" above is
+                    # the legacy mode label kept for API compatibility.
+                    "price_source":   self.price_source(sym) or "UNKNOWN",
+                    "simulated":      self.price_source(sym) == "SIMULATED",
                     "supertrend":     round(ind.supertrend, 2),
                     "supertrend_dir": ind.supertrend_dir,
                     "hma":            round(ind.hma, 2),
@@ -1342,6 +1427,51 @@ class TickEngine:
         seen = set(pri)
         rest = [s for s in self._symbols if s in self._bufs_1min and s not in seen]
         return pri + rest
+
+    def _paper_synthetic_backfill(self, syms: list[str], n_bars: int = 200) -> int:
+        """PAPER + GBM simulator only: give still-cold buffers synthetic warm-up
+        bars from paper_sim so agents can evaluate at once. Returns the number
+        of symbols seeded. A no-op whenever a real feed is active."""
+        if (settings.trading_mode != "PAPER" or self._live_data_enabled()
+                or not getattr(settings, "paper_synthetic_backfill", True)):
+            return 0
+        seeded = 0
+        for sym in syms:
+            buf1 = self._bufs_1min.get(sym)
+            buf5 = self._bufs_5min.get(sym)
+            if buf1 is None or len(buf1.candles()) > 50:
+                continue
+            try:
+                bars = paper_sim.synthetic_bars(sym, n_bars=n_bars, bar_sec=60)
+                if not bars:
+                    continue
+                _five: dict = {}
+                for ts, o, h, l, c, vol in bars:
+                    buf1.seed_candle(o, h, l, c, vol, ts)
+                    _b = ts.replace(minute=ts.minute // 5 * 5, second=0, microsecond=0)
+                    agg = _five.get(_b)
+                    if agg is None:
+                        _five[_b] = [o, h, l, c, vol, _b]
+                    else:
+                        agg[1] = max(agg[1], h); agg[2] = min(agg[2], l)
+                        agg[3] = c; agg[4] += vol
+                if buf5:
+                    # Drop the newest bucket if it is the still-forming 5-min bar.
+                    _cur5 = bars[-1][0] + timedelta(minutes=1)
+                    _cur5 = _cur5.replace(minute=_cur5.minute // 5 * 5, second=0, microsecond=0)
+                    for _b, (o, h, l, c, vol, ts) in _five.items():
+                        if _b >= _cur5:
+                            continue
+                        buf5.seed_candle(o, h, l, c, vol, ts)
+                self._ind_cache.pop(sym, None)
+                self._ind_cache_count.pop(sym, None)
+                seeded += 1
+            except Exception as exc:
+                logger.debug("TickEngine: synthetic backfill failed for {}: {}", sym, exc)
+        if seeded:
+            logger.info("TickEngine: PAPER — no real 1-min history; seeded {}/{} symbols "
+                        "with SYNTHETIC simulator warm-up bars (paper only)", seeded, len(syms))
+        return seeded
 
     async def _backfill_bufs(self, max_symbols: int = 120) -> None:
         """Seed 1-min and 5-min candle buffers with Kite historical bars.
@@ -1427,6 +1557,8 @@ class TickEngine:
                 seeded += 1
             except Exception as exc:
                 logger.debug("TickEngine: backfill failed for {}: {}", sym, exc)
+
+        seeded += self._paper_synthetic_backfill(syms)
 
         if seeded < len(syms) // 4:
             logger.warning(

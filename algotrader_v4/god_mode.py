@@ -70,7 +70,7 @@ _GOD_OVERRIDES: dict[str, Any] = {
     "swing_capital_pct":        10.0,
 
     # Risk per trade — bigger position sizing (1.5% ATR exposure vs 0.5%)
-    "risk_per_trade_pct":        1.5,
+    "risk_per_trade_pct":        1.0,   # audit: never above the 1% hard cap
 
     # Entry score — lower bar so more patterns fire
     "min_score_intraday":        3,

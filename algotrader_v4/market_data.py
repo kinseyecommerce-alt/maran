@@ -65,6 +65,20 @@ def _si(v, default: int = 0) -> int:
 
 
 # ── NSE session headers (required to avoid 401 from NSE) ────────────────────
+def _accept_encoding() -> str:
+    """Advertise brotli only when a decoder is installed. NSE answers 'br'
+    whenever it is offered; without the optional brotli package httpx hands
+    back the raw compressed bytes and every NSE JSON call (allIndices / VIX /
+    market status / option chain) failed with a UTF-8 decode error."""
+    for mod in ("brotli", "brotlicffi"):
+        try:
+            __import__(mod)
+            return "gzip, deflate, br"
+        except ImportError:
+            continue
+    return "gzip, deflate"
+
+
 NSE_HEADERS = {
     "User-Agent": (
         "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
@@ -73,7 +87,7 @@ NSE_HEADERS = {
     ),
     "Accept":          "application/json, text/plain, */*",
     "Accept-Language": "en-US,en;q=0.9",
-    "Accept-Encoding": "gzip, deflate, br",
+    "Accept-Encoding": _accept_encoding(),
     "Referer":         "https://www.nseindia.com/",
     "Connection":      "keep-alive",
 }
@@ -250,11 +264,14 @@ class NSEClient:
         for item in data.get("data", []):
             if item.get("indexSymbol", "").upper() == index_name.upper():
                 ltp = _sf(item.get("last"), 0.0)
+                # allIndices rows carry "high"/"low" (not "dayHigh"/"dayLow" —
+                # that's the quote-equity schema); reading the wrong keys made
+                # every index quote report high = low = ltp.
                 return Quote(
                     symbol=index_name, ltp=ltp,
                     open_=_sf(item.get("open"), ltp),
-                    high=_sf(item.get("dayHigh"), ltp),
-                    low=_sf(item.get("dayLow"),  ltp),
+                    high=_sf(item.get("high", item.get("dayHigh")), ltp),
+                    low=_sf(item.get("low", item.get("dayLow")),  ltp),
                     prev_close=_sf(item.get("previousClose"), ltp),
                     change=_sf(item.get("change"), 0.0),
                     change_pct=_sf(item.get("percentChange"), 0.0),
@@ -356,12 +373,14 @@ class YFinanceClient:
                 from datetime import timedelta as _td
                 from ist_clock import now_ist as _now_ist
                 from bhavcopy_loader import load_symbol as _bhav_load
-                _days_map = {"5d": 5, "15d": 15, "30d": 30, "60d": 60,
+                from bhavcopy_loader import is_index as _is_index, load_index as _idx_load
+                _days_map = {"5d": 5, "10d": 10, "15d": 15, "30d": 30, "60d": 60, "3mo": 92, "6mo": 183,
                              "90d": 90, "180d": 180, "1y": 365, "2y": 730, "5y": 1825}
                 _lookback = _days_map.get(period, 90)
                 _to   = _now_ist().date() - _td(days=1)
                 _from = _to - _td(days=_lookback)
-                _df = _bhav_load(symbol, _from, _to)
+                _df = (_idx_load(symbol, _from, _to) if _is_index(symbol)
+                       else _bhav_load(symbol, _from, _to))
                 if not _df.empty:
                     logger.debug("Bhavcopy: {} {} {} ({} bars)", symbol, interval, period, len(_df))
                     return _df
@@ -488,17 +507,44 @@ class PaperTickSimulator:
         # allow RSI/MACD/EMA crossover signals to fire in PAPER mode.
         self._regimes:           dict[str, int] = {}
         self._regime_countdown:  dict[str, int] = {}
+        # Symbols re-anchored to real levels by index_feed — no synthetic drift.
+        self._anchored:          set[str] = set()
 
     def seed(self, symbols: list[str], exchanges: dict[str, str]) -> None:
         import concurrent.futures as _cf
+
+        def _fallback(sym: str) -> float:
+            # Indices: prefer the real level from index_feed (NSE public /
+            # Kite), else a realistic default — a ₹1000 NIFTY made index
+            # futures/options sizing and strike selection meaningless.
+            try:
+                from index_feed import index_feed, DEFAULT_LEVELS
+                real = index_feed.last_price(sym)
+                if real:
+                    return float(real)
+                if sym.upper() in DEFAULT_LEVELS:
+                    return DEFAULT_LEVELS[sym.upper()]
+            except Exception:
+                pass
+            # Equities: last official close from the NSE bhavcopy (public,
+            # no credentials) so paper sizing/P&L use real rupee levels.
+            try:
+                df = self._yf.historical(sym, exchanges.get(sym, "NSE"), "1d", "10d")
+                if df is not None and not df.empty:
+                    close = float(df["close"].iloc[-1])
+                    if close > 0:
+                        return close
+            except Exception:
+                pass
+            return 1000.0
 
         def _fetch(sym: str) -> tuple[str, float]:
             exch = exchanges.get(sym, "NSE")
             try:
                 price = self._yf.current_price(sym, exch)
-                return sym, price if price > 0 else 1000.0
+                return sym, price if price > 0 else _fallback(sym)
             except Exception:
-                return sym, 1000.0
+                return sym, _fallback(sym)
 
         # Run fetches concurrently; abandon after 4s and fall back to ₹1000 default.
         # pool.shutdown(wait=False) prevents blocking on slow/blocked network calls.
@@ -513,12 +559,89 @@ class PaperTickSimulator:
                 logger.info("Paper seed {} @ ₹{:.2f}", sym, price)
             for fut in pending:
                 sym = futs[fut]
-                self._prices[sym] = 1000.0
-                self._prices[sym + "__base__"] = 1000.0  # baseline for change_pct
-                logger.info("Paper seed {} @ ₹1000.00 (network timeout)", sym)
+                px = _fallback(sym)
+                self._prices[sym] = px
+                self._prices[sym + "__base__"] = px  # baseline for change_pct
+                logger.info("Paper seed {} @ ₹{:.2f} (network timeout)", sym, px)
                 fut.cancel()
         finally:
             pool.shutdown(wait=False)
+
+    def current(self, symbol: str) -> Optional[float]:
+        """Current simulated price (None if the symbol was never seeded/ticked)."""
+        with self._lock:
+            return self._prices.get(symbol)
+
+    def anchor(self, symbol: str, ltp: float, prev_close: Optional[float] = None,
+               open_: Optional[float] = None, high: Optional[float] = None,
+               low: Optional[float] = None) -> None:
+        """Re-anchor a simulated symbol to a REAL observed level (used by
+        index_feed for NIFTY/BANKNIFTY in offline PAPER). The GBM keeps
+        generating ticks between anchors, but drift is disabled for anchored
+        symbols — the real index supplies the trend. Orders are unaffected."""
+        if not ltp or ltp <= 0:
+            return
+        with self._lock:
+            today = _now_ist().date()
+            if today != self._session_date:
+                self._session_date = today
+                self._day_open.clear(); self._day_high.clear()
+                self._day_low.clear();  self._prev_close.clear()
+                for k in [k for k in self._prices if k.endswith("__base__")]:
+                    del self._prices[k]
+            self._prices[symbol] = float(ltp)
+            self._anchored.add(symbol)
+            self._regimes[symbol] = 0
+            if prev_close and prev_close > 0:
+                self._prices[symbol + "__base__"] = float(prev_close)
+                self._prev_close[symbol] = round(float(prev_close), 2)
+            if open_ and open_ > 0:
+                self._day_open[symbol] = round(float(open_), 2)
+            if high and high > 0:
+                self._day_high[symbol] = max(round(float(high), 2), round(float(ltp), 2))
+            if low and low > 0:
+                self._day_low[symbol] = min(round(float(low), 2), round(float(ltp), 2))
+
+    def synthetic_bars(self, symbol: str, n_bars: int = 200, bar_sec: int = 60,
+                       end_ts: Optional[datetime] = None, seed: Optional[int] = None
+                       ) -> list[tuple]:
+        """PAPER warm-up history: *n_bars* completed bars generated with the
+        SAME per-tick GBM sigma and lognormal volume as next_tick(), scaled
+        so the last close equals the symbol's current simulated price.
+
+        Returns [(ts, open, high, low, close, volume), ...] oldest first, the
+        last bar ending just before the current (forming) bar. Used only to
+        warm indicator buffers when no real history exists — never for LIVE.
+        """
+        import numpy as _np
+        rng = _np.random.default_rng(seed)
+        with self._lock:
+            price = float(self._prices.get(symbol, 0.0) or 0.0)
+        if price <= 0 or n_bars <= 0:
+            return []
+        dt = max(settings.tick_interval_ms / 1000.0, 0.05)
+        tpb = max(int(round(bar_sec / dt)), 4)
+        sigma = 0.00025 * math.sqrt(dt)
+        steps = rng.normal(0.0, sigma, size=(n_bars, tpb))
+        path = _np.exp(_np.cumsum(steps.ravel())).reshape(n_bars, tpb)
+        path *= price / path[-1, -1]
+        opens = _np.concatenate(([path[0, 0]], path[:-1, -1]))
+        highs = _np.maximum(path.max(axis=1), opens)
+        lows = _np.minimum(path.min(axis=1), opens)
+        closes = path[:, -1]
+        vols = rng.lognormal(6.2, 0.6, size=(n_bars, tpb)).astype(int) + 1
+        burst = rng.random((n_bars, tpb)) < 0.05
+        vols = _np.where(burst, (vols * rng.uniform(3.0, 8.0, size=vols.shape)).astype(int), vols)
+        vol_bar = vols.sum(axis=1)
+        end = end_ts or _now_ist()
+        secs = (end.hour * 3600 + end.minute * 60 + end.second) // bar_sec * bar_sec
+        cur_bar = datetime(end.year, end.month, end.day, tzinfo=end.tzinfo) + timedelta(seconds=secs)
+        out = []
+        for i in range(n_bars):
+            ts = cur_bar - timedelta(seconds=bar_sec * (n_bars - i))
+            out.append((ts, round(float(opens[i]), 2), round(float(highs[i]), 2),
+                        round(float(lows[i]), 2), round(float(closes[i]), 2), int(vol_bar[i])))
+        return out
 
     def next_tick(self, symbol: str) -> Quote:
         with self._lock:
@@ -548,7 +671,7 @@ class PaperTickSimulator:
             else:
                 self._regime_countdown[symbol] = countdown
 
-            regime = self._regimes.get(symbol, 0)
+            regime = 0 if symbol in self._anchored else self._regimes.get(symbol, 0)
             # Drift: ±0.00006 per second in trend, 0 sideways.
             # Per-minute drift ≈ ±0.36 % → RSI/MACD reach signal thresholds
             # in ~3–5 candles without making daily moves unrealistically large.

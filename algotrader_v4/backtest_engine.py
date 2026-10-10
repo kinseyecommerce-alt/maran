@@ -226,6 +226,18 @@ STRATEGY_PARAMS = {
 ALL_STRATEGIES = list(STRATEGY_PARAMS.keys())
 
 
+def effective_params(strategy: str) -> dict:
+    """STRATEGY_PARAMS + stop/target/hold accepted by the self-improvement
+    loop (only once it is activated by the server; bounded + versioned)."""
+    p = dict(STRATEGY_PARAMS.get(strategy, STRATEGY_PARAMS["intraday"]))
+    try:
+        from self_learning import learning
+        p.update(learning.builtin_overrides(strategy))
+    except Exception:
+        pass
+    return p
+
+
 # ── Core backtest engine ─────────────────────────────────────────────────────────
 
 class BacktestEngine:
@@ -253,7 +265,7 @@ class BacktestEngine:
                 return self._cache[key]
 
         days   = lookback_days or settings.bt_lookback_days
-        params = STRATEGY_PARAMS.get(strategy, STRATEGY_PARAMS["intraday"])
+        params = effective_params(strategy)
 
         df = self._fetch_data(symbol, exchange, params["interval"], days)
         if df is None or len(df) < 60:

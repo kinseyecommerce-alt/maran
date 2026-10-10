@@ -44,9 +44,21 @@ try:
     report("PAPER mode place_order returns mock ID", oid.startswith("PAPER-"),
            f"order_id={oid}")
 
-    # 1c: Cancel order in PAPER mode
-    cancel_result = kite_client.cancel_order(oid)
-    report("PAPER mode cancel_order graceful", True, f"result={cancel_result}")
+    # 1c: Cancel in PAPER mode. A paper MARKET order fills immediately, so —
+    # like Kite — cancelling it must be refused; a resting SL-M cancels cleanly.
+    try:
+        kite_client.cancel_order(oid)
+        report("PAPER cancel of a filled MARKET order refused", False, "cancel succeeded")
+    except Exception as ex:
+        report("PAPER cancel of a filled MARKET order refused",
+               "COMPLETE" in str(ex), str(ex)[:60])
+    sl_oid = kite_client.place_order(
+        tradingsymbol="RELIANCE", exchange="NSE",
+        transaction_type="SELL", quantity=1,
+        order_type="SL-M", product="MIS", trigger_price=1.0, tag="test-SL"
+    )
+    cancel_result = kite_client.cancel_order(sl_oid)
+    report("PAPER mode cancel_order of a pending SL-M", True, f"result={cancel_result}")
 
     # 1d: margins call (PAPER returns empty or graceful error)
     try:

@@ -6,7 +6,18 @@ const ax = () => {
   const headers: Record<string, string> = {}
   if (apiKey)  headers['X-API-Key']     = apiKey
   if (token)   headers['Authorization'] = `Bearer ${token}`
-  return axios.create({ baseURL: apiBase, headers, timeout: 10000, withCredentials: true })
+  const inst = axios.create({ baseURL: apiBase, headers, timeout: 10000, withCredentials: true })
+  // A 401 on a data call means the session is gone (the server issues a new
+  // JWT secret on every restart). Surface it — go back to the login screen —
+  // instead of every panel silently showing empty data next to stale numbers.
+  inst.interceptors.response.use(undefined, (err) => {
+    const url = String(err?.config?.url || '')
+    if (err?.response?.status === 401 && !url.startsWith('/auth/')) {
+      useStore.getState().setSessionExpired(true)
+    }
+    return Promise.reject(err)
+  })
+  return inst
 }
 
 // Login uses OAuth2PasswordRequestForm (application/x-www-form-urlencoded)
@@ -54,7 +65,36 @@ export const api = {
   botTestOrder: (data: { symbol: string; side: 'BUY' | 'SELL'; qty: number }) =>
                  ax().post('/bot/test-order', data),
 
-  // ── Market ──────────────────────────────────────────────────────────────────
+  
+  // ── Strategy inventor ───────────────────────────────────────────────────────
+  inventStatus:      () => ax().get('/invent/status'),
+  inventEnabled:     (enabled: boolean) => ax().post('/invent/enabled', { enabled }),
+  inventPropose:     (segment: string, regime?: string) => ax().post('/invent/propose', { segment, regime }),
+  inventArmLiveTiny: (id: string, confirm: boolean, confirm_text: string) =>
+                       ax().post(`/invent/${id}/arm-live-tiny`, { confirm, confirm_text }),
+  inventDisarmLive:  (id: string) => ax().post(`/invent/${id}/disarm-live`),
+  inventStrategies:  (segment?: string) => ax().get('/invent/strategies', { params: { segment } }),
+  inventJournal:     (limit = 50) => ax().get('/invent/journal', { params: { limit } }),
+
+  // ── Self-improvement (PAPER only) ───────────────────────────────────────────
+  learningReport:    () => ax().get('/learning/report'),
+  learningJournal:   (limit = 100) => ax().get('/learning/journal', { params: { limit } }),
+  scalperStatus:     () => ax().get('/scalper/status'),
+  scalperBacktest:   () => ax().get('/scalper/backtest'),
+  scalperBacktestRun: (body: { days?: string[]; latency_ms?: number; use_windows?: boolean; use_whitelist?: boolean } = {}) =>
+                       ax().post('/scalper/backtest', { ...body, wait: false }),
+  scalperWhitelist:  () => ax().get('/scalper/whitelist'),
+  researchPipeline:  () => ax().get('/research/pipeline'),
+  researchRun:       (body: { days?: number; agents?: string[] } = {}) => ax().post('/research/run', { ...body, wait: false }),
+  agentsPolicy:      () => ax().get('/agents/policy'),
+  scalperTicks:      () => ax().get('/scalper/ticks'),
+
+  // ── Options engine (PAPER only) ─────────────────────────────────────────────
+  optionsStatus:     () => ax().get('/options/status'),
+  optionsScalper:    () => ax().get('/options/scalper'),
+  optionsDemo:       () => ax().get('/options/demo'),
+
+// ── Market ──────────────────────────────────────────────────────────────────
   marketLive:       () => ax().get('/market/live'),
   marketLiveSymbol: (symbol: string) => ax().get(`/market/live/${symbol}`),
   marketStatus:     () => ax().get('/market/status'),
@@ -76,6 +116,7 @@ export const api = {
   // ── Portfolio ───────────────────────────────────────────────────────────────
   positions: () => ax().get('/portfolio/positions'),
   orders:    () => ax().get('/portfolio/orders'),
+  book:      () => ax().get('/portfolio/book'),
 
   // ── Risk ────────────────────────────────────────────────────────────────────
   riskStatus:      () => ax().get('/risk/status'),
@@ -156,8 +197,13 @@ export const api = {
 
   // ── Settings — Trading Mode ─────────────────────────────────────────────────
   getTradingMode: () => ax().get('/settings/trading-mode'),
-  setTradingMode: (mode: 'PAPER' | 'LIVE', confirm: boolean = false) =>
-                    ax().post('/settings/trading-mode', { mode, confirm }),
+  // LIVE requires confirm=true AND the typed phrase "SEND" (enforced server-side).
+  setTradingMode: (mode: 'PAPER' | 'LIVE', confirm: boolean = false, confirmText: string = '') =>
+                    ax().post('/settings/trading-mode', { mode, confirm, confirm_text: confirmText }),
+
+  // ── Market — live index levels ──────────────────────────────────────────────
+  marketOverview: (limit: number = 20) => ax().get('/market/overview', { params: { limit } }),
+  indices: (refresh: boolean = false) => ax().get('/market/indices', { params: refresh ? { refresh: true } : {} }),
 
   // ── Settings — Capital Allocation ───────────────────────────────────────────
   getCapitalAllocation: () => ax().get('/settings/capital-allocation'),
@@ -179,8 +225,15 @@ export const api = {
 
   // ── Settings — Agent Enables ────────────────────────────────────────────────
   getAgentEnables: () => ax().get('/settings/agent-enables'),
-  setAgentEnables: (data: { intraday?: boolean; fno?: boolean; swing?: boolean; scalping?: boolean }) =>
+  // keys are server strategy names (intraday, options, …, mcx_trend) — the old
+  // type used 'fno', which the server silently ignored
+  setAgentEnables: (data: Record<string, boolean>) =>
                      ax().post('/settings/agent-enables', data),
+  segments:        () => ax().get('/segments'),
+  segmentKill:     (code: string, flatten = true) => ax().post(`/segments/${code}/kill`, { reason: 'manual', flatten }),
+  segmentRearm:    (code: string) => ax().post(`/segments/${code}/rearm`),
+  segmentMode:     (code: string, mode: 'PAPER' | 'LIVE', confirm = false, confirm_text = '') =>
+                     ax().post(`/segments/${code}/mode`, { mode, confirm, confirm_text }),
 
   // ── Settings — Intelligence ─────────────────────────────────────────────────
   getIntelligence: () => ax().get('/settings/intelligence'),

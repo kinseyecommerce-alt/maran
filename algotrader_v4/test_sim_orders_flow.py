@@ -19,6 +19,16 @@ Covers (13 tests):
  13. validate_credentials() has all required keys
 """
 from __future__ import annotations
+# Test isolation: keep test trades/P&L out of the app's real SQLite DB
+# (logs/algotrader.db). Without this, running the suite on a deployed box
+# wrote synthetic P&L that the server restored as "today's P&L" on its next
+# boot — enough to trip the daily-loss halt. Override with DATABASE_PATH.
+import os as _os_iso, tempfile as _tf_iso
+_iso_dir = _tf_iso.mkdtemp(prefix="algotrader-test-")
+_os_iso.environ.setdefault("DATABASE_PATH", _os_iso.path.join(_iso_dir, "algotrader.db"))
+_os_iso.environ.setdefault("ADAPTIVE_DATA_DIR", _os_iso.path.join(_iso_dir, "adaptive"))
+_os_iso.environ.setdefault("SEBI_AUDIT_DIR", _iso_dir)
+_os_iso.environ.setdefault("SEGMENT_PAPER_AFTER_HOURS", "true")   # segment hours are tested explicitly in test_segments.py
 
 import os
 import re
@@ -67,6 +77,10 @@ def summary() -> int:
 section("SIMULATION ORDERS FLOW")
 
 from config import settings
+# these suites pin pre-existing behaviour; the all-agents policy gate and smart
+# exits are covered by test_all_agents_policy.py
+settings.use_agent_policy_gate = False
+settings.use_smart_exits = False
 settings.trading_mode = "PAPER"  # ensure paper mode for all tests
 
 from kite_client import kite_client
