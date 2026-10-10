@@ -699,6 +699,47 @@ def normalize_price_source(raw: Optional[str]) -> Optional[str]:
     return r
 
 
+
+class CoalescingQueue(asyncio.Queue):
+    """Subscriber mailbox holding the LATEST snapshot per symbol.
+
+    A plain FIFO let a lagging agent fall seconds behind (1500 ticks/s into a
+    consumer that needs ~1 ms/snap: p50 decision latency 835 ms, 2.4k stale
+    snaps queued — bench/tick_queue_bench.py). Here a newer snapshot
+    for a symbol already waiting REPLACES it in place (keeps its turn), so the
+    queue never holds more than one snap per symbol and every dequeue is the
+    freshest price. Still bounded by maxsize (distinct symbols); the fan-out's
+    overflow path handles the pathological >maxsize-symbols case. Items with no
+    .symbol are never merged."""
+
+    def _init(self, maxsize):
+        import collections
+        self._queue = collections.OrderedDict()
+        self.coalesced = 0
+
+    @staticmethod
+    def _key(item):
+        k = getattr(item, "symbol", None)
+        return k if k is not None else ("_id", id(item))
+
+    def put_nowait(self, item):
+        k = self._key(item)
+        if k in self._queue:
+            self._queue[k] = item          # replace in place, keep queue position
+            self.coalesced += 1
+            return
+        super().put_nowait(item)
+
+    def _put(self, item):
+        self._queue[self._key(item)] = item
+
+    def _get(self):
+        return self._queue.popitem(last=False)[1]
+
+    def _qsize(self):
+        return len(self._queue)
+
+
 class TickEngine:
     """
     In LIVE mode: KiteConnect WebSocket (true real-time sub-second ticks) with
@@ -918,7 +959,7 @@ class TickEngine:
     # ── Subscriber management ─────────────────────────────────────────
 
     def add_subscriber(self, name: str) -> asyncio.Queue:
-        q: asyncio.Queue = asyncio.Queue(maxsize=5000)
+        q: asyncio.Queue = CoalescingQueue(maxsize=5000)   # latest snap per symbol
         self._subscribers[name] = q
         return q
 
@@ -967,7 +1008,8 @@ class TickEngine:
             cnt = self._queue_drop_count.get(name, 0) + 1
             self._queue_drop_count[name] = cnt
             if cnt % 100 == 1:
-                logger.warning("[TickEngine] Queue full for '{}': {} oldest ticks dropped (size={})", name, cnt, q.maxsize)
+                logger.warning("[TickEngine] Queue full for '{}' ({} overflows; >{} distinct symbols pending) — coalesced to latest per symbol",
+                               name, cnt, q.maxsize)
 
     async def _process_tick(self, symbol: str, tick: Tick, source: str = "KITE") -> None:
         """Candle buffer push → indicator calc → snapshot broadcast. Used by both WS and REST paths."""

@@ -827,6 +827,54 @@ run("_sync_nse: FIFO per (strategy, symbol); exit_ts = SL-M fill time; lots set"
 run("tick fan-out coalesces to the latest snapshot per symbol", t_tick_queue_coalesces)
 
 
+def t_subscriber_mailbox_latest_per_symbol():
+    from tick_engine import TickEngine, CoalescingQueue
+    te = TickEngine.__new__(TickEngine)
+    te._subscribers, te._queue_drop_count = {}, {}
+    q = te.add_subscriber("agent_x")
+    assert isinstance(q, CoalescingQueue) and isinstance(q, asyncio.Queue)
+
+    class S:
+        def __init__(self, sym, n):
+            self.symbol, self.n = sym, n
+    for it in (S("NIFTY24000CE", 1), S("NIFTY24000PE", 1), S("NIFTY24000CE", 2), S("NIFTY24000CE", 3)):
+        te._fanout("agent_x", q, it)
+    assert q.qsize() == 2 and q.coalesced == 2, (q.qsize(), q.coalesced)
+    got = [(i.symbol, i.n) for i in (q.get_nowait(), q.get_nowait())]
+    # latest price, original turn kept (CE was queued first)
+    assert got == [("NIFTY24000CE", 3), ("NIFTY24000PE", 1)], got
+    assert te._queue_drop_count == {}        # coalescing is not a drop
+    # bounded: distinct symbols beyond maxsize still go through the overflow path
+    q2 = CoalescingQueue(maxsize=2)
+    te._fanout("y", q2, S("A", 1)); te._fanout("y", q2, S("B", 1)); te._fanout("y", q2, S("C", 1))
+    assert q2.qsize() == 2 and [q2.get_nowait().symbol for _ in range(2)] == ["B", "C"]
+    # items with no symbol are never merged
+    q3 = CoalescingQueue(maxsize=10)
+    q3.put_nowait(object()); q3.put_nowait(object())
+    assert q3.qsize() == 2
+
+
+run("subscriber mailbox keeps the latest snapshot per symbol (bounded, no stale backlog)",
+    t_subscriber_mailbox_latest_per_symbol)
+
+
+def t_imports_keep_server_log_sinks():
+    """main.py on_startup imports historical_learner; its module-level
+    logger.remove() used to wipe the server's file sink for the whole run."""
+    import importlib, sys as _s
+    from loguru import logger as _lg
+    hid = _lg.add(lambda m: None, level="INFO")
+    before = set(_lg._core.handlers)
+    for mod in ("historical_learner", "download_historical", "generate_sim_data"):
+        _s.modules.pop(mod, None)
+        importlib.import_module(mod)
+        assert set(_lg._core.handlers) == before, f"importing {mod} changed loguru sinks"
+    _lg.remove(hid)
+
+
+run("importing CLI modules never removes the server's log sinks", t_imports_keep_server_log_sinks)
+
+
 # ════════════════════════════════════════════════════════════════════════════
 section("9. medium/low: pairs off, boot LIVE guard, retired badge, LIVE CNC refused, UNKNOWN fallback, risk hard cap")
 
