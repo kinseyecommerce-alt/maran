@@ -88,7 +88,11 @@ def _spec(daily_default: int, agent: str, time_stop: tuple, cooldown: tuple = (1
 
 POLICY_SPECS = {
     "intraday": _spec(5, "intraday", (90, 30, 180)),
-    "scalping": _spec(6, "scalping", (20, 5, 45), cooldown=(20, 5, 60), edge=(3.0, 2.5, 4.0)),
+    # signal_exits=0 for scalping: chosen on TRAIN days in all 4 walk-forward
+    # folds (exit_study 2026-10-10, 20 real days); OOS difference is tiny
+    # (₹-28.2k vs ₹-28.3k) — a tie-break toward fewer discretionary rules, not
+    # an edge. intraday / futures keep 1 (train picked 1 in 4/4 and 3/4 folds).
+    "scalping": _spec(6, "scalping", (20, 5, 45), cooldown=(20, 5, 60), edge=(3.0, 2.5, 4.0), signal_exits=0),
     "swing": _spec(2, "swing", (0, 0, 0), cooldown=(60, 30, 240)),
     "momentum": _spec(4, "momentum", (60, 20, 120)),
     "mean_reversion": _spec(4, "mean_reversion", (45, 15, 90)),
