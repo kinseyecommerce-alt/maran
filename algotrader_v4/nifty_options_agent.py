@@ -293,8 +293,21 @@ class NiftyOptionsIntradayAgent:
         state = st if master_running or st != "running" else "stopped"
         if state == "stopped":
             why = "engine stopped"
-        return {"segment": "NSE_FO", "state": "running" if state == "running" else "paused",
-                "reason": why if state != "running" else "", "on": state == "running",
+        elif state == "running":
+            try:
+                from segments import segment_manager
+                if not segment_manager.is_open("NSE_FO"):
+                    state, why = "closed", f"NSE F&O closed · {why}"
+            except Exception:
+                pass
+            try:
+                from kite_client import kite_client
+                if kite_client._kite is None:
+                    why += " · waiting for Kite login"
+            except Exception:
+                pass
+        return {"segment": "NSE_FO", "state": state if state in ("running", "closed") else "paused",
+                "reason": why, "on": state == "running",
                 "running": state == "running", "enabled": True, "native": False, "hidden": False,
                 "trades_today": self.trades_today, "pnl_today": 0.0, "pnl_realised": 0.0,
                 "pnl_unrealised": 0.0, "open_positions": len(self.positions),
