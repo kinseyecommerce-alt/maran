@@ -3912,8 +3912,11 @@ class FuturesAgent(BaseAgent):
     # settings.futures_stock_symbols (lot sizes resolved from kite_client's
     # _FON_LOT_SIZES table) — indices alone proved to be the binding
     # constraint: two efficient charts leave no selection edge.
-    LOT_SIZES: dict = {"NIFTY": 75, "BANKNIFTY": 15, "MIDCPNIFTY": 75,
-                       "FINNIFTY": 40, "SENSEX": 10, "BANKEX": 15}
+    # Fallback only — the Kite instrument master (kite_client._FON_LOT_SIZES,
+    # refreshed on load) wins in _tradeable_lots(). NIFTY 75 here was stale
+    # (NSE revised it to 65) → futures quantities that were not lot multiples.
+    LOT_SIZES: dict = {"NIFTY": 65, "BANKNIFTY": 30, "MIDCPNIFTY": 120,
+                       "FINNIFTY": 65, "SENSEX": 20, "BANKEX": 30}
     MIN_SCORE = 4
     COOL_S    = 180
 
@@ -3922,7 +3925,7 @@ class FuturesAgent(BaseAgent):
         stock set can be pruned at runtime on live evidence; a stock missing
         from the kite lot table is silently skipped (never guess a lot size)."""
         from kite_client import _FON_LOT_SIZES
-        lots = dict(self.LOT_SIZES)
+        lots = {k: int(_FON_LOT_SIZES.get(k) or v) for k, v in self.LOT_SIZES.items()}
         raw = getattr(settings, "futures_stock_symbols", "") or ""
         for s in raw.split(","):
             s = s.strip().upper()
@@ -4656,8 +4659,7 @@ class FuturesAgent(BaseAgent):
     def _is_rollover_period(self) -> bool:
         """True if today is within 3 calendar days BEFORE NSE monthly futures expiry
         (last Tuesday since the 2025 SEBI expiry standardization)."""
-        from datetime import date
-        today = date.today()
+        today = now_ist().date()          # IST (replay-pinned); date.today() is host-local (UTC)
         for month_offset in (0, 1):
             y, m = today.year, today.month + month_offset
             if m > 12:
@@ -4729,8 +4731,7 @@ class FuturesAgent(BaseAgent):
 
     def _futures_symbol(self, underlying: str, rollover: bool = False) -> str:
         """Build NFO futures symbol. During rollover window, trade the far (next) month."""
-        from datetime import date
-        today = date.today()
+        today = now_ist().date()          # IST (replay-pinned); date.today() is host-local (UTC)
 
         near_exp = _nse_monthly_expiry(today.year, today.month)
         if today > near_exp or rollover:

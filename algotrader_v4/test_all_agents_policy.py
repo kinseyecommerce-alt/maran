@@ -561,6 +561,90 @@ def t_tsl_flag_off():
 check("live TSL: breakeven at +1R and time stop via SL path", t_tsl_breakeven_and_timestop)
 check("live TSL: smart exits off → legacy behaviour", t_tsl_flag_off)
 
+# ── 2026-10-10 backtest-audit fixes ─────────────────────────────────────────
+def t_mandatory_exit_classifier():
+    from exit_policy import is_mandatory_exit as m
+    for r in ("SL hit ₹101.20", "Target ₹110", "Futures SL -1.00% ₹2", "Futures TGT +2.00% ₹3", "Scalp SL ₹9",
+              "Scalp target ₹9", "Auto square-off 14:55", "Rollover period — exit before 14:00 cutoff",
+              "Swing TGT ₹1", "Pairs auto-square 2:30 PM", "Expiry-day 13:30 forced exit (theta acceleration)",
+              "Late-day theta flatten (>15:00)", "SCALP_TIME_STOP 7m"):
+        assert m(r), r
+    for r in ("Supertrend flip (UP) exit", "MACD + trend both bullish — cut loss at -0.1%", "RSI overbought 77 exit",
+              "Trend reversal exit", "EMA9 breakdown exit", "Futures +1.3% momentum fading — exit before give-back",
+              "VWAP breakdown exit", "ADX fade 18 — momentum gone", "RSI+momentum neutral — exit before theta decay"):
+        assert not m(r), r
+
+
+def _brain_sim(signal_exits):
+    day = "2026-10-07"
+    bars = _bars(day, seed=3)
+    mk = ub.Market("TEST", "NSE_EQ", {day: bars}, [])
+    sig = [(40, "BUY", {"stop_loss": 0, "target": 0, "pattern": "T"})]
+    signals = {"TEST": {day: {"sig": {"intraday": sig}, "inds": [object()] * len(bars), "tf": {"intraday": 1}}}}
+    p = ap.defaults("intraday")
+    p["edge_cost_mult"] = ap.POLICY_SPECS["intraday"]["edge_cost_mult"][1]
+    p["signal_exits"] = signal_exits
+    sim = ub.Sim("intraday", {"TEST": mk}, signals, p, days=[day], use_regime=False, use_brain_exits=True)
+
+    class _B:
+        def should_exit_position(self, pos, ind):
+            return True, "Supertrend flip (DOWN) exit"
+    sim._brain = lambda: _B()
+    sim.run()
+    return sim
+
+
+def t_signal_exits_policy():
+    assert ap.defaults("intraday")["signal_exits"] == 1 and ap.defaults("scalping")["signal_exits"] == 0
+    on, off = _brain_sim(1).trades, _brain_sim(0).trades
+    assert on and on[0].reason.startswith("brain:Supertrend"), [t.reason for t in on]
+    assert off and not any(t.reason.startswith("brain:") for t in off), [t.reason for t in off]
+    assert ap.clamp_params("futures", {"signal_exits": 7})["signal_exits"] == 1      # bounded 0..1
+
+
+def t_pct_stop_target_resolution():
+    day = "2026-10-07"
+    bars = _bars(day, seed=5)
+    mk = ub.Market("TEST", "NSE_EQ", {day: bars}, [])
+    sig = [(40, "BUY", {"stop_loss_pct": 1.0, "target_pct": 2.0, "pattern": "T"})]
+    signals = {"TEST": {day: {"sig": {"intraday": sig}, "inds": [], "tf": {"intraday": 1}}}}
+    p = ap.defaults("intraday")
+    p["edge_cost_mult"] = ap.POLICY_SPECS["intraday"]["edge_cost_mult"][1]
+    sim = ub.Sim("intraday", {"TEST": mk}, signals, p, days=[day], use_regime=False, use_brain_exits=False)
+    sim.run()
+    assert sim.trades, sim.skips
+    t = sim.trades[0]
+    dist = t.r_risk / t.qty
+    ltp = bars[40][4]
+    assert abs(dist - 0.01 * ltp) < 0.002 * ltp, (dist, ltp)      # 1% pct stop, not the 0.3%/1.5×ATR fallback
+
+
+def t_signal_cache_key_ignores_exit_methods():
+    a = "class A:\n    def evaluate_tick(self):\n        return 1\n\n    def should_exit_position(self, p, i):\n        return 1\n"
+    b = a.replace("    def should_exit_position(self, p, i):\n        return 1", "    def should_exit_position(self, p, i):\n        return 2")
+    c = a.replace("return 1\n\n", "return 3\n\n", 1)
+    assert ub._signal_source(a) == ub._signal_source(b)
+    assert ub._signal_source(a) != ub._signal_source(c)
+
+
+def t_futures_lot_from_master():
+    import kite_client
+    from agents.strategy_agents import FuturesAgent
+    assert FuturesAgent()._tradeable_lots().get("NIFTY") == 65
+    old = kite_client._FON_LOT_SIZES.get("NIFTY")
+    try:
+        kite_client._FON_LOT_SIZES["NIFTY"] = 50
+        assert FuturesAgent()._tradeable_lots().get("NIFTY") == 50     # master wins over the class table
+    finally:
+        kite_client._FON_LOT_SIZES["NIFTY"] = old
+
+
+check("audit: mandatory vs discretionary brain-exit classifier", t_mandatory_exit_classifier)
+check("audit: signal_exits policy (backtest gate + bounds + defaults)", t_signal_exits_policy)
+check("audit: backtester resolves stop_loss_pct/target_pct like live", t_pct_stop_target_resolution)
+check("audit: signal-cache key ignores exit-only methods", t_signal_cache_key_ignores_exit_methods)
+check("audit: futures lot size from instrument master (NIFTY 65)", t_futures_lot_from_master)
+
 n_ok = sum(1 for _n, ok, _e in RESULTS if ok)
 print(f"\n  RESULTS: {len(RESULTS)} tests -- {n_ok} passed  {len(RESULTS) - n_ok} failed")
 for n, ok, e in RESULTS:
