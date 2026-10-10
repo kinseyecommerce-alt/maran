@@ -64,6 +64,7 @@ OPT_DAILY_CAP = 40             # option scalps per day (all symbols)
 OPT_SYMBOL_DAILY_CAP = 12      # per contract per day
 OPT_MAX_CONCURRENT = 2
 OPT_MAX_LOTS = 10
+OPT_PROBATION_TRADES = 30      # < this many journalled option scalps -> 0.5x size probation
 OPT_MAX_NOTIONAL_PCT = 10.0    # premium outlay ≤ 10% of NSE_FO capital per scalp
 OPT_RECENTER_SEC = 60
 OPT_MIN_ATM_VOLUME = 200_000   # FINNIFTY/SENSEX are included only above this
@@ -577,6 +578,13 @@ class FastScalper:
         if not ok:
             self.opt_stats["gate_skips"] += 1
             return
+        # Backtest gate is never loosened: until the option scalper has a real
+        # track record (>= OPT_PROBATION_TRADES journalled live-price scalps)
+        # it runs in PAPER probation at half size and half the lot cap.
+        probation = self._opt_probation(learning)
+        max_lots = OPT_MAX_LOTS // 2 if probation else OPT_MAX_LOTS
+        if probation:
+            factor *= 0.5
         lim = _limits("NSE_FO")
         risk = Guard.clamp_risk("NSE_FO", lim["capital"] * RISK_PCT / 100.0, factor)
         px = t.get("bid") or 0.0                       # join the bid (limit at touch)
@@ -584,7 +592,7 @@ class FastScalper:
             return
         sl_d = float(p["sl_ticks"]) * inst.tick
         lots = int(risk // (sl_d * inst.lot)) if sl_d > 0 else 0
-        lots = min(lots, OPT_MAX_LOTS, int(lim["capital"] * OPT_MAX_NOTIONAL_PCT / 100.0 // (px * inst.lot)))
+        lots = min(lots, max_lots, int(lim["capital"] * OPT_MAX_NOTIONAL_PCT / 100.0 // (px * inst.lot)))
         if lots < 1:
             self.opt_stats["cap_skips"] += 1
             return
@@ -678,6 +686,16 @@ class FastScalper:
         except Exception:
             pass
 
+    def _opt_probation(self, learning=None) -> bool:
+        try:
+            if learning is None:
+                from self_learning import learning
+            n = learning.store.q("SELECT COUNT(*) AS n FROM journal WHERE strategy=? AND price_source='KITE'",
+                                 (OPT_FAMILY,))[0]["n"]
+            return int(n) < OPT_PROBATION_TRADES
+        except Exception:
+            return True
+
     def opt_status(self) -> dict:
         from self_learning import learning
         open_ = [{"symbol": self.insts[k].symbol, **{x: v for x, v in s.pos.items() if x != "features"}}
@@ -689,7 +707,10 @@ class FastScalper:
                 "caps": {"daily": OPT_DAILY_CAP, "per_symbol_daily": OPT_SYMBOL_DAILY_CAP,
                          "max_concurrent": OPT_MAX_CONCURRENT, "max_lots": OPT_MAX_LOTS,
                          "per_min_per_symbol": MAX_PER_MIN, "risk_pct": RISK_PCT,
-                         "max_notional_pct": OPT_MAX_NOTIONAL_PCT}}
+                         "max_notional_pct": OPT_MAX_NOTIONAL_PCT,
+                         "probation": self._opt_probation(),
+                         "probation_rule": f"< {OPT_PROBATION_TRADES} live-price scalps -> 0.5x size, "
+                                           f"max {OPT_MAX_LOTS // 2} lots"}}
 
     # ── helpers ─────────────────────────────────────────────────────────────
     def _regime(self) -> str:

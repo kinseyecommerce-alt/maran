@@ -25,6 +25,61 @@ UNDERLYINGS: dict[str, dict] = {
 }
 
 EXPIRY_CLOSE = (15, 30)
+PUBLIC_DUMP = "https://api.kite.trade/instruments/{ex}"
+_INST_CACHE_DIR = "logs/instruments"
+
+
+def _parse_dump_row(r: dict) -> dict:
+    out = dict(r)
+    for k in ("instrument_token", "exchange_token", "lot_size"):
+        try:
+            out[k] = int(r.get(k) or 0)
+        except ValueError:
+            out[k] = 0
+    for k in ("strike", "tick_size", "last_price"):
+        try:
+            out[k] = float(r.get(k) or 0)
+        except ValueError:
+            out[k] = 0.0
+    e = (r.get("expiry") or "").strip()
+    out["expiry"] = date.fromisoformat(e) if e else None
+    return out
+
+
+def public_instruments(exchange: str, fetch: bool = True) -> list:
+    """Kite's public instrument dump (no login needed) - same master Kite's
+    instruments() returns. Used when there is no Kite session (weekends /
+    expired token) so lot sizes, expiries and strikes still come from Kite,
+    never a hard-coded table. Cached per day under logs/instruments/."""
+    import csv
+    import io
+    import os
+    os.makedirs(_INST_CACHE_DIR, exist_ok=True)
+    f = os.path.join(_INST_CACHE_DIR, f"{exchange}_{date.today():%Y%m%d}.csv")
+    text = None
+    if os.path.exists(f):
+        text = open(f, encoding="utf-8").read()
+    elif fetch:
+        try:
+            import requests
+            resp = requests.get(PUBLIC_DUMP.format(ex=exchange), timeout=30)
+            if resp.status_code == 200 and resp.text.startswith("instrument_token"):
+                text = resp.text
+                with open(f, "w", encoding="utf-8") as fh:
+                    fh.write(text)
+        except Exception:
+            text = None
+    if not text:
+        # newest older dump (better than nothing; lot sizes rarely change intra-week)
+        try:
+            olds = sorted(x for x in os.listdir(_INST_CACHE_DIR) if x.startswith(f"{exchange}_"))
+            if olds:
+                text = open(os.path.join(_INST_CACHE_DIR, olds[-1]), encoding="utf-8").read()
+        except Exception:
+            text = None
+    if not text:
+        return []
+    return [_parse_dump_row(r) for r in csv.DictReader(io.StringIO(text))]
 
 
 def _d(x) -> date:
@@ -101,8 +156,13 @@ class OptionChain:
     def _instruments(self, exchange: str) -> list:
         if self._instruments_fn:
             return self._instruments_fn(exchange) or []
-        from kite_client import kite_client
-        return kite_client.get_instruments(exchange) or []
+        rows = []
+        try:
+            from kite_client import kite_client
+            rows = kite_client.get_instruments(exchange) or []
+        except Exception:
+            rows = []
+        return rows or public_instruments(exchange)
 
     def load(self, und: str, force: bool = False) -> dict:
         und = und.upper()

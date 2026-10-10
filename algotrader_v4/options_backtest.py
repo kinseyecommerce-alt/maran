@@ -49,14 +49,22 @@ def _kite_hist(token: int, frm: datetime, to: datetime) -> list:
         return [dict(r, date=datetime.fromisoformat(r["date"])) for r in json.loads(f.read_text())]
     from kite_client import kite_client
     rows = kite_client.historical_data(token, frm, to, "minute", oi=True) or []
+    if not rows:
+        return []              # never cache an empty answer (no session / holiday)
     f.write_text(json.dumps([{**r, "date": r["date"].isoformat()} for r in rows], default=str))
     return rows
 
 
 def index_token(und: str) -> Optional[int]:
     from kite_client import kite_client
+    from option_chain import public_instruments
     ex, name = INDEX_SYMBOL[und]
-    for r in kite_client.get_instruments(ex) or []:
+    rows = []
+    try:
+        rows = kite_client.get_instruments(ex) or []
+    except Exception:
+        rows = []
+    for r in rows or public_instruments(ex):
         if r.get("tradingsymbol") == name:
             return int(r["instrument_token"])
     return None
@@ -323,28 +331,37 @@ def nightly(sl, n_days: int = 10, unds: tuple = ("NIFTY", "BANKNIFTY")) -> dict:
 
 
 # ── demo: last session dry-run ───────────────────────────────────────────────
-def synth_option_ticks(bars: list, snap: Optional[dict], lot: int, tick: float = 0.05) -> list:
-    """Minute bars → 4 synthetic ticks/minute (O, H/L, L/H, C; path order by bar
-    direction). Book: real closing-spread and sizes; imbalance proxy = previous
-    minute's direction (no look-ahead). Row format = recorded-tick CSV."""
+def synth_option_ticks(bars: list, snap: Optional[dict], lot: int, tick: float = 0.05,
+                       per_leg: int = 4) -> list:
+    """Minute bars -> 12 synthetic ticks/minute (every 5 s): the O->L->H->C (or
+    O->H->L->C) path is walked in `per_leg` steps per leg, rounded to the tick.
+    Book: real closing spread and sizes when a snapshot exists (else 1 tick /
+    10 lots); book-imbalance proxy = previous minute's direction (no
+    look-ahead); traded volume spread evenly across the minute. Row format =
+    recorded-tick CSV (ts, ltp, bid, ask, bid_qty5, ask_qty5, bid0, ask0, cum_vol)."""
     rows = []
     prev_dir = 0
     cum = 0
     spread = max(tick, (snap["ask"] - snap["bid"]) if snap and snap.get("bid") else tick)
-    b0 = int((snap or {}).get("bids", [(0, lot * 10)])[0][1]) if snap and snap.get("bids") else lot * 10
-    a0 = int((snap or {}).get("asks", [(0, lot * 10)])[0][1]) if snap and snap.get("asks") else lot * 10
+    b0 = int(snap["bids"][0][1]) if snap and snap.get("bids") else lot * 10
+    a0 = int(snap["asks"][0][1]) if snap and snap.get("asks") else lot * 10
     base = max(b0, a0, lot * 5)
+    n_ticks = 3 * per_leg
     for (d, o, h, l, c, v, _oi) in bars:
         path = [o, l, h, c] if c >= o else [o, h, l, c]
+        pts = []
+        for x, y in zip(path, path[1:]):
+            for i in range(1, per_leg + 1):
+                pts.append(x + (y - x) * i / per_leg)
         ts0 = d.replace(tzinfo=IST).timestamp()
-        for i, px in enumerate(path):
-            cum += max(1, v // 4)
+        imb = 0.45 * prev_dir
+        for i, px in enumerate(pts):
+            px = max(tick, round(px / tick) * tick)
+            cum += max(1, int(v) // n_ticks)
             bid = max(tick, round((px - spread / 2) / tick) * tick)
             ask = bid + spread
-            imb = 0.45 * prev_dir
-            bq5 = int(base * 5 * (1 + imb))
-            aq5 = int(base * 5 * (1 - imb))
-            rows.append((ts0 + i * 15, px, round(bid, 2), round(ask, 2), bq5, aq5, int(base * (1 + imb)),
+            rows.append((ts0 + i * 60.0 / n_ticks, round(px, 2), round(bid, 2), round(ask, 2),
+                         int(base * 5 * (1 + imb)), int(base * 5 * (1 - imb)), int(base * (1 + imb)),
                          int(base * (1 - imb)), cum))
         prev_dir = 1 if c > o else (-1 if c < o else 0)
     return rows
@@ -403,7 +420,7 @@ def demo(day: Optional[date] = None, und: str = "NIFTY", ic_time: str = "10:30")
            "data_notes": [
                "index + option 1-minute bars (with OI) from Kite historical data",
                "quotes = minute close ± half the REAL closing spread of each strike; depth = real closing sizes",
-               "option scalp ticks are synthesised from 1-minute bars (4 ticks/min); book imbalance proxy = "
+               "option scalp ticks are synthesised from 1-minute bars (12 ticks/min along the O-H-L-C path); book imbalance proxy = "
                "previous minute's direction (no look-ahead) — mechanics demo, not evidence of edge"],
            "engine": res, "scalps": scalps, "scalp_contracts": per, "params_scalp": p,
            "elapsed_sec": round(_time.time() - t0, 1)}
