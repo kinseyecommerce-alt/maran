@@ -351,6 +351,20 @@ def retune_all(sl, segments: Optional[list[str]] = None, history: Optional[Histo
         out["retunes"].extend(retune_scalpers(sl, segments))
     except Exception as exc:
         out["errors"].append(f"scalpers: {exc}")
+    if not segments or "NSE_FO" in segments:
+        # options: real-data backtest gate per family (never loosened) + retune
+        try:
+            from options_backtest import nightly
+            o = nightly(sl)
+            out["retunes"].extend(o.get("retunes", []))
+            out["gate"]["options"] = o.get("gate", {})
+            out["errors"].extend(o.get("errors", []))
+        except Exception as exc:
+            out["errors"].append(f"options backtest: {exc}")
+        try:
+            out["retunes"].append(retune_option_scalper(sl))
+        except Exception as exc:
+            out["errors"].append(f"option scalper: {exc}")
     out["history_notes"] = history.notes
     return out
 
@@ -375,7 +389,8 @@ def load_ticks(segment: str, days: int = 5, root: Optional[Path] = None) -> dict
     return out
 
 
-def replay_scalper(rows: list[tuple], inst, params: dict, risk: float = 2_500.0) -> list[float]:
+def replay_scalper(rows: list[tuple], inst, params: dict, risk: float = 2_500.0,
+                   trades: Optional[list] = None, max_lots: Optional[int] = None) -> list[float]:
     """Net ₹ per scalp on recorded ticks — same ScalpLogic as live."""
     from fast_scalper import ScalpLogic, SState
     from cost_model import total, kind_for
@@ -403,15 +418,22 @@ def replay_scalper(rows: list[tuple], inst, params: dict, risk: float = 2_500.0)
                 p = st.pos
                 q = p["units"]
                 gross = (ex[1] - p["entry"]) * q * p["side"]
-                out.append(gross - total(kind, q, p["entry"], ex[1], "BUY" if p["side"] > 0 else "SELL",
-                                         inst.exchange))
+                cst = total(kind, q, p["entry"], ex[1], "BUY" if p["side"] > 0 else "SELL", inst.exchange)
+                out.append(gross - cst)
+                if trades is not None:
+                    trades.append({"symbol": inst.symbol, "entry_ts": p["opened"], "exit_ts": ts,
+                                   "entry": p["entry"], "exit": ex[1], "qty": q, "reason": ex[0],
+                                   "hold_sec": round(ts - p["opened"], 1), "gross": round(gross, 2),
+                                   "costs": round(cst, 2), "net": round(gross - cst, 2),
+                                   "features": p.get("features")})
                 st.pos = None
             continue
         if st.order:
             if ScalpLogic.queue_fill(st.order, t, vd):
                 o = st.order
                 st.pos = {"side": o["side"], "entry": o["px"], "sl": o["px"] - o["side"] * o["sl_d"],
-                          "tp": o["px"] + o["side"] * o["tp_d"], "opened": ts, "units": o["units"]}
+                          "tp": o["px"] + o["side"] * o["tp_d"], "opened": ts, "units": o["units"],
+                          "features": o.get("features")}
                 st.order = None
                 last_entry = ts
             elif ts - st.order["ts"] > 6.0:
@@ -423,8 +445,12 @@ def replay_scalper(rows: list[tuple], inst, params: dict, risk: float = 2_500.0)
         side = ScalpLogic.signal(f, params)
         if not side:
             continue
+        if getattr(inst, "kind", "") == "opt" and side < 0:
+            continue                      # option scalps are long premium only
         sl_d = float(params["sl_ticks"]) * inst.tick
         lots = int(risk // (sl_d * inst.mult * inst.lot)) if sl_d > 0 else 0
+        if max_lots is not None:
+            lots = min(lots, max_lots)
         if lots < 1:
             continue
         units = lots * inst.mult * inst.lot
@@ -433,8 +459,58 @@ def replay_scalper(rows: list[tuple], inst, params: dict, risk: float = 2_500.0)
         if not okc:
             continue
         st.order = {"side": side, "px": px, "queue": int(b0 if side > 0 else a0), "ts": ts,
-                    "sl_d": sl_d, "tp_d": float(params["tp_ticks"]) * inst.tick, "units": units}
+                    "sl_d": sl_d, "tp_d": float(params["tp_ticks"]) * inst.tick, "units": units, "features": f}
     return out
+
+
+def _opt_inst(key: str):
+    """Inst for a recorded option-scalp file (SYM@NSE_FO_OPT) from the instrument master."""
+    from fast_scalper import Inst
+    sym = key.split("@", 1)[0]
+    r = None
+    try:
+        from option_chain import option_chain
+        r = option_chain.by_symbol(sym)
+        if r is None:
+            for und in ("NIFTY", "BANKNIFTY", "FINNIFTY", "SENSEX"):
+                if sym.startswith(und):
+                    option_chain.load(und)
+            r = option_chain.by_symbol(sym)
+    except Exception:
+        r = None
+    if not r:
+        return None
+    return Inst(key, "NSE_FO", sym, int(r.get("instrument_token") or 0), float(r.get("tick_size") or 0.05), 1.0,
+                int(r.get("lot_size") or 1), "opt_paper", r.get("exchange") or "NFO", "opt", r.get("name", ""),
+                r.get("instrument_type", ""), str(r.get("expiry"))[:10], float(r.get("strike") or 0))
+
+
+def retune_option_scalper(sl, days: int = 5) -> dict:
+    """Nightly retune of the option scalper on recorded Kite WS option ticks."""
+    from self_learning import SCALP_OPT
+    name = "scalp:NSE_FO_OPT"
+    ticks = load_ticks("NSE_FO_OPT", days=days)
+    n_ticks = sum(len(v) for v in ticks.values())
+    insts = {k: _opt_inst(k) for k in ticks}
+    insts = {k: v for k, v in insts.items() if v is not None}
+    if not ticks or not insts:
+        return {"strategy": name, "accepted": False, "reason": f"no recorded option ticks yet ({n_ticks})",
+                "data": "recorded ticks"}
+    risk = 2_500.0
+
+    def ev(params: dict, part: str) -> list:
+        res: list = []
+        for key, rows in ticks.items():
+            inst = insts.get(key)
+            if not inst or len(rows) < 200:
+                continue
+            k = int(len(rows) * TRAIN_FRAC)
+            res.extend(replay_scalper(rows[:k] if part == "train" else rows[k:], inst, params, risk=risk))
+        return res
+    cur = sl.params(name)
+    r = sl.retune(name, ev, sl.grid(SCALP_OPT, cur, ("imb_entry", "sl_ticks", "tp_ticks")))
+    r["data"] = f"recorded Kite WS option ticks ({n_ticks:,} ticks, {len(ticks)} contracts)"
+    return r
 
 
 def retune_scalpers(sl, segments: Optional[list[str]] = None) -> list[dict]:

@@ -2687,6 +2687,93 @@ def scalper_enable(req: ScalperEnableRequest):
     return {"ok": True, "enabled": False}
 
 
+# ── Options engine (PAPER): defined-risk baskets, option buying, option scalps ──
+@app.get("/options/status", tags=["Options"])
+def options_status():
+    """Options engine: open/today baskets (legs, credit, max loss/profit,
+    breakevens, Greeks, margin), option buys, per-family backtest gate /
+    probation, guards, recent decisions."""
+    from options_engine import options_engine
+    st = options_engine.status()
+    try:
+        from self_learning import learning
+        st["readiness"] = learning.readiness_families("NSE_FO")
+    except Exception as exc:
+        st["readiness"] = {"error": str(exc)}
+    return st
+
+
+@app.get("/options/scalper", tags=["Options"])
+def options_scalper():
+    """Option scalper on Kite WS depth: ATM window, stats, open/recent scalps."""
+    from fast_scalper import fast_scalper
+    return fast_scalper.opt_status()
+
+
+@app.get("/options/demo", tags=["Options"])
+def options_demo_get():
+    """Last DRY-RUN demo (iron condor basket + option scalp on last session's Kite data)."""
+    from self_learning import learning
+    return learning.store.kv_get("options_demo", {}) or {"ok": False, "why": "no demo run yet"}
+
+
+class OptionsDemoRequest(BaseModel):
+    day: Optional[str] = None
+    underlying: str = "NIFTY"
+    ic_time: str = "10:30"
+
+
+_options_demo_running = {"on": False}
+
+
+@app.post("/options/demo", tags=["Options"])
+async def options_demo_run(req: OptionsDemoRequest):
+    """DRY-RUN replay of a past session through the live engine code. Isolated:
+    never touches the paper ledger or the learning journal."""
+    if settings.trading_mode != "PAPER":
+        raise HTTPException(409, "PAPER only")
+    if _options_demo_running["on"]:
+        raise HTTPException(409, "demo already running")
+    import options_backtest
+    from datetime import date as _d
+    day = _d.fromisoformat(req.day) if req.day else None
+    _options_demo_running["on"] = True
+    try:
+        return await asyncio.to_thread(options_backtest.demo, day, req.underlying.upper(), req.ic_time)
+    finally:
+        _options_demo_running["on"] = False
+
+
+@app.post("/options/backtest", tags=["Options"])
+async def options_backtest_run():
+    """Real-Kite-history replay of the option families -> backtest gate
+    (pass / insufficient=PAPER probation 0.5x / fail=blocked). Same as nightly."""
+    if settings.trading_mode != "PAPER":
+        raise HTTPException(409, "PAPER only")
+    import options_backtest
+    from self_learning import learning
+    return await asyncio.to_thread(options_backtest.nightly, learning)
+
+
+class OptionsEnableRequest(BaseModel):
+    enabled: bool
+
+
+@app.post("/options/enable", tags=["Options"])
+def options_enable(req: OptionsEnableRequest):
+    """Pause/resume NEW option entries (open baskets keep being managed)."""
+    from options_engine import options_engine
+    options_engine.enabled = bool(req.enabled)
+    return {"ok": True, "enabled": options_engine.enabled}
+
+
+@app.post("/options/close_all", tags=["Options"])
+def options_close_all():
+    """Close every open basket (shorts bought back first) and option buy."""
+    from options_engine import options_engine
+    return {"ok": True, "closed": options_engine.close_all("manual close_all")}
+
+
 @app.post("/invent/{strategy_id}/approve", tags=["Invent"])
 def invent_approve(strategy_id: str):
     """Approve a pending proposal for PAPER trading (only needed when master
@@ -4263,6 +4350,24 @@ async def on_startup():
             r = await asyncio.to_thread(fast_scalper.start)
             logger.info("[scalper] {}", r)
         asyncio.create_task(_start_scalper(), name="fast_scalper_start").add_done_callback(_log_task_exc)
+
+        # Options engine loop (PAPER only): manage baskets/buys every ~3 s,
+        # decide entries every 5 min, reconcile with the paper ledger.
+        async def _options_loop() -> None:
+            await asyncio.sleep(30)
+            from options_engine import options_engine
+            while True:
+                await asyncio.sleep(3)
+                if settings.trading_mode != "PAPER":
+                    continue
+                try:
+                    await asyncio.to_thread(options_engine.reconcile_ledger)
+                    if kite_client._kite is not None:
+                        await asyncio.to_thread(options_engine.step)
+                except Exception as _oe_exc:
+                    options_engine.last_error = f"loop: {_oe_exc}"
+                    logger.debug("[options] loop: {}", _oe_exc)
+        asyncio.create_task(_options_loop(), name="options_engine_loop").add_done_callback(_log_task_exc)
     except Exception as _le_exc:
         logger.warning("[startup] self-learning not started: {}", _le_exc)
 

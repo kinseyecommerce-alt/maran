@@ -314,7 +314,15 @@ class SegmentManager:
             return []
         from kite_client import kite_client
         out = []
-        for p in list(getattr(kite_client, "_paper_positions", [])):
+        if code == "NSE_FO":
+            try:
+                from options_engine import options_engine
+                out.extend(options_engine.close_all(reason="kill_switch"))
+            except Exception as exc:
+                logger.error("[segments] options engine close_all failed: {}", exc)
+        # shorts (BUY to close) first — see option_guard: hedges are sold last
+        for p in sorted(list(getattr(kite_client, "_paper_positions", [])),
+                        key=lambda r: int(r.get("quantity", 0) or 0)):
             if p.get("exchange") != spec.kite_exchange or not p.get("quantity"):
                 continue
             q = int(p["quantity"])
@@ -380,9 +388,41 @@ class SegmentManager:
             trades += inv["entries"]
         except Exception:
             pass
+        if code == "NSE_FO":
+            # options engine (baskets / option buys) and the fast scalper's
+            # paper-ledger scalps (futures + option scalps) realise P&L outside
+            # the agents — it counts toward the NSE_FO daily loss cap.
+            try:
+                from options_engine import options_engine
+                realised += options_engine.realised_today()
+                trades += options_engine.entries_today()
+            except Exception:
+                pass
+        if code in ("NSE_FO", "NSE_EQ"):
+            try:
+                from fast_scalper import fast_scalper
+                d = fast_scalper.stats.get("by_segment", {}).get(code) or {}
+                realised += float(d.get("pnl") or 0.0)
+                trades += int(d.get("entries") or 0)
+            except Exception:
+                pass
         unreal = sum(p["pnl"] for p in self.positions(code))
         return {"realised": round(realised, 2), "unrealised": round(unreal, 2),
                 "total": round(realised + unreal, 2), "trades_today": trades}
+
+    def position_count(self, code: str) -> int:
+        """Open positions, with each multi-leg option basket counted once."""
+        rows = self.positions(code)
+        if code != "NSE_FO":
+            return len(rows)
+        try:
+            from options_engine import options_engine
+            legs = options_engine.leg_symbols()
+            n_b = sum(1 for b in options_engine.baskets.values() if b.status == "OPEN")
+            n_buy = sum(1 for p in options_engine.buys.values() if p.status == "OPEN")
+        except Exception:
+            return len(rows)
+        return sum(1 for p in rows if p.get("symbol") not in legs) + n_b + n_buy
 
     def capital_used(self, code: str) -> float:
         spec = SEGMENTS[code]
@@ -393,7 +433,19 @@ class SegmentManager:
         # would otherwise exceed the whole ₹10L segment allocation).
         fut_m = float(getattr(settings, "futures_margin_pct", 20.0)) / 100.0
         used = 0.0
+        legs: set = set()
+        if code == "NSE_FO":
+            # option baskets block their (hedged) margin estimate, not the
+            # premium notional of each leg
+            try:
+                from options_engine import options_engine
+                legs = options_engine.leg_symbols()
+                used += options_engine.margin_used()
+            except Exception:
+                legs = set()
         for p in self.positions(code):
+            if p.get("symbol") in legs:
+                continue
             v = abs(p["qty"]) * (p["ltp"] or p["avg"])
             if code == "NSE_FO" and str(p.get("symbol") or "").endswith("FUT"):
                 v *= fut_m
@@ -444,7 +496,7 @@ class SegmentManager:
             self._roll_day()
             if self._entries_today.get(code, 0) >= lim["max_trades_per_day"]:
                 return False, f"{spec.label} max trades/day ({lim['max_trades_per_day']}) reached"
-        if len(self.positions(code)) >= lim["max_positions"]:
+        if self.position_count(code) >= lim["max_positions"]:
             return False, f"{spec.label} max open positions ({lim['max_positions']}) reached"
         if notional > 0 and self.capital_used(code) + notional > lim["capital"]:
             return False, (f"{spec.label} capital ₹{lim['capital']:,.0f} exhausted "

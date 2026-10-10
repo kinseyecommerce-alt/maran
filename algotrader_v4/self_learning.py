@@ -88,6 +88,18 @@ SCALP = {"imb_entry": (0.30, 0.15, 0.60), "mom_ticks": (3, 2, 8), "sl_ticks": (6
          "tp_ticks": (9, 4, 25), "time_stop_sec": (90, 20, 300), "edge_cost_mult": (1.5, 1.2, 3.0),
          "size_factor": (1.0, SIZE_MIN, SIZE_MAX)}
 
+# options (jag 2026-10-09): defined-risk selling, cost/θ-aware buying, option scalping
+OPT_SELL = {"short_delta": (0.20, 0.10, 0.35), "wing_steps": (2, 1, 6), "target_frac": (0.5, 0.3, 0.8),
+            "stop_mult": (2.0, 1.0, 3.0), "size_factor": (1.0, SIZE_MIN, SIZE_MAX)}
+OPT_BUY = {"sl_pct": (25.0, 15.0, 40.0), "tgt_pct": (40.0, 20.0, 80.0), "max_hold_min": (45, 15, 90),
+           "edge_cost_mult": (2.0, 1.5, 4.0), "size_factor": (1.0, SIZE_MIN, SIZE_MAX)}
+SCALP_OPT = {"imb_entry": (0.30, 0.15, 0.60), "mom_ticks": (4, 2, 10), "sl_ticks": (12, 4, 40),
+             "tp_ticks": (20, 6, 60), "time_stop_sec": (60, 15, 240), "edge_cost_mult": (1.5, 1.2, 3.0),
+             "max_spread_ticks": (4, 1, 10), "size_factor": (1.0, SIZE_MIN, SIZE_MAX)}
+OPTION_FAMILIES = {"opt_sell:IRON_CONDOR": OPT_SELL, "opt_sell:IRON_FLY": OPT_SELL,
+                   "opt_sell:BULL_PUT": OPT_SELL, "opt_sell:BEAR_CALL": OPT_SELL,
+                   "opt_buy:TREND": OPT_BUY, "opt_buy:AGENT": OPT_BUY, "scalp:NSE_FO_OPT": SCALP_OPT}
+
 FORBIDDEN_KEYS = {"trading_mode", "mode", "live", "risk_per_trade", "segment_risk_per_trade_pct",
                   "max_daily_loss", "segment_daily_loss_pct", "kill_switch", "confirm_text",
                   "live_armed", "max_positions", "capital"}
@@ -260,6 +272,8 @@ def strategy_registry() -> dict[str, dict]:
     for seg in ("NSE_EQ", "NSE_FO", "BSE_EQ", "MCX", "CDS"):
         reg[f"invent:{seg}"] = {"segment": seg, "kind": "invent", "spec": INVENT}
         reg[f"scalp:{seg}"] = {"segment": seg, "kind": "scalp", "spec": SCALP}
+    for n, sp in OPTION_FAMILIES.items():
+        reg[n] = {"segment": "NSE_FO", "kind": "options", "spec": sp}
     for n in BUILTIN_NSE:
         seg = "NSE_FO" if n == "futures" else "NSE_EQ"
         try:
@@ -317,6 +331,8 @@ class SelfLearning:
             return r["spec"]
         if name.startswith("invent:"):
             return INVENT
+        if name in OPTION_FAMILIES:
+            return OPTION_FAMILIES[name]
         if name.startswith("scalp:"):
             return SCALP
         return {}
@@ -398,14 +414,20 @@ class SelfLearning:
         qty = float(r.get("qty_units") or 0)
         kind = r.pop("cost_kind", None) or kind_for(r["segment"], r.pop("product", ""), r.get("symbol", ""))
         exch = r.pop("exchange", "")
-        cd = costs(kind, qty, float(r["entry"]), float(r["exit"]), side, exch)
+        override = r.pop("costs_override", None)
+        if override is not None:
+            # multi-leg option baskets / scalps: exact per-order charges summed
+            # by the engine (cost_model.order_costs per executed leg)
+            cd = {"kind": "OPT_LEGS", **override, "total": round(float(override.get("total") or 0.0), 2)}
+        else:
+            cd = costs(kind, qty, float(r["entry"]), float(r["exit"]), side, exch)
         gross = r.get("gross")
         if gross is None:
             sgn = 1 if side == "BUY" else -1
             gross = (float(r["exit"]) - float(r["entry"])) * qty * sgn
         r["gross"] = round(float(gross), 2)
         r["costs"] = cd["total"]
-        r["cost_detail"] = json.dumps(cd)
+        r["cost_detail"] = json.dumps(cd, default=str)
         r["net"] = round(r["gross"] - cd["total"], 2)
         r["exit_ts"] = r.get("exit_ts") or _iso()
         r["day"] = str(r["exit_ts"])[:10]
@@ -538,6 +560,9 @@ class SelfLearning:
         except Exception:
             return 0
         orders = [o for o in orders if str(o.get("status", "COMPLETE")).upper() == "COMPLETE"]
+        # option baskets / option buys / option scalps journal themselves (one
+        # row per basket with exact per-leg costs) — don't FIFO-pair their legs
+        orders = [o for o in orders if not str(o.get("tag") or "").startswith(("OBASK", "OBUY", "OSCALP"))]
         orders.sort(key=lambda o: float(o.get("placed_ts") or 0) or str(o.get("placed_at") or o.get("order_timestamp") or ""))
         opens: dict[str, list] = {}
         n = 0
@@ -988,6 +1013,47 @@ class SelfLearning:
                                   if ready else "Keep paper trading.")}
         return out
 
+    def readiness_families(self, segment: str = "NSE_FO") -> dict:
+        """Readiness per options strategy family inside a segment (display only).
+        Same criteria as the segment scorecard, computed on the family's
+        live-price paper journal; capital = the segment's capital."""
+        from segments import _limits
+        cap = float(_limits(segment)["capital"])
+        out = {}
+        for fam in OPTION_FAMILIES:
+            rows = self.store.q("SELECT day, net FROM journal WHERE segment=? AND strategy=? AND price_source='KITE' "
+                                "ORDER BY exit_ts", (segment, fam))
+            nets = [float(r["net"]) for r in rows]
+            daily: dict[str, float] = {}
+            for r in rows:
+                daily[r["day"]] = daily.get(r["day"], 0.0) + float(r["net"])
+            dv = [daily[d] for d in sorted(daily)]
+            sh = 0.0
+            if len(dv) > 1 and statistics.stdev(dv) > 0:
+                sh = statistics.mean(dv) / statistics.stdev(dv) * math.sqrt(252)
+            cum = peak = dd = 0.0
+            for v in dv:
+                cum += v
+                peak = max(peak, cum)
+                dd = max(dd, peak - cum)
+            s = stats(nets)
+            crit = [
+                {"key": "days", "label": "≥20 trading days of live-price paper", "value": len(dv), "pass": len(dv) >= 20},
+                {"key": "net", "label": "after-cost P&L > 0", "value": round(sum(nets), 2), "pass": sum(nets) > 0},
+                {"key": "pf", "label": "profit factor ≥ 1.3", "value": s["profit_factor"],
+                 "pass": s["profit_factor"] >= 1.3 and s["n"] > 0},
+                {"key": "sharpe", "label": "Sharpe ≥ 1 (daily, annualised)", "value": round(sh, 2), "pass": sh >= 1.0},
+                {"key": "dd", "label": "max drawdown ≤ 5% of capital", "value": round(dd, 2),
+                 "pass": dd <= cap * 0.05 and s["n"] > 0},
+                {"key": "trades", "label": "≥ 50 trades", "value": s["n"], "pass": s["n"] >= 50},
+            ]
+            ready = all(c["pass"] for c in crit)
+            out[fam] = {"family": fam, "segment": segment, "ready": ready,
+                        "status": "READY" if ready else "NOT READY", "criteria": crit,
+                        "passed": sum(c["pass"] for c in crit), "of": len(crit), "stats": s,
+                        "note": "Display only — never arms LIVE."}
+        return out
+
     # ── report ──────────────────────────────────────────────────────────────
     def report(self) -> dict:
         reg = strategy_registry()
@@ -1039,6 +1105,8 @@ class SelfLearning:
             "events": self.store.q("SELECT * FROM events ORDER BY ts DESC LIMIT 80"),
             "lessons": self.store.kv_get("lessons", {}) or {},
             "readiness": self.readiness(), "latency": self.latency_summary(),
+            "readiness_options": self.readiness_families("NSE_FO"),
+            "options_gate": self.store.kv_get("options_gate", {}) or {},
         }
 
     def journal(self, limit: int = 100, segment: Optional[str] = None) -> list[dict]:

@@ -905,8 +905,10 @@ class OptionsAgent(BaseAgent):
     product = "NRML"
     min_candles_1min = 10
 
-    LOT_SIZES: dict = {"NIFTY": 75, "BANKNIFTY": 15, "MIDCPNIFTY": 75,
-                       "FINNIFTY": 40, "SENSEX": 10}
+    # Fallback only — live lot sizes come from the Kite instrument master
+    # (kite_client.refresh_lot_sizes). NIFTY is 65 / BANKNIFTY 30 since 2025.
+    LOT_SIZES: dict = {"NIFTY": 65, "BANKNIFTY": 30, "MIDCPNIFTY": 140,
+                       "FINNIFTY": 65, "SENSEX": 20}
     MIN_SCORE    = 4        # minimum score to fire at 0.25× size
     MAX_IV_BUY   = 72       # hard block above this IV rank
     COOL_S       = 120      # 2-min per symbol per direction
@@ -1111,6 +1113,44 @@ class OptionsAgent(BaseAgent):
             return "HOLD", None
         cools[best_opt] = now
 
+        # ── Options-engine hand-off (2026-10-09 options upgrade) ──────────────
+        # This agent no longer places single option legs itself:
+        #   • SELL ideas (STRANGLE_SELL / IRON_CONDOR / CE_SELL / PE_SELL) are
+        #     executed ONLY as defined-risk baskets (iron condor / credit
+        #     spread) by options_engine — a naked short leg is impossible.
+        #   • BUY ideas on index underlyings go to the engine's cost/theta-
+        #     aware buyer (liquid weekly/monthly strikes, Greek sizing, real
+        #     bid/ask fills, lot size from the Kite instrument master).
+        #   • Stock-option ideas are dropped: spreads/OI fail the liquidity
+        #     gate and the old path sized option qty off the stock price.
+        self._update_state(sym, ind, ltp)
+        try:
+            from options_engine import options_engine, ENGINE_UNDERLYINGS
+        except Exception:
+            return "HOLD", None
+        if sym.upper() not in ENGINE_UNDERLYINGS:
+            return "HOLD", None
+        _opt = best_opt.replace("_SELL", "") if is_sell_signal else best_opt
+        import threading as _thr
+        _thr.Thread(target=self._engine_handoff,
+                    args=(options_engine, sym.upper(), _opt, best_pattern, best_score, is_sell_signal),
+                    daemon=True, name=f"opt-handoff-{sym}").start()
+        return "HOLD", None
+
+    def _engine_handoff(self, engine, und, opt_type, pattern, score, is_sell) -> None:
+        try:
+            res = engine.submit_agent_signal(und, opt_type, pattern, score=score, is_sell=is_sell)
+            logger.info("[{}] options hand-off {} {} {} -> {}", self.name, und, pattern,
+                        "SELL(basket)" if is_sell else "BUY", (res or {}).get("result") or res)
+        except Exception as exc:
+            logger.warning("[{}] options hand-off failed: {}", self.name, exc)
+
+    def _legacy_single_leg_signal(self, sym, snap, ind, ltp, now, best_opt, best_score,
+                                  best_pattern, is_sell_signal, iv_rank, atm_iv):
+        """Pre-2026-10-09 single-leg path, kept for reference/replays only —
+        evaluate_tick no longer reaches it. Lot size comes from the Kite
+        instrument master (_FON_LOT_SIZES refreshed on load), never the stale
+        hardcoded table."""
         # SL / TGT from IV regime
         sl_pct, tgt_pct = self._iv_sl_tgt(iv_rank)
 
@@ -1144,7 +1184,7 @@ class OptionsAgent(BaseAgent):
         strike  = self._target_delta_strike(ltp, actual_opt, atm_iv, target_delta, dte)
         opt_sym = self._nfo_symbol(sym, strike, actual_opt)
         from kite_client import _FON_LOT_SIZES as _kite_lots
-        lot_sz = self.LOT_SIZES.get(sym) or _kite_lots.get(sym)
+        lot_sz = _kite_lots.get(sym) or self.LOT_SIZES.get(sym)
         if not lot_sz:
             # No real listed F&O contract for this underlying (most Nifty 500
             # names have none) — defaulting to lot=1 would fabricate an order

@@ -54,6 +54,19 @@ DAILY_CAP = {"NSE_EQ": 80, "NSE_FO": 40, "BSE_EQ": 30, "MCX": 60, "CDS": 30}
 MAX_CONCURRENT = 3
 ENTRY_TTL_SEC = 6.0
 TICK_DIR = Path("logs/ticks")
+# option scalping (jag 2026-10-09): ATM±N window on NIFTY/BANKNIFTY (+FINNIFTY/
+# SENSEX when liquid), long premium only, per-symbol caps, ledger-booked PAPER.
+OPT_SEG_KEY = "NSE_FO_OPT"
+OPT_FAMILY = "scalp:NSE_FO_OPT"
+OPT_UNDERLYINGS = ("NIFTY", "BANKNIFTY", "FINNIFTY", "SENSEX")
+OPT_WINDOW = 3                 # strikes each side of ATM (CE + PE)
+OPT_DAILY_CAP = 40             # option scalps per day (all symbols)
+OPT_SYMBOL_DAILY_CAP = 12      # per contract per day
+OPT_MAX_CONCURRENT = 2
+OPT_MAX_LOTS = 10
+OPT_MAX_NOTIONAL_PCT = 10.0    # premium outlay ≤ 10% of NSE_FO capital per scalp
+OPT_RECENTER_SEC = 60
+OPT_MIN_ATM_VOLUME = 200_000   # FINNIFTY/SENSEX are included only above this
 
 
 @dataclass
@@ -65,8 +78,13 @@ class Inst:
     tick: float              # tick size
     mult: float              # P&L per 1.0 price per lot (lot units)
     lot: int = 1             # NSE F&O lot size (qty multiple)
-    route: str = "native"    # native | kite_paper
+    route: str = "native"    # native | kite_paper | opt_paper
     exchange: str = "NSE"
+    kind: str = ""           # "opt" for index option scalps (long premium only)
+    underlying: str = ""
+    opt_type: str = ""
+    expiry: str = ""
+    strike: float = 0.0
 
 
 @dataclass
@@ -105,7 +123,7 @@ class ScalpLogic:
 
     @staticmethod
     def signal(f: dict, p: dict) -> int:
-        if f["spread_ticks"] > 2.0:
+        if f["spread_ticks"] > float(p.get("max_spread_ticks", 2.0)):
             return 0
         m, imb = int(p["mom_ticks"]), float(p["imb_entry"])
         if f["imbalance"] >= imb and f["tick_mom"] >= m and f["bar_mom_ticks"] >= 0:
@@ -168,6 +186,12 @@ class FastScalper:
         self._lock = threading.RLock()
         self.stats = {"signals": 0, "cost_skips": 0, "cap_skips": 0, "gate_skips": 0, "orders": 0,
                       "fills": 0, "cancels": 0, "exits": 0, "pnl": 0.0, "by_segment": {}}
+        self.opt_stats = {"instruments": 0, "underlyings": [], "window": {}, "signals": 0, "short_skips": 0,
+                          "cost_skips": 0, "cap_skips": 0, "gate_skips": 0, "orders": 0, "fills": 0,
+                          "cancels": 0, "exits": 0, "wins": 0, "losses": 0, "gross": 0.0, "costs": 0.0,
+                          "net": 0.0, "entries_today": 0, "per_symbol": {}, "recent": [], "last_recenter": None}
+        self._opt_last_recenter = 0.0
+        self._opt_atm: dict = {}
         self.day = None
         self._rec: dict[str, list] = {}
         self._rec_flush = time.time()
@@ -233,6 +257,10 @@ class FastScalper:
         except Exception as exc:
             self.last_error = f"universe: {exc}"
             n = 0
+        try:
+            n += self.build_option_window()
+        except Exception as exc:
+            self.last_error = f"option window: {exc}"
         kite_ws_feed.on_tick(self.on_tick)
         kite_ws_feed.subscribe(list(self.insts))
         kite_ws_feed.start()
@@ -266,6 +294,15 @@ class FastScalper:
         else:
             st.bars[-1] = t["ltp"]
         self._record(inst, t)
+        if inst.kind == "opt":
+            try:
+                from option_chain import option_chain
+                option_chain.ws_update(inst.symbol, t)
+            except Exception:
+                pass
+        if now - self._opt_last_recenter > OPT_RECENTER_SEC and self.enabled:
+            self._opt_last_recenter = now
+            threading.Thread(target=self._safe_recenter, daemon=True).start()
         if inst.route == "native":
             try:
                 from segment_engine import native_engine
@@ -290,6 +327,8 @@ class FastScalper:
                     pass
 
     def _decide(self, inst: Inst, st: SState, t: dict, now: float, vd: int) -> None:
+        if inst.kind == "opt":
+            return self._decide_opt(inst, st, t, now, vd)
         p = self.params(inst.segment)
         with self._lock:
             if st.pos:
@@ -423,6 +462,235 @@ class FastScalper:
         self.stats["pnl"] = round(self.stats["pnl"] + pnl, 2)
         self.stats["exits"] += 1
 
+    # ── option scalping ─────────────────────────────────────────────────────
+    def build_option_window(self, chain=None, now=None) -> int:
+        """Subscribe ATM±OPT_WINDOW CE/PE of each liquid index for the nearest
+        listed expiry (instrument master) — re-centred as the index moves."""
+        from option_chain import option_chain as _oc
+        from ist_clock import now_ist
+        chain = chain or _oc
+        now = now or now_ist()
+        added: dict[int, Inst] = {}
+        window = {}
+        unds = []
+        for und in OPT_UNDERLYINGS:
+            try:
+                expiry = chain.pick_expiry(und, now.date(), min_dte=0)
+                spot = chain.spot(und)
+                if not expiry or spot <= 0:
+                    continue
+                rows = chain.window(und, expiry, spot, OPT_WINDOW)
+                if not rows:
+                    continue
+                if und not in ("NIFTY", "BANKNIFTY"):
+                    atm = chain.atm(und, expiry, spot)
+                    q = chain.quotes([r for r in rows if float(r["strike"]) == atm])
+                    if max((v.get("volume", 0) for v in q.values()), default=0) < OPT_MIN_ATM_VOLUME:
+                        continue
+                unds.append(und)
+                self._opt_atm[und] = chain.atm(und, expiry, spot)
+                window[und] = {"expiry": expiry, "atm": self._opt_atm[und], "contracts": len(rows)}
+                for r in rows:
+                    tok = int(r["instrument_token"])
+                    added[tok] = Inst(f"{r['tradingsymbol']}@{OPT_SEG_KEY}", "NSE_FO", r["tradingsymbol"], tok,
+                                      float(r.get("tick_size") or 0.05), 1.0, int(r.get("lot_size") or 1),
+                                      "opt_paper", r.get("exchange") or "NFO", "opt", und, r["instrument_type"],
+                                      str(r["expiry"])[:10], float(r["strike"]))
+            except Exception as exc:
+                self.last_error = f"option window {und}: {exc}"
+        with self._lock:
+            keep = {k: v for k, v in self.insts.items()
+                    if v.kind != "opt" or (self.state.get(k) and (self.state[k].pos or self.state[k].order))}
+            keep.update(added)
+            self.insts = keep
+            for tok in added:
+                self.state.setdefault(tok, SState())
+        self.opt_stats.update(instruments=sum(1 for i in self.insts.values() if i.kind == "opt"),
+                              underlyings=unds, window=window, last_recenter=now.isoformat(timespec="seconds"))
+        return len(added)
+
+    def _safe_recenter(self) -> None:
+        try:
+            from option_chain import option_chain as chain
+            from ist_clock import now_ist
+            moved = False
+            for und, atm in list(self._opt_atm.items()):
+                e = chain.pick_expiry(und, now_ist().date(), min_dte=0)
+                s = chain.spot(und)
+                if e and s > 0 and chain.atm(und, e, s) != atm:
+                    moved = True
+            if moved or not self._opt_atm:
+                self.build_option_window()
+                from kite_ws_feed import kite_ws_feed
+                kite_ws_feed.subscribe([k for k, i in self.insts.items() if i.kind == "opt"])
+        except Exception as exc:
+            self.last_error = f"recenter: {exc}"
+
+    def _decide_opt(self, inst: Inst, st: SState, t: dict, now: float, vd: int) -> None:
+        from self_learning import learning
+        p = learning.params(OPT_FAMILY)
+        with self._lock:
+            if st.pos:
+                ex = ScalpLogic.exit_reason(st.pos, t, now, p)
+                if ex:
+                    self._opt_exit(inst, st, ex[0], ex[1], now)
+                return
+            if st.order:
+                if ScalpLogic.queue_fill(st.order, t, vd):
+                    self._opt_fill(inst, st, t, now, p)
+                elif now - st.order["ts"] > ENTRY_TTL_SEC:
+                    st.order = None
+                    self.opt_stats["cancels"] += 1
+                return
+            f = ScalpLogic.features(st, t, inst)
+            side = ScalpLogic.signal(f, p)
+            if not side:
+                return
+            self.opt_stats["signals"] += 1
+            if side < 0:
+                # bearish book on this contract: never short premium (no naked
+                # shorts) — bearish views are expressed by buying the PE.
+                self.opt_stats["short_skips"] += 1
+                return
+            self._opt_enter(inst, st, t, now, p, f)
+
+    def _opt_enter(self, inst: Inst, st: SState, t: dict, now: float, p: dict, f: dict) -> None:
+        from segments import segment_manager, _limits
+        from self_learning import learning, Guard
+        from ist_clock import now_ist
+        if str(settings.trading_mode).upper() != "PAPER":
+            return
+        self._roll_day()
+        n = now_ist()
+        if inst.expiry == n.date().isoformat() and n.hour >= 13:
+            self.opt_stats["cap_skips"] += 1          # expiry-day afternoon gamma: no new scalps
+            return
+        while st.entries and now - st.entries[0] > 60:
+            st.entries.popleft()
+        per_sym = self.opt_stats["per_symbol"].get(inst.symbol, {}).get("entries", 0)
+        open_n = sum(1 for k, s in self.state.items() if s.pos and self.insts.get(k) and self.insts[k].kind == "opt")
+        if (len(st.entries) >= MAX_PER_MIN or self.opt_stats["entries_today"] >= OPT_DAILY_CAP
+                or per_sym >= OPT_SYMBOL_DAILY_CAP or open_n >= OPT_MAX_CONCURRENT):
+            self.opt_stats["cap_skips"] += 1
+            return
+        ok, why, factor = learning.entry_gate(OPT_FAMILY, "NSE_FO")
+        if not ok:
+            self.opt_stats["gate_skips"] += 1
+            return
+        lim = _limits("NSE_FO")
+        risk = Guard.clamp_risk("NSE_FO", lim["capital"] * RISK_PCT / 100.0, factor)
+        px = t.get("bid") or 0.0                       # join the bid (limit at touch)
+        if px <= 0 or not t.get("ask"):
+            return
+        sl_d = float(p["sl_ticks"]) * inst.tick
+        lots = int(risk // (sl_d * inst.lot)) if sl_d > 0 else 0
+        lots = min(lots, OPT_MAX_LOTS, int(lim["capital"] * OPT_MAX_NOTIONAL_PCT / 100.0 // (px * inst.lot)))
+        if lots < 1:
+            self.opt_stats["cap_skips"] += 1
+            return
+        units = lots * inst.lot
+        okc, _tp, _need = ScalpLogic.cost_ok(inst, px, units, p, t["ask"] - t["bid"])
+        if not okc:
+            self.opt_stats["cost_skips"] += 1
+            return
+        okg, why = segment_manager.entry_check("NSE_FO", notional=px * units, transaction_type="BUY")
+        if not okg:
+            self.opt_stats["gate_skips"] += 1
+            return
+        q0 = t["bids"][0][1] if t.get("bids") else 0
+        st.order = {"side": 1, "px": px, "queue": q0, "ts": now, "lots": lots, "features": f,
+                    "sl_d": sl_d, "tp_d": float(p["tp_ticks"]) * inst.tick}
+        self.opt_stats["orders"] += 1
+
+    def _opt_fill(self, inst: Inst, st: SState, t: dict, now: float, p: dict) -> None:
+        from kite_client import kite_client
+        o = st.order
+        st.order = None
+        qty = o["lots"] * inst.lot
+        kite_client._paper_ltp[inst.symbol] = o["px"]
+        try:
+            oid = kite_client.place_order(tradingsymbol=inst.symbol, exchange=inst.exchange, transaction_type="BUY",
+                                          quantity=qty, order_type="LIMIT", price=o["px"], product="NRML",
+                                          tag=f"OSCALP-{inst.underlying}"[:20])
+        except Exception as exc:
+            self.last_error = f"opt fill: {exc}"
+            return
+        from ist_clock import now_ist
+        st.pos = {"side": 1, "entry": o["px"], "sl": o["px"] - o["sl_d"], "tp": o["px"] + o["tp_d"],
+                  "opened": now, "lots": o["lots"], "oid": oid, "qty": qty, "features": o["features"],
+                  "queue_at_join": o.get("queue"), "entry_ts": now_ist().isoformat(timespec="seconds")}
+        st.entries.append(now)
+        self.opt_stats["entries_today"] += 1
+        ps = self.opt_stats["per_symbol"].setdefault(inst.symbol, {"entries": 0, "net": 0.0})
+        ps["entries"] += 1
+        seg = self._seg_count("NSE_FO")
+        seg["entries"] += 1
+        seg["open"] += 1
+        self.opt_stats["fills"] += 1
+
+    def _opt_exit(self, inst: Inst, st: SState, reason: str, mark: float, now: float) -> None:
+        from kite_client import kite_client
+        from cost_model import order_costs
+        from ist_clock import now_ist
+        pos = st.pos
+        st.pos = None
+        qty = pos["qty"]
+        kite_client._paper_ltp[inst.symbol] = mark
+        try:
+            kite_client.place_order(tradingsymbol=inst.symbol, exchange=inst.exchange, transaction_type="SELL",
+                                    quantity=qty, order_type="MARKET", product="NRML",
+                                    tag=f"OSCALP-{inst.underlying}"[:20])
+        except Exception as exc:
+            self.last_error = f"opt exit: {exc}"
+            st.pos = pos
+            return
+        gross = round((mark - pos["entry"]) * qty, 2)
+        ce = order_costs("OPT", "BUY", qty, pos["entry"], inst.exchange)
+        cx = order_costs("OPT", "SELL", qty, mark, inst.exchange)
+        cost = round(ce["total"] + cx["total"], 2)
+        net = round(gross - cost, 2)
+        seg = self._seg_count("NSE_FO")
+        seg["open"] = max(0, seg["open"] - 1)
+        seg["pnl"] = round(seg["pnl"] + gross, 2)
+        self.stats["pnl"] = round(self.stats["pnl"] + gross, 2)
+        o = self.opt_stats
+        o["exits"] += 1
+        o["gross"] = round(o["gross"] + gross, 2)
+        o["costs"] = round(o["costs"] + cost, 2)
+        o["net"] = round(o["net"] + net, 2)
+        o["wins" if net > 0 else "losses"] += 1
+        o["per_symbol"].setdefault(inst.symbol, {"entries": 0, "net": 0.0})["net"] = round(
+            o["per_symbol"][inst.symbol]["net"] + net, 2)
+        rec = {"symbol": inst.symbol, "underlying": inst.underlying, "lots": pos["lots"], "qty": qty,
+               "entry": pos["entry"], "exit": mark, "reason": reason, "hold_sec": round(now - pos["opened"], 1),
+               "gross": gross, "costs": cost, "net": net, "ts": now_ist().isoformat(timespec="seconds")}
+        o["recent"] = (o["recent"] + [rec])[-30:]
+        try:
+            from self_learning import learning
+            learning.record({
+                "id": f"OSC-{pos['oid']}", "segment": "NSE_FO", "strategy": OPT_FAMILY, "family": OPT_FAMILY,
+                "symbol": inst.symbol, "side": "BUY", "qty_units": qty, "lots": pos["lots"], "multiplier": 1.0,
+                "entry": pos["entry"], "exit": mark, "entry_ts": pos.get("entry_ts"), "exit_ts": rec["ts"],
+                "gross": gross, "costs_override": {"entry": ce, "exit": cx, "total": cost},
+                "reason": f"scalp_{reason}", "price_source": "KITE",
+                "features": {**(pos.get("features") or {}), "queue_at_join": pos.get("queue_at_join"),
+                             "hold_sec": rec["hold_sec"]}, "source": "option_scalper"})
+        except Exception:
+            pass
+
+    def opt_status(self) -> dict:
+        from self_learning import learning
+        open_ = [{"symbol": self.insts[k].symbol, **{x: v for x, v in s.pos.items() if x != "features"}}
+                 for k, s in self.state.items() if s.pos and k in self.insts and self.insts[k].kind == "opt"]
+        o = dict(self.opt_stats)
+        n = o["wins"] + o["losses"]
+        o["win_rate"] = round(o["wins"] / n * 100, 1) if n else 0.0
+        return {**o, "open": open_, "params": learning.params(OPT_FAMILY),
+                "caps": {"daily": OPT_DAILY_CAP, "per_symbol_daily": OPT_SYMBOL_DAILY_CAP,
+                         "max_concurrent": OPT_MAX_CONCURRENT, "max_lots": OPT_MAX_LOTS,
+                         "per_min_per_symbol": MAX_PER_MIN, "risk_pct": RISK_PCT,
+                         "max_notional_pct": OPT_MAX_NOTIONAL_PCT}}
+
     # ── helpers ─────────────────────────────────────────────────────────────
     def _regime(self) -> str:
         try:
@@ -439,6 +707,8 @@ class FastScalper:
             for v in self.stats["by_segment"].values():
                 v["entries"] = 0
                 v["pnl"] = 0.0
+            self.opt_stats.update(entries_today=0, per_symbol={}, wins=0, losses=0, gross=0.0, costs=0.0,
+                                  net=0.0, exits=0, recent=[])
 
     def _record(self, inst: Inst, t: dict) -> None:
         b = t.get("bids") or []
@@ -478,6 +748,7 @@ class FastScalper:
         return {"enabled": self.enabled, "mode": settings.trading_mode, "instruments": len(self.insts),
                 "by_segment_instruments": segs, "feed": dict(kite_ws_feed.status), "stats": self.stats,
                 "open": open_, "latency": lat, "last_error": self.last_error,
+                "options": self.opt_status(),
                 "params": {s: self.params(s) for s in ("NSE_EQ", "NSE_FO", "BSE_EQ", "MCX", "CDS")}}
 
 
