@@ -32,4 +32,4 @@ full_pipeline 31/31 · all_agents_e2e 46/46 · audit_fixes 46/46 — **all 22 su
 ## Remaining
 - strategy_inventor itself unchanged (library feeds the research loop; inventor is focus-paused).
 - Backtests use Black-Scholes modelled option prices on 63/64 days, so treat the numbers as estimates.
-- Agent stop paths (focus pauses, regime) call agent.stop() without tick_engine.remove_subscriber; with the coalescing mailbox, a dead subscriber costs at most one snap per symbol (not fixed further).
+- master_agent.stop() left every agent subscriber registered (dead mailboxes after /bot/stop) — now removed (master_agent_v5; test_pipeline 1282/1282, segments 22/22, index_feed 25/25). Other stop paths already remove theirs.

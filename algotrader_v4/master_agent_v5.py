@@ -330,8 +330,9 @@ class MasterAgent:
     async def stop(self) -> None:
         self.running = False
         tick_engine.stop()
-        for a in ALL_AGENTS.values():
+        for _n, a in ALL_AGENTS.items():
             a.stop()
+            tick_engine.remove_subscriber(f"agent_{_n}")   # no dead mailboxes left behind after /bot/stop
         try:
             from segment_engine import native_engine
             from segments import segment_manager
