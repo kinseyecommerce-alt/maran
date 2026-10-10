@@ -14,10 +14,10 @@ const inr = (n: any) => (n === null || n === undefined || n === '') ? '—'
 const pnlCls = (n: any) => Number(n) > 0 ? 'text-emerald-400' : Number(n) < 0 ? 'text-rose-400' : 'text-slate-400'
 const v = (x: any, suf = '') => (x === null || x === undefined) ? '—' : `${x}${suf}`
 
-const STAGES = ['proposed', 'backtested', 'rejected', 'probation', 'promoted', 'retired'] as const
+const STAGES = ['proposed', 'backtested', 'rejected', 'probation', 'promoted', 'retired', 'aborted'] as const
 const STAGE_CLS: Record<string, string> = {
   proposed: 'bg-slate-700 text-slate-200', backtested: 'bg-sky-900 text-sky-200', rejected: 'bg-rose-900/70 text-rose-200',
-  probation: 'bg-amber-900/70 text-amber-200', promoted: 'bg-emerald-900/70 text-emerald-200', retired: 'bg-zinc-800 text-zinc-300',
+  probation: 'bg-amber-900/70 text-amber-200', promoted: 'bg-emerald-900/70 text-emerald-200', retired: 'bg-zinc-800 text-zinc-300', aborted: 'bg-zinc-900 text-zinc-500',
 }
 
 function Card({ title, children, right }: { title: React.ReactNode; children: React.ReactNode; right?: React.ReactNode }) {

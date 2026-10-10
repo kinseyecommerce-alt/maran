@@ -44,8 +44,9 @@ HYP_PATH = HERE / "logs" / "backtests" / "research_hypotheses.json"
 OUT_PATH = HERE / "logs" / "backtests" / "research_backtest.json"
 WL_PATH = HERE / "logs" / "agent_whitelist.json"
 MAX_PER_AGENT = 4
+FOCUS_OPTIONS_AGENTS = ("options", "option_scalping")   # only NIFTY-options hypotheses in focus mode
 MAX_STEP = 0.35
-STATUSES = ("proposed", "backtested", "rejected", "probation", "promoted", "retired")
+STATUSES = ("proposed", "backtested", "rejected", "probation", "promoted", "retired", "aborted")
 BACKTESTABLE = ("intraday", "scalping", "swing", "momentum", "mean_reversion", "futures", "options",
                 "option_scalping", "mcx_native", "invent")
 
@@ -62,6 +63,7 @@ class Research:
         self.started: Optional[str] = None
         self.last_error = ""
         self.last_report: dict = {}
+        self._cycle: Optional[str] = None
         self._ensure()
 
     def st(self):
@@ -143,13 +145,158 @@ class Research:
             alloc = (self.st().kv_get("allocator", {}) or {}).get("agents", {})
         except Exception:
             pass
-        return {"counts": counts, "rows": rows, "last_report": self.last_report or self.st().kv_get("research_last", {}),
+        try:
+            library = self.method_library()
+        except Exception as exc:
+            library = {"error": str(exc)[:200]}
+        return {"counts": counts, "rows": rows, "library": library,
+                "last_report": self.last_report or self.st().kv_get("research_last", {}),
                 "backtest": bt, "allocator": alloc,
                 "runner": {"running": self.running, "started": self.started, "last_error": self.last_error},
                 "guardrails": ["PAPER only — research never switches to LIVE or touches LIVE gates",
                                "bounded params; hard daily caps / size ≤ 1.0 cannot be raised",
                                "owner-paused segments, owner-retired strategies and owner-pinned agents are skipped",
                                "every change is a versioned learning param with automatic rollback"]}
+
+    # ── researched method library → hypothesis generator ────────────────────
+    @staticmethod
+    def method_library(focus: Optional[str] = None) -> dict:
+        """Published-method library + walk-forward verdicts (options_methods_research,
+        all_agents_methods_research) and the live agent gate status. In focus mode
+        `nifty_intraday_options` ONLY the NIFTY option methods are returned."""
+        if focus is None:
+            try:
+                from owner_universe import owner_universe
+                focus = owner_universe.focus()
+            except Exception:
+                focus = None
+        lib: list[dict] = []
+        gate = {}
+        try:
+            gate = (json.loads((HERE / "logs" / "nifty_options_agent_gate.json").read_text()).get("signals") or {})
+        except Exception:
+            pass
+        try:
+            om = json.loads((HERE / "logs" / "options_methods_research.json").read_text())
+        except Exception:
+            om = {}
+        for name, row in (om.get("methods") or {}).items():
+            b = (row.get("base") or {}).get("oos_uncond") or {}
+            x = (om.get("agent_exec") or {}).get(name) or {}
+            var = x.get("variant")
+            lib.append({"name": name, "market": "NIFTY_OPTIONS", "kind": row.get("kind"), "desc": row.get("desc"),
+                        "agent_legal": row.get("agent_legal"), "verdict": row.get("verdict"),
+                        "oos": {k: b.get(k) for k in ("trades", "net", "gross", "costs", "pf", "dsr", "win_pct", "max_dd")},
+                        "variant": var, "variant_verdict": x.get("verdict"),
+                        "variant_oos": {k: (x.get("oos_uncond") or {}).get(k) for k in ("trades", "net", "pf", "dsr")} if var else None,
+                        "live": (gate.get(var) or {}).get("status") if var else None, "source": row.get("source")})
+        if focus != "nifty_intraday_options":
+            try:
+                am = json.loads((HERE / "logs" / "all_agents_methods_research.json").read_text())
+            except Exception:
+                am = {}
+            for name, row in (am.get("methods") or {}).items():
+                b = row.get("oos_uncond") or {}
+                lib.append({"name": name, "market": row.get("agent"), "kind": "buy", "desc": row.get("desc"),
+                            "agent_legal": True, "verdict": row.get("verdict"),
+                            "oos": {k: b.get(k) for k in ("trades", "net", "gross", "costs", "pf", "dsr", "win_pct", "max_dd")},
+                            "variant": None, "live": None, "source": row.get("evidence")})
+        return {"focus": focus, "generated": om.get("generated"), "methods": lib, "ideas": Research._library_ideas(lib)}
+
+    @staticmethod
+    def _library_ideas(lib: list) -> list[dict]:
+        """Next hypotheses derived from the verdicts (never auto-wired; each must pass
+        the same walk-forward / cost / DSR gate in the nightly options research):
+          • edge before costs but not after → fewer legs / cheaper fills variant
+          • published rule set wins but its agent-executable variant does not → close the gap
+          • probation variant → keep collecting real-option-price evidence (no change)"""
+        out = []
+        for m in lib:
+            o, vo = m.get("oos") or {}, m.get("variant_oos") or {}
+            if not m.get("agent_legal"):
+                continue
+            if (o.get("gross") or 0) > 0 and (o.get("net") or 0) <= 0:
+                out.append({"method": m["name"], "market": m["market"], "idea": "edge before costs only — test a "
+                            "lower-cost variant (fewer legs / limit fills / fewer trades)",
+                            "evidence": f"OOS gross ₹{o.get('gross', 0):,.0f} vs costs ₹{o.get('costs', 0):,.0f}"})
+            if m.get("variant") and (o.get("net") or 0) > 0 and (vo.get("net") or 0) <= 0:
+                out.append({"method": m["name"], "market": m["market"], "idea": f"published rules win (₹{o['net']:,.0f}) "
+                            f"but engine variant {m['variant']} loses (₹{vo.get('net', 0):,.0f}) — find which engine "
+                            "rule (exit time / stops / sizing) causes the gap",
+                            "evidence": f"{m['verdict']} vs {m.get('variant_verdict')}"})
+            if m.get("live") in ("pass", "probation"):
+                out.append({"method": m["name"], "market": m["market"], "idea": f"{m['variant']} live in PAPER "
+                            f"({m['live']}) — collect real option prices; re-judge after ≥30 real trades",
+                            "evidence": f"OOS {vo.get('trades')} tr ₹{vo.get('net', 0):,.0f} PF {vo.get('pf')}"})
+        return out
+
+    def sync_library(self) -> dict:
+        """Record the library verdicts as research rows (kind='method'), idempotently:
+        one row per method, updated only when its verdict/live status changes."""
+        lib = self.method_library()
+        existing = {r["title"]: r for r in self.rows(limit=5000) if r.get("kind") == "method"}
+        n_new = n_upd = 0
+        for m in lib["methods"]:
+            title = f"{m['market']}: {m['name']}"
+            live = m.get("live")
+            st = "probation" if live in ("pass", "probation") else "rejected"
+            note = (f"{'LIVE PAPER ' + live + ' via ' + str(m['variant']) if st == 'probation' else 'not traded'} — "
+                    f"published verdict {m['verdict']}; OOS {m['oos'].get('trades')} tr net ₹{(m['oos'].get('net') or 0):,.0f} "
+                    f"PF {m['oos'].get('pf')} DSR {m['oos'].get('dsr')}"
+                    + (f"; engine variant {m['variant']}: {m.get('variant_verdict')} "
+                       f"(₹{((m.get('variant_oos') or {}).get('net') or 0):,.0f})" if m.get("variant") else ""))
+            r = existing.get(title)
+            if r is None:
+                rid = self.add("library", "nifty_options_intraday" if m["market"] == "NIFTY_OPTIONS" else str(m["market"]),
+                               "method", title, {"variant": m.get("variant")}, m.get("desc") or f"published method {title}")
+                self.update(rid, st, note, {"oos": m["oos"], "variant_oos": m.get("variant_oos"), "source": m.get("source")})
+                n_new += 1
+            elif r["status"] != st or r.get("outcome") != note:
+                self.update(r["id"], st, note, {"oos": m["oos"], "variant_oos": m.get("variant_oos")})
+                n_upd += 1
+        return {"focus": lib["focus"], "methods": len(lib["methods"]), "new": n_new, "updated": n_upd,
+                "ideas": lib["ideas"]}
+
+    # ── interrupted cycles (resumable / idempotent) ─────────────────────────
+    def recover_stale(self, runner_result: Optional[dict] = None) -> dict:
+        """'proposed' rows that belong to no RUNNING cycle come from an interrupted one.
+        • If the finished backtest output (OUT_PATH) holds results for exactly those ids
+          and was generated after they were proposed → RESUME: apply the results
+          (same rules as a normal cycle; no re-backtest).
+        • Otherwise → mark them 'aborted' (with the reason); the next cycle re-proposes
+          fresh hypotheses from the then-current baseline. Never leaves them dangling."""
+        out = {"resumed": 0, "aborted": 0, "cycles": []}
+        with self._lock:
+            active = self._cycle if self.running else None
+        stale = [r for r in self.rows("proposed", limit=5000) if r["cycle"] != active]
+        if not stale:
+            return out
+        by_cycle: dict = {}
+        for r in stale:
+            by_cycle.setdefault(r["cycle"], []).append(r)
+        res = runner_result
+        if res is None:
+            try:
+                res = json.loads(OUT_PATH.read_text()) if OUT_PATH.exists() else {}
+            except Exception:
+                res = {}
+        res_ids = {h.get("id") for h in (res.get("hypotheses") or [])}
+        for cyc, rows in by_cycle.items():
+            ids = {r["id"] for r in rows}
+            fresh = str(res.get("generated") or "") >= min(r["ts"] for r in rows)
+            if ids and ids <= res_ids and fresh:
+                sub = {**res, "hypotheses": [h for h in res["hypotheses"] if h.get("id") in ids]}
+                rep = {"cycle": cyc, "passed": 0, "rejected": 0, "probation": [], "notes": [], "resumed": True}
+                self._apply_results(sub, rep)
+                out["resumed"] += len(ids)
+                out["cycles"].append({"cycle": cyc, "action": "resumed", "n": len(ids)})
+            else:
+                for r in rows:
+                    self.update(r["id"], "aborted", "ABORTED — research cycle was interrupted before its "
+                                "backtest finished (no result); the next cycle re-proposes from fresh data")
+                out["aborted"] += len(rows)
+                out["cycles"].append({"cycle": cyc, "action": "aborted", "n": len(rows)})
+        return out
 
     # ── owner / guardrails ──────────────────────────────────────────────────
     @staticmethod
@@ -169,9 +316,15 @@ class Research:
             st = learning._state
         except Exception:
             st = {}
+        try:
+            focus = owner_universe.focus()
+        except Exception:
+            focus = None
         for a in BACKTESTABLE:
             seg = AGENT_SEGMENT.get(a, "")
-            if a in pinned:
+            if focus == "nifty_intraday_options" and a not in FOCUS_OPTIONS_AGENTS:
+                skipped[a] = "owner focus: NIFTY intraday options only"
+            elif a in pinned:
                 skipped[a] = "owner-pinned agent (logs/agent_policy.json)"
             elif seg and seg not in ("ANY", "*") and not owner_universe.segment_enabled(seg):
                 skipped[a] = f"segment {seg} paused by owner"
@@ -310,9 +463,16 @@ class Research:
         from allocator import allocator
         Guard.require_paper()
         t0 = time.time()
-        cycle = datetime.now(IST).strftime("%Y%m%d-%H%M")
+        cycle = datetime.now(IST).strftime("%Y%m%d-%H%M%S")
         rep: dict = {"cycle": cycle, "started": _iso(), "probation_review": [], "proposed": 0, "passed": 0,
                      "rejected": 0, "probation": [], "skipped_agents": {}, "notes": []}
+        rep["recovered"] = self.recover_stale()            # interrupted cycles: resume or abort, never dangle
+        try:
+            rep["method_library"] = self.sync_library()    # researched methods + verdicts → hypotheses
+        except Exception as exc:
+            rep["method_library"] = {"error": str(exc)[:200]}
+        with self._lock:
+            self._cycle = cycle
         rep["probation_review"] = self.review_probation()
         elig, skipped = self.eligible_agents()
         if agents:
@@ -329,13 +489,62 @@ class Research:
         for h in hyps:
             h["id"] = self.add(cycle, h["agent"], "policy", h["title"], h["params"], h["why"])
         rep["proposed"] = len(hyps)
-        res = self._backtest(elig, [{"id": h["id"], "agent": h["agent"], "params": h["params"]} for h in hyps],
-                             days, workers, runner)
+        try:
+            res = self._backtest(elig, [{"id": h["id"], "agent": h["agent"], "params": h["params"]} for h in hyps],
+                                 days, workers, runner)
+        except Exception as exc:
+            for h in hyps:
+                r = self.get(h["id"])
+                if r and r["status"] == "proposed":
+                    self.update(h["id"], "aborted", f"ABORTED — backtest failed: {str(exc)[:200]}")
+            with self._lock:
+                self._cycle = None
+            raise
         rep["notes"] = res.get("notes") or []
         rep["baseline"] = {a: {"stats": v["stats"], "verdict": v["verdict"]} for a, v in (res.get("agents") or {}).items()}
+        self._apply_results(res, rep)
+        for h in hyps:                                     # a hypothesis the backtest skipped never dangles
+            r = self.get(h["id"])
+            if r and r["status"] == "proposed":
+                self.update(h["id"], "aborted", "ABORTED — no backtest result returned for this hypothesis")
+        if write_whitelist and res.get("whitelist"):
+            try:
+                cfg = json.loads((HERE / "logs" / "agent_policy.json").read_text()) \
+                    if (HERE / "logs" / "agent_policy.json").exists() else {}
+                if not cfg.get("whitelist_pinned"):
+                    WL_PATH.write_text(json.dumps({**res["whitelist"], "generated": _iso(),
+                                                   "source": "unified_backtest real Kite 1m data",
+                                                   "days": [res["days"][0], res["days"][-1]] if res.get("days") else []},
+                                                  indent=1))
+                    rep["notes"].append("liquidity whitelist refreshed from real data")
+            except Exception as exc:
+                rep["notes"].append(f"whitelist not written: {exc}")
+        allocator.refresh()
+        rep["elapsed_s"] = round(time.time() - t0, 1)
+        rep["finished"] = _iso()
+        self.last_report = rep
+        with self._lock:
+            self._cycle = None
+        try:
+            self.st().kv_set("research_last", rep)
+            learning.event("research_cycle", "", "master", f"research cycle {cycle}: {rep['proposed']} proposed, "
+                           f"{rep['passed']} passed OOS, {len(rep['probation'])} to probation, "
+                           f"{rep['rejected']} rejected")
+        except Exception:
+            pass
+        return rep
+
+    def _apply_results(self, res: dict, rep: dict) -> None:
+        """Apply backtest results to proposed rows. Idempotent: only rows still
+        'proposed' are touched, so re-applying the same result changes nothing."""
+        from self_learning import learning
+        from allocator import allocator
         best: dict[str, dict] = {}
         for hr in res.get("hypotheses") or []:
             rid = hr.get("id")
+            r0 = self.get(rid or "")
+            if not r0 or r0["status"] != "proposed":
+                continue
             st = hr.get("stats") or {}
             ev = {"oos": {k: st.get(k) for k in ("trades", "net", "costs", "win_rate", "expectancy", "profit_factor",
                                                  "max_dd")},
@@ -371,30 +580,6 @@ class Research:
             r = self.get(hr.get("id") or "")
             if r and r["status"] == "backtested":
                 self.update(r["id"], "rejected", "passed, but another variation of this agent did better this cycle")
-        if write_whitelist and res.get("whitelist"):
-            try:
-                cfg = json.loads((HERE / "logs" / "agent_policy.json").read_text()) \
-                    if (HERE / "logs" / "agent_policy.json").exists() else {}
-                if not cfg.get("whitelist_pinned"):
-                    WL_PATH.write_text(json.dumps({**res["whitelist"], "generated": _iso(),
-                                                   "source": "unified_backtest real Kite 1m data",
-                                                   "days": [res["days"][0], res["days"][-1]] if res.get("days") else []},
-                                                  indent=1))
-                    rep["notes"].append("liquidity whitelist refreshed from real data")
-            except Exception as exc:
-                rep["notes"].append(f"whitelist not written: {exc}")
-        allocator.refresh()
-        rep["elapsed_s"] = round(time.time() - t0, 1)
-        rep["finished"] = _iso()
-        self.last_report = rep
-        try:
-            self.st().kv_set("research_last", rep)
-            learning.event("research_cycle", "", "master", f"research cycle {cycle}: {rep['proposed']} proposed, "
-                           f"{rep['passed']} passed OOS, {len(rep['probation'])} to probation, "
-                           f"{rep['rejected']} rejected")
-        except Exception:
-            pass
-        return rep
 
     def start(self, **kw) -> dict:
         with self._lock:

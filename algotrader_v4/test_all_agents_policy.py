@@ -514,11 +514,62 @@ def t_research_probation_review():
     assert "intraday" not in allocator.probation()
 
 
-for n, f in [("research: PAPER only (refuses in LIVE)", t_research_paper_only),
+def t_research_interrupted_cycle_aborts_and_resumes():
+    r = Research()
+    # 1) backtest crashes mid-cycle → this cycle's rows are aborted, none left 'proposed'
+    def boom(*a):
+        raise RuntimeError("box restarted")
+    try:
+        r.run_cycle(agents=["intraday"], runner=boom, write_whitelist=False)
+        raise AssertionError("expected failure")
+    except RuntimeError:
+        pass
+    assert not [x for x in r.rows("proposed") if x["agent"] == "intraday"]
+    assert any(x["status"] == "aborted" and "backtest failed" in x["outcome"] for x in r.rows())
+    # 2) dangling rows from a killed process (no result file) → aborted by the next cycle/recover
+    rid = r.add("19990101-0000", "futures", "policy", "dangling", {"edge_cost_mult": 2.5}, "test")
+    out = r.recover_stale(runner_result={})
+    assert out["aborted"] >= 1 and r.get(rid)["status"] == "aborted"
+    # 3) dangling rows whose finished backtest result exists → resumed (applied), idempotent
+    rid2 = r.add("19990102-0000", "futures", "policy", "resumable", {"edge_cost_mult": 2.5}, "test")
+    res = _fake_runner(lambda h: False)(["futures"], [{"id": rid2, "agent": "futures", "params": {"edge_cost_mult": 2.5}}], 1, 1)
+    res["generated"] = "9999"
+    out = r.recover_stale(runner_result=res)
+    assert out["resumed"] == 1 and r.get(rid2)["status"] == "rejected"
+    n_hist = len(r.get(rid2)["history"])
+    r._apply_results(res, {"passed": 0, "rejected": 0, "probation": []})
+    assert len(r.get(rid2)["history"]) == n_hist, "re-applying a result is a no-op"
+    assert r.recover_stale(runner_result=res) == {"resumed": 0, "aborted": 0, "cycles": []}
+
+
+def t_research_method_library_focus():
+    import research_loop as RL
+    lib = RL.Research.method_library(focus="nifty_intraday_options")
+    assert all(m["market"] == "NIFTY_OPTIONS" for m in lib["methods"]), "focus: only NIFTY option methods"
+    full = RL.Research.method_library(focus=None)
+    assert len(full["methods"]) >= len(lib["methods"])
+    import owner_universe as ou
+    orig = ou.owner_universe.focus
+    ou.owner_universe.focus = lambda: "nifty_intraday_options"
+    try:
+        elig, skipped = RL.Research.eligible_agents()
+        assert set(elig) <= set(RL.FOCUS_OPTIONS_AGENTS) and "intraday" in skipped
+    finally:
+        ou.owner_universe.focus = orig
+    r = Research()
+    a = r.sync_library(); b = r.sync_library()
+    assert b["new"] == 0 and b["updated"] == 0, "library sync is idempotent"
+    assert not [x for x in r.rows("proposed") if x["kind"] == "method"]
+
+
+for n, f in [("research: method library (focus → NIFTY options only), idempotent sync", t_research_method_library_focus),
+             ("research: PAPER only (refuses in LIVE)", t_research_paper_only),
              ("research: pass → probation (versioned, half size); fail → rejected with reasons", t_research_flow),
              ("research: out-of-bounds params can never be promoted", t_research_rejects_unbounded),
              ("research: owner-paused segment agents skipped", t_research_owner_skips),
-             ("research: rolled-back probation → retired, size restored", t_research_probation_review)]:
+             ("research: rolled-back probation → retired, size restored", t_research_probation_review),
+             ("research: interrupted cycle → aborted / resumed, never dangling 'proposed'",
+              t_research_interrupted_cycle_aborts_and_resumes)]:
     check(n, f)
 
 # ── live TSL smart exits ────────────────────────────────────────────────────
