@@ -78,7 +78,7 @@ export function strategyView(e: EngineStatus | null, key: string): StrategyView 
                    reason: 'waiting for server state', canResume: false, action: 'none' }
   const b = BADGE[s.state] || BADGE.unknown
   const badge = s.state === 'retired' && s.retired_by === 'owner' ? 'RETIRED (owner)'
-    : s.owner_paused ? 'PAUSED (owner)' : b.text
+    : s.owner_paused ? ((s.reason || '').startsWith('PAUSED (focus)') ? 'PAUSED (focus)' : 'PAUSED (owner)') : b.text
   const action = s.state === 'running' ? 'pause' : (s.can_resume ? 'resume' : 'none')
   return { state: s.state, on: s.on, badge, badgeCls: b.cls, reason: s.reason,
            canResume: s.can_resume, action }
@@ -86,7 +86,8 @@ export function strategyView(e: EngineStatus | null, key: string): StrategyView 
 
 export function segmentBadge(s: SegmentState): { text: string; cls: string } {
   const b = BADGE[s.state] || BADGE.unknown
-  if (s.owner_paused) return { text: 'PAUSED (owner)', cls: BADGE.paused.cls }
+  if (s.owner_paused) return { text: (s.reason || '').startsWith('PAUSED (focus)') ? 'PAUSED (focus)' : 'PAUSED (owner)',
+                               cls: BADGE.paused.cls }
   return { text: s.state === 'running' ? 'RUNNING' : b.text, cls: b.cls }
 }
 

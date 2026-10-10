@@ -752,7 +752,7 @@ class SegmentManager:
                 "pnl_unrealised": float(bk.get("unrealised", 0.0)),
                 "open_positions": int(bk.get("open_positions", 0)),
                 "display": meta.get("display"), "desc": meta.get("desc"),
-                "can_resume": state not in ("starting", "stopped", "killed", "closed", "retired"),
+                "can_resume": state not in ("starting", "stopped", "killed", "closed", "retired") and not focus_paused,
                 "retired_by": retired_by if state == "retired" else None,
                 "owner_paused": owner_paused,
             }
