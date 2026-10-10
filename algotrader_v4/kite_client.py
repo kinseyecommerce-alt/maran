@@ -226,6 +226,13 @@ class KiteClient:
                                       label="instruments")
             self._instruments_cache[exchange] = instruments
             logger.info("[kite] Loaded {} instruments for {}", len(instruments), exchange)
+            if getattr(self, "_inst_index", None) is not None:
+                self._inst_index.pop(exchange, None)
+            if exchange in ("NFO", "BFO"):
+                try:
+                    self.refresh_lot_sizes(exchange)
+                except Exception as _ls_exc:
+                    logger.debug("[kite] lot refresh: {}", _ls_exc)
             return instruments
         except Exception as exc:
             logger.warning("[kite] instruments fetch failed: {}", exc)
@@ -439,6 +446,12 @@ class KiteClient:
         disclosed_quantity = self._resolve_disclosed_qty(
             exchange, order_type, quantity, price, disclosed_quantity)
 
+        # HARD GUARD (PAPER and LIVE): never open/leave a naked short option.
+        # Stop orders are protective exits; they are re-checked at trigger
+        # fill time in PAPER (check_paper_triggers).
+        if order_type not in ("SL", "SL-M"):
+            self._naked_short_guard(tradingsymbol, exchange, transaction_type, quantity)
+
         if settings.trading_mode == "PAPER":
             return self._paper_place(tradingsymbol, exchange, transaction_type,
                                      quantity, order_type, product, price,
@@ -643,7 +656,10 @@ class KiteClient:
 
     def squareoff_all_positions(self) -> list[str]:
         order_ids: list[str] = []
-        for pos in self.positions().get("net", []):
+        # Buy back shorts BEFORE selling longs: a long option may be the hedge
+        # of a short (defined-risk basket) — the naked-short guard rejects
+        # selling a hedge while its short is still open.
+        for pos in sorted(self.positions().get("net", []), key=lambda p: int(p.get("quantity", 0) or 0)):
             if pos.get("quantity", 0) == 0:
                 continue
             side = "SELL" if pos["quantity"] > 0 else "BUY"
@@ -714,6 +730,69 @@ class KiteClient:
 
     # ── Internal helpers ───────────────────────────────────────────────────
 
+    # ── options: naked-short guard, instrument rows, lot sizes ────────────
+    def _naked_short_guard(self, symbol: str, exchange: str, side: str, qty: int) -> None:
+        from option_guard import check, is_option
+        if not is_option(symbol, exchange):
+            return
+        if settings.trading_mode == "PAPER":
+            with self._paper_positions_lock:
+                pos = [dict(p) for p in self._paper_positions]
+        else:
+            # LIVE: fail closed — no positions → no option orders at all.
+            pos = (self.positions_cached() or {}).get("net", [])
+        check(symbol, exchange, side, int(qty), pos)
+
+    def instrument_row(self, tradingsymbol: str, exchange: str = "") -> Optional[dict]:
+        """Instrument-master row for a contract (from the cached NFO/BFO/MCX/CDS
+        lists). None when the master isn't loaded or the symbol is unknown."""
+        idx = getattr(self, "_inst_index", None)
+        if idx is None:
+            idx = self._inst_index = {}
+        exs = [exchange.upper()] if exchange else []
+        exs += [e for e in ("NFO", "BFO", "MCX", "CDS", "NSE", "BSE") if e not in exs]
+        for ex in exs:
+            rows = self._instruments_cache.get(ex)
+            if not rows:
+                continue
+            m = idx.get(ex)
+            if m is None or len(m) == 0:
+                m = idx[ex] = {r.get("tradingsymbol"): r for r in rows}
+            r = m.get(tradingsymbol)
+            if r:
+                return r
+        return None
+
+    def lot_size_for(self, tradingsymbol: str, exchange: str = "") -> Optional[int]:
+        r = self.instrument_row(tradingsymbol, exchange)
+        if r and int(r.get("lot_size") or 0) > 0:
+            return int(r["lot_size"])
+        return None
+
+    def refresh_lot_sizes(self, exchange: str = "NFO") -> dict:
+        """Update the underlying → lot table from the instrument master
+        (nearest-expiry FUT/OPT row per name). Exchange lot sizes change
+        (NIFTY 75 → 65 etc.) — the master is the source of truth."""
+        rows = self._instruments_cache.get(exchange) or []
+        best: dict[str, tuple] = {}
+        for r in rows:
+            if r.get("instrument_type") not in ("FUT", "CE", "PE"):
+                continue
+            n, e, lot = r.get("name"), str(r.get("expiry") or ""), int(r.get("lot_size") or 0)
+            if not n or lot <= 0:
+                continue
+            if n not in best or e < best[n][0]:
+                best[n] = (e, lot)
+        changed = {}
+        for n, (_e, lot) in best.items():
+            if _FON_LOT_SIZES.get(n) != lot:
+                changed[n] = (_FON_LOT_SIZES.get(n), lot)
+                _FON_LOT_SIZES[n] = lot
+        if changed:
+            logger.info("[kite] lot sizes refreshed from {} instrument master: {}", exchange,
+                        {k: v for k, v in list(changed.items())[:12]})
+        return changed
+
     def _validated_quantity(
         self, symbol: str, exchange: str, product: str, quantity: int
     ) -> int:
@@ -727,7 +806,12 @@ class KiteClient:
             raise InputException(f"Invalid quantity {quantity} for {symbol}")
 
         if product == "NRML" or exchange in ("NFO", "BFO", "CDS", "MCX"):
-            lot = _FON_LOT_SIZES.get(symbol)
+            lot = None
+            try:
+                lot = self.lot_size_for(symbol, exchange)
+            except Exception:
+                lot = None
+            lot = lot or _FON_LOT_SIZES.get(symbol)
             if lot is None:
                 # Contract symbols (BAJFINANCE26JUL1050CE) miss a table keyed by
                 # underlying — live 2026-07-13: qty 70/262/46 option entries
@@ -1047,6 +1131,8 @@ class KiteClient:
                 )
                 if not triggered:
                     continue
+                if not self._fill_time_guard_ok(order):
+                    continue
                 # CAS: only fill if still TRIGGER PENDING — snapshot under lock prevents double-fill race
                 with self._paper_orders_lock:
                     if order["status"] != "TRIGGER PENDING":
@@ -1072,6 +1158,8 @@ class KiteClient:
                 )
                 if not crossed:
                     continue
+                if not self._fill_time_guard_ok(order):
+                    continue
                 # CAS: only fill if still OPEN — snapshot under lock prevents double-fill race
                 with self._paper_orders_lock:
                     if order["status"] != "OPEN":
@@ -1087,6 +1175,24 @@ class KiteClient:
                 logger.info("[PAPER] LIMIT fill — {} {} qty={} limit=₹{} ltp=₹{}",
                             order["transaction_type"], symbol,
                             order["quantity"], limit_px, ltp)
+
+    def _fill_time_guard_ok(self, order: dict) -> bool:
+        """A resting option SELL (SL-M/LIMIT) that would now open a naked
+        short is cancelled instead of filled."""
+        if order.get("transaction_type") != "SELL":
+            return True
+        try:
+            self._naked_short_guard(order["tradingsymbol"], order.get("exchange", ""), "SELL",
+                                    int(order.get("quantity") or 0))
+            return True
+        except Exception as exc:
+            with self._paper_orders_lock:
+                if order.get("status") in ("OPEN", "TRIGGER PENDING"):
+                    order["status"] = "CANCELLED"
+                    order["status_message"] = str(exc)[:200]
+            logger.warning("[PAPER] {} {} cancelled at fill: {}", order.get("order_type"),
+                           order.get("tradingsymbol"), exc)
+            return False
 
     def update_paper_pnl(self, symbol: str, ltp: float) -> None:
         """

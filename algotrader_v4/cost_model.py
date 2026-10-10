@@ -27,8 +27,8 @@ from __future__ import annotations
 _EXCH = {
     "EQ_INTRADAY": {"NSE": 0.0000297, "BSE": 0.0000375},
     "EQ_DELIVERY": {"NSE": 0.0000297, "BSE": 0.0000375},
-    "FUT": {"NSE": 0.0000173},
-    "OPT": {"NSE": 0.0003503},
+    "FUT": {"NSE": 0.0000173, "NFO": 0.0000173},
+    "OPT": {"NSE": 0.0003503, "NFO": 0.0003503, "BSE": 0.000325, "BFO": 0.000325},
     "MCX_FUT": {"MCX": 0.0000210},
     "CDS_FUT": {"NSE": 0.0000035, "CDS": 0.0000035},
 }
@@ -91,3 +91,44 @@ def costs(kind: str, qty_units: float, entry: float, exit: float, side: str = "B
 def total(kind: str, qty_units: float, entry: float, exit: float, side: str = "BUY",
           exchange: str = "") -> float:
     return costs(kind, qty_units, entry, exit, side, exchange)["total"]
+
+
+# ── per-order costs (multi-leg option baskets, scalps) ─────────────────────
+def order_costs(kind: str, side: str, qty_units: float, price: float, exchange: str = "") -> dict:
+    """Charges for ONE executed order (one leg, one direction).
+
+    Options (kind OPT): flat ₹20 brokerage per executed order, STT 0.1% of
+    premium on the SELL side only, exchange transaction charge on premium
+    turnover (NSE 0.03503%, BSE/BFO 0.0325%), SEBI ₹10/crore, GST 18% on
+    (brokerage + exchange + SEBI), stamp duty 0.003% on the BUY side only.
+    A round trip = order_costs(entry) + order_costs(exit) and equals costs()."""
+    if kind not in KINDS:
+        raise ValueError(f"unknown cost kind {kind}")
+    q = abs(float(qty_units))
+    val = q * float(price)
+    buy = side.upper() == "BUY"
+    exch_tbl = _EXCH[kind]
+    ex_rate = exch_tbl.get((exchange or "").upper()) or next(iter(exch_tbl.values()))
+    brokerage = _brokerage(kind, val) if q > 0 else 0.0
+    stt = (val * _STT_BUY.get(kind, 0.0)) if buy else (val * _STT_SELL[kind])
+    exch = val * ex_rate
+    sebi = val * SEBI
+    gst = (brokerage + exch + sebi) * GST
+    stamp = val * _STAMP_BUY[kind] if buy else 0.0
+    tot = brokerage + stt + exch + sebi + gst + stamp
+    return {"kind": kind, "side": side.upper(), "brokerage": round(brokerage, 2), "stt": round(stt, 2),
+            "exchange": round(exch, 2), "sebi": round(sebi, 4), "gst": round(gst, 2),
+            "stamp": round(stamp, 2), "total": round(tot, 4), "turnover": round(val, 2)}
+
+
+def legs_costs(legs: list, exchange: str = "NFO") -> dict:
+    """Sum of order_costs over executed option legs.
+    legs: [{"side": "BUY"|"SELL", "qty": units, "price": premium}, ...]"""
+    agg = {"brokerage": 0.0, "stt": 0.0, "exchange": 0.0, "sebi": 0.0, "gst": 0.0, "stamp": 0.0,
+           "total": 0.0, "turnover": 0.0, "orders": 0}
+    for lg in legs:
+        c = order_costs("OPT", lg["side"], lg["qty"], lg["price"], lg.get("exchange") or exchange)
+        for k in ("brokerage", "stt", "exchange", "sebi", "gst", "stamp", "total", "turnover"):
+            agg[k] += c[k]
+        agg["orders"] += 1
+    return {k: (round(v, 2) if isinstance(v, float) else v) for k, v in agg.items()}
