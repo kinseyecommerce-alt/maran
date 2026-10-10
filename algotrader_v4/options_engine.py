@@ -722,15 +722,19 @@ class OptionsEngine:
 
     # ── placement ───────────────────────────────────────────────────────────
     def open_basket(self, structure: str, und: str, reason: str = "", spot: Optional[float] = None,
-                    expiry: Optional[str] = None, short_strikes: Optional[dict] = None) -> dict:
+                    expiry: Optional[str] = None, short_strikes: Optional[dict] = None,
+                    agent: str = "opt_baskets", family: Optional[str] = None) -> dict:
         ok, why = self._market_ok()
         if not ok:
             return {"ok": False, "why": why}
         if not self.replay:
             from owner_universe import owner_universe
+            fok, fwhy = owner_universe.agent_allowed(agent)
+            if not fok:
+                return {"ok": False, "why": fwhy}
             if not owner_universe.fo_underlying_allowed(und):
                 return {"ok": False, "why": f"PAUSED (owner): {und} options not in the owner universe"}
-        family = f"opt_sell:{structure}"
+        family = family or f"opt_sell:{structure}"
         gok, factor, gwhy = self.family_gate(family)
         if not gok:
             return {"ok": False, "why": gwhy}
@@ -752,6 +756,7 @@ class OptionsEngine:
         if not b:
             self.stats["baskets_rejected"] += 1
             return {"ok": False, "why": why}
+        b.family = family
         if (date.fromisoformat(b.expiry) - self.now().date()).days < 1:
             return {"ok": False, "why": "expiry-day contracts are never sold (gamma risk)"}
         budget = self.risk_budget(factor)
@@ -930,7 +935,7 @@ class OptionsEngine:
 
     # ── option buying ───────────────────────────────────────────────────────
     def open_buy(self, und: str, typ: str, family: str = "opt_buy:TREND", pattern: str = "",
-                 reason: str = "", spot: Optional[float] = None) -> dict:
+                 reason: str = "", spot: Optional[float] = None, agent: str = "options") -> dict:
         ok, why = self._market_ok()
         if not ok:
             return {"ok": False, "why": why}
@@ -938,6 +943,10 @@ class OptionsEngine:
             return {"ok": False, "why": f"{und}: the options engine trades index options only"}
         if not self.replay:
             from owner_universe import owner_universe
+            fok, fwhy = owner_universe.agent_allowed(agent)
+            if not fok:
+                self.stats["buy_gate_skips"] += 1
+                return {"ok": False, "why": fwhy}
             if not owner_universe.fo_underlying_allowed(und):
                 return {"ok": False, "why": f"PAUSED (owner): {und} options not in the owner universe"}
         gok, factor, gwhy = self.family_gate(family)

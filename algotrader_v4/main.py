@@ -1288,7 +1288,8 @@ def bot_status():
         from owner_universe import owner_universe
         _u = owner_universe.status()
         status["owner_universe"] = {k: _u[k] for k in ("restricted", "segments", "nse_eq_universe",
-                                                       "nse_fo_underlyings", "reason", "updated_at")}
+                                                       "nse_fo_underlyings", "reason", "updated_at",
+                                                       "focus", "focus_reason")}
     except Exception as exc:
         status["owner_universe"] = {"error": str(exc)}
     return status
@@ -2762,6 +2763,39 @@ class OwnerUniverseRequest(BaseModel):
     nse_fo_underlyings: Optional[list[str]] = None   # e.g. ["NIFTY"]; [] = all
     restricted: bool = True
     reason: str = ""
+
+
+class OwnerFocusRequest(BaseModel):
+    focus: Optional[str] = None                      # "nifty_intraday_options" | null/"" to clear
+    reason: str = ""
+
+
+@app.post("/owner/focus", tags=["Owner"])
+def owner_focus_set(req: OwnerFocusRequest, request: Request):
+    """Owner-only FOCUS mode (persistent, reversible). While set, only the focus
+    agent opens new entries; everything else shows PAUSED (focus). Exits allowed."""
+    from owner_universe import owner_universe
+    try:
+        st = owner_universe.set_focus(req.focus, _owner_actor(request), req.reason)
+    except ValueError as exc:
+        raise HTTPException(400, str(exc))
+    try:
+        from fast_scalper import fast_scalper
+        fast_scalper.apply_owner_universe()
+    except Exception:
+        pass
+    try:
+        from segments import segment_manager
+        segment_manager.supervise(force=True)
+    except Exception:
+        pass
+    return st
+
+
+@app.get("/agents/nifty_options_intraday", tags=["Owner"])
+def nifty_options_agent_status():
+    from nifty_options_agent import nifty_options_agent
+    return nifty_options_agent.status()
 
 
 @app.get("/owner/universe", tags=["Owner"])
@@ -4691,6 +4725,9 @@ async def on_startup():
                     await asyncio.to_thread(options_engine.reconcile_ledger)
                     if kite_client._kite is not None:
                         await asyncio.to_thread(options_engine.step)
+                        # focused agent (owner focus nifty_intraday_options) — PAPER only
+                        from nifty_options_agent import nifty_options_agent
+                        await asyncio.to_thread(nifty_options_agent.step, options_engine)
                 except Exception as _oe_exc:
                     options_engine.last_error = f"loop: {_oe_exc}"
                     logger.debug("[options] loop: {}", _oe_exc)

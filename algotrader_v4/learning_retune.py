@@ -365,6 +365,12 @@ def retune_all(sl, segments: Optional[list[str]] = None, history: Optional[Histo
             out["retunes"].append(retune_option_scalper(sl))
         except Exception as exc:
             out["errors"].append(f"option scalper: {exc}")
+        try:                                   # focused agent: walk-forward research gate
+            from nifty_options_agent import nightly as _noi_nightly
+            o = _noi_nightly(sl)
+            out["gate"]["nifty_options_intraday"] = o.get("gate", {})
+        except Exception as exc:
+            out["errors"].append(f"nifty_options_intraday: {exc}")
     out["history_notes"] = history.notes
     return out
 

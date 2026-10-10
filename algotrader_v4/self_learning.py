@@ -411,6 +411,11 @@ class SelfLearning:
             return OPTION_FAMILIES[name]
         if name.startswith("scalp:"):
             return SCALP
+        if name.startswith("noi_buy:"):          # focused NIFTY options agent (bounded)
+            from nifty_options_agent import NOI_BUY_SPEC
+            return NOI_BUY_SPEC
+        if name.startswith("noi_sell:"):
+            return OPT_SELL
         if name.startswith("policy:"):
             try:
                 from agent_policy import POLICY_SPECS
