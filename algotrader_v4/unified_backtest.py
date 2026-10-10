@@ -173,13 +173,39 @@ def lot_size(name: str = "NIFTY") -> int:
     return 65
 
 
+_NOT_IN_PHASE1 = ("should_exit_position",)    # exit-only methods: never run when signals are generated
+
+
+def _signal_source(src: str) -> str:
+    """Source with exit-only methods removed (AST), so an exit-rule fix does
+    not invalidate cached ENTRY signals that it cannot affect. Phase 1 only
+    calls evaluate_tick(); should_exit_position runs in phase 2 (Sim._manage)
+    on every run, uncached."""
+    import ast
+    try:
+        tree = ast.parse(src)
+    except SyntaxError:
+        return src
+    lines = src.splitlines(keepends=True)
+    cut: list[tuple[int, int]] = []
+    for node in ast.walk(tree):
+        if isinstance(node, ast.ClassDef):
+            for f in node.body:
+                if isinstance(f, ast.FunctionDef) and f.name in _NOT_IN_PHASE1:
+                    start = min([f.lineno] + [d.lineno for d in f.decorator_list]) - 1
+                    cut.append((start, f.end_lineno))
+    for a, b in sorted(cut, reverse=True):
+        del lines[a:b]
+    return "".join(lines)
+
+
 def code_version() -> str:
     h = hashlib.sha1()
     h.update(GEN_VERSION.encode())
     for f in ("agents/strategy_agents.py", "tick_engine.py"):      # the code that produces cached signals
         p = HERE / f
         if p.exists():
-            h.update(p.read_bytes())
+            h.update(_signal_source(p.read_text()).encode() if f.endswith("strategy_agents.py") else p.read_bytes())
     return h.hexdigest()[:12]
 
 
@@ -602,10 +628,18 @@ class Sim:
             return
         ltp = b[4]
         atr = _atr(bars[: i + 1])
+        # live resolution order (base_agent._place_orders / _register_position):
+        # absolute price → agent pct (FuturesAgent carries only stop_loss_pct /
+        # target_pct) → default. Before 2026-10-10 the pct fields were ignored
+        # here, so futures ran without its own target and with a generic stop.
         stop = float(s.get("stop_loss") or 0)
+        if (not stop or stop <= 0) and float(s.get("stop_loss_pct") or 0) > 0:
+            stop = ltp * (1 - side * float(s["stop_loss_pct"]) / 100.0)
         if not stop or (stop - ltp) * side >= 0 or abs(stop - ltp) > 0.2 * ltp:
             stop = ltp - side * max(1.5 * atr, ltp * 0.003)
         target = float(s.get("target") or 0)
+        if (not target or target <= 0) and float(s.get("target_pct") or 0) > 0:
+            target = ltp * (1 + side * float(s["target_pct"]) / 100.0)
         if target and (target - ltp) * side <= 0:
             target = 0.0
         dist = abs(ltp - stop)
@@ -737,6 +771,10 @@ class Sim:
                     should, why = o.should_exit_position(p, ind)
                 except Exception:
                     should, why = False, ""
+                if should and not int(self.p.get("signal_exits", 1)):
+                    from exit_policy import is_mandatory_exit
+                    if not is_mandatory_exit(str(why)):
+                        should = False            # discretionary indicator exit disabled by policy
                 if should and ts_close - tr.entry_ts >= 120:
                     px, _how = mk.fill(d, i, -pos["side"], self.latency, SLIP_BPS.get(pos["seg"], 2.0))
                     self._exit_all(pos, ts_close, px, f"brain:{str(why)[:40]}")

@@ -66,7 +66,7 @@ WINDOWS = {
 
 
 def _spec(daily_default: int, agent: str, time_stop: tuple, cooldown: tuple = (15, 5, 60),
-          edge: tuple = (2.5, 2.0, 4.0)) -> dict:
+          edge: tuple = (2.5, 2.0, 4.0), signal_exits: int = 1) -> dict:
     hard = HARD_DAILY_CAP[agent]
     hs = HARD_SYMBOL_CAP[agent]
     return {
@@ -77,6 +77,10 @@ def _spec(daily_default: int, agent: str, time_stop: tuple, cooldown: tuple = (1
         # smarter exits (exit_policy)
         "be_r": (1.0, 0.5, 1.5), "partial_r": (1.5, 1.0, 2.5), "partial_frac": (0.5, 0.25, 0.5),
         "trail_atr_mult": (3.0, 2.0, 4.0), "time_stop_min": time_stop,
+        # 1 = also act on the agent's DISCRETIONARY indicator exits (Supertrend /
+        # MACD / RSI / EMA flips); 0 = mandatory exits only (own SL/target/
+        # square-off) + the exit_policy machine. Default chosen by walk-forward.
+        "signal_exits": (signal_exits, 0, 1),
         # filters
         "vix_spike_pct": (15.0, 10.0, 25.0), "spread_mult": (2.5, 1.5, 4.0),
     }

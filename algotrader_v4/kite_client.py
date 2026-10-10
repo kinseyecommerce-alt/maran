@@ -64,7 +64,10 @@ _PAPER_LIMIT_EXPIRY_SEC   = 15 * 60   # cancel unfilled OPEN LIMIT orders after 
 
 # ── F&O lot sizes (NSE — as of 2025, update after each expiry revision) ────
 _FON_LOT_SIZES: dict[str, int] = {
-    "NIFTY": 75, "BANKNIFTY": 30, "FINNIFTY": 65, "MIDCPNIFTY": 120,
+    # fallback only — refresh_lot_sizes() overwrites from the instrument master.
+    # NIFTY lot is 65 (NSE revision, 2025); 75 was stale and produced
+    # non-multiple futures quantities (jag 2026-10-10 backtest audit).
+    "NIFTY": 65, "BANKNIFTY": 30, "FINNIFTY": 65, "MIDCPNIFTY": 120,
     "RELIANCE": 250, "TCS": 150, "INFY": 300, "HDFCBANK": 550,
     "ICICIBANK": 700, "SBIN": 1500, "AXISBANK": 1200, "KOTAKBANK": 400,
     "LT": 300, "WIPRO": 1500, "BAJFINANCE": 125, "MARUTI": 100,

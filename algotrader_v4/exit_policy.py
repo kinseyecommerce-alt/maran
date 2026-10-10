@@ -65,6 +65,22 @@ class ExitAction:
     why: str = ""
 
 
+# Agent "brain" exits (should_exit_position) mix two kinds of rule: MANDATORY
+# risk exits (own SL / target / session square-off / rollover / option theta
+# & expiry) and DISCRETIONARY indicator exits (Supertrend flip, MACD+trend,
+# RSI exhaustion, EMA breakdown, momentum fading …). The policy param
+# signal_exits (agent_policy) = 0 keeps only the mandatory ones; the stop /
+# breakeven / trail / time-stop machine above still manages every trade.
+import re as _re
+_MANDATORY_EXIT = _re.compile(r"\bSL\b|stop.?loss|\btarget\b|\bTGT\b|square|rollover|forced exit|theta flatten|time.?stop",
+                              _re.IGNORECASE)
+
+
+def is_mandatory_exit(reason: str) -> bool:
+    """True for risk exits that must always be honoured (see note above)."""
+    return bool(_MANDATORY_EXIT.search(reason or ""))
+
+
 def _p(params: Optional[dict], k: str) -> float:
     if params and k in params and params[k] is not None:
         return float(params[k])

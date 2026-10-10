@@ -1225,6 +1225,20 @@ class BaseAgent(ABC):
         # futures signal carries a futures_symbol + lot_size.
         _lot_size = signal.get("lot_size", 1)
         if _lot_size > 1 and signal.get("futures_symbol"):
+            # The exchange lot comes from the Kite instrument master
+            # (kite_client._FON_LOT_SIZES, refreshed on load), never an
+            # agent's static table: FuturesAgent.LOT_SIZES carried NIFTY=75
+            # after NSE's revision to 65 → quantities not a lot multiple.
+            try:
+                from kite_client import _FON_LOT_SIZES as _kl
+                _und = str(signal.get("underlying") or snap.symbol).upper()
+                if int(_kl.get(_und) or 0) > 1 and int(_kl[_und]) != int(_lot_size):
+                    logger.warning("[{}] {} lot_size {} → {} (instrument master)", self.name, _und,
+                                   _lot_size, _kl[_und])
+                    _lot_size = int(_kl[_und])
+                    signal["lot_size"] = _lot_size
+            except Exception:
+                pass
             qty = risk_manager.calculate_futures_qty(ltp, _lot_size, agent=self.name)
         elif getattr(settings, "use_atr_sizing", False) and atr_14 > 0:
             # When the signal carries the stop that will actually be placed,
@@ -2269,6 +2283,18 @@ class BaseAgent(ABC):
             should, reason = self.should_exit_position(pos, ind)
             if not should:
                 continue
+            # Policy: discretionary indicator exits (Supertrend/MACD/RSI/EMA
+            # flips) only when this agent's walk-forward-chosen signal_exits=1.
+            # Mandatory exits (own SL/target/square-off/rollover) always pass;
+            # the TSL/exit_policy stop, breakeven, trail and time stop still run.
+            try:
+                from agent_policy import live_params as _lp, POLICY_SPECS as _PS
+                from exit_policy import is_mandatory_exit as _mand
+                if (self.name in _PS and not int(_lp(self.name).get("signal_exits", 1))
+                        and not _mand(str(reason))):
+                    continue
+            except Exception:
+                pass
             exit_side  = "SELL" if pos["quantity"] > 0 else "BUY"
             entry_side = "BUY" if pos["quantity"] > 0 else "SELL"
             qty  = abs(pos["quantity"])

@@ -797,8 +797,13 @@ class IntradayAgent(BaseAgent):
             return False, ""
 
         atr      = ind.atr_14 or entry * 0.005
-        sl_dist  = max(atr * self.SL_ATR,  entry * self.SL_MIN_PCT  / 100)
-        tgt_dist = max(atr * self.TGT_ATR, entry * self.TGT_MIN_PCT / 100)
+        # Same floors as the bracket placed at entry (evaluate_tick uses
+        # settings.sl_pct_intraday / tgt_pct_intraday). Before 2026-10-10 the
+        # exit used SL_MIN_PCT 0.5 / TGT_MIN_PCT 0.8, so the "brain" stop and
+        # target fired at ~⅓ of the placed stop and ~¼ of the placed target —
+        # the position was sized for one bracket and managed by another.
+        sl_dist  = max(atr * self.SL_ATR,  entry * settings.sl_pct_intraday  / 100)
+        tgt_dist = max(atr * self.TGT_ATR, entry * settings.tgt_pct_intraday / 100)
 
         if side == "BUY":
             sl_price = entry - sl_dist
