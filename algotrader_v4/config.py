@@ -337,6 +337,12 @@ class Settings(BaseSettings):
     # Per-agent override (min_edge_cost_ratio_<agent_name>); 0 = use the global.
     # Scalping gets a stricter floor — its edge is thinnest relative to costs.
     min_edge_cost_ratio_scalping: float = 3.0
+    # All-agents "trade less, better" (jag 2026-10-10): agent_policy gate
+    # (windows, liquidity whitelist, caps, cool-downs, loss stops, event/VIX/
+    # spread filters, cost-edge) and exit_policy smart exits (breakeven, partial,
+    # chandelier trail, time stop, book flip). Both only ever block/shrink/tighten.
+    use_agent_policy_gate: bool = True
+    use_smart_exits: bool = True
 
     # Decision cadence — THE churn fix (live 2026-07-10: tick-cadence
     # decisions produced 200 round trips in 32 minutes; gross −₹5.4k but

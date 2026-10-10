@@ -778,6 +778,11 @@ class StrategyInventor:
             strat.next_entry_ts = time.time() + 300
             strat.last_error = f"entry blocked: {why_u}"[:200]
             return {"ok": False, "reason": why_u}
+        from agent_policy import live_pre_check, live_on_entry
+        _dec = live_pre_check("invent", sym, strat.segment)
+        if not _dec.ok:
+            strat.next_entry_ts = time.time() + 120
+            return {"ok": False, "reason": f"policy: {_dec.why}"}
         tag = f"INVENTED-{strat.id}"
         try:
             if strat.segment in _NATIVE:

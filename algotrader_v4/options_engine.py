@@ -734,6 +734,11 @@ class OptionsEngine:
         gok, factor, gwhy = self.family_gate(family)
         if not gok:
             return {"ok": False, "why": gwhy}
+        if not self.replay:                    # all-agents policy gate (windows, caps, filters, allocation)
+            from agent_policy import live_pre_check
+            _dec = live_pre_check("opt_baskets", und, "NSE_FO")
+            if not _dec.ok:
+                return {"ok": False, "why": f"policy: {_dec.why}"}
         with self._lock:
             open_b = [b for b in self.baskets.values() if b.status == "OPEN"]
             if len(open_b) >= MAX_OPEN_BASKETS:
@@ -801,6 +806,9 @@ class OptionsEngine:
         b.costs_entry = legs_costs(fills)
         self._price(b, b.spot_entry)
         b.status, b.opened = "OPEN", self._iso()
+        if not self.replay:
+            from agent_policy import live_on_entry
+            live_on_entry("opt_baskets", b.underlying)
         b.events.append({"ts": b.opened, "event": "opened",
                          "detail": f"{b.lots} lot(s), credit Rs {b.credit:.2f}/unit, max loss Rs {b.max_loss:,.0f}"})
         with self._lock:
@@ -936,6 +944,13 @@ class OptionsEngine:
         if not gok:
             self.stats["buy_gate_skips"] += 1
             return {"ok": False, "why": gwhy}
+        if not self.replay:                    # all-agents policy gate; size multiplier ≤ 1
+            from agent_policy import live_pre_check
+            _dec = live_pre_check("options", und, "NSE_FO")
+            if not _dec.ok:
+                self.stats["buy_gate_skips"] += 1
+                return {"ok": False, "why": f"policy: {_dec.why}"}
+            factor = float(factor) * _dec.size_mult
         with self._lock:
             open_p = [p for p in self.buys.values() if p.status == "OPEN"]
             if len(open_p) >= MAX_OPEN_BUYS or any(p.underlying == und for p in open_p):
@@ -1014,6 +1029,9 @@ class OptionsEngine:
                      reason=f"{reason} | {gwhy}")
         with self._lock:
             self.buys[pid] = pos
+        if not self.replay:
+            from agent_policy import live_on_entry
+            live_on_entry("options", und)
         self.stats["buys_opened"] += 1
         self._save()
         return {"ok": True, "position": pos.d()}

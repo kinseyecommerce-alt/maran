@@ -77,6 +77,10 @@ def summary() -> int:
 section("SIMULATION ORDERS FLOW")
 
 from config import settings
+# these suites pin pre-existing behaviour; the all-agents policy gate and smart
+# exits are covered by test_all_agents_policy.py
+settings.use_agent_policy_gate = False
+settings.use_smart_exits = False
 settings.trading_mode = "PAPER"  # ensure paper mode for all tests
 
 from kite_client import kite_client

@@ -52,6 +52,10 @@ from unittest.mock import patch
 os.environ.setdefault("TRADING_MODE", "PAPER")
 
 from config import settings
+# these suites pin pre-existing behaviour; the all-agents policy gate and smart
+# exits are covered by test_all_agents_policy.py
+settings.use_agent_policy_gate = False
+settings.use_smart_exits = False
 # This suite verifies pipeline MECHANICS (ingestion → order → exit), not
 # pattern/agent selection policy — run with the evidence kill-list cleared
 # and the regime gate off so crafted scenarios can use any pattern/agent

@@ -1110,6 +1110,16 @@ class TickEngine:
         # alongside running agents.
         try:
             from trailing_sl_engine import trailing_sl_engine as _tsl_eng
+            # spread EWMA (spread-widening filter) + top-5 book imbalance
+            # (adverse book-flip exit) — observation only, no decisions here.
+            if tick.bid > 0 and tick.ask >= tick.bid:
+                from market_filters import spread_tracker as _spt
+                _spt.observe(symbol, tick.ask - tick.bid)
+            if tick.bid_depth and tick.ask_depth:
+                _bq = sum(float(q) for _p, q, *_r in tick.bid_depth[:5])
+                _aq = sum(float(q) for _p, q, *_r in tick.ask_depth[:5])
+                if _bq + _aq > 0:
+                    _tsl_eng.observe_book(symbol, _bq / (_bq + _aq))
             if _tsl_eng.has_active_for(symbol):
                 asyncio.create_task(
                     _tsl_eng.on_tick(symbol, tick.ltp, ind.atr_14 or 0.0))

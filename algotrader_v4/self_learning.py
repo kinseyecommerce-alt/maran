@@ -528,6 +528,11 @@ class SelfLearning:
         n = self.store.x(f"INSERT OR IGNORE INTO journal({','.join(cols)}) VALUES({','.join('?' * len(cols))})", vals)
         if n:
             self._after_trade(key, r)
+            try:                                   # per-agent policy state (cool-down, loss stop)
+                from agent_policy import live_on_close
+                live_on_close(r["strategy"], r["segment"], r.get("symbol", ""), r["net"])
+            except Exception:
+                pass
         return bool(n)
 
     def _after_trade(self, key: str, r: dict) -> None:

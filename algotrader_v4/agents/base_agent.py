@@ -2087,6 +2087,27 @@ class BaseAgent(ABC):
             except Exception:
                 pass
 
+        # All-agents policy gate (jag 2026-10-10 "trade less, better"): session
+        # windows, liquidity whitelist, daily/symbol caps, cool-downs, loss
+        # stops, event/VIX/spread filters, regime/meta-learner allocation.
+        # Only blocks or shrinks (size multiplier ≤ 1).
+        try:
+            from agent_policy import live_pre_check, POLICY_SPECS as _PS
+            if self.name in _PS:
+                _seg = "NSE_FO" if int(signal.get("lot_size", 1) or 1) > 1 else "NSE_EQ"
+                _dec = live_pre_check(self.name, snap.symbol, _seg, float(snap.tick.bid or 0),
+                                      float(snap.tick.ask or 0))
+                if not _dec.ok:
+                    self._policy_skips = getattr(self, "_policy_skips", 0) + 1
+                    if self._policy_skips % 20 == 1:
+                        logger.info("[{}] {} policy gate: {} (skip #{})", self.name, snap.symbol, _dec.why,
+                                    self._policy_skips)
+                    return
+                if _dec.size_mult < 1.0:
+                    signal["_learn_size_factor"] = float(signal.get("_learn_size_factor", 1.0)) * _dec.size_mult
+        except Exception as exc:
+            logger.debug("[{}] policy gate unavailable: {}", self.name, exc)
+
         if not await self._pre_claim_checks(snap, action, loop, signal):
             return
 
@@ -2155,11 +2176,38 @@ class BaseAgent(ABC):
                     order_guard.release_claim(snap.symbol, self.name, action)
                     return
 
+        # Policy cost-edge gate: expected move × qty ≥ k × (round-trip costs +
+        # spread × qty), k a bounded per-agent learning param (≥ the global floor).
+        try:
+            from agent_policy import live_edge_ok, POLICY_SPECS as _PS
+            if self.name in _PS:
+                _ltp = float(snap.tick.ltp or 0)
+                _ta, _tp = signal.get("target"), signal.get("target_pct")
+                _td = (abs(_ta - _ltp) if _ta and _ta > 0 else _ltp * _tp / 100 if _tp and _tp > 0 else 0.0)
+                if _td > 0 and _ltp > 0:
+                    from risk_manager import compute_round_trip_cost
+                    _prod = ("NRML" if signal.get("lot_size", 1) > 1 else "CNC" if self.name == "swing" else "MIS")
+                    _c = compute_round_trip_cost(snap.symbol, qty, _ltp, product=_prod)
+                    _sp = max(0.0, float(snap.tick.ask or 0) - float(snap.tick.bid or 0)) if snap.tick.bid else 0.0
+                    _ok, _why = live_edge_ok(self.name, qty, _td, _c, _sp)
+                    if not _ok:
+                        self._cost_gate_skips += 1
+                        logger.info("[{}] {} policy edge skip: {}", self.name, snap.symbol, _why)
+                        order_guard.release_claim(snap.symbol, self.name, action)
+                        return
+        except Exception as exc:
+            logger.debug("[{}] policy edge check unavailable: {}", self.name, exc)
+
         _order_t0 = _time.monotonic()
         try:
             order_id, sl_order_id, qty = await self._place_orders(snap, action, signal, qty, loop)
         except RuntimeError:
             return
+        try:
+            from agent_policy import live_on_entry
+            live_on_entry(self.name, snap.symbol)
+        except Exception:
+            pass
 
         latency_ms = (_time.monotonic() - _order_t0) * 1000
         self._last_order_latency_ms = latency_ms

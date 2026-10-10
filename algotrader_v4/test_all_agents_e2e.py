@@ -40,6 +40,10 @@ os.environ.setdefault("TRADING_MODE", "PAPER")
 from unittest.mock import MagicMock, patch
 
 from config import settings
+# these suites pin pre-existing behaviour; the all-agents policy gate and smart
+# exits are covered by test_all_agents_policy.py
+settings.use_agent_policy_gate = False
+settings.use_smart_exits = False
 from kite_client import kite_client
 from risk_manager import risk_manager
 from trailing_sl_engine import trailing_sl_engine

@@ -410,12 +410,21 @@ class NativeEngine:
             ver = (learning._state.get(strat.name) or {}).get("version")
         except Exception:
             pass
+        if c.segment == "MCX":                 # all-agents policy gate (windows, caps, filters, allocation)
+            from agent_policy import live_pre_check
+            ba = self.kite_ba.get(key) if hasattr(self, "kite_ba") else None
+            _dec = live_pre_check("mcx_native", c.symbol, "MCX", *(ba[:2] if ba else (0.0, 0.0)))
+            if not _dec.ok:
+                strat.state.last_signal = {"symbol": c.symbol, "action": side, "skipped": f"policy: {_dec.why}"}
+                return None
+            factor = float(factor) * _dec.size_mult
         dist = self.stop_distance(key, lp.get("sl_range_frac"))
         lots, margin_lot, why = self.size_lots(key, dist, factor)
         if lots < 1:
             strat.state.last_signal = {"symbol": c.symbol, "action": side, "skipped": why}
             return None
-        ok_e, why_e = self.edge_ok(key, side, lots, float(lp.get("target_r", TARGET_R)) * dist)
+        ok_e, why_e = self.edge_ok(key, side, lots, float(lp.get("target_r", TARGET_R)) * dist,
+                                   agent="mcx_native" if c.segment == "MCX" else None)
         if not ok_e:
             strat.state.last_signal = {"symbol": c.symbol, "action": side, "skipped": why_e}
             return None
@@ -440,6 +449,9 @@ class NativeEngine:
             self.positions_[key] = pos
             # trades = entries today (same convention as the NSE agents)
             self.trades[c.segment] = self.trades.get(c.segment, 0) + 1
+        if c.segment == "MCX":
+            from agent_policy import live_on_entry
+            live_on_entry("mcx_native", c.symbol)
         strat.state.trades_today += 1
         strat.state.last_signal = {"symbol": c.symbol, "action": side, "price": rec["price"]}
         logger.info("[segment:{}] PAPER {} {} lots={} @ {} ({}) risk=₹{:,.0f} by {}",
@@ -512,7 +524,8 @@ class NativeEngine:
         room = max(0.0, gross - self.notional_open(c.segment))
         return int(min(per_pos, room) // n_lot)
 
-    def edge_ok(self, key: str, side: str, lots: int, target_dist: float) -> tuple[bool, str]:
+    def edge_ok(self, key: str, side: str, lots: int, target_dist: float,
+                agent: Optional[str] = None) -> tuple[bool, str]:
         """Expected gross edge at target must be ≥ native_min_edge_cost_ratio ×
         round-trip costs (MCX/BSE paid ₹7.2k/₹5.8k of costs on Oct 9 for
         noise-sized moves)."""
@@ -533,6 +546,11 @@ class NativeEngine:
         edge = units * target_dist
         if edge < ratio * cost:
             return False, f"edge ₹{edge:,.0f} at target < {ratio:g}× round-trip costs ₹{cost:,.0f}"
+        if agent:                              # per-agent learned k (≥ its floor) incl. the spread
+            from agent_policy import live_edge_ok
+            ba = self.kite_ba.get(key) if hasattr(self, "kite_ba") else None
+            sp = max(0.0, ba[1] - ba[0]) if ba else 0.0
+            return live_edge_ok(agent, units, target_dist, cost, sp)
         return True, "ok"
 
     def open_external(self, segment: str, symbol: str, side: str, *, strategy: str,
@@ -844,6 +862,33 @@ class NativeEngine:
             for st in self.strategies.values():
                 st.state.trades_today, st.state.pnl_today = 0, 0.0
 
+    def _smart_stop(self, key: str, pos: dict, px: float) -> None:
+        """exit_policy overlay for native/invented positions: stop → breakeven
+        at +be_r R, then a 1R chandelier trail from the best price. Tighten only."""
+        try:
+            if not getattr(settings, "use_smart_exits", True) or pos.get("segment") != "MCX":
+                return
+            from agent_policy import agent_of_strategy, live_params
+            agent = agent_of_strategy(pos.get("strategy", ""), pos["segment"]) or "mcx_native"
+            p = live_params(agent)
+            sgn = 1 if pos["qty"] > 0 else -1
+            r0 = pos.setdefault("r0", abs(float(pos["entry"]) - float(pos["sl"])))
+            if r0 <= 0 or not px:
+                return
+            best = pos["best"] = (max if sgn > 0 else min)(pos.get("best", pos["entry"]), px)
+            fav = (best - float(pos["entry"])) * sgn
+            new = None
+            if fav >= float(p["be_r"]) * r0:
+                new = float(pos["entry"])
+                pos["be_done"] = True
+            if pos.get("be_done") and float(p["trail_atr_mult"]) > 0:
+                ch = best - sgn * r0
+                new = ch if new is None or (ch - new) * sgn > 0 else new
+            if new is not None and (new - float(pos["sl"])) * sgn > 0:
+                pos["sl"] = round(new, 4)
+        except Exception as exc:
+            logger.debug("[segment] smart stop {}: {}", key, exc)
+
     def evaluate(self) -> None:
         from segments import segment_manager, SEGMENTS
         self._roll_day()
@@ -853,6 +898,7 @@ class NativeEngine:
             px = self.price[key]
             long = pos["qty"] > 0
             spec = SEGMENTS[pos["segment"]]
+            self._smart_stop(key, pos, px)
             sq_cut = (datetime.combine(now_dt.date(), spec.close_t, tzinfo=now_dt.tzinfo)
                       - timedelta(minutes=spec.squareoff_min_before))
             if (long and px <= pos["sl"]) or (not long and px >= pos["sl"]):

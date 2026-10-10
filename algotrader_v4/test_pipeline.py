@@ -85,6 +85,10 @@ def summary():
 # ══════════════════════════════════════════════════════════════════════════
 section("1. CONFIG / SETTINGS")
 from config import settings
+# these suites pin pre-existing behaviour; the all-agents policy gate and smart
+# exits are covered by test_all_agents_policy.py
+settings.use_agent_policy_gate = False
+settings.use_smart_exits = False
 
 def t_cfg_mode():        assert settings.trading_mode == "PAPER"
 def t_cfg_daily_loss():  assert settings.max_daily_loss > 0

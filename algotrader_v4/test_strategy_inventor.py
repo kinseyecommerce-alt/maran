@@ -17,6 +17,10 @@ os.environ["LEARNING_DB"] = os.path.join(_TMP, "learning.db")   # never the real
 os.environ.setdefault("TRADING_MODE", "PAPER")
 
 from config import settings
+# these suites pin pre-existing behaviour; the all-agents policy gate and smart
+# exits are covered by test_all_agents_policy.py
+settings.use_agent_policy_gate = False
+settings.use_smart_exits = False
 from ist_clock import now_ist
 from strategy_inventor import StrategyInventor, LIVE_CONFIRM_PHRASE
 from segment_engine import UNIVERSE

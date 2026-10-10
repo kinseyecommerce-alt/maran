@@ -84,6 +84,7 @@ MCX_SQ = dtime(23, 15)
 WARMUP_BARS = 260
 MIN_OOS_TRADES = 20
 DSR_MIN = 0.95
+GEN_VERSION = "1"            # bump when gen_symbol_day / _snapshot change
 
 
 # ═════════════════════════════════════════════════════════════════════════════
@@ -174,8 +175,8 @@ def lot_size(name: str = "NIFTY") -> int:
 
 def code_version() -> str:
     h = hashlib.sha1()
-    for f in ("agents/strategy_agents.py", "agents/base_agent.py", "tick_engine.py", "segment_engine.py",
-              "unified_backtest.py"):
+    h.update(GEN_VERSION.encode())
+    for f in ("agents/strategy_agents.py", "tick_engine.py"):      # the code that produces cached signals
         p = HERE / f
         if p.exists():
             h.update(p.read_bytes())

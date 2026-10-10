@@ -370,3 +370,60 @@ def _live_weight(agent: str) -> float:
 
 # the live gate (agents, native engine, inventor, options engine share it)
 agent_gate = AgentGate(weight_fn=_live_weight, filters_live=True)
+
+
+# ── live helpers (one call per entry site) ─────────────────────────────────
+def gate_enabled() -> bool:
+    try:
+        from config import settings
+        return bool(getattr(settings, "use_agent_policy_gate", True))
+    except Exception:
+        return True
+
+
+def live_pre_check(agent: str, symbol: str, segment: str = "", bid: float = 0.0, ask: float = 0.0,
+                   spread_key: str = "") -> Decision:
+    """Live entry pre-check: observes the spread (EWMA), reads India VIX from
+    the regime detector, then runs the shared gate. Only blocks or shrinks;
+    never fails closed on an internal error (logs, returns ok×1.0)."""
+    if not gate_enabled():
+        return Decision(True, "agent policy gate disabled", 1.0)
+    try:
+        from ist_clock import now_ist
+        from market_filters import spread_tracker, live_vix
+        key = spread_key or symbol            # tick_engine observes every tick under the symbol
+        spread = (ask - bid) if (bid and ask and ask >= bid) else None
+        typical = spread_tracker.typical(key)
+        vix, chg = live_vix()
+        return agent_gate.pre_check(agent, symbol, now_ist(), segment, spread=spread, typical_spread=typical,
+                                    vix=vix, vix_chg_pct=chg)
+    except Exception as exc:  # pragma: no cover - defensive
+        return Decision(True, f"gate error ignored: {exc}", 1.0)
+
+
+def live_edge_ok(agent: str, qty: float, expected_move: float, cost_rt: float, spread: float = 0.0) -> tuple[bool, str]:
+    if not gate_enabled() or agent not in POLICY_SPECS:
+        return True, ""
+    try:
+        return AgentGate.edge_ok(agent, qty, expected_move, cost_rt, spread)
+    except Exception as exc:  # pragma: no cover
+        return True, f"edge check error ignored: {exc}"
+
+
+def live_on_entry(agent: str, symbol: str) -> None:
+    if agent in POLICY_SPECS:
+        try:
+            from ist_clock import now_ist
+            agent_gate.on_entry(agent, symbol, now_ist())
+        except Exception:
+            pass
+
+
+def live_on_close(strategy: str, segment: str, symbol: str, net: float) -> None:
+    a = agent_of_strategy(strategy, segment)
+    if a:
+        try:
+            from ist_clock import now_ist
+            agent_gate.on_close(a, symbol, float(net), now_ist())
+        except Exception:
+            pass

@@ -43,6 +43,10 @@ def section(t):
 
 
 from config import settings
+# these suites pin pre-existing behaviour; the all-agents policy gate and smart
+# exits are covered by test_all_agents_policy.py
+settings.use_agent_policy_gate = False
+settings.use_smart_exits = False
 settings.trading_mode = "PAPER"
 from segments import segment_manager, SEGMENTS, _limits
 from segment_engine import native_engine, UNIVERSE
