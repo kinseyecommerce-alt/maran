@@ -389,6 +389,17 @@ def gate_enabled() -> bool:
         return True
 
 
+def _policy_now():
+    """The ONE trading clock (segment_manager.now(): aware IST; test-injectable), so the
+    policy windows agree with the segment hours / native engine that called us."""
+    try:
+        from segments import segment_manager
+        return segment_manager.now()
+    except Exception:
+        from ist_clock import now_ist
+        return now_ist()
+
+
 def live_pre_check(agent: str, symbol: str, segment: str = "", bid: float = 0.0, ask: float = 0.0,
                    spread_key: str = "") -> Decision:
     """Live entry pre-check: observes the spread (EWMA), reads India VIX from
@@ -397,13 +408,12 @@ def live_pre_check(agent: str, symbol: str, segment: str = "", bid: float = 0.0,
     if not gate_enabled():
         return Decision(True, "agent policy gate disabled", 1.0)
     try:
-        from ist_clock import now_ist
         from market_filters import spread_tracker, live_vix
         key = spread_key or symbol            # tick_engine observes every tick under the symbol
         spread = (ask - bid) if (bid and ask and ask >= bid) else None
         typical = spread_tracker.typical(key)
         vix, chg = live_vix()
-        return agent_gate.pre_check(agent, symbol, now_ist(), segment, spread=spread, typical_spread=typical,
+        return agent_gate.pre_check(agent, symbol, _policy_now(), segment, spread=spread, typical_spread=typical,
                                     vix=vix, vix_chg_pct=chg)
     except Exception as exc:  # pragma: no cover - defensive
         return Decision(True, f"gate error ignored: {exc}", 1.0)
@@ -421,8 +431,7 @@ def live_edge_ok(agent: str, qty: float, expected_move: float, cost_rt: float, s
 def live_on_entry(agent: str, symbol: str) -> None:
     if agent in POLICY_SPECS:
         try:
-            from ist_clock import now_ist
-            agent_gate.on_entry(agent, symbol, now_ist())
+            agent_gate.on_entry(agent, symbol, _policy_now())
         except Exception:
             pass
 
@@ -431,7 +440,6 @@ def live_on_close(strategy: str, segment: str, symbol: str, net: float) -> None:
     a = agent_of_strategy(strategy, segment)
     if a:
         try:
-            from ist_clock import now_ist
-            agent_gate.on_close(a, symbol, float(net), now_ist())
+            agent_gate.on_close(a, symbol, float(net), _policy_now())
         except Exception:
             pass
