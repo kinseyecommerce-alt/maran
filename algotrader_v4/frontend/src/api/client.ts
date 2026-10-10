@@ -81,6 +81,11 @@ export const api = {
   learningJournal:   (limit = 100) => ax().get('/learning/journal', { params: { limit } }),
   scalperStatus:     () => ax().get('/scalper/status'),
 
+  // ── Options engine (PAPER only) ─────────────────────────────────────────────
+  optionsStatus:     () => ax().get('/options/status'),
+  optionsScalper:    () => ax().get('/options/scalper'),
+  optionsDemo:       () => ax().get('/options/demo'),
+
 // ── Market ──────────────────────────────────────────────────────────────────
   marketLive:       () => ax().get('/market/live'),
   marketLiveSymbol: (symbol: string) => ax().get(`/market/live/${symbol}`),
