@@ -84,6 +84,9 @@ export const api = {
   scalperBacktestRun: (body: { days?: string[]; latency_ms?: number; use_windows?: boolean; use_whitelist?: boolean } = {}) =>
                        ax().post('/scalper/backtest', { ...body, wait: false }),
   scalperWhitelist:  () => ax().get('/scalper/whitelist'),
+  researchPipeline:  () => ax().get('/research/pipeline'),
+  researchRun:       (body: { days?: number; agents?: string[] } = {}) => ax().post('/research/run', { ...body, wait: false }),
+  agentsPolicy:      () => ax().get('/agents/policy'),
   scalperTicks:      () => ax().get('/scalper/ticks'),
 
   // ── Options engine (PAPER only) ─────────────────────────────────────────────

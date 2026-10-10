@@ -2839,6 +2839,72 @@ class ScalperBacktestRequest(BaseModel):
     wait: bool = False
 
 
+# ── all-agents research (jag 2026-10-10) ─────────────────────────────────────
+class ResearchRunRequest(BaseModel):
+    days: int = 20
+    workers: int = 6
+    agents: Optional[list[str]] = None
+    wait: bool = False
+
+
+@app.get("/research/pipeline", tags=["Learning"])
+def research_pipeline():
+    """Research view: proposed → backtested → probation → promoted / retired,
+    each with its plain-English reason, plus the last real-data backtest per
+    agent and the allocator's weights."""
+    from research_loop import research
+    return research.pipeline()
+
+
+@app.post("/research/run", tags=["Learning"])
+async def research_run(req: ResearchRunRequest):
+    """Run one research cycle now (PAPER only; places no orders)."""
+    from research_loop import research
+    from self_learning import GuardViolation
+    kw = dict(days=max(5, min(int(req.days), 60)), workers=max(1, min(int(req.workers), 7)), agents=req.agents)
+    try:
+        if req.wait:
+            return await asyncio.to_thread(research.run_cycle, **kw)
+        from self_learning import Guard
+        Guard.require_paper()
+        return research.start(**kw)
+    except GuardViolation as exc:
+        raise HTTPException(409, str(exc))
+
+
+@app.get("/agents/policy", tags=["Learning"])
+def agents_policy():
+    """Per-agent policy: params (bounded learning), hard caps, windows, today's gate state, allocation."""
+    import agent_policy as ap
+    from allocator import allocator
+    out = {}
+    for a in ap.AGENTS:
+        out[a] = {"params": ap.live_params(a), "hard_daily_cap": ap.HARD_DAILY_CAP[a],
+                  "hard_symbol_cap": ap.HARD_SYMBOL_CAP[a],
+                  "windows": [f"{x.strftime('%H:%M')}-{y.strftime('%H:%M')}" for x, y in ap.windows_for(a)],
+                  "segment": ap.AGENT_SEGMENT[a]}
+    return {"agents": out, "gate": ap.agent_gate.status(), "allocator": allocator.snapshot(),
+            "enabled": {"policy_gate": bool(getattr(settings, "use_agent_policy_gate", True)),
+                        "smart_exits": bool(getattr(settings, "use_smart_exits", True))}}
+
+
+@app.get("/backtest/unified", tags=["Learning"])
+def backtest_unified(trades: bool = False):
+    """Last unified real-data backtest (all agents, live decision code, costs, walk-forward OOS)."""
+    import unified_backtest as ub
+    p = ub.RESULT_PATH
+    from research_loop import OUT_PATH
+    src = max((x for x in (p, OUT_PATH) if x.exists()), key=lambda x: x.stat().st_mtime, default=None)
+    if src is None:
+        return {"ok": False, "why": "no unified backtest yet — POST /research/run"}
+    import json as _json
+    d = _json.loads(src.read_text())
+    if not trades:
+        for v in (d.get("agents") or {}).values():
+            v.pop("sample_trades", None)
+    return {"ok": True, "source": src.name, **d}
+
+
 @app.get("/scalper/backtest", tags=["Learning"])
 def scalper_backtest_get(trades: bool = True):
     """Last tick-replay backtest of the fast scalper on REAL recorded Kite

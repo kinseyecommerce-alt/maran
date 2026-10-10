@@ -343,6 +343,7 @@ class Settings(BaseSettings):
     # chandelier trail, time stop, book flip). Both only ever block/shrink/tighten.
     use_agent_policy_gate: bool = True
     use_smart_exits: bool = True
+    research_loop_enabled: bool = True                  # nightly master research loop (PAPER only)
 
     # Decision cadence — THE churn fix (live 2026-07-10: tick-cadence
     # decisions produced 200 round trips in 32 minutes; gross −₹5.4k but

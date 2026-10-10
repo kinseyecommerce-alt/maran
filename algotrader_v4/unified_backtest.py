@@ -1198,6 +1198,14 @@ def run(agents: list[str], n_days: int = 20, symbols: Optional[list[str]] = None
                             "sample_trades": [t.d() for t in tr[-15:]]}
         log(f"{a:16s} OOS {st['trades']:4d} trades  net ₹{st['net']:>10,.0f}  costs ₹{st['costs']:>9,.0f}  "
             f"win {st['win_rate']}%  → {verdict(st)}")
+    # live liquidity whitelist: ranked on ALL replayed days (the live gate uses
+    # it going forward; the walk-forward above ranked on train days only)
+    wl: dict = {"ranked": {}}
+    for a in agents:
+        if a in FO_AGENTS:
+            continue
+        wl["ranked"].update(build_whitelist(ds.markets_for(a), ds.days_for(a), [a])["ranked"])
+    res["whitelist"] = wl
     trials: dict[str, int] = defaultdict(int)
     for h in hypotheses or []:
         trials[h.get("agent", "")] += 1
