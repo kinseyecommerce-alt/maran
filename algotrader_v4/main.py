@@ -2902,6 +2902,7 @@ def backtest_unified(trades: bool = False):
     if not trades:
         for v in (d.get("agents") or {}).values():
             v.pop("sample_trades", None)
+            v.pop("equity", None)
     return {"ok": True, "source": src.name, **d}
 
 

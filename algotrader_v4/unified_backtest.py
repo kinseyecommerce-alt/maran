@@ -1205,6 +1205,10 @@ def run(agents: list[str], n_days: int = 20, symbols: Optional[list[str]] = None
         ev = evaluate_agent(ds, a, p)
         st = ev["stats"]
         tr = ev["trades"]
+        st["dsr"] = (round(deflated_sharpe([t.net for t in tr], 1), 3)
+                     if deflated_sharpe([t.net for t in tr], 1) is not None else None)
+        st["sharpe_per_trade"] = (round(statistics.mean([t.net for t in tr]) / statistics.pstdev([t.net for t in tr]), 3)
+                                  if len(tr) > 2 and statistics.pstdev([t.net for t in tr]) > 0 else None)
         base[a] = st
         res["agents"][a] = {"params": p, "stats": st, "verdict": verdict(st),
                             "by_symbol": breakdown(tr, lambda t: t.symbol),
@@ -1212,7 +1216,9 @@ def run(agents: list[str], n_days: int = 20, symbols: Optional[list[str]] = None
                             "by_exit": breakdown(tr, lambda t: t.reason.split(":")[0]),
                             "by_regime": breakdown(tr, lambda t: t.regime),
                             "by_data": breakdown(tr, lambda t: t.data),
-                            "sample_trades": [t.d() for t in tr[-15:]]}
+                            "sample_trades": [t.d() for t in tr[-15:]],
+                            "equity": [[datetime.fromtimestamp(t.exit_ts or t.entry_ts, IST).isoformat(timespec="minutes"),
+                                        round(t.net, 2)] for t in sorted(tr, key=lambda x: x.exit_ts or x.entry_ts)]}
         log(f"{a:16s} OOS {st['trades']:4d} trades  net ₹{st['net']:>10,.0f}  costs ₹{st['costs']:>9,.0f}  "
             f"win {st['win_rate']}%  → {verdict(st)}")
     # live liquidity whitelist: ranked on ALL replayed days (the live gate uses
