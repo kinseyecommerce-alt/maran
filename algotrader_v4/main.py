@@ -2820,12 +2820,98 @@ class ScalperEnableRequest(BaseModel):
 def scalper_enable(req: ScalperEnableRequest):
     from fast_scalper import fast_scalper
     if req.enabled:
+        fast_scalper.user_disabled = False
         r = fast_scalper.start()
         if not r.get("ok"):
             raise HTTPException(409, r.get("reason", "cannot start"))
         return r
     fast_scalper.enabled = False
+    fast_scalper.user_disabled = True
     return {"ok": True, "enabled": False}
+
+
+# ── Fast scalper: real-tick backtest, liquidity whitelist, windows (PAPER) ──
+class ScalperBacktestRequest(BaseModel):
+    days: Optional[list[str]] = None
+    latency_ms: Optional[float] = None
+    use_windows: bool = True
+    use_whitelist: bool = True
+    wait: bool = False
+
+
+@app.get("/scalper/backtest", tags=["Learning"])
+def scalper_backtest_get(trades: bool = True):
+    """Last tick-replay backtest of the fast scalper on REAL recorded Kite
+    ticks (same decision code as live): walk-forward OOS, in-sample reference,
+    previous-rules comparison, per symbol / window / hour stats, costs."""
+    import scalper_backtest as sb
+    r = sb.last_result() or {"ok": False, "why": "no backtest run yet — POST /scalper/backtest"}
+    if not trades:
+        for k in ("walk_forward", "in_sample"):
+            if isinstance(r.get(k), dict):
+                r[k] = {x: v for x, v in r[k].items() if x != "trades"}
+    return {**r, "runner": {"running": sb.runner.running, "started": sb.runner.started,
+                            "last_error": sb.runner.last_error}}
+
+
+@app.post("/scalper/backtest", tags=["Learning"])
+async def scalper_backtest_run(req: ScalperBacktestRequest):
+    """Run the tick-replay backtest (read-only research; places no orders)."""
+    import scalper_backtest as sb
+    kw = dict(days=req.days, latency_ms=req.latency_ms, use_windows=req.use_windows,
+              use_whitelist=req.use_whitelist, save=True)
+    if req.wait:
+        if sb.runner.running:
+            raise HTTPException(409, "a backtest is already running")
+        return await asyncio.to_thread(sb.run, **kw)
+    return sb.runner.start(**kw)
+
+
+@app.get("/scalper/whitelist", tags=["Learning"])
+def scalper_whitelist_get():
+    from scalper_whitelist import whitelist
+    return whitelist.get()
+
+
+@app.post("/scalper/whitelist/rebuild", tags=["Learning"])
+def scalper_whitelist_rebuild():
+    from scalper_whitelist import whitelist
+    return whitelist.rebuild()
+
+
+@app.get("/scalper/config", tags=["Learning"])
+def scalper_config_get():
+    from scalper_config import scalper_config
+    return scalper_config.get()
+
+
+class ScalperConfigRequest(BaseModel):
+    windows: Optional[dict] = None
+    whitelist: Optional[dict] = None
+    hard_caps: Optional[dict] = None
+    symbol_hard_cap: Optional[int] = None
+
+
+@app.post("/scalper/config", tags=["Learning"])
+def scalper_config_set(req: ScalperConfigRequest):
+    """Owner (API key) changes entry windows / whitelist rules, or LOWERS the
+    hard daily ceilings (they can never be raised above the built-in ones)."""
+    from scalper_config import scalper_config
+    patch = {k: v for k, v in req.dict().items() if v is not None}
+    try:
+        return scalper_config.update(patch, actor="owner(api-key)")
+    except ValueError as exc:
+        raise HTTPException(400, str(exc))
+
+
+@app.get("/scalper/ticks", tags=["Learning"])
+def scalper_ticks():
+    """Recorded tick inventory (day/instrument/ticks/span/depth format) + recorder status."""
+    from tick_recorder import depth_recorder
+    from tick_replayer import inventory
+    inv = inventory()
+    return {"recorder": depth_recorder.status(), "files": len(inv), "ticks": sum(r["ticks"] for r in inv),
+            "inventory": inv}
 
 
 # ── Options engine (PAPER): defined-risk baskets, option buying, option scalps ──
@@ -4497,16 +4583,32 @@ async def on_startup():
         asyncio.create_task(_learning_observer(), name="learning_observer").add_done_callback(_log_task_exc)
 
         # Fast scalper on the Kite WebSocket (PAPER only, needs a Kite session).
+        # Supervisor: retries every minute so a Kite login made AFTER boot (e.g.
+        # Monday 08:50 with a weekend-expired token) still starts the scalper —
+        # and with it the depth tick recording — before the open; also rebuilds
+        # the universe/whitelist on a new IST day and flushes the recorder.
         async def _start_scalper() -> None:
             await asyncio.sleep(20)
-            if settings.trading_mode != "PAPER" or not getattr(settings, "fast_scalper_enabled", True):
-                return
-            if kite_client._kite is None:
-                logger.info("[scalper] Kite not connected — fast scalper idle")
-                return
             from fast_scalper import fast_scalper
-            r = await asyncio.to_thread(fast_scalper.start)
-            logger.info("[scalper] {}", r)
+            try:
+                from scalper_whitelist import whitelist as _wl
+                from ist_clock import now_ist as _ni
+                if (_wl.get() or {}).get("as_of") != _ni().date().isoformat():
+                    await asyncio.to_thread(_wl.rebuild)
+            except Exception as _we:
+                logger.debug("[scalper] whitelist rebuild: {}", _we)
+            last = None
+            while True:
+                try:
+                    r = await asyncio.to_thread(fast_scalper.ensure_running)
+                    msg = str(r)
+                    if msg != last:
+                        logger.info("[scalper] {}", r)
+                        last = msg
+                    await asyncio.to_thread(fast_scalper.flush)
+                except Exception as _se:
+                    logger.debug("[scalper] supervisor: {}", _se)
+                await asyncio.sleep(60)
         asyncio.create_task(_start_scalper(), name="fast_scalper_start").add_done_callback(_log_task_exc)
 
         # Options engine loop (PAPER only): manage baskets/buys every ~3 s,
