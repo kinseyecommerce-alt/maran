@@ -893,6 +893,91 @@ run("UNKNOWN regime falls back to defensive roster at 0.5×", t_unknown_regime_f
 run("risk hard cap 1% holds even if risk_per_trade_pct is raised (god_mode)", t_risk_hard_cap_beats_overrides)
 
 
+section("Owner pin: retired_by_owner (jag's decision beats automation)")
+
+
+def t_owner_pin_survives_reevaluate_and_cycle():
+    sl = _sl()
+    for i in range(6):     # too few to justify retirement on evidence → auto path would un-retire
+        _jrow(sl, "mcx_mean_reversion", -400, i, f"2026-10-08T11:{i:02d}:00+05:30")
+    r = sl.owner_retire("MCX", "mcx_mean_reversion", "jag: losing on real prices", "owner(test)")
+    assert r["status"] == "RETIRED (owner)"
+    sl.st("mcx_mean_reversion")["retire_basis"] = "sim"          # even a stale basis must not matter
+    assert sl.reevaluate_retirements() == []
+    assert sl.st("mcx_mean_reversion")["retired"]
+    act = sl.review("mcx_mean_reversion", "MCX")
+    assert act["action"] == "owner_pinned", act
+    sl.st("mcx_mean_reversion")["retired"] = False                # simulate any rogue auto path
+    assert sl.enforce_owner_pins() == ["mcx_mean_reversion"]
+    ok, why, f = sl.entry_gate("mcx_mean_reversion", "MCX")
+    assert not ok and f == 0.0 and "RETIRED (owner)" in why, why
+    sl.active = False                                             # pin holds before activate()
+    assert not sl.entry_gate("mcx_mean_reversion", "MCX")[0]
+    rep = sl.report()
+    row = [x for x in rep["strategies"] if x["strategy"] == "mcx_mean_reversion"][0]
+    assert row["retired_by_owner"] and row["status"] == "RETIRED (owner)", row
+    assert "mcx_mean_reversion" in rep["summary"]["retired_by_owner"]
+    assert rep["owner_actions"][0]["kind"] == "owner_retire"
+
+
+def t_owner_pin_persists_and_only_owner_unretires():
+    from self_learning import SelfLearning
+    sl = _sl()
+    sl.owner_retire("BSE_EQ", "bse_momentum", "jag test", "owner(test)")
+    sl2 = SelfLearning(sl.store.path)                            # fresh process view of the same db
+    sl2.activate()                                               # startup re-check
+    assert sl2.st("bse_momentum")["retired"] and sl2.st("bse_momentum")["retired_by_owner"]
+    out = sl2.run_cycle(retune=False)
+    assert sl2.st("bse_momentum")["retired_by_owner"], out
+    r = sl2.owner_unretire("BSE_EQ", "bse_momentum", "jag changed mind", "owner(test)")
+    assert r["was_owner_pinned"] and not sl2.st("bse_momentum")["retired"]
+    assert sl2.params("bse_momentum").get("size_factor") == 0.5
+    kinds = [e["kind"] for e in sl2.owner_actions()]
+    assert kinds[:2] == ["owner_unretire", "owner_retire"], kinds
+
+
+def t_owner_retire_validates_and_segment_status():
+    sl = _sl()
+    for bad in (("MCX", "bse_momentum"), ("MCX", "no_such_strategy"), ("", "mcx_trend")):
+        try:
+            sl.owner_retire(*bad, "x")
+            raise AssertionError(f"accepted {bad}")
+        except ValueError:
+            pass
+    from segments import segment_manager
+    from self_learning import learning
+    learning.owner_retire("MCX", "mcx_trend", "unit", "owner(test)")
+    try:
+        st = segment_manager.strategy_states("running", True)["mcx_trend"]
+        assert st["state"] == "retired" and st["retired_by"] == "owner" and "RETIRED (owner)" in st["reason"], st
+        st = segment_manager.strategy_states("running", False)["mcx_trend"]     # even with master stopped
+        assert st["state"] == "retired" and st["retired_by"] == "owner", st
+    finally:
+        learning.owner_unretire("MCX", "mcx_trend", "unit cleanup", "owner(test)")
+
+
+def t_owner_endpoints_auth():
+    from fastapi.testclient import TestClient
+    import main
+    c = TestClient(main.app)
+    body = {"segment": "MCX", "strategy": "mcx_trend", "reason": "endpoint test"}
+    assert c.post("/learning/retire", json=body).status_code == 401
+    h = {"X-API-Key": "unit-test-local-only"}
+    r = c.post("/learning/retire", json=body, headers=h)
+    assert r.status_code == 200 and r.json()["status"] == "RETIRED (owner)", r.text
+    rep = c.get("/learning/report", headers=h).json()
+    assert "mcx_trend" in rep["summary"]["retired_by_owner"]
+    assert c.post("/learning/retire", json={**body, "segment": "CDS"}, headers=h).status_code == 400
+    r = c.post("/learning/unretire", json=body, headers=h)
+    assert r.status_code == 200 and r.json()["was_owner_pinned"], r.text
+
+
+run("owner pin survives startup re-check, review and rogue auto un-retire; gate blocks", t_owner_pin_survives_reevaluate_and_cycle)
+run("owner pin persists across restart + nightly cycle; only owner_unretire lifts it", t_owner_pin_persists_and_only_owner_unretires)
+run("owner retire validates segment/strategy; segment status shows RETIRED (owner)", t_owner_retire_validates_and_segment_status)
+run("POST /learning/retire|unretire require API key/admin; report shows pin", t_owner_endpoints_auth)
+
+
 # ════════════════════════════════════════════════════════════════════════════
 if __name__ == "__main__":
     passed = sum(1 for _, ok, _ in _results if ok)

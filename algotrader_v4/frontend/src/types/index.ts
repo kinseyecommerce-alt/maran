@@ -114,6 +114,7 @@ export interface StrategyState {
   display?: string | null
   desc?: string | null
   can_resume: boolean
+  retired_by?: 'owner' | 'learning' | null
 }
 
 export interface SegmentInstrument {

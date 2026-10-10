@@ -76,9 +76,10 @@ export function strategyView(e: EngineStatus | null, key: string): StrategyView 
   const s = e?.strategies?.[key]
   if (!s) return { state: 'unknown', on: false, badge: BADGE.unknown.text, badgeCls: BADGE.unknown.cls,
                    reason: 'waiting for server state', canResume: false, action: 'none' }
-  const b = BADGE[s.state]
+  const b = BADGE[s.state] || BADGE.unknown
+  const badge = s.state === 'retired' && s.retired_by === 'owner' ? 'RETIRED (owner)' : b.text
   const action = s.state === 'running' ? 'pause' : (s.can_resume ? 'resume' : 'none')
-  return { state: s.state, on: s.on, badge: b.text, badgeCls: b.cls, reason: s.reason,
+  return { state: s.state, on: s.on, badge, badgeCls: b.cls, reason: s.reason,
            canResume: s.can_resume, action }
 }
 

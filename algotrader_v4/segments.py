@@ -672,15 +672,23 @@ class SegmentManager:
             enabled = bot_state.is_agent_enabled(name)
             native = name in native_engine.strategies
             retired_why = None
+            retired_by = None
             try:
                 from self_learning import learning as _lrn
                 _st = _lrn._state.get(name) or {}
-                if _lrn.active and _st.get("retired"):
+                if _st.get("retired_by_owner"):
+                    # owner pin applies even before learning activates
+                    retired_by = "owner"
+                    retired_why = f"RETIRED (owner): {_st.get('owner_reason') or _st.get('retired_reason', '')}"
+                elif _lrn.active and _st.get("retired"):
+                    retired_by = "learning"
                     retired_why = _st.get("retired_reason") or "retired by self-improvement"
             except Exception:
-                retired_why = None
+                retired_why = retired_by = None
             if starting:
                 state, reason = "starting", "engine starting"
+            elif retired_by == "owner":
+                state, reason = "retired", retired_why
             elif retired_why is not None and master_running:
                 # audit #22: a retired strategy's loop may still tick, but it
                 # takes no entries — never show it as "running"
@@ -717,6 +725,7 @@ class SegmentManager:
                 "open_positions": int(bk.get("open_positions", 0)),
                 "display": meta.get("display"), "desc": meta.get("desc"),
                 "can_resume": state not in ("starting", "stopped", "killed", "closed", "retired"),
+                "retired_by": retired_by if state == "retired" else None,
             }
         return out
 

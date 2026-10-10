@@ -2701,6 +2701,55 @@ async def learning_run(req: LearningRunRequest):
         raise HTTPException(409, str(exc))
 
 
+class OwnerRetireRequest(BaseModel):
+    segment: str
+    strategy: str
+    reason: str = ""
+
+
+def _owner_actor(request: Request) -> str:
+    """Owner pin endpoints: X-API-Key, or a JWT for the admin user only."""
+    if bool(settings.api_key) and hmac.compare_digest(
+            request.headers.get("X-API-Key", "").encode(), settings.api_key.encode()):
+        return "owner(api-key)"
+    auth_hdr = request.headers.get("Authorization", "")
+    tok = auth_hdr[7:] if auth_hdr.startswith("Bearer ") else request.cookies.get("jwt", "")
+    user = decode_token(tok) if tok and settings.jwt_secret_key else None
+    if not user:
+        raise HTTPException(401, "Not authenticated")
+    if user != settings.admin_username:
+        raise HTTPException(403, "Admin access required")
+    return f"owner({user})"
+
+
+@app.post("/learning/retire", tags=["Learning"])
+def learning_owner_retire(req: OwnerRetireRequest, request: Request):
+    """Owner pin: retire a strategy; nightly cycle / startup re-check never un-retire it."""
+    from self_learning import learning
+    actor = _owner_actor(request)
+    try:
+        return learning.owner_retire(req.segment, req.strategy, req.reason, actor)
+    except ValueError as exc:
+        raise HTTPException(400, str(exc))
+
+
+@app.post("/learning/unretire", tags=["Learning"])
+def learning_owner_unretire(req: OwnerRetireRequest, request: Request):
+    """The only way to lift an owner pin (back on 0.5x probation, PAPER)."""
+    from self_learning import learning
+    actor = _owner_actor(request)
+    try:
+        return learning.owner_unretire(req.segment, req.strategy, req.reason, actor)
+    except ValueError as exc:
+        raise HTTPException(400, str(exc))
+
+
+@app.get("/learning/owner-actions", tags=["Learning"])
+def learning_owner_actions(limit: int = 50):
+    from self_learning import learning
+    return {"owner_actions": learning.owner_actions(min(max(limit, 1), 500))}
+
+
 @app.get("/scalper/status", tags=["Learning"])
 def scalper_status():
     """Fast scalper (PAPER): Kite WS feed status, per-segment stats, open scalps,

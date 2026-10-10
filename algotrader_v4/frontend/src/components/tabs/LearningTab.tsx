@@ -150,7 +150,8 @@ export default function LearningTab() {
                 <td>{s.stats.profit_factor}</td><td className="text-rose-300">{inr(s.stats.max_dd)}</td>
                 <td>{Number(s.params?.size_factor ?? 1).toFixed(2)}</td>
                 <td className={s.retired ? 'text-rose-400' : s.cooloff_until ? 'text-amber-300' : 'text-emerald-400'}
-                    title={s.retired_reason || ''}>{s.retired ? 'RETIRED' : s.cooloff_until ? 'COOL-OFF' : 'active'}</td>
+                    title={s.retired_by_owner ? `${s.owner_reason || ''}${s.owner_at ? ` (${s.owner_at})` : ''}` : (s.retired_reason || '')}>
+                  {s.retired_by_owner ? 'RETIRED (owner)' : s.retired ? 'RETIRED' : s.cooloff_until ? 'COOL-OFF' : 'active'}</td>
                 <td className="text-slate-500 text-[10px]">{s.version}</td>
               </tr>
             ))}

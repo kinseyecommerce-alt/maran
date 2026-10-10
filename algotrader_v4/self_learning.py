@@ -365,6 +365,7 @@ class SelfLearning:
         """Called once at server start: live hooks use learned params, and
         accepted built-in NSE params are mirrored into runtime settings."""
         self.active = True
+        self.enforce_owner_pins()
         try:
             un = self.reevaluate_retirements()
             if un:
@@ -412,9 +413,11 @@ class SelfLearning:
     # ── live hooks ──────────────────────────────────────────────────────────
     def entry_gate(self, name: str, segment: str = "", regime: str = "") -> tuple[bool, str, float]:
         """(allowed, why, size multiplier) for a new PAPER entry."""
+        s = self._state.get(name) or {}
+        if s.get("retired_by_owner"):     # owner pin holds even before activate()
+            return False, f"RETIRED (owner): {s.get('owner_reason') or s.get('retired_reason', '')}", 0.0
         if not self.active:
             return True, "learning inactive", 1.0
-        s = self._state.get(name) or {}
         if s.get("retired"):
             return False, f"retired by self-improvement: {s.get('retired_reason', '')}", 0.0
         if time.time() < float(s.get("cooloff_until") or 0):
@@ -946,6 +949,11 @@ class SelfLearning:
             if len(xs) >= REGIME_MIN_N:
                 rw[reg] = 0.5 if sum(xs) / len(xs) < 0 else 1.0
         st["regime_w"] = rw
+        if st.get("retired_by_owner"):
+            st["retired"] = True             # owner pin: no auto promote/demote/un-retire
+            act["action"], act["why"] = "owner_pinned", f"RETIRED (owner): {st.get('owner_reason', '')}"
+            self._save()
+            return act
         if not st.get("retired") and ((s["n"] >= RETIRE_MIN_N and s["expectancy"] < 0) or s["max_dd"] >= dd_lim):
             why = (f"after-cost expectancy ₹{s['expectancy']:,.0f}/trade over {s['n']} trades"
                    if s["max_dd"] < dd_lim else f"drawdown ₹{s['max_dd']:,.0f} ≥ limit ₹{dd_lim:,.0f}")
@@ -975,7 +983,10 @@ class SelfLearning:
         justify retirement is re-enabled on probation (size factor 0.5)."""
         out = []
         reg = strategy_registry()
+        self.enforce_owner_pins()
         for name, st in list(self._state.items()):
+            if st.get("retired_by_owner"):
+                continue                     # owner pin: only POST /learning/unretire lifts it
             if not st.get("retired") or st.get("retire_basis") == "evidence":
                 continue
             seg = (reg.get(name) or {}).get("segment") or (name.split(":", 1)[1] if ":" in name else "")
@@ -1003,6 +1014,75 @@ class SelfLearning:
         if out:
             self._save()
         return out
+
+    # ── owner pins (jag's manual decisions; automation never overrides) ────────
+    def enforce_owner_pins(self) -> list[str]:
+        """Every owner-pinned strategy stays retired, whatever any automatic
+        path did in memory. Called at activate, before/after every cycle."""
+        fixed = []
+        with self._lock:
+            for name, st in self._state.items():
+                if st.get("retired_by_owner") and not st.get("retired"):
+                    st.update(retired=True, retired_reason=f"owner: {st.get('owner_reason', '')}",
+                              retire_basis="owner")
+                    fixed.append(name)
+            if fixed:
+                self._save()
+        if fixed:
+            logger.warning("[learning] owner pin re-applied (auto path tried to un-retire): {}", fixed)
+        return fixed
+
+    def _owner_target(self, segment: str, strategy: str) -> tuple[str, str]:
+        name = (strategy or "").strip()
+        seg = (segment or "").strip().upper()
+        if not name or not seg:
+            raise ValueError("segment and strategy are required")
+        reg = strategy_registry()
+        known = reg.get(name, {}).get("segment") or (name.split(":", 1)[1] if ":" in name else "")
+        if name not in reg and name not in OPTION_FAMILIES and not name.startswith(("invent:", "scalp:")):
+            raise ValueError(f"unknown strategy {name!r}")
+        if known and known != seg:
+            raise ValueError(f"strategy {name!r} belongs to segment {known}, not {seg}")
+        return name, seg
+
+    def owner_retire(self, segment: str, strategy: str, reason: str, actor: str = "owner") -> dict:
+        """Owner pin: retire and never auto-unretire. Allowed in any mode
+        (retiring only removes entries; it can never arm anything)."""
+        name, seg = self._owner_target(segment, strategy)
+        reason = (reason or "").strip() or "owner decision"
+        with self._lock:
+            st = self.st(name)
+            st.update(retired=True, retired_by_owner=True, retire_basis="owner",
+                      retired_reason=f"owner: {reason}", owner_reason=reason, owner_by=actor,
+                      owner_at=_iso(), retired_at=_iso())
+            self._save()
+        self.event("owner_retire", seg, name, f"RETIRED (owner) by {actor}: {reason}")
+        logger.warning("[learning] OWNER RETIRE {}/{} by {}: {}", seg, name, actor, reason)
+        return {"ok": True, "segment": seg, "strategy": name, "status": "RETIRED (owner)",
+                "reason": reason, "at": st["owner_at"], "by": actor}
+
+    def owner_unretire(self, segment: str, strategy: str, reason: str, actor: str = "owner") -> dict:
+        """The ONLY way an owner pin is lifted. Comes back on probation (0.5x) in PAPER."""
+        name, seg = self._owner_target(segment, strategy)
+        reason = (reason or "").strip() or "owner decision"
+        with self._lock:
+            st = self.st(name)
+            was = bool(st.get("retired_by_owner"))
+            st.update(retired=False, retired_by_owner=False, retired_reason="", retire_basis="owner_unretired",
+                      owner_reason=reason, owner_by=actor, owner_at=_iso(), unretired_at=_iso())
+            self._save()
+        try:
+            self.set_params(name, {"size_factor": 0.5}, f"owner un-retire by {actor}: {reason}", "reenable")
+        except Exception:
+            pass                         # outside PAPER params are frozen; the un-retire itself stands
+        self.event("owner_unretire", seg, name, f"un-retired by {actor} (was owner pin: {was}): {reason}")
+        logger.warning("[learning] OWNER UNRETIRE {}/{} by {}: {}", seg, name, actor, reason)
+        return {"ok": True, "segment": seg, "strategy": name, "status": "active (probation 0.5x)",
+                "was_owner_pinned": was, "reason": reason, "at": st["owner_at"], "by": actor}
+
+    def owner_actions(self, limit: int = 50) -> list[dict]:
+        return self.store.q("SELECT * FROM events WHERE kind IN ('owner_retire','owner_unretire') "
+                            "ORDER BY ts DESC, rowid DESC LIMIT ?", (limit,))
 
     def lessons(self) -> dict:
         """(segment, regime, idea) → stats for invented ideas; avoid / favour."""
@@ -1070,13 +1150,15 @@ class SelfLearning:
                 n = r.get("strategy")
                 st = self._state.get(n) or {}
                 ct = (r.get("candidate_test") if r.get("accepted") else r.get("current_test")) or {}
-                if st.get("retired") and ct.get("n", 0) >= MIN_OOS_TRADES and ct.get("expectancy", 0) > 0:
+                if (st.get("retired") and not st.get("retired_by_owner")
+                        and ct.get("n", 0) >= MIN_OOS_TRADES and ct.get("expectancy", 0) > 0):
                     st.update(retired=False, retired_reason="")
                     try:
                         self.set_params(n, {"size_factor": 0.5}, "re-enabled on probation: retuned out-of-sample "
                                         f"₹{ct['expectancy']:,.0f}/trade over {ct['n']} trades", "reenable")
                     except GuardViolation:
                         pass
+            self.enforce_owner_pins()
             self._save()
         except GuardViolation:
             raise
@@ -1196,7 +1278,8 @@ class SelfLearning:
         strategies = []
         for n, r in reg.items():
             rows = self._rows_for(n)
-            if not rows and n not in self._params and not (self._state.get(n) or {}).get("retired"):
+            if (not rows and n not in self._params and not (self._state.get(n) or {}).get("retired")
+                    and not (self._state.get(n) or {}).get("retired_by_owner")):
                 continue
             nets = [float(x["net"]) for x in rows]
             st = self._state.get(n) or {}
@@ -1205,6 +1288,11 @@ class SelfLearning:
                 "stats": stats(nets, [float(x["gross"]) for x in rows], [float(x["costs"]) for x in rows]),
                 "params": self.params(n), "version": st.get("version", "v0"),
                 "retired": bool(st.get("retired")), "retired_reason": st.get("retired_reason", ""),
+                "retired_by_owner": bool(st.get("retired_by_owner")),
+                "owner_reason": st.get("owner_reason", "") if st.get("retired_by_owner") else "",
+                "owner_at": st.get("owner_at") if st.get("retired_by_owner") else None,
+                "status": ("RETIRED (owner)" if st.get("retired_by_owner") else "RETIRED" if st.get("retired")
+                           else "COOL-OFF" if float(st.get("cooloff_until") or 0) > time.time() else "active"),
                 "cooloff_until": (datetime.utcfromtimestamp(st["cooloff_until"]) + IST_OFFSET).isoformat(timespec="seconds")
                 if float(st.get("cooloff_until") or 0) > time.time() else None,
                 "regime_weights": st.get("regime_w", {})})
@@ -1234,11 +1322,13 @@ class SelfLearning:
                         "today_by_segment": seg_today,
                         "last_cycle_ts": last.get("ts"), "last_cycle_elapsed_sec": last.get("elapsed_sec"),
                         "changes_total": len(versions),
-                        "retired": [s["strategy"] for s in strategies if s["retired"]]},
+                        "retired": [s["strategy"] for s in strategies if s["retired"]],
+                        "retired_by_owner": [s["strategy"] for s in strategies if s["retired_by_owner"]]},
             "last_cycle": {k: last.get(k) for k in ("ts", "ok", "reviews", "retunes", "gate", "rollbacks", "errors",
                                                      "elapsed_sec", "journal_sync")},
             "strategies": strategies, "changes": versions,
             "events": self.store.q("SELECT * FROM events ORDER BY ts DESC LIMIT 80"),
+            "owner_actions": self.owner_actions(),
             "lessons": self.store.kv_get("lessons", {}) or {},
             "readiness": self.readiness(), "latency": self.latency_summary(),
             "readiness_options": self.readiness_families("NSE_FO"),
