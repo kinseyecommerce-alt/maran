@@ -214,12 +214,8 @@ def recipes():
                volume_ratio=1.5, ema9=1705, ema21=1700, ema50=1690,
                ema200=1600, n_candles=210),
         ]),
-        "options": (OptionsAgent(), "INFY", [
-            mk("INFY", 1620, rsi=50, vwap=1612, macd_hist=0.5, volume_ratio=1.6,
-               ema9=1615, ema21=1618, ema50=1610, ema200=1500, n_candles=30),
-            mk("INFY", 1626, rsi=58, vwap=1612, macd_hist=1.4, volume_ratio=1.9,
-               ema9=1624, ema21=1618, ema50=1612, ema200=1500, n_candles=30),
-        ]),
+        # OptionsAgent no longer places single option legs (2026-10-09
+        # options-engine hand-off) — it is covered by stage_options_handoff().
         # FuturesAgent only trades INDEX futures (in LOT_SIZES); stock futures like
         # SBIN are rejected at evaluate_tick's index-only guard. NIFTY now trades on
         # margin-based sizing (75 × ~24k × 20% ≈ ₹360k margin/lot, funded above) and
@@ -290,7 +286,7 @@ async def stage_ingestion():
 
 # ── Stages B & C — per-agent entry (evaluate→gate→place) + forced exit ────────
 async def stage_agents():
-    section("STAGE B/C — All 5 agents: signal → gate → entry+SL → exit")
+    section("STAGE B/C — 4 order-placing agents: signal → gate → entry+SL → exit")
 
     # Deterministic gate: exercise the gate STAGE without network/Claude flakiness.
     def _stub_assess(snap, action, signal, name):
@@ -364,6 +360,87 @@ async def stage_agents():
               oid not in trailing_sl_engine._positions)
 
 
+# ── OptionsAgent → options_engine hand-off (2026-10-09 design) ────────────────
+# The agent returns HOLD and hands index ideas to options_engine (defined-risk
+# baskets for SELL ideas, cost/theta-aware buyer for BUY ideas); stock-option
+# ideas are dropped. The same EMA-cross shape as the old INFY recipe, on NIFTY.
+_NIFTY_SCALE = 24000 / 1620
+
+
+def options_handoff_snaps(sym: str = "NIFTY"):
+    k = _NIFTY_SCALE if sym == "NIFTY" else 1.0
+    return [
+        mk(sym, 1620 * k, rsi=50, vwap=1612 * k, macd_hist=0.5, volume_ratio=1.6,
+           ema9=1615 * k, ema21=1618 * k, ema50=1610 * k, ema200=1500 * k, n_candles=30),
+        mk(sym, 1626 * k, rsi=58, vwap=1612 * k, macd_hist=1.4, volume_ratio=1.9,
+           ema9=1624 * k, ema21=1618 * k, ema50=1612 * k, ema200=1500 * k, n_candles=30),
+    ]
+
+
+class HandoffRecorder:
+    """Stands in for options_engine.submit_agent_signal (no Kite chain on a
+    test box); records exactly what the agent handed off."""
+    def __init__(self):
+        self.calls = []
+
+    def __call__(self, und, opt_type, pattern, score=0.0, is_sell=False):
+        self.calls.append(dict(und=und, opt_type=opt_type, pattern=pattern,
+                               score=score, is_sell=is_sell))
+        return {"result": "recorded"}
+
+
+async def stage_options_handoff():
+    section("STAGE D — OptionsAgent → options_engine hand-off (no single legs)")
+    import options_engine as _oe
+    for sym, expect_handoff in (("NIFTY", True), ("INFY", False)):
+        agent = OptionsAgent()
+        agent._approved.add(sym)
+        rec = HandoffRecorder()
+        before = {o["order_id"] for o in kite_client._paper_orders.values()}
+        q: asyncio.Queue = asyncio.Queue()
+        agent.start(q)
+        try:
+            with patch("agents.strategy_agents.now_ist", return_value=MKT), \
+                 patch.object(_oe.options_engine, "submit_agent_signal", rec):
+                import time as _t
+                for s in options_handoff_snaps(sym):
+                    s.tick._monotonic_ts = _t.monotonic()
+                    await q.put(s)
+                for _ in range(60):
+                    await asyncio.sleep(0.05)
+                    if rec.calls:
+                        break
+                await asyncio.sleep(0.2)
+        finally:
+            agent.stop()
+        new = [o for o in kite_client._paper_orders.values()
+               if o["order_id"] not in before and str(o.get("tag", "")).startswith("Agent-options")]
+        check(f"options/{sym}: agent placed NO single-leg order itself",
+              not new, f"orders={[o.get('tradingsymbol') for o in new]}")
+        if expect_handoff:
+            c = rec.calls[0] if rec.calls else {}
+            check(f"options/{sym}: idea handed to options_engine",
+                  c.get("und") == "NIFTY" and c.get("opt_type") in ("CE", "PE") and c.get("pattern"),
+                  f"calls={rec.calls}")
+        else:
+            check(f"options/{sym}: stock-option idea dropped (no hand-off)",
+                  not rec.calls, f"calls={rec.calls}")
+
+    # Engine routing contract: SELL ideas only ever become defined-risk baskets.
+    eng = _oe.options_engine
+    seen = []
+    with patch.object(eng, "open_basket", lambda s, und, reason="": seen.append(("basket", s)) or {}), \
+         patch.object(eng, "open_buy", lambda *a, **k: seen.append(("buy", a[1])) or {}):
+        eng.submit_agent_signal("NIFTY", "CE", "STRANGLE_SELL", is_sell=True)
+        eng.submit_agent_signal("NIFTY", "PE", "PE_SELL", is_sell=True)
+        eng.submit_agent_signal("NIFTY", "CE", "CE_SELL", is_sell=True)
+        eng.submit_agent_signal("NIFTY", "CE", "EMA_CROSS", is_sell=False)
+    check("options engine: SELL ideas → IRON_CONDOR / BULL_PUT / BEAR_CALL baskets only",
+          seen[:3] == [("basket", "IRON_CONDOR"), ("basket", "BULL_PUT"), ("basket", "BEAR_CALL")],
+          f"seen={seen}")
+    check("options engine: BUY idea → engine buyer", seen[3:] == [("buy", "CE")], f"seen={seen}")
+
+
 # ── PAPER pipeline driver ─────────────────────────────────────────────────────
 async def run_paper():
     print("\n" + "═" * 62)
@@ -420,6 +497,7 @@ async def run_paper():
     try:
         await stage_ingestion()
         await stage_agents()
+        await stage_options_handoff()
     finally:
         settings.use_multi_timeframe   = saved["mtf"]
         settings.use_claude_trade_gate = saved["gate"]

@@ -1,7 +1,7 @@
 """
 test_all_agents_e2e.py
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-Pre-deployment end-to-end proof — ALL 8 strategy agents fire orders, every entry
+Pre-deployment end-to-end proof — all 8 strategy agents are exercised (6 place orders; options hands off to options_engine; pairs is disabled since 4a84d8d), every entry
 is protected by an SL-M (bounded loss), and the PAPER→LIVE switch routes to the
 real Kite API.
 
@@ -61,7 +61,8 @@ from agents.base_agent import _otag
 
 # Reuse the proven snapshot builder + harness from test_full_pipeline.
 from test_full_pipeline import (mk, ok, fail, check, section, summary,
-                                _orders_with_tag, MKT, _aged_swing)
+                                _orders_with_tag, MKT, _aged_swing,
+                                stage_options_handoff)
 
 
 # ── State isolation ───────────────────────────────────────────────────────────
@@ -166,12 +167,6 @@ def recipes():
                volume_ratio=1.5, ema9=1705, ema21=1700, ema50=1690,
                ema200=1600, n_candles=210),
         ])),
-        ("options", build_simple(OptionsAgent(), "INFY", [
-            mk("INFY", 1620, rsi=50, vwap=1612, macd_hist=0.5, volume_ratio=1.6,
-               ema9=1615, ema21=1618, ema50=1610, ema200=1500, n_candles=30),
-            mk("INFY", 1626, rsi=58, vwap=1612, macd_hist=1.4, volume_ratio=1.9,
-               ema9=1624, ema21=1618, ema50=1612, ema200=1500, n_candles=30),
-        ])),
         # FuturesAgent only trades INDEX futures (LOT_SIZES) — a stock like SBIN is
         # rejected by the index-only guard. Use NIFTY (funded futures bucket below
         # covers its ~₹360k margin/lot; F&O is exempt from the ₹1M value cap).
@@ -183,13 +178,12 @@ def recipes():
         ])),
         ("mean_reversion", build_mean_reversion()),
         ("momentum",       build_momentum()),
-        ("pairs",          build_pairs()),
     ]
 
 
 # ── Stage 1 + 2 + 3 — signal → order → protective SL, for all 8 agents ─────────
 async def stage_all_agents():
-    section("STAGE 1/2/3 — All 8 agents: signal → entry+SL-M → bounded-loss check")
+    section("STAGE 1/2/3 — 6 order-placing agents: signal → entry+SL-M → bounded-loss check")
 
     def _stub_assess(snap, action, signal, name):
         async def _coro():
@@ -248,8 +242,29 @@ async def stage_all_agents():
               f"order_id {oid} not tracked")
         fired.append(name)
 
-    check("ALL 8 agents fired an order", len(fired) == 8,
+    check("all 6 order-placing agents fired an order", len(fired) == 6,
           f"only fired: {fired}")
+
+
+# ── Pairs — single-leg trading disabled since 4a84d8d (audit #19) ─────────────
+def stage_pairs():
+    section("PAIRS — disabled by default (one unhedged leg ≠ stat-arb), mechanics intact")
+    check("pairs: pairs_single_leg_enabled defaults to False",
+          settings.pairs_single_leg_enabled is False,
+          f"pairs_single_leg_enabled={settings.pairs_single_leg_enabled}")
+    agent, symbol, trig, action, signal = build_pairs()
+    check("pairs: disabled → evaluate_tick HOLDs (no entry)",
+          action == "HOLD" and signal is None, f"action={action}")
+    # The z-score mechanics still work when explicitly re-enabled (signal only;
+    # no order is placed — atomic two-leg execution does not exist yet).
+    saved = settings.pairs_single_leg_enabled
+    settings.pairs_single_leg_enabled = True
+    try:
+        agent, symbol, trig, action, signal = build_pairs()
+    finally:
+        settings.pairs_single_leg_enabled = saved
+    check("pairs: z-score divergence still produces BUY TCS when enabled (mechanics)",
+          action == "BUY" and signal is not None, f"action={action}")
 
 
 # ── Stage 4 — PAPER→LIVE switch routes to the real Kite API ───────────────────
@@ -329,6 +344,8 @@ async def main() -> int:
     settings.total_capital       = 5_000_000.0
     try:
         await stage_all_agents()
+        await stage_options_handoff()
+        stage_pairs()
         await stage_live_switch()
     finally:
         settings.use_multi_timeframe = saved["mtf"]
