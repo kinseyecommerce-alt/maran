@@ -1388,7 +1388,8 @@ class BaseAgent(ABC):
                 notional_cap = notional_caps("NSE_FO")[0]
             else:
                 risk_budget = (risk_manager.max_capital_for_agent(self.name)
-                               * float(settings.risk_per_trade_pct) / 100)
+                               * min(float(settings.risk_per_trade_pct),
+                                     float(getattr(settings, "risk_per_trade_hard_cap_pct", 1.0))) / 100)
                 notional_cap = min(float(settings.max_position_size),
                                    risk_manager.buying_power_for_agent(self.name),
                                    _limits("NSE_EQ")["capital"]
@@ -1589,6 +1590,7 @@ class BaseAgent(ABC):
             raise RuntimeError("catalyst_negative")
         if catalyst > 0.3:
             qty = min(int(qty * 1.2), int(settings.max_position_size // ltp))
+            qty = self._clamp_risk_notional(snap, signal, qty)   # bump never beats the 1% / notional caps
             logger.debug("[{}] {} positive catalyst {:.2f} → qty bumped to {}", self.name, sym, catalyst, qty)
 
         # Re-align to the lot boundary AFTER the macro/catalyst adjustments:
@@ -2030,6 +2032,15 @@ class BaseAgent(ABC):
         if _pat and not _bs.is_pattern_enabled(self.name, _pat):
             logger.debug("[{}] {} pattern {} is killed — entry skipped",
                          self.name, snap.symbol, _pat)
+            return
+
+        # Audit #14: an overnight CNC position in LIVE has no exchange stop
+        # after the day's SL-M expires (no GTT/OCO implemented). Refuse NEW
+        # LIVE CNC entries until a GTT stop path exists; PAPER unaffected.
+        if (settings.trading_mode == "LIVE"
+                and str(signal.get("product", self.product)).upper() == "CNC"
+                and not getattr(settings, "live_cnc_gtt_enabled", False)):
+            logger.warning("[{}] {} LIVE CNC entry refused — no GTT overnight stop path", self.name, snap.symbol)
             return
 
         # Self-learning gate (audit X7): built-in NSE agents obey retirement,

@@ -153,12 +153,18 @@ REGIME_PLANS: dict[Regime, StrategyPlan] = {
                      "FALLING=protect/puts, STABILIZING=ladder mean-reversion, RECOVERING=IV crush+bounce",
         regime     = Regime.BLACK_SWAN,
     ),
+    # Audit (master agent): UNKNOWN used to run "scalping only" — and scalping
+    # often has no approved symbols, so NSE sat idle all day. Fall back to the
+    # defensive RANGING roster at HALF size (the regime label stays UNKNOWN,
+    # so the UNKNOWN row of regime_blocked_agents still benches options /
+    # momentum / mean_reversion / pairs / swing).
     Regime.UNKNOWN: StrategyPlan(
-        active     = ["scalping"],
-        paused     = ["swing", "intraday", "options"],
-        allocation = {"scalping":100, "swing":0, "intraday":0, "options":0},
+        active     = ["scalping", "intraday", "futures"],
+        paused     = ["swing", "options", "momentum", "mean_reversion", "pairs"],
+        allocation = {"scalping":40, "intraday":40, "futures":20, "swing":0, "options":0},
         size_factor= 0.5,
-        reasoning  = "Could not determine market regime. Running only scalping at reduced size.",
+        reasoning  = "Regime undetermined — falling back to the defensive RANGING roster "
+                     "(scalping/intraday/futures) at 0.5× size until a regime is confirmed.",
         regime     = Regime.UNKNOWN,
     ),
 }

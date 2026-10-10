@@ -222,6 +222,8 @@ class Settings(BaseSettings):
     # Untested (no backtest evidence) symbols approved in PAPER trade on
     # PROBATION at this size factor until they have evidence (audit X12).
     paper_block_sim_entries_when_live_wanted: bool = True   # audit X3
+    live_cnc_gtt_enabled: bool = False      # audit #14: LIVE CNC entries refused until a GTT stop path exists
+    pairs_single_leg_enabled: bool = False  # audit #19: pairs agent trades one unhedged leg — off
     paper_stop_slippage_bps: float = 2.0     # adverse sweep on paper SL/SL-M fills (audit X11)
     paper_stop_gap_error_pct: float = 5.0    # stop gaps beyond this need a confirming tick
     paper_untested_size_factor: float = Field(default=0.5, ge=0.0, le=1.0)
@@ -651,6 +653,9 @@ class Settings(BaseSettings):
     # quantity (after Kelly / conviction / consensus / gate multipliers) to this
     # rupee risk at the stop and to the notional cap.
     risk_per_trade_pct: float = Field(default=1.0, gt=0, le=50)
+    # Hard ceiling for the FINAL per-trade risk clamp — god_mode / overrides
+    # raising risk_per_trade_pct cannot lift sizing past it.
+    risk_per_trade_hard_cap_pct: float = Field(default=1.0, gt=0, le=5)
     use_conviction_sizing: bool = True  # score-proportional size (floor loosened: low=0.75×, mid=1.0×, high=1.25×)
     # Conviction concentration: a signal that reaches sizing with a FULL gate
     # size-factor (top score bucket AND gate-confident) earns a doubled capital

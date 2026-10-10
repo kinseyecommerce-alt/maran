@@ -92,7 +92,7 @@ export interface BookRowMeta {
   multiplier?: number
 }
 
-export type AgentRunState = 'starting' | 'running' | 'paused' | 'closed' | 'killed' | 'stopped'
+export type AgentRunState = 'starting' | 'running' | 'paused' | 'closed' | 'killed' | 'stopped' | 'retired'
 
 /** One record per strategy agent — the ONLY input for every badge, Pause/Resume
  *  button and toggle on the dashboard panel and the Agents tab. */

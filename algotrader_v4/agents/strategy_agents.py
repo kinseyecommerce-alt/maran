@@ -5840,6 +5840,12 @@ class PairsAgent(BaseAgent):
         # stale 14:30 price from the previous session.
         self._prices[sym] = snap.tick.ltp
 
+        # Audit #19: this agent opens only ONE leg of a pair (an unhedged
+        # directional bet labelled stat-arb). Disabled until both legs are
+        # placed atomically; exits of any open leg are still managed.
+        if not getattr(settings, "pairs_single_leg_enabled", False):
+            return "HOLD", None
+
         now = now_ist()
         t   = entry_session_time()  # remaps outside hours when PAPER after-hours sim
         if not (time(9, 30) <= t <= time(14, 30)):

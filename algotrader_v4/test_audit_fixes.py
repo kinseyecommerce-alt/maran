@@ -824,6 +824,76 @@ run("tick fan-out coalesces to the latest snapshot per symbol", t_tick_queue_coa
 
 
 # ════════════════════════════════════════════════════════════════════════════
+section("9. medium/low: pairs off, boot LIVE guard, retired badge, LIVE CNC refused, UNKNOWN fallback, risk hard cap")
+
+
+def t_pairs_single_leg_disabled():
+    from agents.strategy_agents import PairsAgent
+    a = PairsAgent()
+    sym = sorted(a.PAIR_SYMBOLS)[0]
+    act, sig = a.evaluate_tick(_bsnap(sym, ltp=1000.0))
+    assert act == "HOLD" and sig is None
+
+
+def t_boot_live_needs_typed_send():
+    import main
+    with _settings(trading_mode="LIVE"), mock.patch.dict(_os_iso.environ, {"TRADING_MODE_BOOT_CONFIRM": ""}):
+        assert main._boot_mode_guard() == "PAPER"
+    with _settings(trading_mode="LIVE"), mock.patch.dict(_os_iso.environ, {"TRADING_MODE_BOOT_CONFIRM": "SEND"}):
+        assert main._boot_mode_guard() == "LIVE"
+    from config import settings
+    assert settings.trading_mode == "PAPER"
+
+
+def t_retired_strategy_shown_retired():
+    from segments import segment_manager
+    from self_learning import learning
+    was = learning.active
+    learning.active = True
+    learning.st("mcx_trend").update(retired=True, retired_reason="unit")
+    try:
+        st = segment_manager.strategy_states("running", True)
+        assert st["mcx_trend"]["state"] == "retired" and not st["mcx_trend"]["on"], st["mcx_trend"]
+    finally:
+        learning.st("mcx_trend").update(retired=False)
+        learning.active = was
+
+
+def t_live_cnc_entry_refused():
+    from agents.strategy_agents import SwingAgent
+    a = SwingAgent()
+    with _settings(trading_mode="LIVE"), mock.patch.object(type(a), "_pre_claim_checks") as pc:
+        asyncio.run(a._try_enter(_bsnap(), "BUY", {"product": "CNC", "stop_loss_pct": 2.0, "score": 9}))
+        assert not pc.called
+
+
+def t_unknown_regime_fallback():
+    from market_regime import REGIME_PLANS, Regime
+    p = REGIME_PLANS[Regime.UNKNOWN]
+    assert {"intraday", "scalping"} <= set(p.active) and p.size_factor <= 0.5
+    assert "options" in p.paused and "pairs" in p.paused
+
+
+def t_risk_hard_cap_beats_overrides():
+    from agents.strategy_agents import ScalpingAgent
+    from risk_manager import risk_manager as rm
+    a = ScalpingAgent()
+    with _settings(risk_per_trade_pct=1.5):          # god_mode-style override
+        q = a._clamp_risk_notional(_bsnap(ltp=500.0), {"stop_loss_pct": 0.5}, 10**6)
+    assert q * 500 * 0.005 <= rm.max_capital_for_agent("scalping") * 0.01 + 1e-6, q
+    import god_mode
+    assert god_mode._GOD_OVERRIDES["risk_per_trade_pct"] <= 1.0
+
+
+run("pairs agent (single unhedged leg) takes no entries", t_pairs_single_leg_disabled)
+run("TRADING_MODE=LIVE env boots PAPER unless typed SEND boot confirmation", t_boot_live_needs_typed_send)
+run("retired strategy shows RETIRED, not running", t_retired_strategy_shown_retired)
+run("LIVE CNC (overnight) entries refused — no GTT stop path", t_live_cnc_entry_refused)
+run("UNKNOWN regime falls back to defensive roster at 0.5×", t_unknown_regime_fallback)
+run("risk hard cap 1% holds even if risk_per_trade_pct is raised (god_mode)", t_risk_hard_cap_beats_overrides)
+
+
+# ════════════════════════════════════════════════════════════════════════════
 if __name__ == "__main__":
     passed = sum(1 for _, ok, _ in _results if ok)
     failed = len(_results) - passed

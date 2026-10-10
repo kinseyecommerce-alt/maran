@@ -671,8 +671,20 @@ class SegmentManager:
             running = bool(a.state.running)
             enabled = bot_state.is_agent_enabled(name)
             native = name in native_engine.strategies
+            retired_why = None
+            try:
+                from self_learning import learning as _lrn
+                _st = _lrn._state.get(name) or {}
+                if _lrn.active and _st.get("retired"):
+                    retired_why = _st.get("retired_reason") or "retired by self-improvement"
+            except Exception:
+                retired_why = None
             if starting:
                 state, reason = "starting", "engine starting"
+            elif retired_why is not None and master_running:
+                # audit #22: a retired strategy's loop may still tick, but it
+                # takes no entries — never show it as "running"
+                state, reason = "retired", f"retired: {retired_why}"
             elif running and master_running:
                 state, reason = "running", ""
             elif not master_running:
@@ -704,7 +716,7 @@ class SegmentManager:
                 "pnl_unrealised": float(bk.get("unrealised", 0.0)),
                 "open_positions": int(bk.get("open_positions", 0)),
                 "display": meta.get("display"), "desc": meta.get("desc"),
-                "can_resume": state not in ("starting", "stopped", "killed", "closed"),
+                "can_resume": state not in ("starting", "stopped", "killed", "closed", "retired"),
             }
         return out
 
@@ -717,7 +729,7 @@ class SegmentManager:
         for code in SEGMENT_ORDER:
             spec = SEGMENTS[code]
             kids = [s for s, v in strategies.items() if v["segment"] == code and not v["hidden"]]
-            n_run = sum(1 for s in kids if strategies[s]["running"])
+            n_run = sum(1 for s in kids if strategies[s]["running"] and strategies[s]["state"] != "retired")
             is_open = self.is_open(code, now)
             if starting:
                 state, reason = "starting", "engine starting"
@@ -729,7 +741,7 @@ class SegmentManager:
                 nxt = self.next_open(code, now)
                 state, reason = "closed", f"opens {nxt.strftime('%a %H:%M')} IST"
             elif n_run:
-                state, reason = "running", ("after-hours simulation" if not is_open else "")
+                state, reason = "running", ""
             else:
                 state, reason = "paused", "no strategy running"
             lim = _limits(code)

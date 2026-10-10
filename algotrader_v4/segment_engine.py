@@ -75,12 +75,12 @@ UNIVERSE: dict[str, list[Contract]] = {
     # Liquid MCX front-month futures (jag 2026-10-09: whole liquid MCX universe).
     # Contracts whose single-lot margin exceeds the per-position slot (GOLD,
     # SILVER at ₹10L/segment) are listed but never sized: size_lots() returns 0.
-    "MCX": [Contract("GOLDM-FUT", "MCX", 10.0, 0.10, 1.0, 120000.0),
+    "MCX": [Contract("GOLDM-FUT", "MCX", 10.0, 0.10, 1.0, 150000.0),
             Contract("SILVERM-FUT", "MCX", 5.0, 0.12, 1.8, 145000.0),
             Contract("CRUDEOILM-FUT", "MCX", 10.0, 0.15, 2.5, 5600.0),
             Contract("NATURALGAS-FUT", "MCX", 1250.0, 0.20, 3.5, 290.0),
             Contract("COPPER-FUT", "MCX", 2500.0, 0.10, 1.2, 900.0),
-            Contract("GOLD-FUT", "MCX", 100.0, 0.10, 1.0, 120000.0),
+            Contract("GOLD-FUT", "MCX", 100.0, 0.10, 1.0, 150000.0),
             Contract("SILVER-FUT", "MCX", 30.0, 0.12, 1.8, 145000.0),
             Contract("CRUDEOIL-FUT", "MCX", 100.0, 0.15, 2.5, 5600.0),
             Contract("NATGASMINI-FUT", "MCX", 250.0, 0.20, 3.5, 290.0),

@@ -54,6 +54,7 @@ const BADGE: Record<AgentRunState | 'unknown', { text: string; cls: string }> = 
   paused:   { text: 'PAUSED',   cls: 'text-amber-500/80 bg-amber-950/30 border border-amber-900/30' },
   closed:   { text: 'CLOSED',   cls: 'text-slate-400 bg-slate-800/50 border border-slate-700/50' },
   killed:   { text: 'KILLED',   cls: 'text-rose-400/80 bg-rose-950/40 border border-rose-900/40' },
+  retired:  { text: 'RETIRED',  cls: 'text-slate-400 bg-slate-900/60 border border-slate-700/60 line-through' },
   stopped:  { text: 'STOPPED',  cls: 'text-slate-500 bg-slate-800/40 border border-slate-700/40' },
   unknown:  { text: '…',        cls: 'text-slate-600 bg-slate-900/40 border border-slate-800/40' },
 }

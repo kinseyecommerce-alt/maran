@@ -4157,8 +4157,25 @@ async def _prewarm_gate() -> None:
         logger.debug("[startup] Gate pre-warm skipped: {}", _e)
 
 
+def _boot_mode_guard() -> str:
+    """Audit #21: a process started with TRADING_MODE=LIVE in its env boots in
+    PAPER unless the operator ALSO typed the confirmation phrase into
+    TRADING_MODE_BOOT_CONFIRM. Runtime switching still needs /settings/
+    trading-mode with typed SEND, and every segment still needs its own SEND."""
+    if settings.trading_mode == "LIVE":
+        import os as _osb
+        typed = _osb.environ.get("TRADING_MODE_BOOT_CONFIRM", "").strip()
+        if not hmac.compare_digest(typed.encode(), LIVE_CONFIRM_PHRASE.encode()):
+            settings.trading_mode = "PAPER"
+            logger.warning("[startup] TRADING_MODE=LIVE from env WITHOUT typed boot confirmation — "
+                           "booting in PAPER (switch via /settings/trading-mode with typed {})",
+                           LIVE_CONFIRM_PHRASE)
+    return settings.trading_mode
+
+
 @app.on_event("startup")
 async def on_startup():
+    _boot_mode_guard()
     # Initialise SQLite state store
     from state_store import init_db, get_daily_pnl, get_kv
     init_db()
