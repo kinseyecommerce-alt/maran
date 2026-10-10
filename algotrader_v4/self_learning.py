@@ -292,6 +292,14 @@ def strategy_registry() -> dict[str, dict]:
             reg[n] = {"segment": seg, "kind": "builtin", "spec": _builtin_spec(n)}
         except Exception:
             pass
+    # per-agent "trade less, better" + exits + filters policy (agent_policy.py)
+    try:
+        from agent_policy import POLICY_SPECS, AGENT_SEGMENT
+        for a, sp in POLICY_SPECS.items():
+            seg = AGENT_SEGMENT.get(a, "")
+            reg[f"policy:{a}"] = {"segment": seg if seg != "*" else "", "kind": "policy", "spec": sp}
+    except Exception:
+        pass
     return reg
 
 
@@ -403,6 +411,12 @@ class SelfLearning:
             return OPTION_FAMILIES[name]
         if name.startswith("scalp:"):
             return SCALP
+        if name.startswith("policy:"):
+            try:
+                from agent_policy import POLICY_SPECS
+                return POLICY_SPECS.get(name.split(":", 1)[1], {})
+            except Exception:
+                return {}
         return {}
 
     def params(self, name: str) -> dict:
@@ -833,6 +847,12 @@ class SelfLearning:
                 "NSE_EQ", "NSE_FO", "BSE_EQ", "MCX", "CDS"):
             seg = name.split(":")[1]
             sql, args = "SELECT * FROM journal WHERE strategy LIKE 'invent:%' AND segment=?", [seg]
+        elif name.startswith("policy:"):
+            # a policy change is judged on the evidence of the agent it governs
+            from agent_policy import journal_patterns
+            pats = journal_patterns(name.split(":", 1)[1])
+            sql = "SELECT * FROM journal WHERE (" + " OR ".join("strategy LIKE ?" for _ in pats) + ")"
+            args = list(pats)
         else:
             sql, args = "SELECT * FROM journal WHERE strategy=?", [name]
         if since:
@@ -1140,6 +1160,8 @@ class SelfLearning:
             reg = strategy_registry()
             names = [n for n, r in reg.items() if (not segments or r["segment"] in segments)]
             for n in names:
+                if reg[n].get("kind") == "policy":
+                    continue                 # policies are changed only by the research loop
                 if self._journal_n(n) == 0:
                     continue
                 try:
@@ -1295,6 +1317,8 @@ class SelfLearning:
         reg = strategy_registry()
         strategies = []
         for n, r in reg.items():
+            if r.get("kind") == "policy":
+                continue                     # shown in the Research view (/research/pipeline)
             rows = self._rows_for(n)
             if (not rows and n not in self._params and not (self._state.get(n) or {}).get("retired")
                     and not (self._state.get(n) or {}).get("retired_by_owner")):
