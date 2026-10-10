@@ -84,18 +84,30 @@ NATIVE_MEANREV = {"z_entry": (2.0, 1.5, 3.0), "z_window": (30, 20, 60), "sl_rang
                   "target_r": (1.6, 1.2, 2.5), "time_stop_min": (60, 20, 120), "size_factor": (1.0, SIZE_MIN, SIZE_MAX)}
 INVENT = {"stop_mult": (1.0, 0.7, 1.6), "target_r": (1.6, 1.2, 2.5), "min_strength": (0.03, 0.02, 0.15),
           "size_factor": (1.0, SIZE_MIN, SIZE_MAX)}
-SCALP = {"imb_entry": (0.30, 0.15, 0.60), "mom_ticks": (3, 2, 8), "sl_ticks": (6, 3, 15),
-         "tp_ticks": (9, 4, 25), "time_stop_sec": (90, 20, 300), "edge_cost_mult": (1.5, 1.2, 3.0),
-         "size_factor": (1.0, SIZE_MIN, SIZE_MAX)}
+# fast scalper (jag 2026-10-10 "trade less, better"): stricter defaults; every
+# knob is a bounded learning param, retuned only on walk-forward OOS improvement
+# of the real-tick backtester (scalper_backtest). Hard ceilings for the caps
+# live in fast_scalper.DAILY_CAP / scalper_config.hard_caps (never exceeded).
+_SCALP_TLB = {"confluence_min": (3, 2, 4),          # votes of imb / tick-mom / 15-s bar / VWAP side
+              "cooldown_sec": (300, 60, 1800),      # per-symbol pause after a losing scalp
+              "max_consec_losses": (2, 1, 4),       # → symbol OFF for the rest of the day
+              "symbol_daily_cap": (4, 2, 6),        # scalps per symbol per day
+              "skip_open_min": (1, 0, 10),          # trim at each entry-window start
+              "skip_close_min": (3, 1, 10)}         # no new scalps in a window's last N min
+SCALP = {"imb_entry": (0.35, 0.20, 0.70), "mom_ticks": (4, 2, 10), "sl_ticks": (6, 3, 20),
+         "tp_ticks": (10, 4, 30), "time_stop_sec": (90, 20, 300), "edge_cost_mult": (2.5, 2.0, 4.0),
+         "max_spread_ticks": (2, 1, 4), "daily_cap": (12, 4, 25), "whitelist_n": (10, 5, 10),
+         **_SCALP_TLB, "size_factor": (1.0, SIZE_MIN, SIZE_MAX)}
 
 # options (jag 2026-10-09): defined-risk selling, cost/θ-aware buying, option scalping
 OPT_SELL = {"short_delta": (0.20, 0.10, 0.35), "wing_steps": (2, 1, 6), "target_frac": (0.5, 0.3, 0.8),
             "stop_mult": (2.0, 1.0, 3.0), "size_factor": (1.0, SIZE_MIN, SIZE_MAX)}
 OPT_BUY = {"sl_pct": (25.0, 15.0, 40.0), "tgt_pct": (40.0, 20.0, 80.0), "max_hold_min": (45, 15, 90),
            "edge_cost_mult": (2.0, 1.5, 4.0), "size_factor": (1.0, SIZE_MIN, SIZE_MAX)}
-SCALP_OPT = {"imb_entry": (0.30, 0.15, 0.60), "mom_ticks": (4, 2, 10), "sl_ticks": (12, 4, 40),
-             "tp_ticks": (20, 6, 60), "time_stop_sec": (60, 15, 240), "edge_cost_mult": (1.5, 1.2, 3.0),
-             "max_spread_ticks": (4, 1, 10), "size_factor": (1.0, SIZE_MIN, SIZE_MAX)}
+SCALP_OPT = {"imb_entry": (0.35, 0.20, 0.70), "mom_ticks": (4, 2, 10), "sl_ticks": (12, 4, 40),
+             "tp_ticks": (24, 6, 60), "time_stop_sec": (60, 15, 240), "edge_cost_mult": (2.5, 2.0, 4.0),
+             "max_spread_ticks": (4, 1, 10), "daily_cap": (10, 4, 15), **_SCALP_TLB,
+             "size_factor": (1.0, SIZE_MIN, SIZE_MAX)}
 OPTION_FAMILIES = {"opt_sell:IRON_CONDOR": OPT_SELL, "opt_sell:IRON_FLY": OPT_SELL,
                    "opt_sell:BULL_PUT": OPT_SELL, "opt_sell:BEAR_CALL": OPT_SELL,
                    "opt_buy:TREND": OPT_BUY, "opt_buy:AGENT": OPT_BUY, "scalp:NSE_FO_OPT": SCALP_OPT}
