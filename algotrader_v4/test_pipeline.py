@@ -14,6 +14,16 @@ _os_iso.environ.setdefault("DATABASE_PATH", _os_iso.path.join(_iso_dir, "algotra
 _os_iso.environ.setdefault("ADAPTIVE_DATA_DIR", _os_iso.path.join(_iso_dir, "adaptive"))
 _os_iso.environ.setdefault("SEBI_AUDIT_DIR", _iso_dir)
 _os_iso.environ.setdefault("SEGMENT_PAPER_AFTER_HOURS", "true")   # segment hours are tested explicitly in test_segments.py
+_os_iso.environ["LEARNING_DB"] = _os_iso.path.join(_iso_dir, "learning.db")   # never the real logs/learning.db
+# The after-hours flag is ignored since the 2026-10-10 audit (window_ok =
+# real exchange hours): pin the segment session clock to a weekday session so
+# order-path tests don't depend on the wall clock (hours: test_segments.py).
+def _pin_session_clock():
+    from datetime import datetime as _dt_pin
+    from zoneinfo import ZoneInfo as _ZI_pin
+    from segments import segment_manager as _sm_pin
+    _sm_pin._now_fn = lambda: _dt_pin(2026, 10, 7, 11, 0, tzinfo=_ZI_pin("Asia/Kolkata"))
+_pin_session_clock()
 
 import asyncio
 import sys
@@ -1551,18 +1561,14 @@ def t_conviction_2x_slice():
         q_off  = agent._compute_qty(snap, "BUY", dict(base_sig, _gate_size_factor=1.0))
         settings.conviction_2x_enabled = True
         q_low  = agent._compute_qty(snap, "BUY", dict(base_sig, _gate_size_factor=0.75))
-        assert q_top > q_off, f"2x flag should raise qty ({q_top} vs {q_off})"
+        # Audit 2026-10-10 (X9): the 2x slice may raise qty only up to the
+        # FINAL 1% risk / notional clamp — never past it.
+        assert q_top >= q_off, f"2x flag must not shrink qty ({q_top} vs {q_off})"
         assert q_off * snap.tick.ltp <= settings.max_position_size + snap.tick.ltp, "hard clamp must hold"
-        # The boost is doubled-then-capped at conviction_2x_mult x the agent
-        # slice (2 x 2L = 4L notional): q_top must equal the smaller of 2x the
-        # base or that cap — never less.
-        from risk_manager import risk_manager as _rm
-        _cap = int(min(float(settings.max_position_size),
-                       _rm.buying_power_for_agent("scalping") * settings.conviction_2x_mult)
-                   // snap.tick.ltp)
-        assert q_top == min(q_off * 2, _cap), f"q_top={q_top} base={q_off} cap={_cap}"
+        _cap = agent._clamp_risk_notional(snap, dict(base_sig), 10**9)
+        assert q_top <= _cap and q_top == min(q_off * 2, _cap), f"q_top={q_top} base={q_off} cap={_cap}"
         # low-conviction path gets no concentration (0.75 sf also shrinks base)
-        assert q_low < q_top
+        assert q_low <= q_top
     finally:
         settings.conviction_2x_enabled = old_flag
 
@@ -4707,7 +4713,7 @@ def t_audit_vix_unavailable_no_flags():
 
 def t_audit_tick_queue_drops_oldest():
     import inspect, tick_engine as _te
-    src = inspect.getsource(_te.TickEngine._process_tick)
+    src = inspect.getsource(_te.TickEngine._process_tick) + inspect.getsource(_te.TickEngine._fanout)
     assert "get_nowait" in src, "queue-full must drop oldest tick, not newest"
 
 def t_audit_signals_have_pattern_key():
@@ -14515,7 +14521,8 @@ def t_kite_paper_placed_at_uses_ist():
     src = _inspect33.getsource(_kc.KiteClient._paper_place)
     assert "datetime.now()" not in src, \
         "_paper_place must not use datetime.now() — paper order timestamps must be IST"
-    assert "_IST" in src, "_paper_place must use _IST timezone for placed_at timestamp"
+    assert "_IST" in src or "_session_now()" in src, "_paper_place must use _IST timezone for placed_at timestamp"
+    assert _kc._session_now().tzinfo is not None, "session clock must be tz-aware IST"
 
 def t_macro_signals_vix_preserves_zero():
     """macro_signals VIX fetch must not discard zero VIX — the pattern 'or 0) or None' returns None for 0.0."""

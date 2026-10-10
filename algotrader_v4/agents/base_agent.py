@@ -624,7 +624,7 @@ class BaseAgent(ABC):
                         # symbols don't trade real money on zero history.
                         _have = {i["symbol"] for i in approved}
                         approved = approved + [i for i in watchlist if i["symbol"] not in _have]
-                        self._probation |= {i["symbol"] for i in watchlist if i["symbol"] not in _have}
+                        self._prob_set().update({i["symbol"] for i in watchlist if i["symbol"] not in _have})
                         label = (f"PAPER: {len(_have)} pre-approved + "
                                  f"{len(approved) - len(_have)} untested — trading full watchlist")
                 else:
@@ -632,13 +632,13 @@ class BaseAgent(ABC):
                     # Approve all watchlist symbols so the agent can start immediately.
                     approved = list(watchlist)
                     if settings.trading_mode == "PAPER":
-                        self._probation |= {i["symbol"] for i in watchlist}
+                        self._prob_set().update({i["symbol"] for i in watchlist})
                     label = "agent not in seed file — approving all watchlist symbols"
             else:
                 # No file yet — approve everything (user trusts their watchlist)
                 approved = list(watchlist)
                 if settings.trading_mode == "PAPER":
-                    self._probation |= {i["symbol"] for i in watchlist}
+                    self._prob_set().update({i["symbol"] for i in watchlist})
                 label = "skip_backtest=true, no seed file — approving all"
 
             # Book cap: the full-year breadth test (30-symbol book, tf15,
@@ -680,7 +680,7 @@ class BaseAgent(ABC):
                 # never takes this branch.
                 approved.append(item)
                 self._approved.add(sym)
-                self._probation.add(sym)      # half size until evidence (audit X12)
+                self._prob_set().add(sym)      # half size until evidence (audit X12)
                 untested.append(sym)
             else:
                 logger.info("[{}] {} FAIL: {}", self.name, sym,
@@ -734,7 +734,7 @@ class BaseAgent(ABC):
                 break
             self._approved.add(sym)
             if live_ok is None:
-                self._probation.add(sym)      # PAPER scan pick, no evidence yet
+                self._prob_set().add(sym)      # PAPER scan pick, no evidence yet
             if sym not in self.state.approved_symbols:
                 self.state.approved_symbols.append(sym)
             added += 1
@@ -1342,10 +1342,16 @@ class BaseAgent(ABC):
         qty = self._clamp_risk_notional(snap, signal, qty)
         # Probation: an untested PAPER symbol trades at a fraction of the
         # ALLOWED size (applied after the clamp so it always bites).
-        if qty > 0 and snap.symbol in self._probation:
+        if qty > 0 and snap.symbol in (getattr(self, "_probation", None) or ()):
             pf = float(getattr(settings, "paper_untested_size_factor", 0.5))
             qty = int(qty * pf)
         return qty
+
+    def _prob_set(self) -> set:
+        p = getattr(self, "_probation", None)
+        if p is None:
+            p = self._probation = set()
+        return p
 
     def _learning_segment(self, signal: dict) -> str:
         if self.name == "futures" or (int(signal.get("lot_size", 1) or 1) > 1

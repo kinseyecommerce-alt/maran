@@ -1275,6 +1275,8 @@ class KiteClient:
         """Feed that prices *tradingsymbol* right now: its own mark source, else
         the underlying's (F&O contracts are marked off the underlying), else
         KITE when live data + a Kite session are on, else SIMULATED."""
+        if not hasattr(self, "_paper_src"):
+            self._paper_src = {}
         src = self._paper_src.get(tradingsymbol)
         if src:
             return src
@@ -1309,6 +1311,8 @@ class KiteClient:
         new = self._norm_src(source)
         if not new:
             return 0
+        if not hasattr(self, "_paper_src"):
+            self._paper_src = {}
         prev = self._paper_src.get(symbol)
         self._paper_src[symbol] = new
         for c in self._derived_contracts(symbol):
