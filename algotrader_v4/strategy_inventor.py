@@ -315,6 +315,9 @@ class StrategyInventor:
         trend, have the master agent review it and — when approved — activate
         it for PAPER trading (never LIVE: LIVE stays behind typed SEND)."""
         from owner_universe import owner_universe
+        _fok, _fwhy = owner_universe.agent_allowed("strategy_inventor")
+        if not _fok:
+            return {"ok": False, "reason": _fwhy}
         if not owner_universe.segment_enabled(segment):
             return {"ok": False, "reason": f"{segment} PAUSED (owner)"}
         with self._lock:
@@ -377,6 +380,9 @@ class StrategyInventor:
         if segment_manager.killed(strat.segment):
             return False, f"segment halted ({segment_manager.killed(strat.segment)})"
         from owner_universe import owner_universe
+        _fok, _fwhy = owner_universe.agent_allowed("strategy_inventor")
+        if not _fok:
+            return False, _fwhy
         if not owner_universe.segment_enabled(strat.segment):
             return False, f"{strat.segment} PAUSED (owner) — master may not approve"
         _psym = strat.planned_symbol or strat.symbol
@@ -708,7 +714,7 @@ class StrategyInventor:
     # ── paper trading ─────────────────────────────────────────────────────
     def _pick_symbol(self, segment: str) -> Optional[str]:
         from owner_universe import owner_universe
-        if not owner_universe.segment_enabled(segment):
+        if not owner_universe.segment_enabled(segment) or not owner_universe.agent_allowed("strategy_inventor")[0]:
             return None
         if segment == "NSE_EQ":
             pool = [x for x in _NSE_SYMBOLS if owner_universe.allows(x, segment="NSE_EQ")[0]] or [None]
@@ -773,7 +779,9 @@ class StrategyInventor:
         elif strat.segment == "NSE_EQ" and sym.upper() in _INDEXES:
             return {"ok": False, "reason": f"{sym} is an index, not a tradable stock"}
         from owner_universe import owner_universe
-        ok_u, why_u = owner_universe.allows(sym, segment=strat.segment)
+        ok_u, why_u = owner_universe.agent_allowed("strategy_inventor")
+        if ok_u:
+            ok_u, why_u = owner_universe.allows(sym, segment=strat.segment)
         if not ok_u:
             strat.next_entry_ts = time.time() + 300
             strat.last_error = f"entry blocked: {why_u}"[:200]

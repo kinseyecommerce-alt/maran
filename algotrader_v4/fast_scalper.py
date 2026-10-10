@@ -628,9 +628,10 @@ class FastScalper:
         an instrument with an open scalp or resting order is kept until it exits."""
         from owner_universe import owner_universe
         out = {}
+        focus_ok = owner_universe.agent_allowed("fast_scalper")[0]     # focus mode pauses the scalper
         for tok, i in insts.items():
             st = self.state.get(tok)
-            if owner_universe.allows(i.symbol, segment=i.segment)[0] or (st and (st.pos or st.order)):
+            if (focus_ok and owner_universe.allows(i.symbol, segment=i.segment)[0]) or (st and (st.pos or st.order)):
                 out[tok] = i
         return out
 
@@ -905,6 +906,8 @@ class FastScalper:
         unds = []
         from owner_universe import owner_universe
         for und in OPT_UNDERLYINGS:
+            if not owner_universe.agent_allowed("fast_scalper")[0]:
+                break                        # FOCUS mode: the scalper takes no new option windows
             if not owner_universe.fo_underlying_allowed(und):
                 continue                     # OWNER universe: e.g. NIFTY only
             try:

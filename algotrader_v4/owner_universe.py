@@ -39,6 +39,23 @@ JAG_POLICY: dict[str, Any] = {
               "pause BSE, CDS, other indices and all stock F&O",
 }
 
+# ── FOCUS mode (jag 2026-10-10: "recreate the agents, focus only one — intraday
+# NIFTY options — and test"). Owner-only, persistent, reversible: while a focus is
+# set, ONLY the focus agent may open new entries, ONLY in the focus instruments;
+# every other agent / strategy / segment / the inventor / native MCX shows
+# "PAUSED (focus)". Exits and square-offs are never blocked. Code is kept.
+FOCUS_MODES: dict[str, dict] = {
+    "nifty_intraday_options": {
+        "agents": ("nifty_options_intraday",),
+        "segments": ("NSE_FO",),
+        "underlyings": ("NIFTY",),
+        "instruments": "NIFTY index options only (weekly + nearest monthly), intraday, flat by 15:15 IST",
+        "capital": 1_000_000,
+    },
+}
+FOCUS_LABEL = "PAUSED (focus)"
+_OPT_RE = re.compile(r"(CE|PE)$")
+
 _EXCH_SEG = {"NSE": "NSE_EQ", "NFO": "NSE_FO", "BSE": "BSE_EQ", "BFO": "BSE_EQ", "MCX": "MCX", "CDS": "CDS"}
 _UNDERLYING_RE = re.compile(r"^([A-Z&\-]+?)(?=\d|-FUT$|$)")
 
@@ -100,7 +117,8 @@ class OwnerUniverse:
             except FileNotFoundError:
                 self._cache, self._mtime, self._loaded_path = None, -1.0, p
                 return {"restricted": False, "segments": {s: True for s in ALL_SEGMENTS},
-                        "nse_eq_universe": "ALL", "nse_fo_underlyings": [], "reason": "no owner setting"}
+                        "nse_eq_universe": "ALL", "nse_fo_underlyings": [], "reason": "no owner setting",
+                        "focus": None}
             if self._cache is None or mt != self._mtime or p != self._loaded_path:
                 try:
                     self._cache = json.loads(p.read_text())
@@ -129,7 +147,8 @@ class OwnerUniverse:
         now = datetime.now(IST).isoformat(timespec="seconds")
         new = {"restricted": bool(restricted), "segments": segs, "nse_eq_universe": eq,
                "nse_fo_underlyings": fo, "reason": reason or cur.get("reason", ""),
-               "updated_at": now, "updated_by": actor}
+               "updated_at": now, "updated_by": actor, "focus": cur.get("focus"),
+               "focus_reason": cur.get("focus_reason"), "focus_set_at": cur.get("focus_set_at")}
         hist.append({"ts": now, "by": actor, "reason": reason,
                      "segments": segs, "nse_eq_universe": eq, "nse_fo_underlyings": fo})
         new["history"] = hist
@@ -143,12 +162,56 @@ class OwnerUniverse:
         logger.warning("[owner-universe] set by {}: segments={} eq={} fo={} — {}", actor, segs, eq, fo, reason)
         return self.status()
 
+    def set_focus(self, mode: Optional[str], actor: str = "owner", reason: str = "") -> dict:
+        """Owner-only. mode=None/'' clears the focus (everything returns to the
+        universe rules above). Automation never calls this."""
+        mode = (mode or "").strip().lower() or None
+        if mode and mode not in FOCUS_MODES:
+            raise ValueError(f"unknown focus {mode}; known: {sorted(FOCUS_MODES)}")
+        p = _path()
+        cur = self.policy() if p.exists() else dict(JAG_POLICY)
+        now = datetime.now(IST).isoformat(timespec="seconds")
+        new = {k: v for k, v in cur.items()}
+        new.update({"focus": mode, "focus_reason": reason or (f"owner focus {mode}" if mode else "focus cleared"),
+                    "focus_set_at": now, "updated_at": now, "updated_by": actor})
+        hist = list(cur.get("history") or [])[-49:]
+        hist.append({"ts": now, "by": actor, "reason": new["focus_reason"], "focus": mode})
+        new["history"] = hist
+        p.parent.mkdir(parents=True, exist_ok=True)
+        tmp = p.with_suffix(".tmp")
+        tmp.write_text(json.dumps(new, indent=2))
+        os.replace(tmp, p)
+        with self._lock:
+            self._cache = None
+        logger.warning("[owner-universe] FOCUS set by {}: {} — {}", actor, mode, new["focus_reason"])
+        return self.status()
+
+    def focus(self) -> Optional[str]:
+        f = self.policy().get("focus")
+        return f if f in FOCUS_MODES else None
+
+    def focus_spec(self) -> Optional[dict]:
+        f = self.focus()
+        return FOCUS_MODES.get(f) if f else None
+
+    def agent_allowed(self, name: str) -> tuple[bool, str]:
+        """May agent/strategy/engine `name` open NEW entries? (focus mode only)."""
+        spec = self.focus_spec()
+        if not spec:
+            return True, "ok"
+        if (name or "") in spec["agents"]:
+            return True, "focus agent"
+        return False, f"{FOCUS_LABEL}: only {', '.join(spec['agents'])} trades ({self.focus()})"
+
     def apply_jag_policy(self, actor: str = "owner") -> dict:
         return self.set_policy(JAG_POLICY["segments"], JAG_POLICY["nse_eq_universe"],
                                JAG_POLICY["nse_fo_underlyings"], JAG_POLICY["reason"], actor)
 
     # ── checks ──────────────────────────────────────────────────────────────
     def segment_enabled(self, segment: str) -> bool:
+        spec = self.focus_spec()
+        if spec and (segment or "").upper() not in spec["segments"]:
+            return False
         pol = self.policy()
         if not pol.get("restricted"):
             return True
@@ -156,6 +219,12 @@ class OwnerUniverse:
 
     def allows(self, symbol: str, segment: str = "", exchange: str = "") -> tuple[bool, str]:
         """(allowed, why) for a NEW entry on `symbol`. Exits never call this."""
+        spec = self.focus_spec()
+        if spec:
+            seg = segment_of(symbol, exchange, segment)
+            sym = (symbol or "").upper().split(":", 1)[-1]
+            if seg not in spec["segments"] or not _OPT_RE.search(sym) or underlying_of(sym) not in spec["underlyings"]:
+                return False, f"{FOCUS_LABEL}: {sym or symbol} — {spec['instruments']}"
         pol = self.policy()
         if not pol.get("restricted"):
             return True, "ok"
@@ -176,6 +245,9 @@ class OwnerUniverse:
         return True, "ok"
 
     def fo_underlying_allowed(self, underlying: str) -> bool:
+        spec = self.focus_spec()
+        if spec:
+            return underlying_of(underlying) in spec["underlyings"]
         pol = self.policy()
         if not pol.get("restricted"):
             return True
@@ -213,6 +285,9 @@ class OwnerUniverse:
         return out
 
     def segment_scope(self, segment: str) -> str:
+        spec = self.focus_spec()
+        if spec:
+            return spec["instruments"] if segment in spec["segments"] else FOCUS_LABEL
         pol = self.policy()
         if not pol.get("restricted"):
             return "all"
@@ -226,13 +301,17 @@ class OwnerUniverse:
 
     def status(self) -> dict:
         pol = self.policy()
-        segs = {s: ("enabled" if self.segment_enabled(s) else "PAUSED (owner)") for s in ALL_SEGMENTS}
+        fspec = self.focus_spec()
+        segs = {s: ("enabled" if self.segment_enabled(s) else (FOCUS_LABEL if fspec else "PAUSED (owner)"))
+                for s in ALL_SEGMENTS}
         return {"restricted": bool(pol.get("restricted")), "segments": segs,
                 "nse_eq_universe": pol.get("nse_eq_universe", "ALL"),
                 "nse_fo_underlyings": pol.get("nse_fo_underlyings", []),
                 "nifty50_count": len(_nifty50()), "reason": pol.get("reason", ""),
                 "updated_at": pol.get("updated_at"), "updated_by": pol.get("updated_by"),
                 "history": (pol.get("history") or [])[-10:], "path": str(_path()),
+                "focus": self.focus(), "focus_spec": fspec, "focus_reason": pol.get("focus_reason"),
+                "focus_set_at": pol.get("focus_set_at"),
                 "note": "Owner setting — automation never changes it. Exits of existing positions always allowed."}
 
 

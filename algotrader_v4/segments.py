@@ -585,10 +585,12 @@ class SegmentManager:
 
     def run_block_reason(self, strategy: str) -> Optional[str]:
         """None when the strategy may run; else 'PAUSED (owner)' / 'killed' / 'closed'."""
+        from owner_universe import owner_universe, FOCUS_LABEL
+        if not owner_universe.agent_allowed(strategy)[0]:
+            return FOCUS_LABEL
         code = STRATEGY_SEGMENT.get(strategy)
         if not code:
             return None
-        from owner_universe import owner_universe
         if not owner_universe.segment_enabled(code):
             return "PAUSED (owner)"
         if self._killed.get(code):
@@ -704,10 +706,13 @@ class SegmentManager:
                     retired_why = _st.get("retired_reason") or "retired by self-improvement"
             except Exception:
                 retired_why = retired_by = None
-            from owner_universe import owner_universe as _ou
-            owner_paused = bool(code) and not _ou.segment_enabled(code)
+            from owner_universe import owner_universe as _ou, FOCUS_LABEL as _FL
+            focus_paused = not _ou.agent_allowed(name)[0]
+            owner_paused = focus_paused or (bool(code) and not _ou.segment_enabled(code))
             if starting:
                 state, reason = "starting", "engine starting"
+            elif focus_paused:
+                state, reason = "paused", _FL
             elif owner_paused:
                 state, reason = "paused", "PAUSED (owner)"
             elif retired_by == "owner":
@@ -751,6 +756,13 @@ class SegmentManager:
                 "retired_by": retired_by if state == "retired" else None,
                 "owner_paused": owner_paused,
             }
+        try:                                   # the focused agent (owner focus mode)
+            from owner_universe import owner_universe as _ou2
+            if _ou2.focus():
+                from nifty_options_agent import nifty_options_agent, AGENT_NAME
+                out[AGENT_NAME] = nifty_options_agent.dashboard_row(master_running and not starting)
+        except Exception as exc:
+            logger.debug("[segments] focus agent row: {}", exc)
         return out
 
     def segment_states(self, phase: str, master_running: bool, strategies: dict) -> list[dict]:
@@ -764,12 +776,12 @@ class SegmentManager:
             kids = [s for s, v in strategies.items() if v["segment"] == code and not v["hidden"]]
             n_run = sum(1 for s in kids if strategies[s]["running"] and strategies[s]["state"] != "retired")
             is_open = self.is_open(code, now)
-            from owner_universe import owner_universe as _ou
+            from owner_universe import owner_universe as _ou, FOCUS_LABEL as _FL
             owner_paused = not _ou.segment_enabled(code)
             if starting:
                 state, reason = "starting", "engine starting"
             elif owner_paused:
-                state, reason = "paused", "PAUSED (owner)"
+                state, reason = "paused", (_FL if _ou.focus() else "PAUSED (owner)")
             elif not master_running:
                 state, reason = "stopped", "engine stopped"
             elif self._killed.get(code):

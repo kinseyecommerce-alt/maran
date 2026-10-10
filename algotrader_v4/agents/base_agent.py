@@ -1572,7 +1572,9 @@ class BaseAgent(ABC):
 
         # OWNER universe (jag): new entries only inside the allowed universe
         from owner_universe import owner_universe
-        _ou_ok, _ou_why = owner_universe.allows(trade_sym, exchange=exch)
+        _ou_ok, _ou_why = owner_universe.agent_allowed(self.name)
+        if _ou_ok:
+            _ou_ok, _ou_why = owner_universe.allows(trade_sym, exchange=exch)
         if not _ou_ok:
             raise RuntimeError(f"owner_universe:{_ou_why}")
 
