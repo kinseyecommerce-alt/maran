@@ -908,7 +908,7 @@ class TickEngine:
     # ── Subscriber management ─────────────────────────────────────────
 
     def add_subscriber(self, name: str) -> asyncio.Queue:
-        q: asyncio.Queue = asyncio.Queue(maxsize=2000)
+        q: asyncio.Queue = asyncio.Queue(maxsize=5000)
         self._subscribers[name] = q
         return q
 
@@ -929,6 +929,35 @@ class TickEngine:
             d.pop(symbol, None)
 
     # ── Shared tick processing ────────────────────────────────────────
+
+    def _fanout(self, name: str, q: asyncio.Queue, snap) -> None:
+        try:
+            q.put_nowait(snap)
+        except asyncio.QueueFull:
+            # Coalesce (audit #17): keep only the LATEST snapshot per
+            # symbol — a lagging agent catches up on current prices for
+            # every symbol instead of dropping whole symbols' last ticks.
+            try:
+                pending = []
+                while True:
+                    try:
+                        pending.append(q.get_nowait())
+                    except asyncio.QueueEmpty:
+                        break
+                pending.append(snap)
+                latest: dict = {}
+                for it in pending:
+                    k = getattr(it, "symbol", None) or id(it)
+                    latest.pop(k, None)
+                    latest[k] = it
+                for it in list(latest.values())[-q.maxsize:]:
+                    q.put_nowait(it)
+            except (asyncio.QueueEmpty, asyncio.QueueFull):
+                pass
+            cnt = self._queue_drop_count.get(name, 0) + 1
+            self._queue_drop_count[name] = cnt
+            if cnt % 100 == 1:
+                logger.warning("[TickEngine] Queue full for '{}': {} oldest ticks dropped (size={})", name, cnt, q.maxsize)
 
     async def _process_tick(self, symbol: str, tick: Tick, source: str = "KITE") -> None:
         """Candle buffer push → indicator calc → snapshot broadcast. Used by both WS and REST paths."""
@@ -1102,20 +1131,7 @@ class TickEngine:
                 logger.warning("[TickEngine] Tick recording error for {}: {}", symbol, exc)
 
         for name, q in list(self._subscribers.items()):
-            try:
-                q.put_nowait(snap)
-            except asyncio.QueueFull:
-                # Drop the OLDEST tick, keep the newest: a lagging agent should
-                # catch up on current prices, not replay a stale backlog.
-                try:
-                    q.get_nowait()
-                    q.put_nowait(snap)
-                except (asyncio.QueueEmpty, asyncio.QueueFull):
-                    pass
-                cnt = self._queue_drop_count.get(name, 0) + 1
-                self._queue_drop_count[name] = cnt
-                if cnt % 100 == 1:
-                    logger.warning("[TickEngine] Queue full for '{}': {} oldest ticks dropped (size={})", name, cnt, q.maxsize)
+            self._fanout(name, q, snap)
 
         if self.ws_broadcast:
             try:

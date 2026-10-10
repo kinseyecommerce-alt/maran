@@ -222,6 +222,8 @@ class Settings(BaseSettings):
     # Untested (no backtest evidence) symbols approved in PAPER trade on
     # PROBATION at this size factor until they have evidence (audit X12).
     paper_block_sim_entries_when_live_wanted: bool = True   # audit X3
+    paper_stop_slippage_bps: float = 2.0     # adverse sweep on paper SL/SL-M fills (audit X11)
+    paper_stop_gap_error_pct: float = 5.0    # stop gaps beyond this need a confirming tick
     paper_untested_size_factor: float = Field(default=0.5, ge=0.0, le=1.0)
     # Cash-equity single-position notional cap as a fraction of segment capital
     # (MIS leverage widens affordability, never past this) — audit X9/X10.

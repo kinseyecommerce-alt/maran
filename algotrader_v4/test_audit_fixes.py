@@ -322,7 +322,9 @@ def t_kite_position_untouched_and_fills_stamped():
         kc.update_paper_pnl("TITAN", 4321.0, source="KITE_WS")
         kc.check_paper_triggers("TITAN", 4321.0)
         o = kc._paper_orders[sl]
-        assert o["status"] == "COMPLETE" and o["price"] == 4321.0 and o["price_source"] == "KITE"
+        assert o["status"] == "COMPLETE" and o["price_source"] == "KITE"
+        assert 4321.0 < o["price"] <= 4321.0 * 1.0003, o["price"]          # gap fill + adverse sweep
+        assert o.get("filled_ts"), "fill time recorded"
         from self_learning import learning
         assert learning._fill_source(kc._paper_orders[oid], o) == "KITE"
         assert learning._fill_source({"price_source": "SIMULATED"}, {"price_source": "KITE"}) == "MIXED"
@@ -737,6 +739,88 @@ run("untested PAPER symbol trades on probation (half size)", t_probation_half_si
 run("built-in NSE agent obeys learning.entry_gate (retired → no order; size factor passed)", t_learning_gate_blocks_retired_agent)
 run("/bot/test-order in LIVE: 1-share far LIMIT then cancel — never MARKET", t_test_order_never_market)
 run("NSE_FO futures: per-position and gross CONTRACT notional caps", t_futures_notional_gate)
+
+
+# ════════════════════════════════════════════════════════════════════════════
+section("8. paper stop gap model, net daily-loss cap, NSE journal FIFO per strategy, tick coalescing")
+
+
+def t_stop_gap_model():
+    with fresh_paper_book() as kc:
+        kc.update_paper_pnl("TITAN", 4300.0, source="KITE_WS")
+        kc._paper_place("TITAN", "NSE", "BUY", 10, "MARKET", "MIS", 0.0, 0.0, "scalping")
+        sl = kc._paper_place("TITAN", "NSE", "SELL", 10, "SL-M", "MIS", 0.0, 4280.0, "scalping")
+        kc.update_paper_pnl("TITAN", 4000.0, source="KITE_WS")         # 6.5% gap: suspect
+        kc.check_paper_triggers("TITAN", 4000.0)
+        assert kc._paper_orders[sl]["status"] == "TRIGGER PENDING", "single gap tick filled"
+        kc.check_paper_triggers("TITAN", 3990.0)                      # confirmed
+        o = kc._paper_orders[sl]
+        assert o["status"] == "COMPLETE" and o["price"] < 3990.0 and o.get("gap_flag"), o
+        assert o["price"] < 4280.0, "gapped stop must not fill at its trigger"
+
+
+def t_daily_loss_cap_is_net():
+    from segments import segment_manager, _limits
+    lim = _limits("NSE_EQ")["max_daily_loss"]
+    with clock(at(*WED, 11, 0)), \
+            mock.patch.object(segment_manager, "pnl", return_value={"total": -lim + 100.0}), \
+            mock.patch.object(segment_manager, "costs_today", return_value=500.0), \
+            mock.patch.object(segment_manager, "kill") as k, \
+            mock.patch.object(segment_manager, "positions", return_value=[]):
+        ok, why = segment_manager.entry_check("NSE_EQ", count=False)
+        assert not ok and "daily loss" in why, why
+        assert k.called
+
+
+def t_sync_nse_fifo_per_strategy():
+    from self_learning import SelfLearning
+    sl = SelfLearning(_os_iso.path.join(_iso_dir, f"fifo-{time.time_ns()}.db"))
+    sl.active = True
+    t0 = 1_791_000_000.0
+    orders = [
+        {"order_id": "A1", "tradingsymbol": "SBIN", "transaction_type": "BUY", "quantity": 10, "average_price": 800,
+         "tag": "intraday", "placed_ts": t0, "price_source": "KITE", "status": "COMPLETE"},
+        {"order_id": "B1", "tradingsymbol": "SBIN", "transaction_type": "BUY", "quantity": 10, "average_price": 805,
+         "tag": "momentum", "placed_ts": t0 + 10, "price_source": "KITE", "status": "COMPLETE"},
+        {"order_id": "B2", "tradingsymbol": "SBIN", "transaction_type": "SELL", "quantity": 10, "average_price": 810,
+         "tag": "momentum", "placed_ts": t0 + 20, "pnl": 50.0, "price_source": "KITE", "status": "COMPLETE"},
+        # SL-M placed right after A1 but FILLED last
+        {"order_id": "A2", "tradingsymbol": "SBIN", "transaction_type": "SELL", "quantity": 10, "average_price": 790,
+         "tag": "intraday", "placed_ts": t0 + 1, "filled_ts": t0 + 30, "filled_at": "2026-10-07T11:05:00+05:30",
+         "pnl": -100.0, "price_source": "KITE", "status": "COMPLETE"},
+    ]
+    with mock.patch("kite_client.kite_client.paper_orders_today", return_value=orders), \
+            mock.patch("book._strategy_from_tag", side_effect=lambda t: t):
+        sl._sync_nse()
+    rows = {r["strategy"]: r for r in sl.store.q("SELECT * FROM journal")}
+    assert rows["momentum"]["entry"] == 805 and rows["momentum"]["exit"] == 810, rows
+    assert rows["intraday"]["entry"] == 800 and rows["intraday"]["exit"] == 790, rows
+    assert rows["intraday"]["exit_ts"].startswith("2026-10-07T11:05"), rows["intraday"]["exit_ts"]
+    assert rows["intraday"]["lots"] == 10
+
+
+def t_tick_queue_coalesces():
+    from tick_engine import TickEngine
+    te = TickEngine.__new__(TickEngine)
+    q = asyncio.Queue(maxsize=3)
+
+    class S:
+        def __init__(self, sym, n):
+            self.symbol, self.n = sym, n
+    for it in (S("A", 1), S("B", 1), S("A", 2)):
+        q.put_nowait(it)
+    te._subscribers = {"x": q}
+    te._queue_drop_count = {}
+    te._fanout("x", q, S("C", 1))
+    got = [q.get_nowait() for _ in range(q.qsize())]
+    latest = {i.symbol: i for i in got}
+    assert [(i.symbol, i.n) for i in got] == [("B", 1), ("A", 2), ("C", 1)], [(i.symbol, i.n) for i in got]
+
+
+run("paper stop: gap fills at gapped price + slippage; big gap needs a confirming tick", t_stop_gap_model)
+run("segment daily-loss cap uses NET (after-cost) P&L", t_daily_loss_cap_is_net)
+run("_sync_nse: FIFO per (strategy, symbol); exit_ts = SL-M fill time; lots set", t_sync_nse_fifo_per_strategy)
+run("tick fan-out coalesces to the latest snapshot per symbol", t_tick_queue_coalesces)
 
 
 # ════════════════════════════════════════════════════════════════════════════

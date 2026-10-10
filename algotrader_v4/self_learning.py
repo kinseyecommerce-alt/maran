@@ -621,8 +621,13 @@ class SelfLearning:
         # option baskets / option buys / option scalps journal themselves (one
         # row per basket with exact per-leg costs) — don't FIFO-pair their legs
         orders = [o for o in orders if not str(o.get("tag") or "").startswith(("OBASK", "OBUY", "OSCALP"))]
-        orders.sort(key=lambda o: float(o.get("placed_ts") or 0) or str(o.get("placed_at") or o.get("order_timestamp") or ""))
-        opens: dict[str, list] = {}
+        # FILL time order: a resting SL-M is PLACED at entry but FILLS later
+        orders.sort(key=lambda o: float(o.get("filled_ts") or o.get("placed_ts") or 0)
+                    or str(o.get("filled_at") or o.get("placed_at") or o.get("order_timestamp") or ""))
+        # FIFO per (strategy, symbol) — two agents on one symbol must not
+        # cross-pair each other's fills (audit #18). An exit whose own
+        # strategy has no opposite open falls back to any open on the symbol.
+        opens: dict[tuple, list] = {}
         n = 0
         from book import ist_iso
         for o in orders:
@@ -630,11 +635,17 @@ class SelfLearning:
             qty = int(o.get("quantity") or 0)
             sgn = 1 if o.get("transaction_type") == "BUY" else -1
             px = float(o.get("average_price") or o.get("price") or 0)
+            okey = (self._strategy_for_order(o)[0], sym)
             if o.get("pnl") is None:
-                opens.setdefault(sym, []).append({"o": o, "left": qty, "sgn": sgn, "px": px})
+                opens.setdefault(okey, []).append({"o": o, "left": qty, "sgn": sgn, "px": px})
                 continue
-            # exit: match FIFO against opposite-side opens
-            book = opens.get(sym, [])
+            # exit: match FIFO against opposite-side opens of the same strategy
+            book = opens.get(okey, [])
+            if not book or book[0]["sgn"] == sgn:
+                for k2, b2 in opens.items():
+                    if k2[1] == sym and b2 and b2[0]["sgn"] != sgn:
+                        book = b2
+                        break
             remain = qty
             while remain > 0 and book:
                 e = book[0]
@@ -656,9 +667,9 @@ class SelfLearning:
                 feats = self._entry_feats.get(str(eo.get("order_id"))) or {}
                 ok = self.record({
                     "id": jid, "segment": seg, "strategy": strat, "family": fam, "symbol": sym,
-                    "side": "BUY" if e["sgn"] > 0 else "SELL", "qty_units": take, "lots": None, "multiplier": 1.0,
-                    "entry": e["px"], "exit": px, "entry_ts": ist_iso(eo.get("placed_at") or eo.get("placed_ts")),
-                    "exit_ts": ist_iso(o.get("placed_at") or o.get("placed_ts")) or _iso(),
+                    "side": "BUY" if e["sgn"] > 0 else "SELL", "qty_units": take, "lots": self._lots_of(seg, take, o, eo), "multiplier": 1.0,
+                    "entry": e["px"], "exit": px, "entry_ts": ist_iso(eo.get("filled_at") or eo.get("placed_at") or eo.get("placed_ts")),
+                    "exit_ts": ist_iso(o.get("filled_at") or o.get("placed_at") or o.get("placed_ts")) or _iso(),
                     "features": feats, "regime": feats.get("regime"),
                     "live_entry_px": feats.get("ltp"), "slippage": None,
                     "gross": (px - e["px"]) * take * e["sgn"], "reason": o.get("tag"),
@@ -670,8 +681,20 @@ class SelfLearning:
                 if e["left"] <= 0:
                     book.pop(0)
             if remain > 0:
-                opens.setdefault(sym, []).append({"o": o, "left": remain, "sgn": sgn, "px": px})
+                opens.setdefault(okey, []).append({"o": o, "left": remain, "sgn": sgn, "px": px})
         return n
+
+    @staticmethod
+    def _lots_of(seg: str, units: int, *orders: dict) -> Optional[float]:
+        """Journal lots for NSE rows (audit #23): shares for cash, contracts
+        for F&O when the lot size is known."""
+        if seg == "NSE_EQ":
+            return float(units)
+        for od in orders:
+            ls = int(od.get("lot_size") or 0)
+            if ls > 0:
+                return round(units / ls, 2)
+        return None
 
     def _fill_source(self, entry_order: dict, exit_order: dict) -> str:
         """Journal label from the fills themselves (kite_client stamps each

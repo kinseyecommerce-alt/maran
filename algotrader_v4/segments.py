@@ -304,7 +304,7 @@ class SegmentManager:
                 continue
             try:
                 lim = _limits(code)
-                if self.pnl(code)["total"] <= -lim["max_daily_loss"]:
+                if self.net_total(code) <= -lim["max_daily_loss"]:
                     self.kill(code, reason=self.DAILY_HALT, flatten=True)
                     halted.append(code)
             except Exception as exc:
@@ -444,6 +444,22 @@ class SegmentManager:
         return {"realised": round(realised, 2), "unrealised": round(unreal, 2),
                 "total": round(realised + unreal, 2), "trades_today": trades}
 
+    def costs_today(self, code: str) -> float:
+        """Transaction costs of today's closed trades in the segment (from the
+        learning journal, which prices every fill with cost_model)."""
+        try:
+            from self_learning import learning
+            day = self.now().date().isoformat()
+            r = learning.store.q("SELECT SUM(costs) c FROM journal WHERE segment=? AND day=?", (code, day))
+            return float((r[0] or {}).get("c") or 0.0) if r else 0.0
+        except Exception:
+            return 0.0
+
+    def net_total(self, code: str) -> float:
+        """Today's P&L AFTER costs (realised + open − today's costs) — the
+        daily-loss cap works on net, not gross (audit #15)."""
+        return round(self.pnl(code)["total"] - self.costs_today(code), 2)
+
     def position_count(self, code: str) -> int:
         """Open positions, with each multi-leg option basket counted once."""
         rows = self.positions(code)
@@ -530,8 +546,7 @@ class SegmentManager:
         if not okw:
             return False, whyw
         lim = _limits(code)
-        p = self.pnl(code)
-        if p["total"] <= -lim["max_daily_loss"]:
+        if self.net_total(code) <= -lim["max_daily_loss"]:
             if not self._killed.get(code):
                 self.kill(code, reason=self.DAILY_HALT, flatten=True)
             return False, f"{spec.label} daily loss limit ₹{lim['max_daily_loss']:,.0f} hit"

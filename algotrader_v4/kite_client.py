@@ -1153,11 +1153,28 @@ class KiteClient:
                     (order["transaction_type"] == "BUY"  and ltp >= tp)
                 )
                 if not triggered:
+                    order.pop("_gap_ticks", None)
                     continue
+                # Gap model (audit X11): a stop that is gapped through fills at
+                # the gapped market price (never at the trigger) plus adverse
+                # sweep slippage. A gap beyond paper_stop_gap_error_pct is
+                # treated as a possible data error and must be confirmed by a
+                # second tick before it fills.
+                gap_pct = abs(ltp - tp) / tp * 100 if tp > 0 else 0.0
+                if gap_pct > float(getattr(settings, "paper_stop_gap_error_pct", 5.0) or 5.0):
+                    order["_gap_ticks"] = int(order.get("_gap_ticks", 0)) + 1
+                    if order["_gap_ticks"] < 2:
+                        logger.warning("[PAPER] {} stop gap {:.1f}% (trigger ₹{} ltp ₹{}) — "
+                                       "awaiting a confirming tick", symbol, gap_pct, tp, ltp)
+                        continue
+                    order["gap_flag"] = round(gap_pct, 2)
                 if not self._fill_time_guard_ok(order):
                     continue
                 if not self._feed_guard_ok(order):
                     continue
+                slip = float(getattr(settings, "paper_stop_slippage_bps", 2.0) or 0.0) / 10_000
+                fill = ltp * (1 - slip) if order["transaction_type"] == "SELL" else ltp * (1 + slip)
+                fill = round(fill, 2)
                 # CAS: only fill if still TRIGGER PENDING — snapshot under lock prevents double-fill race
                 with self._paper_orders_lock:
                     if order["status"] != "TRIGGER PENDING":
@@ -1165,14 +1182,17 @@ class KiteClient:
                     if order["order_id"] in self._paper_filled_ids:
                         continue
                     order["status"] = "COMPLETE"
-                    order["price"]  = ltp  # filled at market after trigger
+                    order["price"]  = fill  # market after trigger (gap-through) + sweep slippage
+                    order["average_price"] = fill
+                    order["filled_at"] = datetime.now(tz=_IST).isoformat()
+                    order["filled_ts"] = time.time()
                     order["price_source"] = self.paper_price_source(symbol)
                     self._paper_filled_ids.add(order["order_id"])
                     order_copy = dict(order)
                 self._update_paper_position(order_copy)
-                logger.info("[PAPER] Trigger hit — {} {} {} qty={} trigger=₹{} fill=₹{}",
+                logger.info("[PAPER] Trigger hit — {} {} {} qty={} trigger=₹{} fill=₹{} (ltp ₹{})",
                             order["transaction_type"], symbol,
-                            order["order_type"], order["quantity"], tp, ltp)
+                            order["order_type"], order["quantity"], tp, fill, ltp)
 
             elif snap_status == "OPEN" and order["order_type"] == "LIMIT":
                 limit_px = order.get("price", 0.0)
@@ -1197,6 +1217,8 @@ class KiteClient:
                     order["status"]        = "COMPLETE"
                     order["price"]         = limit_px   # LIMIT fills at limit price
                     order["average_price"] = limit_px
+                    order["filled_at"]     = datetime.now(tz=_IST).isoformat()
+                    order["filled_ts"]     = time.time()
                     order["price_source"]  = self.paper_price_source(symbol)
                     self._paper_filled_ids.add(order["order_id"])
                     order_copy = dict(order)
