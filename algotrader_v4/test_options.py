@@ -46,6 +46,15 @@ NOW = datetime(2026, 10, 9, 10, 30)
 SPOT = 22500.0
 W1, W2, MON = "2026-10-13", "2026-10-20", "2026-10-27"
 LOT = 65
+from zoneinfo import ZoneInfo as _ZI
+IST = _ZI("Asia/Kolkata")
+
+
+def ist_ts(d):
+    return d.replace(tzinfo=IST).timestamp() if d.tzinfo is None else d.timestamp()
+
+
+NOW_TS = ist_ts(NOW)
 
 
 def sym(exp, k, typ):
@@ -100,7 +109,7 @@ def mk_engine(mkt=None, fail_on=None, capital=1_000_000.0, gate=None):
     mkt = mkt or Market()
     ch = OptionChain(instruments_fn=lambda ex: master() if ex == "NFO" else [], quote_fn=mkt.quote)
     ch.spot = lambda und: mkt.spot
-    br = PaperOptionBroker(ledger=False, max_quote_age=5.0, clock=lambda: mkt.now.timestamp(), fail_on=fail_on)
+    br = PaperOptionBroker(ledger=False, clock=lambda: ist_ts(mkt.now), fail_on=fail_on)
     eng = OptionsEngine(chain=ch, broker=br, clock=lambda: mkt.now, persist=False, journal=False, replay=True,
                         capital=capital, underlyings=("NIFTY",),
                         gate_override=gate if gate is not None else {f: {"status": "pass"} for f in OE.ALL_FAMILIES})
@@ -421,11 +430,11 @@ def test_paper_fills():
     eng, mkt, br = mk_engine()
     leg = Leg(symbol=sym(W1, 22500, "CE"), exchange="NFO", opt_type="CE", strike=22500, expiry=W1, side=1,
               lot_size=65, lots=1)
-    ok("no fill without a two-sided quote", not br.execute(leg, "BUY", 65, {"bid": 0, "ask": 10, "ts": NOW.timestamp()}, "t")["ok"])
-    stale = {"bid": 9, "ask": 10, "bids": [], "asks": [], "ts": NOW.timestamp() - 60}
+    ok("no fill without a two-sided quote", not br.execute(leg, "BUY", 65, {"bid": 0, "ask": 10, "ts": NOW_TS}, "t")["ok"])
+    stale = {"bid": 9, "ask": 10, "bids": [], "asks": [], "ts": NOW_TS - 60}
     r = br.execute(leg, "BUY", 65, stale, "t")
     ok("stale quote refused", not r["ok"] and "stale" in r["why"], r)
-    fresh = {"bid": 9.0, "ask": 9.1, "bids": [(9.0, 650, 1)], "asks": [(9.1, 650, 1)], "ts": NOW.timestamp()}
+    fresh = {"bid": 9.0, "ask": 9.1, "bids": [(9.0, 650, 1)], "asks": [(9.1, 650, 1)], "ts": NOW_TS}
     r = br.execute(leg, "BUY", 65, fresh, "t")
     ok("fill at the ask, slippage vs mid recorded, costs attached",
        r["ok"] and r["price"] == 9.1 and r["slippage"] > 0 and r["costs"]["brokerage"] == 20, r)
@@ -530,7 +539,7 @@ def test_cannot_go_live():
         r = eng.open_basket("IRON_CONDOR", "NIFTY")
         ok("engine refuses baskets when TRADING_MODE=LIVE", not r.get("ok") and "PAPER" in r["why"], r)
         leg = Leg(symbol=sym(W1, 22500, "CE"), exchange="NFO", opt_type="CE", strike=22500, expiry=W1, side=1, lot_size=65)
-        f = br.execute(leg, "BUY", 65, {"bid": 9, "ask": 9.1, "ts": NOW.timestamp()}, "t")
+        f = br.execute(leg, "BUY", 65, {"bid": 9, "ask": 9.1, "ts": NOW_TS}, "t")
         ok("paper broker refuses to execute when LIVE", not f["ok"] and "PAPER" in f["why"], f)
         ok("step() is a no-op when LIVE", eng.step(NOW)["ok"] is False)
         ok("buy refused when LIVE", not eng.open_buy("NIFTY", "CE").get("ok"))
@@ -554,6 +563,46 @@ def test_cannot_go_live():
         settings.trading_mode = old
 
 
+def test_market_hours_and_freshness():
+    from option_chain import normalize_quote
+    from datetime import datetime as _dt
+    q = normalize_quote({"last_price": 10, "depth": {"buy": [{"price": 9.9, "quantity": 65}], "sell": [{"price": 10, "quantity": 65}]}})
+    ok("quote without an exchange timestamp is stale (ts=0), not poll time", q["ts"] == 0.0, q["ts"])
+    from zoneinfo import ZoneInfo
+    t = _dt(2026, 10, 9, 10, 30, 0)
+    q2 = normalize_quote({"last_price": 10, "timestamp": t, "depth": {}})
+    ok("naive Kite timestamp read as IST", abs(q2["ts"] - t.replace(tzinfo=ZoneInfo("Asia/Kolkata")).timestamp()) < 1e-6)
+    from option_chain import OptionChain
+    ch = OptionChain(instruments_fn=lambda ex: [], quote_fn=lambda k: {})
+    ch.ws_update("X", {"ltp": 1, "bid": 1, "ask": 1.05, "recv_ts": 1e12})
+    ok("WS cache stamped by exch_ts (missing -> stale) not recv_ts", ch._ws["X"]["ts"] == 0.0)
+    eng, mkt, br = mk_engine()
+    leg = Leg(symbol=sym(W1, 22500, "CE"), exchange="NFO", opt_type="CE", strike=22500, expiry=W1, side=1, lot_size=65)
+    q4 = {"bid": 9, "ask": 9.1, "bids": [(9, 650, 1)], "asks": [(9.1, 650, 1)], "ts": NOW_TS - 4}
+    ok("entry refused on a 4 s old quote (limit 3 s)", not br.execute(leg, "BUY", 65, q4, "t")["ok"])
+    ok("exit still allowed on a 4 s old quote", br.execute(leg, "BUY", 65, q4, "t", entry=False)["ok"])
+    # live (non-replay) engine: closed market -> no entries
+    live = OptionsEngine(chain=eng.chain, broker=br, clock=lambda: _dt(2026, 10, 10, 11, 0), persist=False,
+                         journal=False, replay=False, capital=1e6, gate_override={})
+    okm, why = live._market_ok()
+    ok("live engine refuses on a Saturday (real NSE F&O hours only)", not okm and "closed" in why, why)
+    live2 = OptionsEngine(chain=eng.chain, broker=br, clock=lambda: _dt(2026, 10, 9, 18, 0), persist=False,
+                          journal=False, replay=False, capital=1e6, gate_override={})
+    from segments import segment_manager
+    ok("after-hours weekday: NSE F&O not open", segment_manager.is_open("NSE_FO", _dt(2026, 10, 9, 18, 0)) is False)
+    from fast_scalper import fast_scalper, Inst, SState
+    from self_learning import learning
+    inst = Inst("X@NSE_FO_OPT", "NSE_FO", sym(W1, 22500, "CE"), 1, 0.05, 1.0, 65, "opt_paper", "NFO", "opt",
+                "NIFTY", "CE", W1, 22500.0)
+    s0 = SState()
+    fast_scalper._opt_enter(inst, s0, {"bid": 100.0, "ask": 100.05, "bids": [(100.0, 650, 1)], "exch_ts": 0},
+                            0.0, learning.params("scalp:NSE_FO_OPT"), {})
+    ok("option scalper: no entry when market closed / tick stale", s0.order is None)
+    src = open("fast_scalper.py").read()
+    ok("option scalper checks real NSE_FO hours + exchange-time tick age",
+       'segment_manager.is_open("NSE_FO")' in src and "OPT_TICK_MAX_AGE" in src)
+
+
 def test_agent_no_naked_legs():
     src = open("agents/strategy_agents.py").read()
     i = src.index("Options-engine hand-off")
@@ -572,7 +621,7 @@ if __name__ == "__main__":
     for fn in (test_guard_pure, test_guard_in_kite_client, test_atomic_basket_and_unwind,
                test_all_structures_defined_risk, test_sizing, test_margin_estimate, test_cost_model,
                test_lot_and_expiry, test_paper_fills, test_exits, test_option_buying, test_option_scalper,
-               test_cannot_go_live, test_agent_no_naked_legs):
+               test_cannot_go_live, test_market_hours_and_freshness, test_agent_no_naked_legs):
         print(f"\n  — {fn.__name__}")
         try:
             fn()

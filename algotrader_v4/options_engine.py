@@ -64,6 +64,8 @@ EXIT_TIME = dtime(15, 0)
 EXPIRY_DAY_EXIT = dtime(11, 30)
 BUY_START, BUY_END, BUY_FLATTEN = dtime(9, 30), dtime(14, 0), dtime(14, 30)
 DECIDE_EVERY_SEC = 300
+ENTRY_QUOTE_MAX_AGE = 3.0      # s, by exchange timestamp — entries never fill on an older quote
+EXIT_QUOTE_MAX_AGE = 30.0      # exits/unwinds tolerate a little more (getting flat beats waiting)
 MIN_CREDIT_FRAC = {"IRON_CONDOR": 0.15, "IRON_FLY": 0.40, "BULL_PUT": 0.25, "BEAR_CALL": 0.25}
 SELL_STRUCTURES = tuple(MIN_CREDIT_FRAC)
 SELL_FAMILIES = tuple(f"opt_sell:{s}" for s in SELL_STRUCTURES)
@@ -407,10 +409,13 @@ class PaperOptionBroker:
     the segment book, daily loss cap and kite_client's naked-short guard see
     it). ledger=False: private book (replay/tests) with the SAME guard."""
 
-    def __init__(self, ledger: bool = True, max_quote_age: float = 5.0, clock: Callable = time.time,
-                 fail_on: Optional[set] = None, key_fn: Optional[Callable] = None) -> None:
+    def __init__(self, ledger: bool = True, max_quote_age: float = ENTRY_QUOTE_MAX_AGE, clock: Callable = time.time,
+                 fail_on: Optional[set] = None, key_fn: Optional[Callable] = None,
+                 max_exit_quote_age: Optional[float] = None) -> None:
         self.ledger = ledger
         self.max_quote_age = max_quote_age
+        self.max_exit_quote_age = max(max_quote_age, EXIT_QUOTE_MAX_AGE) if max_exit_quote_age is None \
+            else max_exit_quote_age
         self.clock = clock
         self.fail_on = set(fail_on or ())
         self.book: dict = {}
@@ -422,16 +427,17 @@ class PaperOptionBroker:
         guard_check(leg.symbol, leg.exchange, action, qty, pos, key_fn=self.key_fn) if self.key_fn else \
             guard_check(leg.symbol, leg.exchange, action, qty, pos)
 
-    def execute(self, leg: Leg, action: str, qty: int, q: Optional[dict], tag: str) -> dict:
+    def execute(self, leg: Leg, action: str, qty: int, q: Optional[dict], tag: str, entry: bool = True) -> dict:
         if str(settings.trading_mode).upper() != "PAPER":
             return {"ok": False, "why": "options engine is PAPER-only"}
         if leg.symbol in self.fail_on or f"{action}:{leg.symbol}" in self.fail_on:
             return {"ok": False, "why": "injected failure"}
         if not q or (q.get("bid") or 0) <= 0 or (q.get("ask") or 0) <= 0:
             return {"ok": False, "why": "no two-sided quote"}
-        age = self.clock() - float(q.get("ts") or 0)
-        if self.max_quote_age and age > self.max_quote_age:
-            return {"ok": False, "why": f"stale quote ({age:.0f}s old)"}
+        age = self.clock() - float(q.get("ts") or 0)       # q["ts"] = exchange timestamp
+        lim = self.max_quote_age if entry else self.max_exit_quote_age
+        if lim and age > lim:
+            return {"ok": False, "why": f"stale quote ({age:.0f}s old by exchange time > {lim:g}s)"}
         try:
             px, lv = fill_from_book(action, qty, q, leg.tick or 0.05)
         except ValueError as exc:
@@ -806,7 +812,7 @@ class OptionsEngine:
         fills = []
         for x in sorted(filled, key=lambda x: x.side):          # shorts (-1) first
             act = "SELL" if x.side > 0 else "BUY"
-            r = self.broker.execute(x, act, x.qty, qs.get(x.symbol), f"OBASK-{b.id[3:]}-U")
+            r = self.broker.execute(x, act, x.qty, qs.get(x.symbol), f"OBASK-{b.id[3:]}-U", entry=False)
             if r.get("ok"):
                 x.exit, x.closed = r["price"], True
                 fills.append({"side": act, "qty": x.qty, "price": x.exit, "exchange": x.exchange})
@@ -878,7 +884,7 @@ class OptionsEngine:
         qs = self.chain.quotes([x.symbol for x in todo])
         for x in sorted(todo, key=lambda x: x.side):
             act = "SELL" if x.side > 0 else "BUY"
-            r = self.broker.execute(x, act, x.qty, qs.get(x.symbol), f"OBASK-{b.id[3:]}-X")
+            r = self.broker.execute(x, act, x.qty, qs.get(x.symbol), f"OBASK-{b.id[3:]}-X", entry=False)
             if not r.get("ok"):
                 b.events.append({"ts": self._iso(), "event": "close_leg_failed", "leg": x.symbol,
                                  "why": r.get("why")})
@@ -1022,7 +1028,7 @@ class OptionsEngine:
 
     def close_buy(self, p: BuyPos, reason: str, q: Optional[dict] = None) -> bool:
         q = q or self.chain.quotes([p.leg.symbol]).get(p.leg.symbol)
-        r = self.broker.execute(p.leg, "SELL", p.leg.qty, q, f"OBUY-{p.id[4:]}-X")
+        r = self.broker.execute(p.leg, "SELL", p.leg.qty, q, f"OBUY-{p.id[4:]}-X", entry=False)
         if not r.get("ok"):
             return False
         p.leg.exit, p.leg.closed, p.leg.exit_mid = r["price"], True, r["mid"]
@@ -1189,7 +1195,8 @@ class OptionsEngine:
               "shorts before selling wings",
               "max loss (width - credit + round-trip costs) <= 1% of NSE_FO capital x size factor",
               "no expiry-day selling; expiry-day exit 11:30; time exit 15:00 (before the 15:10 square-off)",
-              "real market hours + fresh two-sided quotes only (no after-hours option fills)",
+              "real NSE F&O hours only (09:15-15:30 IST, no after-hours/frozen-price fills); entries need a "
+              "two-sided quote <= 3 s old by EXCHANGE timestamp",
               "segment entry gate (kill switch, 2.5% daily loss cap, capital, typed-SEND LIVE gate) on every entry",
               "backtest gate never loosened: fail -> blocked; insufficient real history -> 0.5x PAPER probation"]
 

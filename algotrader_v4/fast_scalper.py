@@ -64,6 +64,7 @@ OPT_DAILY_CAP = 40             # option scalps per day (all symbols)
 OPT_SYMBOL_DAILY_CAP = 12      # per contract per day
 OPT_MAX_CONCURRENT = 2
 OPT_MAX_LOTS = 10
+OPT_TICK_MAX_AGE = 3.0         # s by exchange timestamp — older ticks never trigger an entry
 OPT_PROBATION_TRADES = 30      # < this many journalled option scalps -> 0.5x size probation
 OPT_MAX_NOTIONAL_PCT = 10.0    # premium outlay ≤ 10% of NSE_FO capital per scalp
 OPT_RECENTER_SEC = 60
@@ -563,6 +564,16 @@ class FastScalper:
             return
         self._roll_day()
         n = now_ist()
+        # real NSE F&O hours only — never on frozen after-hours prices, even
+        # if SEGMENT_PAPER_AFTER_HOURS is on for other segments
+        if not segment_manager.is_open("NSE_FO") or segment_manager.killed("NSE_FO"):
+            self.opt_stats["gate_skips"] += 1
+            return
+        # the tick must be fresh by EXCHANGE time (Kite exch_ts), not receive time
+        ex_ts = float(t.get("exch_ts") or 0.0)
+        if not ex_ts or time.time() - ex_ts > OPT_TICK_MAX_AGE:
+            self.opt_stats["stale_skips"] = self.opt_stats.get("stale_skips", 0) + 1
+            return
         if inst.expiry == n.date().isoformat() and n.hour >= 13:
             self.opt_stats["cap_skips"] += 1          # expiry-day afternoon gamma: no new scalps
             return

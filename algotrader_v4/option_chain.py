@@ -106,17 +106,24 @@ def normalize_quote(q: dict, ts: Optional[float] = None) -> dict:
             for x in (d.get("buy") or []) if float(x.get("price") or 0) > 0]
     asks = [(float(x.get("price") or 0), int(x.get("quantity") or 0), int(x.get("orders") or 0))
             for x in (d.get("sell") or []) if float(x.get("price") or 0) > 0]
+    # Freshness is stamped by the EXCHANGE timestamp of the quote (Kite
+    # `timestamp`, naive IST), never by our poll time: a quote with no
+    # exchange timestamp is treated as stale (ts=0) and cannot fill an entry.
     t = q.get("timestamp") or q.get("last_trade_time")
     tsv = ts
     if tsv is None and t is not None:
         try:
-            tsv = (t if isinstance(t, datetime) else datetime.fromisoformat(str(t))).timestamp()
+            dt = t if isinstance(t, datetime) else datetime.fromisoformat(str(t))
+            if dt.tzinfo is None:
+                from zoneinfo import ZoneInfo
+                dt = dt.replace(tzinfo=ZoneInfo("Asia/Kolkata"))
+            tsv = dt.timestamp()
         except Exception:
             tsv = None
     return {"ltp": float(q.get("last_price") or 0), "bid": bids[0][0] if bids else 0.0,
             "ask": asks[0][0] if asks else 0.0, "bids": bids, "asks": asks,
             "oi": int(q.get("oi") or 0), "volume": int(q.get("volume") or 0),
-            "ts": tsv if tsv is not None else time.time(), "src": "rest"}
+            "ts": tsv if tsv is not None else 0.0, "src": "rest"}
 
 
 def spread_pct(q: dict) -> float:
@@ -261,7 +268,9 @@ class OptionChain:
         self._ws[sym] = {"ltp": t.get("ltp") or 0.0, "bid": t.get("bid") or 0.0, "ask": t.get("ask") or 0.0,
                          "bids": list(t.get("bids") or []), "asks": list(t.get("asks") or []),
                          "oi": int(t.get("oi") or 0), "volume": int(t.get("volume") or 0),
-                         "ts": float(t.get("recv_ts") or time.time()), "src": "ws"}
+                         # exchange timestamp (Kite WS exch_ts), not receive time
+                         "ts": float(t.get("exch_ts") or 0.0), "recv_ts": float(t.get("recv_ts") or 0.0),
+                         "src": "ws"}
 
     def quotes(self, rows_or_syms: list, max_ws_age: float = 2.0) -> dict[str, dict]:
         syms, exch = [], {}
