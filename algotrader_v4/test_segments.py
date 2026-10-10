@@ -426,7 +426,9 @@ def t_native_trade_cycle():
     # _force_cross makes a 1.2% one-bar jump → a very wide volatility stop;
     # widen the per-trade risk budget so this signal-cycle test still sizes ≥1 lot
     with clock(at(*TUE, 20, 0)), world(running={"mcx_trend", "cds_trend"}), no_kite(), \
-         mock.patch.object(settings, "segment_risk_per_trade_pct", 10.0):
+         mock.patch.object(settings, "segment_risk_per_trade_pct", 10.0), \
+         mock.patch.object(settings, "segment_max_position_notional_x", 5.0), \
+         mock.patch.object(settings, "native_min_edge_cost_ratio", 0.0):
         native_engine.seed(ref_fn=lambda s: (1000.0, "2026-10-05"))
         native_engine.positions_.clear()
         for st in native_engine.strategies.values():
@@ -599,7 +601,7 @@ def t_mcx_risk_sizing():
                 assert lots * dist * c.multiplier <= lim["risk_per_trade"] + 1e-6, (key, lots)
                 assert lots * margin_lot <= max(lim["capital"] / lim["max_positions"], 0.3 * lim["capital"]) + 1e-6
             else:
-                assert "risk" in why or "margin" in why
+                assert "risk" in why or "margin" in why or "notional" in why
         key = "NATURALGAS-FUT@MCX"
         native_engine.price[key] = 290.0
         lots, _, _ = native_engine.size_lots(key, native_engine.stop_distance(key))
@@ -607,12 +609,13 @@ def t_mcx_risk_sizing():
 
 
 def t_daily_halt_flattens_and_expires():
-    with clock(at(*TUE, 20, 0)), world(running={"mcx_trend"}), no_kite():
+    with clock(at(*TUE, 20, 0)), world(running={"mcx_trend"}), no_kite(), \
+            mock.patch.object(settings, "segment_max_position_notional_x", 5.0):
         native_engine.positions_.clear()
         key = "GOLDM-FUT@MCX"
         native_engine.price[key] = 120000.0
         r = native_engine.open_external("MCX", "GOLDM-FUT", "BUY", strategy="mcx_trend",
-                                        stop_dist=100000.0, target_dist=1.0, lots=1)
+                                        stop_dist=100000.0, target_dist=1000.0, lots=1)
         assert r["ok"], r
         base = segment_manager.pnl("MCX")["total"]           # earlier tests' realised P&L today
         native_engine.price[key] = 120000.0 - (base + 26_000.0) / 10.0   # total ≈ −₹26,000 (> 2.5% cap)
@@ -641,7 +644,8 @@ def t_kite_overlay_labels_and_switch():
     cds = [{"instrument_type": "FUT", "name": "USDINR", "tradingsymbol": "USDINR26O16FUT", "expiry": _d.date(2026, 10, 16)},
            {"instrument_type": "FUT", "name": "USDINR", "tradingsymbol": "USDINR26OCTFUT", "expiry": _d.date(2026, 10, 28)}]
     assert resolve_front_future(cds, "USDINR", _d.date(2026, 10, 9))["tradingsymbol"] == "USDINR26OCTFUT"   # monthly, not weekly
-    with clock(at(2026, 10, 7, 20, 0)), world(running=set()), no_kite():   # fresh day: no halt
+    with clock(at(2026, 10, 7, 20, 0)), world(running=set()), no_kite(), \
+            mock.patch.object(settings, "segment_max_position_notional_x", 5.0):   # fresh day: no halt
         native_engine.positions_.clear()
         key = "COPPER-FUT@MCX"
         native_engine.src.pop(key, None)
@@ -669,7 +673,15 @@ def t_kite_overlay_labels_and_switch():
             r = native_engine.open_external("MCX", "COPPER-FUT", "BUY", strategy="mcx_trend",
                                             stop_dist=50.0, target_dist=50.0, lots=1)
             assert not r["ok"] and "fresh Kite quote" in r["reason"], r
-            native_engine.kite_px[key] = (1012.5, _t.time())
+            native_engine.kite_px[key] = (1012.5, _t.time())        # no EXCHANGE timestamp → stale
+            r = native_engine.open_external("MCX", "COPPER-FUT", "BUY", strategy="mcx_trend",
+                                            stop_dist=50.0, target_dist=50.0, lots=1)
+            assert not r["ok"] and "exchange time" in r["reason"], r
+            native_engine.kite_px[key] = (1012.5, _t.time(), _t.time() - 600)   # frozen: exch ts 10 min old
+            r = native_engine.open_external("MCX", "COPPER-FUT", "BUY", strategy="mcx_trend",
+                                            stop_dist=50.0, target_dist=50.0, lots=1)
+            assert not r["ok"] and "exchange time" in r["reason"], r
+            native_engine.kite_px[key] = (1012.5, _t.time(), _t.time() - 2)
             r = native_engine.open_external("MCX", "COPPER-FUT", "BUY", strategy="mcx_trend",
                                             stop_dist=50.0, target_dist=50.0, lots=1)
             assert r["ok"], r

@@ -52,6 +52,10 @@ RISK_PCT = 0.25                 # % of segment capital risked per scalp (before 
 MAX_PER_MIN = 2
 DAILY_CAP = {"NSE_EQ": 80, "NSE_FO": 40, "BSE_EQ": 30, "MCX": 60, "CDS": 30}
 MAX_CONCURRENT = 3
+SCALP_TICK_MAX_AGE = 5.0        # s by exchange timestamp (all scalps)
+STOP_SPREAD_MULT = 3.0          # stop distance ≥ this × the current spread
+MAX_LOTS = {"MCX": 5, "CDS": 5, "NSE_FO": 2}   # hard lot caps (cash segments: by notional only)
+EQ_MAX_NOTIONAL_FRAC = 0.25     # cash scalps: ≤ 25% of segment capital notional
 ENTRY_TTL_SEC = 6.0
 TICK_DIR = Path("logs/ticks")
 # option scalping (jag 2026-10-09): ATM±N window on NIFTY/BANKNIFTY (+FINNIFTY/
@@ -133,6 +137,39 @@ class ScalpLogic:
         if f["imbalance"] <= -imb and f["tick_mom"] <= -m and f["bar_mom_ticks"] <= 0:
             return -1
         return 0
+
+    @staticmethod
+    def stop_target(inst: Inst, p: dict, spread: float) -> tuple[float, float]:
+        """(stop, target) distances. The stop is never inside the noise: at
+        least STOP_SPREAD_MULT × the live spread (a 6-tick CRUDEOIL stop in a
+        2–3-tick spread was hit by the spread alone); the target keeps the
+        tuned target:stop ratio."""
+        sl = float(p["sl_ticks"]) * inst.tick
+        tp = float(p["tp_ticks"]) * inst.tick
+        floor = STOP_SPREAD_MULT * max(0.0, float(spread or 0.0))
+        if floor > sl > 0:
+            tp = tp * floor / sl
+            sl = floor
+        return sl, tp
+
+    @staticmethod
+    def max_lots(inst: Inst, px: float, capital: float) -> int:
+        """Lot cap by NOTIONAL (price × multiplier × lot) on every route:
+        futures/commodities ≤ segment_max_position_notional_x × capital and a
+        hard lot cap; cash ≤ EQ_MAX_NOTIONAL_FRAC × capital. (NSE lots were
+        uncapped: ₹2.5k ÷ 6 × ₹0.05 = 8,333 shares.)"""
+        n_lot = float(px) * float(inst.mult) * float(inst.lot or 1)
+        if n_lot <= 0 or capital <= 0:
+            return 0
+        if inst.segment in ("NSE_EQ", "BSE_EQ"):
+            cap_n = capital * EQ_MAX_NOTIONAL_FRAC
+        else:
+            cap_n = capital * float(getattr(settings, "segment_max_position_notional_x", 1.0) or 1.0)
+        lots = int(cap_n // n_lot)
+        hard = MAX_LOTS.get(inst.segment)
+        if hard:
+            lots = min(lots, hard)
+        return max(0, lots)
 
     @staticmethod
     def cost_ok(inst: Inst, px: float, units: float, p: dict, spread: float) -> tuple[bool, float, float]:
@@ -308,7 +345,8 @@ class FastScalper:
         if inst.route == "native":
             try:
                 from segment_engine import native_engine
-                native_engine.kite_px[inst.key] = (t["ltp"], now)
+                # (price, received-at, EXCHANGE ts) — entries gate on exchange time
+                native_engine.kite_px[inst.key] = (t["ltp"], now, float(t.get("exch_ts") or 0.0))
                 if t.get("bid") and t.get("ask"):
                     native_engine.kite_ba[inst.key] = (t["bid"], t["ask"], now)
             except Exception:
@@ -378,11 +416,18 @@ class FastScalper:
         px = t["bid"] if side > 0 else t["ask"]
         if not px:
             return
-        sl_d = float(p["sl_ticks"]) * inst.tick
+        # the tick must be fresh by EXCHANGE time (Kite exch_ts) — never scalp
+        # a frozen post-close quote
+        ex_ts = float(t.get("exch_ts") or 0.0)
+        if not ex_ts or time.time() - ex_ts > SCALP_TICK_MAX_AGE:
+            self.stats["stale_skips"] = self.stats.get("stale_skips", 0) + 1
+            return
+        spread = max(0.0, float(t.get("ask") or 0) - float(t.get("bid") or 0))
+        sl_d, tp_d = ScalpLogic.stop_target(inst, p, spread)
         per_lot = sl_d * inst.mult * inst.lot
         lots = int(risk // per_lot) if per_lot > 0 else 0
+        lots = min(lots, ScalpLogic.max_lots(inst, px, lim["capital"]))
         if inst.route == "native":
-            lots = min(lots, 5)
             c_margin = px * inst.mult * 0.15
         else:
             c_margin = px * inst.lot * (0.2 if inst.segment == "NSE_FO" else 0.2)
@@ -401,7 +446,7 @@ class FastScalper:
             return
         q0 = (t["bids"][0][1] if side > 0 else t["asks"][0][1]) if (t.get("bids") and t.get("asks")) else 0
         st.order = {"side": side, "px": px, "queue": q0, "ts": now, "lots": lots, "features": f,
-                    "sl_d": sl_d, "tp_d": float(p["tp_ticks"]) * inst.tick}
+                    "sl_d": sl_d, "tp_d": tp_d}
         self.stats["orders"] += 1
 
     def _fill(self, inst: Inst, st: SState, t: dict, now: float, p: dict) -> None:

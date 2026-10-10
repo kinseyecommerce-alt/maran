@@ -21,6 +21,15 @@ _os_iso.environ.setdefault("DATABASE_PATH", _os_iso.path.join(_iso_dir, "algotra
 _os_iso.environ.setdefault("ADAPTIVE_DATA_DIR", _os_iso.path.join(_iso_dir, "adaptive"))
 _os_iso.environ.setdefault("SEBI_AUDIT_DIR", _iso_dir)
 _os_iso.environ.setdefault("SEGMENT_PAPER_AFTER_HOURS", "true")   # segment hours are tested explicitly in test_segments.py
+
+# Segment hours are ALWAYS enforced (the after-hours switch is ignored since
+# the 2026-10-10 audit fix): pin the segment clock to a mid-session weekday so
+# these safety properties don't depend on when the suite runs.
+def _pin_session_clock():
+    from datetime import datetime as _dt_pin
+    from zoneinfo import ZoneInfo as _ZI_pin
+    from segments import segment_manager as _sm_pin
+    _sm_pin._now_fn = lambda: _dt_pin(2026, 10, 7, 11, 0, tzinfo=_ZI_pin("Asia/Kolkata"))
 # Throwaway LOCAL auth value so the HTTP tests exercise the real middleware.
 _os_iso.environ["API_KEY"] = "unit-test-local-only"
 _os_iso.environ["TRADING_MODE"] = "PAPER"
@@ -52,6 +61,7 @@ def section(t: str):
 
 from config import settings
 settings.trading_mode = "PAPER"
+_pin_session_clock()
 
 # ════════════════════════════════════════════════════════════════════
 section("A. INDEX FEED")

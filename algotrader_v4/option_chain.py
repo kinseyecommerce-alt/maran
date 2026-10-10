@@ -99,6 +99,26 @@ def years_to_expiry(expiry, now: datetime) -> float:
     return sec / (365.0 * 86400.0)
 
 
+def quote_exchange_ts(q: dict) -> float:
+    """EXCHANGE timestamp (epoch) of a Kite quote() row — Kite `timestamp`
+    (else `last_trade_time`), naive IST. 0.0 when absent/unparseable, i.e. a
+    quote without an exchange timestamp is treated as stale. Shared by the
+    options chain, the BSE/MCX/CDS native engine and the inventor."""
+    t = (q or {}).get("timestamp") or (q or {}).get("last_trade_time")
+    if t is None:
+        return 0.0
+    try:
+        if isinstance(t, (int, float)):
+            return float(t)
+        dt = t if isinstance(t, datetime) else datetime.fromisoformat(str(t))
+        if dt.tzinfo is None:
+            from zoneinfo import ZoneInfo
+            dt = dt.replace(tzinfo=ZoneInfo("Asia/Kolkata"))
+        return dt.timestamp()
+    except Exception:
+        return 0.0
+
+
 def normalize_quote(q: dict, ts: Optional[float] = None) -> dict:
     """Kite quote() entry → {ltp, bid, ask, bids[(px,qty,n)], asks, oi, volume, ts}."""
     d = q.get("depth") or {}

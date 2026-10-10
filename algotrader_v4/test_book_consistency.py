@@ -56,6 +56,11 @@ def section(t):
 
 from config import settings
 settings.trading_mode = "PAPER"
+# book-accounting tests open GOLDM/COPPER lots: relax the (separately
+# tested, test_audit_fixes.py) notional caps and edge-vs-cost gate here
+settings.segment_max_position_notional_x = 5.0
+settings.segment_max_gross_notional_x = 10.0
+settings.native_min_edge_cost_ratio = 0.0
 import main as _main
 import book
 import paper_store

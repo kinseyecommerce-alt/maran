@@ -190,11 +190,33 @@ class SegmentManager:
         return n
 
     def window_ok(self, code: str, now: datetime | None = None) -> bool:
-        """True when the segment may trade now: inside its hours window, or
-        PAPER with segment_paper_after_hours enabled (simulated after-hours)."""
-        if self.is_open(code, now):
-            return True
-        return settings.trading_mode == "PAPER" and bool(settings.segment_paper_after_hours)
+        """True when the segment may trade now: inside its REAL exchange hours
+        (weekdays, holidays excluded) — in PAPER too. The old
+        segment_paper_after_hours switch (PAPER trading 24×7 on frozen last
+        prices, labelled KITE) is ignored: after-hours paper fills were fake
+        data that polluted the journal, learning and readiness (audit X1)."""
+        return self.is_open(code, now)
+
+    def squareoff_cut(self, code: str, now: datetime | None = None) -> datetime:
+        """Start of the segment's square-off window (close − squareoff_min_before)."""
+        spec = SEGMENTS[code]
+        n = now or self.now()
+        return (datetime.combine(n.date(), spec.close_t, tzinfo=n.tzinfo)
+                - timedelta(minutes=spec.squareoff_min_before))
+
+    def entry_window_ok(self, code: str, now: datetime | None = None) -> tuple[bool, str]:
+        """New entries need the segment open AND before its square-off window
+        (an entry at 15:15 on BSE was squared off 1 s later: pure cost churn)
+        AND not in the last `segment_no_entry_before_close_min` minutes."""
+        n = now or self.now()
+        if not self.is_open(code, n):
+            return False, f"{SEGMENTS[code].label} closed (hours {self.hours_text(code)})"
+        cut = self.squareoff_cut(code, n)
+        extra = int(getattr(settings, "segment_no_entry_before_squareoff_min", 5) or 0)
+        if n >= cut - timedelta(minutes=extra):
+            return False, (f"{SEGMENTS[code].label}: no new entries after "
+                           f"{(cut - timedelta(minutes=extra)).strftime('%H:%M')} (square-off window)")
+        return True, "OK"
 
     def hours_text(self, code: str) -> str:
         s = SEGMENTS[code]
@@ -484,8 +506,9 @@ class SegmentManager:
         if settings.trading_mode == "LIVE" and self.mode(code) != "LIVE":
             return False, (f"{spec.label} is PAPER-gated — arm it for LIVE with typed "
                            f"{LIVE_CONFIRM_PHRASE} before it may place live entries")
-        if not self.window_ok(code):
-            return False, f"{spec.label} closed (hours {self.hours_text(code)})"
+        okw, whyw = self.entry_window_ok(code)
+        if not okw:
+            return False, whyw
         lim = _limits(code)
         p = self.pnl(code)
         if p["total"] <= -lim["max_daily_loss"]:

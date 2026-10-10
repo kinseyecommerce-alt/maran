@@ -20,6 +20,14 @@ from ist_clock import now_ist
 from strategy_inventor import StrategyInventor, LIVE_CONFIRM_PHRASE
 from segment_engine import UNIVERSE
 
+# Segment hours are always enforced now (after-hours switch ignored): pin the
+# segment clock to a Wednesday 11:00 IST session for the paper-entry tests.
+from datetime import datetime as _dt_pin
+from zoneinfo import ZoneInfo as _ZI_pin
+from segments import segment_manager as _sm_pin
+_SESSION = _dt_pin(2026, 10, 7, 11, 0, tzinfo=_ZI_pin("Asia/Kolkata"))
+_sm_pin._now_fn = lambda: _SESSION
+
 PASS = FAIL = 0
 
 

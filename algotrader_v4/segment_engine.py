@@ -329,6 +329,7 @@ class NativeEngine:
         if not self._seeded:
             self.seed()
         now = now if now is not None else time.time()
+        kite_on = self._kite_wanted()
         with self._lock:                          # readers get a consistent price snapshot
             for key, c in self.contracts.items():
                 live = self.kite_px.get(key)
@@ -338,6 +339,13 @@ class NativeEngine:
                         self._switch_to_kite(key)
                     # fresh → real price; aging → hold the last real price
                     p = float(live[0]) if age <= KITE_FRESH_SEC else self.price[key]
+                elif kite_on:
+                    # Kite pricing wanted but no fresh quote (market closed,
+                    # poll failing, session expired): HOLD the last price. A
+                    # simulated walk here used to stop out positions opened on
+                    # real prices with fake fills (audit X3). Entries are
+                    # blocked meanwhile by tradable_price().
+                    p = self.price[key]
                 else:
                     if self.src.get(key) == "KITE":
                         logger.warning("[segment_engine] {} Kite quote stale — SIMULATED fallback", key)
@@ -407,6 +415,10 @@ class NativeEngine:
         if lots < 1:
             strat.state.last_signal = {"symbol": c.symbol, "action": side, "skipped": why}
             return None
+        ok_e, why_e = self.edge_ok(key, side, lots, float(lp.get("target_r", TARGET_R)) * dist)
+        if not ok_e:
+            strat.state.last_signal = {"symbol": c.symbol, "action": side, "skipped": why_e}
+            return None
         ok, why = segment_manager.entry_check(c.segment, notional=lots * margin_lot,
                                               transaction_type=side)
         if not ok:
@@ -458,15 +470,72 @@ class NativeEngine:
         budget = min(lim["risk_per_trade"], lim["risk_per_trade"] * max(0.0, float(risk_factor)))
         lots_risk = int(budget // risk_lot)
         lots_margin = int(slot // margin_lot)
-        lots = min(lots_risk, lots_margin)
+        # NOTIONAL caps (audit X10): margin is not exposure — 4 CRUDEOIL lots
+        # = ₹35L notional passed a ₹10L segment on 15% margin.
+        lots_notional = self.max_lots_by_notional(key)
+        lots = min(lots_risk, lots_margin, lots_notional)
         if c.kind == "FUT":
             lots = min(lots, MAX_FUT_LOTS)
         if lots < 1:
+            if lots_notional < 1:
+                return 0, margin_lot, (f"notional ₹{px * c.multiplier:,.0f}/lot exceeds the segment's "
+                                       f"notional cap")
             if lots_margin < 1:
                 return 0, margin_lot, f"margin ₹{margin_lot:,.0f}/lot > slot ₹{slot:,.0f}"
             return 0, margin_lot, (f"1 lot risks ₹{risk_lot:,.0f} at the stop > "
                                    f"per-trade risk ₹{lim['risk_per_trade']:,.0f}")
         return lots, margin_lot, "ok"
+
+    def notional_open(self, segment: str) -> float:
+        """Gross notional of the segment's open positions (price × multiplier × lots)."""
+        tot = 0.0
+        for k, p in list(self.positions_.items()):
+            if p.get("segment") != segment:
+                continue
+            c = self.contracts.get(k)
+            if c is None:
+                continue
+            tot += abs(float(p.get("lots") or 0)) * float(self.price.get(k) or p.get("entry") or 0) * c.multiplier
+        return tot
+
+    def max_lots_by_notional(self, key: str) -> int:
+        """Lots allowed by the notional caps: one position ≤ capital ×
+        segment_max_position_notional_x, all open positions together ≤
+        capital × segment_max_gross_notional_x."""
+        from segments import _limits
+        c = self.contracts[key]
+        px = float(self.price.get(key) or 0)
+        n_lot = px * c.multiplier
+        if n_lot <= 0:
+            return 0
+        cap = _limits(c.segment)["capital"]
+        per_pos = cap * float(getattr(settings, "segment_max_position_notional_x", 1.0) or 1.0)
+        gross = cap * float(getattr(settings, "segment_max_gross_notional_x", 3.0) or 3.0)
+        room = max(0.0, gross - self.notional_open(c.segment))
+        return int(min(per_pos, room) // n_lot)
+
+    def edge_ok(self, key: str, side: str, lots: int, target_dist: float) -> tuple[bool, str]:
+        """Expected gross edge at target must be ≥ native_min_edge_cost_ratio ×
+        round-trip costs (MCX/BSE paid ₹7.2k/₹5.8k of costs on Oct 9 for
+        noise-sized moves)."""
+        ratio = float(getattr(settings, "native_min_edge_cost_ratio", 0.0) or 0.0)
+        if ratio <= 0 or lots < 1 or target_dist <= 0:
+            return True, "ok"
+        c = self.contracts[key]
+        px = float(self.price.get(key) or 0)
+        units = lots * c.multiplier
+        try:
+            from cost_model import costs, kind_for
+            kind = "EQ_INTRADAY" if c.segment == "BSE_EQ" else kind_for(c.segment, "", c.symbol)
+            exch = {"BSE_EQ": "BSE", "MCX": "MCX", "CDS": "CDS"}.get(c.segment, "")
+            sgn = 1 if side == "BUY" else -1
+            cost = float(costs(kind, units, px, px + sgn * target_dist, side, exch)["total"])
+        except Exception:
+            return True, "ok"
+        edge = units * target_dist
+        if edge < ratio * cost:
+            return False, f"edge ₹{edge:,.0f} at target < {ratio:g}× round-trip costs ₹{cost:,.0f}"
+        return True, "ok"
 
     def open_external(self, segment: str, symbol: str, side: str, *, strategy: str,
                       stop_dist: float, target_dist: float, lots: Optional[int] = None,
@@ -490,8 +559,17 @@ class NativeEngine:
             lots, margin_lot, why = self.size_lots(key, stop_dist)
         else:
             margin_lot, why = self.price[key] * c.multiplier * c.margin_pct, "fixed"
+            # caller-fixed lots (fast scalper / inventor) still obey the notional caps
+            lots = min(int(lots), self.max_lots_by_notional(key))
+            if c.kind == "FUT":
+                lots = min(lots, MAX_FUT_LOTS)
+            if lots < 1:
+                why = "notional cap"
         if lots < 1:
             return {"ok": False, "reason": why}
+        ok_e, why_e = self.edge_ok(key, side, lots, float(target_dist))
+        if not ok_e:
+            return {"ok": False, "reason": why_e}
         ok, why = segment_manager.entry_check(segment, notional=lots * margin_lot, transaction_type=side)
         if not ok:
             return {"ok": False, "reason": why}
@@ -546,14 +624,33 @@ class NativeEngine:
 
     # ── Kite quote overlay ────────────────────────────────────────────────
     def tradable_price(self, key: str) -> tuple[bool, str]:
-        """With the Kite overlay on, entries need a fresh Kite quote for the
-        instrument (no trading on restored / simulated levels meanwhile)."""
+        """Entries need the segment inside its REAL exchange hours and — with
+        the Kite overlay on — a Kite quote whose EXCHANGE timestamp is fresh
+        (settings.quote_entry_max_age_sec). Freshness by our poll time made a
+        frozen post-close LTP look "fresh KITE" (audit X2)."""
+        from segments import segment_manager
+        c = self.contracts.get(key)
+        if c is not None and not segment_manager.is_open(c.segment):
+            return False, f"{c.segment} closed (real exchange hours)"
         if not self._kite_wanted():
             return True, "simulator"
         live = self.kite_px.get(key)
-        if self.src.get(key) == "KITE" and live and time.time() - live[1] <= KITE_FRESH_SEC:
-            return True, "kite"
-        return False, "waiting for a fresh Kite quote"
+        if not (self.src.get(key) == "KITE" and live and time.time() - live[1] <= KITE_FRESH_SEC):
+            return False, "waiting for a fresh Kite quote"
+        ex = self.quote_exchange_age(key)
+        lim = float(getattr(settings, "quote_entry_max_age_sec", 20.0) or 20.0)
+        if ex is None or ex > lim:
+            return False, (f"Kite quote stale by exchange time "
+                           f"({'no exchange timestamp' if ex is None else f'{ex:.0f}s old'})")
+        return True, "kite"
+
+    def quote_exchange_age(self, key: str) -> Optional[float]:
+        """Seconds since the EXCHANGE timestamp of the latest Kite quote, or
+        None when the quote carried no exchange timestamp (= stale)."""
+        live = self.kite_px.get(key)
+        if not live or len(live) < 3 or not live[2]:
+            return None
+        return max(0.0, time.time() - float(live[2]))
 
     def _kite_wanted(self) -> bool:
         if settings.trading_mode != "PAPER":
@@ -623,7 +720,11 @@ class NativeEngine:
             k = rev.get(ins)
             px = float((row or {}).get("last_price") or 0)
             if k and px > 0:
-                self.kite_px[k] = (px, now)
+                # (price, received-at, EXCHANGE timestamp): entries are gated on
+                # the exchange time — after the close Kite keeps returning the
+                # last LTP with the closing timestamp.
+                from option_chain import quote_exchange_ts
+                self.kite_px[k] = (px, now, quote_exchange_ts(row or {}))
                 n += 1
                 try:
                     d = (row or {}).get("depth") or {}
@@ -709,6 +810,12 @@ class NativeEngine:
         st = self.strategies.get(pos["strategy"])
         if st:
             st.state.pnl_today += pnl
+        # re-entry cooldown on this instrument for EVERY native strategy (no
+        # flip-flop churn; momentum and mean-reversion can't trade opposite
+        # views of the same symbol back-to-back)
+        cd = time.time() + float(getattr(settings, "native_reentry_cooldown_sec", 300) or 0)
+        for s2 in self.strategies.values():
+            s2._cooldown[key] = max(s2._cooldown.get(key, 0.0), cd)
         try:
             from self_learning import learning
             learning.native_close_hook(pos, {**rec, "reason": reason}, c)
@@ -757,7 +864,7 @@ class NativeEngine:
         for st in self.strategies.values():
             if not st.state.running:
                 continue
-            if segment_manager.killed(st.segment) or not segment_manager.window_ok(st.segment):
+            if segment_manager.killed(st.segment) or not segment_manager.entry_window_ok(st.segment, now_dt)[0]:
                 continue
             for c in UNIVERSE[st.segment]:
                 key = f"{c.symbol}@{c.segment}"

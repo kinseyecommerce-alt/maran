@@ -779,7 +779,22 @@ class Settings(BaseSettings):
     # PAPER only: let segments keep trading on the simulator outside their
     # real trading-hours window (labelled AFTER-HOURS SIM). Off by default so
     # every segment follows its real exchange hours. LIVE always enforces hours.
-    segment_paper_after_hours: bool = False
+    segment_paper_after_hours: bool = False   # IGNORED since 2026-10-10 (audit X1): hours always enforced
+    # ── Audit fixes 2026-10-10 (all PAPER/LIVE, only ever tighten) ───────────
+    # no new entries in the last N minutes before a segment's square-off window
+    segment_no_entry_before_squareoff_min: int = Field(default=5, ge=0)
+    # notional caps (futures/commodities): one position ≤ X × segment capital,
+    # all open positions together ≤ Y × segment capital (margin is NOT exposure)
+    segment_max_position_notional_x: float = Field(default=1.0, gt=0, le=5)
+    segment_max_gross_notional_x:    float = Field(default=3.0, gt=0, le=10)
+    # a quote is fresh for an ENTRY only if its EXCHANGE timestamp is this young
+    quote_entry_max_age_sec: float = Field(default=20.0, gt=0)
+    # native/invented entries: expected edge at target ≥ N × round-trip costs
+    native_min_edge_cost_ratio: float = Field(default=2.0, ge=0)
+    # native strategies: per-symbol re-entry cooldown after an exit
+    native_reentry_cooldown_sec: int = Field(default=300, ge=0)
+    # invented strategies: no new entry when the remaining TTL < this
+    invent_min_hold_sec: int = Field(default=900, ge=0)
     # ── Strategy inventor (trend-driven short-lived strategies) ──────────────
     invent_enabled_default: bool = False   # dashboard toggle; off until jag enables
     invent_max_concurrent_global: int = 10   # 2 per segment × 5 segments

@@ -79,11 +79,10 @@ def minutes_to_squareoff(squareoff_time: str) -> int:
 def paper_after_hours_active() -> bool:
     """True when PAPER mode is allowing simulated trading outside segment hours
     (SEGMENT_PAPER_AFTER_HOURS). LIVE always returns False."""
-    try:
-        from config import settings
-        return settings.trading_mode == "PAPER" and bool(settings.segment_paper_after_hours)
-    except Exception:
-        return False
+    # Disabled (audit X1, 2026-10-10): PAPER respects the real exchange hours
+    # and holidays. After-hours paper trading filled on frozen last prices
+    # labelled KITE and skipped every MIS square-off. The setting is ignored.
+    return False
 
 
 def entry_session_time(outside_standin: dtime | None = None) -> dtime:

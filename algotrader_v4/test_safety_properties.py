@@ -20,6 +20,16 @@ _os_iso.environ.setdefault("ADAPTIVE_DATA_DIR", _os_iso.path.join(_iso_dir, "ada
 _os_iso.environ.setdefault("SEBI_AUDIT_DIR", _iso_dir)
 _os_iso.environ.setdefault("SEGMENT_PAPER_AFTER_HOURS", "true")   # segment hours are tested explicitly in test_segments.py
 
+# Segment hours are ALWAYS enforced (the after-hours switch is ignored since
+# the 2026-10-10 audit fix): pin the segment clock to a mid-session weekday so
+# these safety properties don't depend on when the suite runs.
+def _pin_session_clock():
+    from datetime import datetime as _dt_pin
+    from zoneinfo import ZoneInfo as _ZI_pin
+    from segments import segment_manager as _sm_pin
+    _sm_pin._now_fn = lambda: _dt_pin(2026, 10, 7, 11, 0, tzinfo=_ZI_pin("Asia/Kolkata"))
+_pin_session_clock()
+
 import asyncio
 import sys
 import traceback
