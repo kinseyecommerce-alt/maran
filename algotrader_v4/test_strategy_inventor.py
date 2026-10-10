@@ -304,7 +304,9 @@ def test_fo_invent_trades_index_future_on_paper():
     ok("NFO monthly future, SELL in bear trend (weaker index)", args.get("exchange") == "NFO"
        and args.get("tradingsymbol", "").startswith("NIFTY") and args.get("tradingsymbol", "").endswith("FUT")
        and args.get("transaction_type") == "SELL", args)
-    ok("whole lots", args.get("quantity", 0) % 75 == 0 and args.get("quantity", 0) >= 75, args)
+    from kite_client import _FON_LOT_SIZES as _lots      # instrument-master lot (NIFTY 65; 75 was stale)
+    _lot = int(_lots.get("NIFTY") or 65)
+    ok("whole lots", args.get("quantity", 0) % _lot == 0 and args.get("quantity", 0) >= _lot, args)
 
 
 def test_api_models_send_phrase():
