@@ -724,9 +724,12 @@ class BaseAgent(ABC):
                 live_ok = set()   # no book → accept nothing in LIVE
         _cap = int(getattr(settings, "max_symbols_per_agent", 30) or 0)
         added = 0
+        from owner_universe import owner_universe
         for sym in symbols:
             if sym in self._approved:
                 continue
+            if not owner_universe.agent_symbol_allowed(self.name, sym):
+                continue                       # outside jag's owner universe
             if live_ok is not None and sym not in live_ok:
                 continue
             if _cap > 0 and len(self._approved) >= _cap:
@@ -1552,6 +1555,12 @@ class BaseAgent(ABC):
             _final_bucket, _final_extra = session_bucket()
             if _final_extra >= 99:
                 raise RuntimeError(f"market_closed:{_final_bucket}")
+
+        # OWNER universe (jag): new entries only inside the allowed universe
+        from owner_universe import owner_universe
+        _ou_ok, _ou_why = owner_universe.allows(trade_sym, exchange=exch)
+        if not _ou_ok:
+            raise RuntimeError(f"owner_universe:{_ou_why}")
 
         claimed, _ = order_guard.try_claim(sym, self.name, action)
         if not claimed:

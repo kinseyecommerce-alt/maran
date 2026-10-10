@@ -314,6 +314,9 @@ class StrategyInventor:
         """Design a short-lived strategy for the segment from the current
         trend, have the master agent review it and — when approved — activate
         it for PAPER trading (never LIVE: LIVE stays behind typed SEND)."""
+        from owner_universe import owner_universe
+        if not owner_universe.segment_enabled(segment):
+            return {"ok": False, "reason": f"{segment} PAUSED (owner)"}
         with self._lock:
             if not force:
                 ok, why = self._can_invent(segment)
@@ -373,6 +376,15 @@ class StrategyInventor:
             return False, "auto-approval is PAPER-only; global mode is not PAPER"
         if segment_manager.killed(strat.segment):
             return False, f"segment halted ({segment_manager.killed(strat.segment)})"
+        from owner_universe import owner_universe
+        if not owner_universe.segment_enabled(strat.segment):
+            return False, f"{strat.segment} PAUSED (owner) — master may not approve"
+        _psym = strat.planned_symbol or strat.symbol
+        if _psym:
+            _pfo = _fo_instrument(_psym) if strat.segment == "NSE_FO" else _psym
+            ok_u, why_u = owner_universe.allows(_pfo or _psym, segment=strat.segment)
+            if not ok_u:
+                return False, why_u
         lim = _limits(strat.segment)
         pnl = float(segment_manager.pnl(strat.segment).get("total", 0.0))
         cap = float(lim["max_daily_loss"])
@@ -695,10 +707,16 @@ class StrategyInventor:
 
     # ── paper trading ─────────────────────────────────────────────────────
     def _pick_symbol(self, segment: str) -> Optional[str]:
+        from owner_universe import owner_universe
+        if not owner_universe.segment_enabled(segment):
+            return None
         if segment == "NSE_EQ":
-            return _NSE_SYMBOLS[int(time.time()) % len(_NSE_SYMBOLS)]
+            pool = [x for x in _NSE_SYMBOLS if owner_universe.allows(x, segment="NSE_EQ")[0]] or [None]
+            return pool[int(time.time()) % len(pool)]
         if segment == "NSE_FO":
-            return _fo_instrument(_NFO_UNDERLYINGS[int(time.time()) % len(_NFO_UNDERLYINGS)])
+            pool = [u for u in _NFO_UNDERLYINGS if owner_universe.fo_underlying_allowed(u)] or [None]
+            u = pool[int(time.time()) % len(pool)]
+            return _fo_instrument(u) if u else None
         from segment_engine import native_engine, UNIVERSE
         contracts = UNIVERSE.get(segment) or []
         if not contracts:
@@ -754,6 +772,12 @@ class StrategyInventor:
             sym = fo
         elif strat.segment == "NSE_EQ" and sym.upper() in _INDEXES:
             return {"ok": False, "reason": f"{sym} is an index, not a tradable stock"}
+        from owner_universe import owner_universe
+        ok_u, why_u = owner_universe.allows(sym, segment=strat.segment)
+        if not ok_u:
+            strat.next_entry_ts = time.time() + 300
+            strat.last_error = f"entry blocked: {why_u}"[:200]
+            return {"ok": False, "reason": why_u}
         tag = f"INVENTED-{strat.id}"
         try:
             if strat.segment in _NATIVE:

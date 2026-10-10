@@ -537,6 +537,14 @@ class SegmentManager:
                         (p["qty"] > 0 and transaction_type == "SELL") or
                         (p["qty"] < 0 and transaction_type == "BUY")):
                     return True, "OK (reducing)"
+        # OWNER universe (jag): paused segments / instruments take no new entries
+        from owner_universe import owner_universe
+        if not owner_universe.segment_enabled(code):
+            return False, f"{spec.label} PAUSED (owner)"
+        if symbol:
+            ok_u, why_u = owner_universe.allows(symbol, segment=code)
+            if not ok_u:
+                return False, why_u
         if self._killed.get(code):
             return False, f"{spec.label} kill switch active ({self._killed[code]})"
         if settings.trading_mode == "LIVE" and self.mode(code) != "LIVE":
@@ -573,10 +581,21 @@ class SegmentManager:
         return True, "OK"
 
     def can_run(self, strategy: str) -> bool:
+        return self.run_block_reason(strategy) is None
+
+    def run_block_reason(self, strategy: str) -> Optional[str]:
+        """None when the strategy may run; else 'PAUSED (owner)' / 'killed' / 'closed'."""
         code = STRATEGY_SEGMENT.get(strategy)
         if not code:
-            return True
-        return not self._killed.get(code) and self.window_ok(code)
+            return None
+        from owner_universe import owner_universe
+        if not owner_universe.segment_enabled(code):
+            return "PAUSED (owner)"
+        if self._killed.get(code):
+            return "killed"
+        if not self.window_ok(code):
+            return "closed"
+        return None
 
     # ── strategy registry + start/stop helpers ────────────────────────────
     def _all(self) -> dict:
@@ -639,7 +658,7 @@ class SegmentManager:
             code = STRATEGY_SEGMENT.get(name)
             if not code:
                 continue
-            blocked = self._killed.get(code) and "killed" or (not self.window_ok(code) and "closed")
+            blocked = self.run_block_reason(name)
             if blocked and a.state.running:
                 self._stop(name)
                 self._held[name] = blocked
@@ -685,8 +704,12 @@ class SegmentManager:
                     retired_why = _st.get("retired_reason") or "retired by self-improvement"
             except Exception:
                 retired_why = retired_by = None
+            from owner_universe import owner_universe as _ou
+            owner_paused = bool(code) and not _ou.segment_enabled(code)
             if starting:
                 state, reason = "starting", "engine starting"
+            elif owner_paused:
+                state, reason = "paused", "PAUSED (owner)"
             elif retired_by == "owner":
                 state, reason = "retired", retired_why
             elif retired_why is not None and master_running:
@@ -726,6 +749,7 @@ class SegmentManager:
                 "display": meta.get("display"), "desc": meta.get("desc"),
                 "can_resume": state not in ("starting", "stopped", "killed", "closed", "retired"),
                 "retired_by": retired_by if state == "retired" else None,
+                "owner_paused": owner_paused,
             }
         return out
 
@@ -740,8 +764,12 @@ class SegmentManager:
             kids = [s for s, v in strategies.items() if v["segment"] == code and not v["hidden"]]
             n_run = sum(1 for s in kids if strategies[s]["running"] and strategies[s]["state"] != "retired")
             is_open = self.is_open(code, now)
+            from owner_universe import owner_universe as _ou
+            owner_paused = not _ou.segment_enabled(code)
             if starting:
                 state, reason = "starting", "engine starting"
+            elif owner_paused:
+                state, reason = "paused", "PAUSED (owner)"
             elif not master_running:
                 state, reason = "stopped", "engine stopped"
             elif self._killed.get(code):
@@ -770,6 +798,8 @@ class SegmentManager:
                 "entries_today": self._entries_today.get(code, 0),
                 "strategies": kids, "strategies_running": n_run,
                 "universe": native_engine.universe(code),
+                "owner_paused": owner_paused,
+                "owner_universe": _ou.segment_scope(code),
             })
         return rows
 

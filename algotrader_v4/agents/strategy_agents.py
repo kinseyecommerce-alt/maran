@@ -2105,6 +2105,9 @@ class OptionsAgent(BaseAgent):
 
         if order_guard.is_symbol_active_anywhere(underlying):
             return
+        from owner_universe import owner_universe
+        if not owner_universe.allows(opt_sym, exchange=exch)[0]:
+            return
         # Atomic claim — reserves the slot before placing, mirroring base_agent.
         claimed, _ = order_guard.try_claim(underlying, self.name, action)
         if not claimed:
@@ -3919,7 +3922,9 @@ class FuturesAgent(BaseAgent):
             s = s.strip().upper()
             if s and s in _FON_LOT_SIZES:
                 lots[s] = _FON_LOT_SIZES[s]
-        return lots
+        # OWNER universe (jag): only allowed NSE_FO underlyings (e.g. NIFTY)
+        from owner_universe import owner_universe
+        return {k: v for k, v in lots.items() if owner_universe.fo_underlying_allowed(k)}
 
     def filter_watchlist(self, watchlist: list[dict]) -> list[dict]:
         """Approve the tradeable futures underlyings: index symbols (always —

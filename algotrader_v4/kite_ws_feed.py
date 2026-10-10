@@ -98,6 +98,23 @@ class KiteWSFeed:
         if new and self._loop and self._ws is not None:
             asyncio.run_coroutine_threadsafe(self._send_sub(sorted(new)), self._loop)
 
+    def unsubscribe(self, tokens) -> int:
+        """Stop streaming tokens (owner-paused instruments, old strikes)."""
+        gone = {int(t) for t in tokens} & self._tokens
+        if not gone:
+            return 0
+        self._tokens -= gone
+        self.status["subscribed"] = len(self._tokens)
+        if self._loop and self._ws is not None:
+            asyncio.run_coroutine_threadsafe(self._send_unsub(sorted(gone)), self._loop)
+        return len(gone)
+
+    async def _send_unsub(self, toks: list[int]) -> None:
+        if self._ws is None or not toks:
+            return
+        for k in range(0, len(toks), 500):
+            await self._ws.send(json.dumps({"a": "unsubscribe", "v": toks[k:k + 500]}))
+
     async def _send_sub(self, toks: list[int]) -> None:
         if self._ws is None or not toks:
             return

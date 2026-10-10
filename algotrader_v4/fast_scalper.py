@@ -285,11 +285,33 @@ class FastScalper:
                 insts[int(r["instrument_token"])] = Inst(key, c.segment, c.symbol, int(r["instrument_token"]),
                                                          float(r.get("tick_size") or 0.05), c.multiplier, 1,
                                                          "native", exch)
+        insts = self._owner_filter(insts)
         with self._lock:
             self.insts = insts
             for tok in insts:
                 self.state.setdefault(tok, SState())
         return len(insts)
+
+    def _owner_filter(self, insts: dict) -> dict:
+        """OWNER universe (jag): only allowed instruments are scalped/subscribed;
+        an instrument with an open scalp or resting order is kept until it exits."""
+        from owner_universe import owner_universe
+        out = {}
+        for tok, i in insts.items():
+            st = self.state.get(tok)
+            if owner_universe.allows(i.symbol, segment=i.segment)[0] or (st and (st.pos or st.order)):
+                out[tok] = i
+        return out
+
+    def apply_owner_universe(self) -> dict:
+        """Drop paused instruments and UNSUBSCRIBE them from the Kite WS."""
+        from kite_ws_feed import kite_ws_feed
+        with self._lock:
+            before = set(self.insts)
+            self.insts = self._owner_filter(dict(self.insts))
+            dropped = sorted(before - set(self.insts))
+        kite_ws_feed.unsubscribe(dropped)
+        return {"dropped": len(dropped), "instruments": len(self.insts)}
 
     def start(self) -> dict:
         if str(settings.trading_mode).upper() != "PAPER":
@@ -444,7 +466,8 @@ class FastScalper:
             self.stats["cost_skips"] += 1
             return
         okg, why = segment_manager.entry_check(inst.segment, notional=lots * c_margin,
-                                               transaction_type="BUY" if side > 0 else "SELL")
+                                               transaction_type="BUY" if side > 0 else "SELL",
+                                               symbol=inst.symbol)
         if not okg:
             self.stats["gate_skips"] += 1
             return
@@ -524,7 +547,10 @@ class FastScalper:
         added: dict[int, Inst] = {}
         window = {}
         unds = []
+        from owner_universe import owner_universe
         for und in OPT_UNDERLYINGS:
+            if not owner_universe.fo_underlying_allowed(und):
+                continue                     # OWNER universe: e.g. NIFTY only
             try:
                 expiry = chain.pick_expiry(und, now.date(), min_dte=0)
                 spot = chain.spot(und)
@@ -553,9 +579,16 @@ class FastScalper:
             keep = {k: v for k, v in self.insts.items()
                     if v.kind != "opt" or (self.state.get(k) and (self.state[k].pos or self.state[k].order))}
             keep.update(added)
+            dropped = [k for k in self.insts if k not in keep]
             self.insts = keep
             for tok in added:
                 self.state.setdefault(tok, SState())
+        if dropped:                          # re-centred / paused strikes: stop streaming them
+            try:
+                from kite_ws_feed import kite_ws_feed
+                kite_ws_feed.unsubscribe(dropped)
+            except Exception:
+                pass
         self.opt_stats.update(instruments=sum(1 for i in self.insts.values() if i.kind == "opt"),
                               underlyings=unds, window=window, last_recenter=now.isoformat(timespec="seconds"))
         return len(added)
@@ -661,7 +694,8 @@ class FastScalper:
         if not okc:
             self.opt_stats["cost_skips"] += 1
             return
-        okg, why = segment_manager.entry_check("NSE_FO", notional=px * units, transaction_type="BUY")
+        okg, why = segment_manager.entry_check("NSE_FO", notional=px * units, transaction_type="BUY",
+                                               symbol=inst.symbol)
         if not okg:
             self.opt_stats["gate_skips"] += 1
             return

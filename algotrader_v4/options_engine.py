@@ -726,6 +726,10 @@ class OptionsEngine:
         ok, why = self._market_ok()
         if not ok:
             return {"ok": False, "why": why}
+        if not self.replay:
+            from owner_universe import owner_universe
+            if not owner_universe.fo_underlying_allowed(und):
+                return {"ok": False, "why": f"PAUSED (owner): {und} options not in the owner universe"}
         family = f"opt_sell:{structure}"
         gok, factor, gwhy = self.family_gate(family)
         if not gok:
@@ -924,6 +928,10 @@ class OptionsEngine:
             return {"ok": False, "why": why}
         if und not in UNDERLYINGS:
             return {"ok": False, "why": f"{und}: the options engine trades index options only"}
+        if not self.replay:
+            from owner_universe import owner_universe
+            if not owner_universe.fo_underlying_allowed(und):
+                return {"ok": False, "why": f"PAUSED (owner): {und} options not in the owner universe"}
         gok, factor, gwhy = self.family_gate(family)
         if not gok:
             self.stats["buy_gate_skips"] += 1

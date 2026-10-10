@@ -1284,6 +1284,13 @@ def bot_status():
     status["start_phase"] = _bot_start_status.get("phase", "idle")
     status["start_error"] = _bot_start_status.get("error")
     status["engine"] = engine_status()
+    try:
+        from owner_universe import owner_universe
+        _u = owner_universe.status()
+        status["owner_universe"] = {k: _u[k] for k in ("restricted", "segments", "nse_eq_universe",
+                                                       "nse_fo_underlyings", "reason", "updated_at")}
+    except Exception as exc:
+        status["owner_universe"] = {"error": str(exc)}
     return status
 
 @app.get("/bot/directives", tags=["Bot"])
@@ -1578,6 +1585,9 @@ async def resume_agent(name: str):
         raise HTTPException(409, f"{SEGMENTS[code].label} kill switch is active — re-arm the segment first")
     if code and not segment_manager.window_ok(code):
         raise HTTPException(409, f"{SEGMENTS[code].label} is closed ({segment_manager.hours_text(code)})")
+    from owner_universe import owner_universe as _ou
+    if code and not _ou.segment_enabled(code):
+        raise HTTPException(409, f"{SEGMENTS[code].label} is PAUSED (owner) — change it via POST /owner/universe")
     # An explicit manual resume overrides (and clears) a persisted pause/disable.
     bot_state.set_agent_enabled(name, True)
     master_agent.regime_paused.discard(name)
@@ -1599,6 +1609,7 @@ async def resume_agent(name: str):
     # Populate approved symbols directly — skip the backtest gate for manual
     # resume.  filter_watchlist is a /bot/start quality gate; here the user
     # is explicitly starting an agent and we should respect that intent.
+    wl = _ou.filter_agent_items(name, wl)
     for item in wl:
         a._approved.add(item["symbol"])
     a.state.approved_symbols = [item["symbol"] for item in wl]
@@ -2742,6 +2753,49 @@ def learning_owner_unretire(req: OwnerRetireRequest, request: Request):
         return learning.owner_unretire(req.segment, req.strategy, req.reason, actor)
     except ValueError as exc:
         raise HTTPException(400, str(exc))
+
+
+class OwnerUniverseRequest(BaseModel):
+    preset: Optional[str] = None                     # "jag" → jag's 2026-10-10 policy
+    segments: Optional[dict[str, bool]] = None
+    nse_eq_universe: Optional[str] = None            # ALL | NIFTY50
+    nse_fo_underlyings: Optional[list[str]] = None   # e.g. ["NIFTY"]; [] = all
+    restricted: bool = True
+    reason: str = ""
+
+
+@app.get("/owner/universe", tags=["Owner"])
+def owner_universe_get():
+    from owner_universe import owner_universe
+    return owner_universe.status()
+
+
+@app.post("/owner/universe", tags=["Owner"])
+def owner_universe_set(req: OwnerUniverseRequest, request: Request):
+    """Owner-only trading universe (persistent). Automation never changes it.
+    New entries outside it are refused everywhere; exits are always allowed."""
+    from owner_universe import owner_universe
+    actor = _owner_actor(request)
+    try:
+        if (req.preset or "").lower() == "jag":
+            st = owner_universe.apply_jag_policy(actor)
+        else:
+            st = owner_universe.set_policy(req.segments, req.nse_eq_universe, req.nse_fo_underlyings,
+                                           req.reason, actor, restricted=req.restricted)
+    except ValueError as exc:
+        raise HTTPException(400, str(exc))
+    applied = {}
+    try:
+        from fast_scalper import fast_scalper
+        applied["scalper"] = fast_scalper.apply_owner_universe()
+    except Exception as exc:
+        applied["scalper"] = f"error: {exc}"
+    try:
+        from segments import segment_manager
+        segment_manager.supervise(force=True)        # stop strategies in paused segments
+    except Exception as exc:
+        applied["supervise"] = f"error: {exc}"
+    return {**st, "applied": applied}
 
 
 @app.get("/learning/owner-actions", tags=["Learning"])

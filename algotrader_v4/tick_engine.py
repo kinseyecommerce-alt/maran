@@ -779,6 +779,16 @@ class TickEngine:
 
     def subscribe(self, watchlist: list[dict]) -> None:
         _new_syms: list[str] = []
+        # OWNER universe (jag): don't stream paused instruments (bandwidth).
+        # Index spots always stay (regime / futures & options underlyings).
+        try:
+            from owner_universe import owner_universe
+            _idx = {"NIFTY", "BANKNIFTY", "FINNIFTY", "MIDCPNIFTY", "SENSEX", "BANKEX", "INDIAVIX", "NIFTY 50"}
+            watchlist = [i for i in (watchlist or [])
+                         if i["symbol"] in _idx or i["symbol"] in self._exchange
+                         or owner_universe.allows(i["symbol"], exchange=i.get("exchange", "NSE"))[0]]
+        except Exception:
+            pass
         for item in watchlist:
             sym  = item["symbol"]
             exch = item.get("exchange", "NSE")

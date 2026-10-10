@@ -231,6 +231,14 @@ class MasterAgent:
                             strat, len(approved))
             else:
                 approved = agent.filter_watchlist(watchlist)
+            # OWNER universe (jag): approvals never widen beyond the allowed universe
+            from owner_universe import owner_universe
+            _ou = owner_universe.filter_agent_items(strat, approved)
+            if len(_ou) != len(approved):
+                logger.info("[master_v5] {} owner universe: {} → {} symbols", strat, len(approved), len(_ou))
+                approved = _ou
+                agent._approved = {item["symbol"] for item in approved}
+                agent.state.approved_symbols = [a["symbol"] for a in approved]
             self._agent_watchlists[strat] = approved
             report[strat] = {
                 "total": len(watchlist),
@@ -257,7 +265,7 @@ class MasterAgent:
                 # and started by segments.supervise() when the segment opens.
                 from segments import segment_manager
                 if not segment_manager.can_run(strat):
-                    segment_manager.hold(strat, "closed")
+                    segment_manager.hold(strat, segment_manager.run_block_reason(strat) or "closed")
                     continue
                 q = tick_engine.add_subscriber(f"agent_{strat}")
                 agent.start(q)
@@ -858,7 +866,7 @@ class MasterAgent:
                     continue
                 if self._agent_watchlists.get(strat):
                     if not segment_manager.can_run(strat):
-                        segment_manager.hold(strat, "closed")
+                        segment_manager.hold(strat, segment_manager.run_block_reason(strat) or "closed")
                         continue
                     q = tick_engine.add_subscriber(f"agent_{strat}")
                     agent.start(q)
@@ -885,7 +893,7 @@ class MasterAgent:
                 if self._agent_watchlists.get(strat):
                     from segments import segment_manager
                     if not segment_manager.can_run(strat):
-                        segment_manager.hold(strat, "closed")
+                        segment_manager.hold(strat, segment_manager.run_block_reason(strat) or "closed")
                         continue
                     q = tick_engine.add_subscriber(f"agent_{strat}")
                     agent.start(q)

@@ -1224,7 +1224,13 @@ class SelfLearning:
                  "pass": len(br) == 0},
             ]
             ready = all(c["pass"] for c in crit)
+            try:
+                from owner_universe import owner_universe
+                _op = not owner_universe.segment_enabled(code)
+            except Exception:
+                _op = False
             out[code] = {"segment": code, "ready": ready, "status": "READY" if ready else "NOT READY",
+                         "owner_paused": _op, "trading": "PAUSED (owner)" if _op else "enabled",
                          "criteria": crit, "passed": sum(c["pass"] for c in crit), "of": len(crit),
                          "note": ("Display only — READY never arms LIVE. jag decides and types SEND."
                                   if ready else "Keep paper trading.")}

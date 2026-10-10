@@ -479,6 +479,9 @@ class KiteClient:
         # fill time in PAPER (check_paper_triggers).
         if order_type not in ("SL", "SL-M"):
             self._naked_short_guard(tradingsymbol, exchange, transaction_type, quantity)
+            # OWNER universe backstop (PAPER and LIVE): an order that is not
+            # reducing an existing position is a NEW entry → must be allowed.
+            self._owner_universe_guard(tradingsymbol, exchange, transaction_type, quantity)
 
         if settings.trading_mode == "PAPER":
             return self._paper_place(tradingsymbol, exchange, transaction_type,
@@ -759,6 +762,27 @@ class KiteClient:
     # ── Internal helpers ───────────────────────────────────────────────────
 
     # ── options: naked-short guard, instrument rows, lot sizes ────────────
+    def _owner_universe_guard(self, symbol: str, exchange: str, side: str, qty: int) -> None:
+        from owner_universe import owner_universe
+        ok, why = owner_universe.allows(symbol, exchange=exchange)
+        if ok:
+            return
+        try:
+            if settings.trading_mode == "PAPER":
+                with self._paper_positions_lock:
+                    pos = [dict(p) for p in self._paper_positions]
+            else:
+                pos = (self.positions_cached() or {}).get("net", [])
+        except Exception:
+            pos = []
+        net = sum(int(p.get("quantity") or 0) for p in pos
+                  if p.get("tradingsymbol") == symbol
+                  and (not exchange or (p.get("exchange") or exchange).upper() == exchange.upper()))
+        delta = int(qty) if (side or "").upper() == "BUY" else -int(qty)
+        if net and (net > 0) != (delta > 0) and abs(delta) <= abs(net):
+            return                        # reducing / closing an existing position: always allowed
+        raise InputException(f"{why} — new entry refused (exits of existing positions are allowed)")
+
     def _naked_short_guard(self, symbol: str, exchange: str, side: str, qty: int) -> None:
         from option_guard import check, is_option
         if not is_option(symbol, exchange):

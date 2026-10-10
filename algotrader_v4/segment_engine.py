@@ -420,7 +420,7 @@ class NativeEngine:
             strat.state.last_signal = {"symbol": c.symbol, "action": side, "skipped": why_e}
             return None
         ok, why = segment_manager.entry_check(c.segment, notional=lots * margin_lot,
-                                              transaction_type=side)
+                                              transaction_type=side, symbol=c.symbol)
         if not ok:
             strat.state.last_signal = {"symbol": c.symbol, "action": side, "skipped": why}
             return None
@@ -568,7 +568,8 @@ class NativeEngine:
         ok_e, why_e = self.edge_ok(key, side, lots, float(target_dist))
         if not ok_e:
             return {"ok": False, "reason": why_e}
-        ok, why = segment_manager.entry_check(segment, notional=lots * margin_lot, transaction_type=side)
+        ok, why = segment_manager.entry_check(segment, notional=lots * margin_lot, transaction_type=side,
+                                              symbol=symbol)
         if not ok:
             return {"ok": False, "reason": why}
         rec = self.route_order(segment, symbol, side, lots, reason or f"{strategy} entry", strategy,
@@ -707,7 +708,14 @@ class NativeEngine:
             self.resolve_kite_symbols()
         if not self.kite_sym:
             return 0
-        rev = {v: k for k, v in self.kite_sym.items()}
+        # OWNER universe: skip quotes for paused segments (bandwidth) unless a
+        # position is still open there and needs prices to exit
+        from owner_universe import owner_universe
+        open_keys = set(self.positions_)
+        rev = {v: k for k, v in self.kite_sym.items()
+               if owner_universe.segment_enabled(k.split("@", 1)[-1]) or k in open_keys}
+        if not rev:
+            return 0
         try:
             data = kite_client.kite.quote(list(rev))       # LTP + best bid/ask (depth)
         except Exception:
@@ -910,7 +918,7 @@ class NativeEngine:
                 st.start()
                 started.append(n)
             else:
-                segment_manager.hold(n, "closed")
+                segment_manager.hold(n, segment_manager.run_block_reason(n) or "closed")
         return started
 
     def stop_strategies(self) -> None:

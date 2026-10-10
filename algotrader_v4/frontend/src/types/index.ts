@@ -115,6 +115,7 @@ export interface StrategyState {
   desc?: string | null
   can_resume: boolean
   retired_by?: 'owner' | 'learning' | null
+  owner_paused?: boolean
 }
 
 export interface SegmentInstrument {
@@ -140,6 +141,8 @@ export interface SegmentState {
   effective_mode: 'PAPER' | 'LIVE'
   live_supported: boolean
   live_stub_reason: string | null
+  owner_paused?: boolean
+  owner_universe?: string
   feed: 'REAL' | 'MIXED' | 'SIMULATED'
   killed: boolean
   kill_reason: string | null
