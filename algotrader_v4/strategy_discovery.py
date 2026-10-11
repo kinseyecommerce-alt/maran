@@ -214,6 +214,8 @@ def canon(spec: dict) -> dict:
     s.pop("meta", None)
     if "filters" in s:
         s["filters"] = sorted([list(f) for f in s["filters"]], key=lambda f: json.dumps(f))
+    if s.get("inst") == "MCX_INTRA" and (s.get("entry") or {}).get("type") == "PDHL_BRK":
+        s["_sim"] = 2     # v2: both-break days booked worse-side (v1 skipped them with hindsight) → new hashes
     return s
 
 
@@ -1707,7 +1709,7 @@ def _sim_mcx_intra_one(U, sym: str, spec: dict, stress: bool) -> list:
         a = atr[t - 1]
         if not np.isfinite(a) or a <= 0:
             continue
-        side, px0 = 0, O[t]
+        side, px0, alt = 0, O[t], None
         if typ == "PDHL_BRK":
             nr = e.get("nr") or 0
             if nr and not (rng_[t - 1] <= rng_[t - nr:t].min() + 1e-12):
@@ -1715,8 +1717,12 @@ def _sim_mcx_intra_one(U, sym: str, spec: dict, stress: bool) -> list:
             up, dn = H[t - 1] * (1 + e["buf"]), L[t - 1] * (1 - e["buf"])
             hu, hd = H[t] >= up, L[t] <= dn
             if hu and hd:
-                continue                          # both triggered, order unknown → skip (no guess)
-            if hu:
+                # Both levels broke the same day; which came first is unknown from daily bars.  Skipping
+                # would be look-ahead (it removes whipsaw days with hindsight).  Evaluate every side the
+                # spec allows and book the WORSE outcome (pessimistic; max one trade per day).
+                side, px0 = 1, max(O[t], up)
+                alt = (-1, min(O[t], dn))
+            elif hu:
                 side, px0 = 1, max(O[t], up)
             elif hd:
                 side, px0 = -1, min(O[t], dn)
@@ -1733,13 +1739,14 @@ def _sim_mcx_intra_one(U, sym: str, spec: dict, stress: bool) -> list:
             elif rsi2[t - 1] > 100 - e["lvl"]:
                 side = -1
         dr = spec.get("dir", "both")
-        if side == 0 or (dr == "long" and side < 0) or (dr == "short" and side > 0):
+        cands = [(side, px0)] + ([alt] if alt else [])
+        cands = [(sd, px) for sd, px in cands
+                 if sd != 0 and not ((dr == "long" and sd < 0) or (dr == "short" and sd > 0))]
+        if not cands:
             continue
         ok = True
         for name, op, v in spec.get("filters") or []:
-            if name == "trend50_agree" and not (np.isfinite(sma50[t - 1]) and (C[t - 1] > sma50[t - 1]) == (side > 0)):
-                ok = False
-            elif name == "atr_rel":
+            if name == "atr_rel":
                 r = a / atr_mean[t - 1] if atr_mean[t - 1] else np.nan
                 if not np.isfinite(r) or (op == "lt" and not r < v) or (op == "gt" and not r > v):
                     ok = False
@@ -1747,31 +1754,43 @@ def _sim_mcx_intra_one(U, sym: str, spec: dict, stress: bool) -> list:
                 ok = False
         if not ok:
             continue
-        R = ex["stop_atr"] * a
-        lots = int(0.01 * CAPITAL // (R * mult))
-        if lots < 1 and R * mult <= 0.025 * CAPITAL:
-            lots = 1
-        lots = min(lots, int(MCX_NOTIONAL_CAP // (px0 * mult)))
-        if lots < 1:
-            continue
-        ep = px0 + side * px0 * MCX_SLIP * sm
-        stop = ep - side * R
-        tgt = ep + side * ex["tgt_r"] * R if ex.get("tgt_r") else None
-        adv, fav = (L[t], H[t]) if side > 0 else (H[t], L[t])
-        if (side > 0 and adv <= stop) or (side < 0 and adv >= stop):
-            xp, why = stop, "stop"                       # a touched stop always wins (pessimistic)
-        elif tgt is not None and ((side > 0 and fav >= tgt) or (side < 0 and fav <= tgt)):
-            xp, why = tgt, "target"
-        else:
-            xp, why = C[t], "square-off"
-        x = xp - side * xp * MCX_SLIP * sm
-        q = lots * mult
-        gross = (x - ep) * side * q
-        cost = (_oc("MCX_FUT", "BUY" if side > 0 else "SELL", q, ep, "MCX") +
-                _oc("MCX_FUT", "SELL" if side > 0 else "BUY", q, x, "MCX")) * cm
-        out.append({"d": d[t], "kind": "mcx_intra", "sym": sym, "side": "L" if side > 0 else "S",
+        def _trade(side, px0):
+            R = ex["stop_atr"] * a
+            lots = int(0.01 * CAPITAL // (R * mult))
+            if lots < 1 and R * mult <= 0.025 * CAPITAL:
+                lots = 1
+            lots = min(lots, int(MCX_NOTIONAL_CAP // (px0 * mult)))
+            if lots < 1:
+                return None
+            ep = px0 + side * px0 * MCX_SLIP * sm
+            stop = ep - side * R
+            tgt = ep + side * ex["tgt_r"] * R if ex.get("tgt_r") else None
+            adv, fav = (L[t], H[t]) if side > 0 else (H[t], L[t])
+            if (side > 0 and adv <= stop) or (side < 0 and adv >= stop):
+                xp, why = stop, "stop"                       # a touched stop always wins (pessimistic)
+            elif tgt is not None and ((side > 0 and fav >= tgt) or (side < 0 and fav <= tgt)):
+                xp, why = tgt, "target"
+            else:
+                xp, why = C[t], "square-off"
+            x = xp - side * xp * MCX_SLIP * sm
+            q = lots * mult
+            gross = (x - ep) * side * q
+            cost = (_oc("MCX_FUT", "BUY" if side > 0 else "SELL", q, ep, "MCX") +
+                    _oc("MCX_FUT", "SELL" if side > 0 else "BUY", q, x, "MCX")) * cm
+            return {"d": d[t], "kind": "mcx_intra", "sym": sym, "side": "L" if side > 0 else "S",
                     "t_in": datetime.combine(d[t], dtime(9, 0)), "net": gross - cost,
-                    "cost": cost + MCX_SLIP * sm * (ep + x) * q, "exit_reason": why, "days": 0})
+                    "cost": cost + MCX_SLIP * sm * (ep + x) * q, "exit_reason": why, "days": 0}
+
+        res = []
+        for sd, px in cands:
+            if any(n_ == "trend50_agree" and not (np.isfinite(sma50[t - 1]) and (C[t - 1] > sma50[t - 1]) == (sd > 0))
+                   for n_, _o, _v in spec.get("filters") or []):
+                continue          # trend filter is per side (on a both-break day the other side may still trade)
+            tr = _trade(sd, px)
+            if tr is not None:
+                res.append(tr)
+        if res:
+            out.append(min(res, key=lambda r_: r_["net"]))
     return out
 
 

@@ -575,7 +575,13 @@ def t_mcx_intra_flat_same_day_causal_pessimistic():
     rows[k] = (rows[k][0], o, h * 1.2, l * 0.8, c)          # huge range: breakout up, stop and target both hit
     U2 = DD.Universe(U.sessions, U.nifty, {}, {}, U.nifty_daily, {"CRUDEOILM": rows}, set())
     last = [t for t in SD.run_spec(U2, dict(MCXI, dir="long")) if t["d"] == rows[k][0]]
-    assert all(t["exit_reason"] in ("stop",) for t in last)
+    assert len(last) == 1 and last[0]["exit_reason"] == "stop"
+    # both levels broken the same day: NOT skipped with hindsight; one trade, the worse side, booked
+    both = [t for t in SD.run_spec(U2, dict(MCXI, dir="both")) if t["d"] == rows[k][0]]
+    assert len(both) == 1 and both[0]["exit_reason"] == "stop"
+    longs = [t for t in SD.run_spec(U2, dict(MCXI, dir="long")) if t["d"] == rows[k][0]]
+    shorts = [t for t in SD.run_spec(U2, dict(MCXI, dir="short")) if t["d"] == rows[k][0]]
+    assert both[0]["net"] <= min(longs[0]["net"], shorts[0]["net"]) + 1e-9
 
 
 def _stock_panel(U, ns=6, seed=3):
