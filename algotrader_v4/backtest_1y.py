@@ -360,31 +360,30 @@ def real_proxy(ctxs: list, res_sig: dict, res_m: dict) -> dict:
     by_exp: dict = defaultdict(list)
     for sym, m in meta.items():
         by_exp[date.fromisoformat(m["expiry"][:10])].append((sym, float(m["strike"]), m["instrument_type"]))
-    have: dict = defaultdict(set)              # day → expiries with real bars
     files = {p.stem[4:]: p for p in K1Y.glob("OPT_*.csv")}
     idx = {c.d: c for c in ctxs}
     out_ctx = []
-    for e, lst in sorted(by_exp.items()):
-        for sym, K, typ in lst:
-            p = files.get(sym)
-            if not p:
-                continue
-            with open(p) as f:
-                for r in csv.DictReader(f):
-                    have[r["date"][:10]].add(e)
-                    break
-    # load real series for the chosen (day, expiry) pairs, strikes within ±12 steps of the open
+    # per day: the nearest expiry (≥1 DTE) whose ATM CE+PE actually traded that day (≥300 bars)
+    atm_cache: dict = {}
+
+    def atm_bars(e, K, d):
+        n = 0
+        for typ in ("CE", "PE"):
+            sym = next((s_ for s_, K_, t_ in by_exp[e] if K_ == K and t_ == typ), None)
+            if sym and sym in files:
+                key = (sym, d)
+                if key not in atm_cache:
+                    atm_cache[key] = len(_day_series(files[sym], d))
+                n += atm_cache[key]
+        return n
     choice = {}
+    real_sessions = {date.fromisoformat(x) for x in _real_sessions()}
     for d, c in idx.items():
-        exps = sorted(e for e in by_exp if e > d)
-        for e in exps:
-            ok = False
-            atm = round(c.bars[0].o / R.STEP) * R.STEP
-            for typ in ("CE", "PE"):
-                sym = next((s for s, K, t in by_exp[e] if K == atm and t == typ), None)
-                if sym and sym in files:
-                    ok = True
-            if ok:
+        if d not in real_sessions:
+            continue
+        atm = float(round(c.bars[0].o / R.STEP) * R.STEP)
+        for e in sorted(e for e in by_exp if e > d):
+            if atm_bars(e, atm, d) >= 300:
                 choice[d] = e
                 break
     store: dict = defaultdict(dict)
@@ -448,6 +447,19 @@ def real_proxy(ctxs: list, res_sig: dict, res_m: dict) -> dict:
 
 
 _PROXY_KEEP: list = []
+
+
+def _real_sessions() -> list:
+    days = set()
+    for p in K1Y.glob("OPT_NIFTY26OCT*.csv"):
+        with open(p) as f:
+            for r in csv.DictReader(f):
+                days.add(r["date"][:10])
+    for p in K1Y.glob("OPT_NIFTY26O13*.csv"):
+        with open(p) as f:
+            for r in csv.DictReader(f):
+                days.add(r["date"][:10])
+    return sorted(days)
 
 
 def _day_series(path: Path, d: date) -> dict:

@@ -98,8 +98,14 @@ def main():
     o.fo_underlying_allowed = lambda u, *a, **k: u == "NIFTY"
     OU._nifty50 = lambda: list(NIFTY_50)
     days = int(os.environ.get("UB_DAYS", "250"))
-    U.main(["--agents", "all", "--days", str(days), "--workers", "6",
-            "--out", str(HERE / "logs" / "backtests" / "unified_backtest_1y.json")])
+    args = ["--agents", "all", "--days", str(days), "--workers", os.environ.get("UB_WORKERS", "6"),
+            "--out", str(HERE / "logs" / "backtests" / "unified_backtest_1y.json")]
+    # UB_SYMBOLS: the stock agents only ever trade their top-10 whitelist (ranked on TRAIN
+    # turnover), so a 1-year run uses the 12 most liquid Nifty 50 names ranked on the
+    # 40 sessions BEFORE the OOS window (no look-ahead) + the 5 MCX contracts.
+    if os.environ.get("UB_SYMBOLS"):
+        args += ["--symbols", os.environ["UB_SYMBOLS"] + ",CRUDEOIL-FUT,CRUDEOILM-FUT,NATURALGAS-FUT,SILVERM-FUT,GOLDM-FUT"]
+    U.main(args)
 
 
 if __name__ == "__main__":
