@@ -706,6 +706,8 @@ class OptionsEngine:
         b.rules = {"target_frac": float(p.get("target_frac", 0.5)), "stop_mult": float(p.get("stop_mult", 2.0)),
                    "exit_time": EXIT_TIME.strftime("%H:%M"), "expiry_day_exit": EXPIRY_DAY_EXIT.strftime("%H:%M"),
                    "short_put": sp, "short_call": sc, "atm_iv": round(iv, 4)}
+        if p.get("breach_exit") is False:        # research-validated rule sets that exit on premium /
+            b.rules["breach_exit"] = False       # k×credit / time only (stops still apply; never loosens risk caps)
         pls = p.get("per_leg_sl")
         if pls:                                  # per-short-leg premium stop (frac of entry), bounded
             b.rules["per_leg_sl"] = max(PER_LEG_SL_BOUNDS[0], min(PER_LEG_SL_BOUNDS[1], float(pls)))
@@ -910,7 +912,9 @@ class OptionsEngine:
             return "stop: 90% of max loss"
         sp, sc = r.get("short_put"), r.get("short_call")
         open_short = {x.opt_type for x in b.legs if x.side < 0 and x.filled and not x.closed}
-        if sp is not None and sc is not None and sp == sc:
+        if r.get("breach_exit", True) is False:
+            pass
+        elif sp is not None and sc is not None and sp == sc:
             # iron fly: the shorts ARE at-the-money, so "spot crossed the short strike"
             # is noise. Exit on a breakeven breach (strike ± credit) instead; the
             # per-leg premium stops / k×credit stop / 90%-max-loss stop still apply.
