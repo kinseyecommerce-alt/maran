@@ -328,7 +328,7 @@ def legs_sim(ctx, j0: int, legs: list, expiry: date, lot: int, per_leg_sl: Optio
     def close(k, px, jj):
         nonlocal raw, stat, cross
         t, K, s = legs[k]
-        raw += -s * (px - e_px[k]) * q
+        raw += s * (px - e_px[k]) * q          # sign fixed 2026-10-11: a short (−1) loses when premium rises
         stat += order_cost("SELL" if s > 0 else "BUY", q, px)
         cross += (spread(px) / 2 + SLIP) * q
         openl[k] = False
@@ -359,7 +359,7 @@ def legs_sim(ctx, j0: int, legs: list, expiry: date, lot: int, per_leg_sl: Optio
             reason = "all legs stopped"
             break
         if basket_stop_mult:
-            mtm = raw / q + sum(-legs[k][2] * (ctx.prem(b.c, legs[k][1], legs[k][0], j, expiry, iv=iv) - e_px[k])
+            mtm = raw / q + sum(legs[k][2] * (ctx.prem(b.c, legs[k][1], legs[k][0], j, expiry, iv=iv) - e_px[k])
                                 for k in live)
             if -mtm >= basket_stop_mult * credit:
                 reason = "basket stop"

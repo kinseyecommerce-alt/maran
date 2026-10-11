@@ -518,7 +518,7 @@ def sell_trade(ctx: DayCtx, ev: Event, lot: int, iv: Optional[float] = None, tar
     if lots is None:
         lots = max(1, min(10, int(10_000 // max((width - credit) * lot, 1e-9))))
     q = lot * lots
-    raw = sum(-s * (x - e) for (t, K, s), e, x in zip(legs, e_px, x_px)) * q
+    raw = sum(s * (x - e) for (t, K, s), e, x in zip(legs, e_px, x_px)) * q   # long +1 gains when its premium rises; short −1 loses (sign fixed 2026-10-11)
     stat = sum(order_cost("BUY" if s > 0 else "SELL", q, e) + order_cost("SELL" if s > 0 else "BUY", q, x)
                for (t, K, s), e, x in zip(legs, e_px, x_px))
     cross = sum((spread(e) / 2 + SLIP + spread(x) / 2 + SLIP) for e, x in zip(e_px, x_px)) * q
