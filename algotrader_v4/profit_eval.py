@@ -181,3 +181,27 @@ def strict_filter(signals: dict, registry: Optional[dict] = None, *, fail_closed
                 v["strict"] = (reg["kept"][name] or {}).get("metrics")
         out[name] = v
     return out
+
+
+def add_kept(name: str, entry: dict, path: Optional[_Path] = None) -> bool:
+    """Add ONE strategy to `kept` (PAPER probation, half size) without touching the criteria or the
+    other rows — used by the discovery loop for a finalist that passed EVERY criterion on its
+    sealed holdout.  Refuses anything that is not PAPER / half size."""
+    if str(entry.get("mode", "PAPER")).upper() != "PAPER" or float(entry.get("size", 1.0)) > 0.5:
+        return False
+    p = path or REGISTRY_PATH
+    reg = load_registry(p) or {"generated": _dt.now().isoformat(timespec="seconds"),
+                               "next_check": (_dt.now() + _td(days=RECHECK_DAYS)).date().isoformat(),
+                               "criteria": CRITERIA, "kept": {}, "retired": {}, "evaluated": {}}
+    if reg.get("criteria") and reg["criteria"] != CRITERIA:
+        reg["criteria_mismatch"] = reg["criteria"]
+    reg["criteria"] = CRITERIA
+    reg.setdefault("kept", {})[name] = entry
+    (reg.get("retired") or {}).pop(name, None)
+    reg["data_recording_only"] = not reg["kept"]
+    reg["note"] = f"{len(reg['kept'])} strategy(ies) on PAPER probation at half size."
+    p.parent.mkdir(parents=True, exist_ok=True)
+    tmp = p.with_suffix(".tmp")
+    tmp.write_text(_json.dumps(reg, indent=1, default=str))
+    tmp.replace(p)
+    return True
