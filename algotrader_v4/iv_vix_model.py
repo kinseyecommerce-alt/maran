@@ -105,9 +105,14 @@ def predict_iv1(coef, S: float, K: float, T: float, vix: float) -> float:
 
 # ── samples from the real option cache ──────────────────────────────────────
 def option_meta() -> dict:
-    f = sorted(K1Y.glob("instruments_NFO_*.json"))[-1]
-    return {r["tradingsymbol"]: r for r in json.loads(f.read_text())
-            if r["name"] == "NIFTY" and r["instrument_type"] in ("CE", "PE")}
+    """NIFTY option contracts from every saved NFO instrument snapshot (newest wins), so contracts
+    that have since expired keep their strike/expiry metadata as forward data accumulates."""
+    out: dict = {}
+    for f in sorted(K1Y.glob("instruments_NFO_*.json")):
+        for r in json.loads(f.read_text()):
+            if r.get("name") == "NIFTY" and r.get("instrument_type") in ("CE", "PE"):
+                out[r["tradingsymbol"]] = r
+    return out
 
 
 def load_samples(every_min: int = 5) -> dict:

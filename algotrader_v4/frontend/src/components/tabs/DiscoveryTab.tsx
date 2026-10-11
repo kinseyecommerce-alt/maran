@@ -13,7 +13,7 @@ const inr = (n: any) => (n === null || n === undefined || n === '') ? '—'
   : (Number(n) < 0 ? '−₹' : '₹') + Math.abs(Math.round(Number(n))).toLocaleString('en-IN')
 const pnlCls = (n: any) => Number(n) > 0 ? 'text-emerald-400' : Number(n) < 0 ? 'text-rose-400' : 'text-slate-400'
 const v = (x: any, suf = '') => (x === null || x === undefined) ? '—' : `${x}${suf}`
-const INSTS = ['', 'NIFTY_OPT_BUY', 'NIFTY_OPT_CREDIT', 'NIFTY_FUT', 'STOCK_INTRA', 'STOCK_SWING', 'MCX_SWING']
+const INSTS = ['', 'NIFTY_OPT_BUY', 'NIFTY_OPT_CREDIT', 'NIFTY_OPT_TBS', 'NIFTY_FUT', 'STOCK_INTRA', 'STOCK_SWING', 'MCX_SWING']
 
 function Card({ title, children, right }: { title: React.ReactNode; children: React.ReactNode; right?: React.ReactNode }) {
   return (

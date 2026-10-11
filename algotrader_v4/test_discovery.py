@@ -86,7 +86,7 @@ MCX = {"inst": "MCX_SWING", "entry": {"type": "DONCH", "n": 10}, "sym": "CRUDEOI
 
 
 def no_option_generation():
-    SD.INST_WEIGHTS = (0.0, 0.0, 0.6, 0.0, 0.0, 0.4)
+    SD.INST_WEIGHTS = (0.0, 0.0, 0.6, 0.0, 0.0, 0.4, 0.0)
     SD.seeds = lambda: [dict(FUT, meta={"seed": "FUT_SEED", "seen_holdout": True}), dict(MCX, meta={"op": "random"})]
 
 
@@ -340,6 +340,122 @@ def t_start_background_respects_hours_and_mode():
         assert r["ok"] is False and "trading hours" in r["why"]
     finally:
         SD.trading_hours_now = o
+
+
+# ── time-based straddle family (NIFTY_OPT_TBS) ─────────────────────────────
+def _tbs_day(path, d=date(2026, 3, 3), expiry=None, tdte=0, iv=0.12):
+    """NDay + plain DayCtx (fixed IV, no real prices): spot path per minute from 09:15."""
+    t0 = datetime.combine(d, dtime(9, 15))
+    bars = [R.Bar(t0 + timedelta(minutes=k), p, p + 2, p - 2, p) for k, p in enumerate(path)]
+    e = expiry or d
+    ctx = R.DayCtx(d, bars, iv, e, e, e == d, path[0])
+    ctx.lot = 65
+    C = np.array(path, dtype=float)
+    nd = DD.NDay(0, d, ctx, C, C + 2, C - 2, C, np.arange(len(path)), np.full(len(path), 14.0))
+    nd.day.update(tdte=tdte, event_x=False, rv_fc_day=0.008)
+    return nd
+
+
+class _U:
+    sessions = [date(2026, 3, 2), date(2026, 3, 3), date(2026, 3, 4), date(2026, 3, 5), date(2026, 3, 6)]
+
+
+TBS_SHORT = {"inst": "NIFTY_OPT_TBS", "side": "short", "entry": {"type": "TIME", "t": "09:20"}, "dte": "0-2",
+             "filters": [], "exit": {"off": 0, "wing": 4, "leg_sl": 0.35, "comb_sl": None, "exit_t": "15:20"}}
+
+
+def t_tbs_never_naked_and_hedged():
+    rng = random.Random(5)
+    for _ in range(3000):
+        s = SD.random_spec(rng, "NIFTY_OPT_TBS")
+        for _ in range(3):
+            s = SD.mutate(s, rng)
+        assert not SD.is_naked_short(s)
+        if s["side"] == "short":
+            assert int(s["exit"]["wing"]) >= 2
+        assert not SD.executable(s)                       # never handed to a live agent
+    bad = json.loads(json.dumps(TBS_SHORT)); bad["exit"]["wing"] = 0
+    assert SD.is_naked_short(bad) and SD._fix(json.loads(json.dumps(bad)))["exit"]["wing"] == 2
+    long_ = {"inst": "NIFTY_OPT_TBS", "side": "long", "entry": {"type": "TIME", "t": "09:20"}, "dte": "0",
+             "filters": [], "exit": {"sl": 0.3, "tgt": None, "exit_t": "15:20"}}
+    assert not SD.is_naked_short(long_)
+    import profitable_research as P
+    seen = []
+    orig = P.hsim
+
+    def spy(ctx, j0, legs, *a, **k):
+        assert P.is_hedged(legs)
+        seen.append(legs)
+        return orig(ctx, j0, legs, *a, **k)
+    P.hsim = spy
+    try:
+        SD.sim_tbs(_U, _tbs_day([22000.0] * 375), TBS_SHORT)
+    finally:
+        P.hsim = orig
+    assert seen and all(any(sg > 0 and t == ty for t, K, sg in seen[0]) for ty in ("CE", "PE"))
+
+
+def t_tbs_short_premium_sign_and_bounded_loss():
+    flat = SD.sim_tbs(_U, _tbs_day([22000.0] * 375), TBS_SHORT)
+    assert flat and flat[0]["raw"] > 0, flat                 # time decay → short premium earns
+    nostop = json.loads(json.dumps(TBS_SHORT)); nostop["exit"]["leg_sl"] = 50.0
+    crash = SD.sim_tbs(_U, _tbs_day(list(np.linspace(22000, 21000, 375))), nostop)
+    assert crash and crash[0]["raw"] < 0                     # trend day without stops → loss
+    t = crash[0]
+    assert -t["raw"] <= (4 * 50) * 65 * t["lots"] + 1e-6    # ... bounded by the wing width
+    # per-leg stop closes the losing put side WITH its wing; the call side keeps its decay
+    st = SD.sim_tbs(_U, _tbs_day(list(np.linspace(22000, 21000, 375))), TBS_SHORT)[0]
+    assert st["raw"] > t["raw"]
+    ld = json.loads(json.dumps(TBS_SHORT)); ld["side"] = "long"; ld["exit"] = {"sl": 0.9, "tgt": None, "exit_t": "15:20"}
+    lt = SD.sim_tbs(_U, _tbs_day([22000.0] * 375), SD._fix(ld))
+    assert lt and lt[0]["raw"] < 0                           # long straddle bleeds on a flat day
+
+
+def t_tbs_trading_clock_decay_and_real_prices():
+    nd = _tbs_day([22000.0] * 375)
+    tc = SD.TradeClock(nd.ctx, _U.sessions)
+    j0, j1 = 5, 365
+    p0 = tc.prem(22000, 22000, "CE", j0, nd.d, True) + tc.prem(22000, 22000, "PE", j0, nd.d, True)
+    p1 = tc.prem(22000, 22000, "CE", j1, nd.d) + tc.prem(22000, 22000, "PE", j1, nd.d)
+    assert p1 / p0 < 0.4                                     # 0DTE: most premium gone by 15:20
+    # 0DTE 9:20 straddle ≈ 0.8·S·σ_t·√(1 session/252): far above the 24-h calendar-clock price
+    cal = sum(nd.ctx.prem(22000, 22000, t, j0, nd.d, True) for t in ("CE", "PE"))
+    assert p0 > 1.8 * cal
+    ts = [tc.t_trade(j, nd.d) for j in range(0, 370, 30)]
+    assert all(a > b for a, b in zip(ts, ts[1:]))
+    # a recorded real close always wins over the model
+    nd.ctx.real = {(nd.d, 22000.0, "CE"): {nd.ctx.bars[j1].ts: 7.5}}
+    nd.ctx.prem = lambda S, K, typ, j, e, at_open=False, iv=None: 7.5
+    assert tc.prem(22000, 22000, "CE", j1, nd.d) == 7.5
+
+
+def t_tbs_dte_bucket_and_blackout():
+    nd = _tbs_day([22000.0] * 375, tdte=1, expiry=date(2026, 3, 4))
+    s0 = json.loads(json.dumps(TBS_SHORT)); s0["dte"] = "0"
+    assert SD.sim_tbs(_U, nd, s0) == []
+    s1 = json.loads(json.dumps(TBS_SHORT)); s1["dte"] = "1"
+    assert SD.sim_tbs(_U, nd, s1)
+    s1["filters"] = [["blackout", "eq", 1]]
+    nd.day["event_x"] = True
+    assert SD.sim_tbs(_U, nd, s1) == []
+    nd.day["event_x"] = False
+    s1["filters"] = [["vix_band", "in", [15, 22]]]           # VIX 14 → outside the band
+    assert SD.sim_tbs(_U, nd, s1) == []
+
+
+def t_vol_features_causal():
+    U = synth_universe(45, seed=4)
+    DD.add_vol_event_features(U.nifty, U.sessions)
+    k = 30
+    before = dict(U.nifty[k].day)
+    nd = U.nifty[k]
+    nd.C[:] = nd.C * np.exp(np.random.default_rng(0).normal(0, 0.01, len(nd.C)))   # wreck day k itself
+    DD.add_vol_event_features(U.nifty, U.sessions)
+    assert U.nifty[k].day["rv_fc_day"] == before["rv_fc_day"]           # forecast uses PAST days only
+    assert U.nifty[k + 1].day["rv_fc_day"] != before["rv_fc_day"]
+    fomc = date(2026, 1, 28)
+    nxt = min(d for d in sessions(400, date(2025, 9, 1)) if d > fomc)
+    assert nxt == date(2026, 1, 29)
 
 
 def t_no_order_or_live_code():

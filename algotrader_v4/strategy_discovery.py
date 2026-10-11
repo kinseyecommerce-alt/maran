@@ -44,6 +44,7 @@ from typing import Optional
 
 import numpy as np
 
+import nifty_options_research as R
 import profit_eval as PE
 
 ROOT = Path(__file__).parent
@@ -71,8 +72,9 @@ LEADERBOARD_PER_INST = 60
 EXECUTABLE_AGENT = "nifty_options_intraday"
 REG_PREFIX = "DISC_"
 
-INSTRUMENTS = ("NIFTY_OPT_BUY", "NIFTY_OPT_CREDIT", "NIFTY_FUT", "STOCK_INTRA", "STOCK_SWING", "MCX_SWING")
-INST_WEIGHTS = (0.34, 0.08, 0.16, 0.20, 0.10, 0.12)
+INSTRUMENTS = ("NIFTY_OPT_BUY", "NIFTY_OPT_CREDIT", "NIFTY_FUT", "STOCK_INTRA", "STOCK_SWING", "MCX_SWING",
+               "NIFTY_OPT_TBS")
+INST_WEIGHTS = (0.20, 0.05, 0.22, 0.14, 0.08, 0.08, 0.23)
 AXIS_OF = {"MCX_SWING": "mcx"}            # everything else: the NSE session axis
 
 def _now() -> datetime:
@@ -151,6 +153,27 @@ R_EXITS = {"stop": [["pct", 0.002], ["pct", 0.003], ["pct", 0.005], ["pct", 0.00
 SWING_EXITS = {"hold": [5, 10, 20], "stop": [None, 0.05, 0.08], "tgt": [None, 0.08, 0.15]}
 MCX_EXITS = {"atr_stop": [1.5, 2.0, 3.0], "tgt_r": [None, 2.0, 3.0], "hold": [5, 10, 20], "trail_atr": [None, 3.0]}
 
+# Time-based straddle / strangle family (NIFTY_OPT_TBS).  side=short → ALWAYS an iron fly / iron
+# condor (long wings ≥ 2 strikes beyond each short strike, per-leg SL closes the short WITH its wing);
+# side=long → long ATM straddle.  Evaluated per DTE bucket (trading sessions to the weekly expiry).
+TBS_TIMES = ["09:20", "09:45", "10:30", "12:20", "13:30"]
+TBS_DTE = ["0", "1", "2", "0-1", "1-2", "0-2"]
+TBS_SHORT_EXITS = {"off": [0, 0, 1, 2, 3], "wing": [2, 4, 6], "leg_sl": [0.20, 0.25, 0.35],
+                   "comb_sl": [None, 0.3, 0.5, 1.0], "exit_t": ["14:30", "15:20"]}
+TBS_LONG_EXITS = {"sl": [0.2, 0.3, 0.4], "tgt": [None, 0.3, 0.5], "exit_t": ["14:30", "15:20"]}
+TBS_FILTERS = [("vix_band", "in", [[12, 22], [13, 23], [11, 20], [12, 18], [14, 22]]),
+               ("em_ratio", "gt", [1.0, 1.15, 1.3, 1.5]), ("em_ratio", "lt", [0.7, 0.85, 1.0]),
+               ("blackout", "eq", [1]), ("gap_abs", "lt", [0.002, 0.004]), ("prev_range", "lt", [0.8, 1.0]),
+               ("prev_range", "gt", [1.0, 1.2]), ("cpr", "eq", ["narrow", "wide", "not_wide", "not_narrow"]),
+               ("vix_rel", "lt", [0.95, 1.0]), ("vix_rel", "gt", [1.0, 1.05])]
+TBS_MAX_RISK_PCT = 0.02          # max defined risk of ONE iron-fly/condor lot (fraction of capital)
+TBS_SLIP_PCT = 0.0025            # Zerodha's 0.25 % per leg per fill as the slippage floor
+TC_NIGHT, TC_OFFDAY = 0.25, 0.10   # trading-time clock: a night = 0.25 session, extra holiday = 0.10
+TC_REF_DAYS = 7.0                  # IV model read at ≥ 7 calendar days (its calibrated range)
+# calendar-annualised σ → trading-time σ with equal total variance over 30 calendar days
+# (≈ 21 sessions + 21 nights + 9 off days): sqrt((30/365) / ((21·(1+0.25) + 9·0.10)/252)) ≈ 0.873
+TC_VOL_SCALE = math.sqrt((30.0 / 365.0) / ((21 * (1 + TC_NIGHT) + 9 * TC_OFFDAY) / 252.0))
+
 # features the live NIFTY options agent can compute from its own 1-min bars + the daily file
 LIVE_ENTRY_TYPES = set(NIFTY_ENTRIES) - {"BREADTH"}
 LIVE_FILTERS = {"dow_not", "dte", "cpr", "gap_abs", "adx", "prev_range", "no_event", "rsi14d", "trend50_agree",
@@ -170,7 +193,12 @@ def spec_hash(spec: dict) -> str:
 
 
 def is_naked_short(spec: dict) -> bool:
-    """Only NIFTY_OPT_CREDIT sells options, and always as a vertical with a same-type long wing."""
+    """Only NIFTY_OPT_CREDIT (vertical) and NIFTY_OPT_TBS side=short (iron fly / condor) sell options,
+    always with a same-type long wing ≥ 1 strike beyond every short strike (≥ 2 enforced by _fix)."""
+    if spec.get("inst") == "NIFTY_OPT_TBS":
+        if spec.get("side") == "long":
+            return False
+        return int((spec.get("exit") or {}).get("wing") or 0) <= 0
     if spec.get("inst") != "NIFTY_OPT_CREDIT":
         return False
     return int((spec.get("exit") or {}).get("wing") or 0) <= 0
@@ -187,6 +215,13 @@ def executable(spec: dict) -> bool:
 
 def describe(spec: dict) -> str:
     e = spec["entry"]
+    if spec.get("inst") == "NIFTY_OPT_TBS":
+        fl = "; ".join(f"{a} {b} {c}" for a, b, c in spec.get("filters") or [])
+        ex = ", ".join(f"{k}={v}" for k, v in (spec.get("exit") or {}).items())
+        what = "LONG straddle" if spec.get("side") == "long" else (
+            "iron fly" if not spec["exit"].get("off") else "iron condor")
+        return (f"NIFTY_OPT_TBS · {what} @ {e.get('t')} · DTE {spec.get('dte')}"
+                f"{' · filters: ' + fl if fl else ''} · exit: {ex}")
     ep = ", ".join(f"{k}={v}" for k, v in e.items() if k != "type")
     w = spec.get("win")
     ws = ""
@@ -228,6 +263,11 @@ def random_spec(rng: random.Random, inst: Optional[str] = None) -> dict:
             s["maxd"] = 1
         else:
             s["exit"] = {k: _pick(rng, v) for k, v in R_EXITS.items()}
+    elif inst == "NIFTY_OPT_TBS":
+        side = "short" if rng.random() < 0.7 else "long"
+        s.update(side=side, entry={"type": "TIME", "t": _pick(rng, TBS_TIMES)}, dte=_pick(rng, TBS_DTE))
+        s["filters"] = [_rand_filter(rng, TBS_FILTERS) for _ in range(rng.choice([0, 1, 1, 2, 2, 3]))]
+        s["exit"] = {k: _pick(rng, v) for k, v in (TBS_SHORT_EXITS if side == "short" else TBS_LONG_EXITS).items()}
     elif inst == "STOCK_INTRA":
         s["entry"] = _rand_params(rng, STOCK_ENTRIES, _pick(rng, list(STOCK_ENTRIES)))
         a = _pick(rng, W0[:5])
@@ -268,12 +308,54 @@ def _fix(s: dict) -> dict:
         s["filters"] = fl
     if s["inst"] == "NIFTY_OPT_CREDIT":
         s["exit"]["wing"] = max(2, int(s["exit"].get("wing") or 2))      # never naked
+    if s["inst"] == "NIFTY_OPT_TBS" and s.get("side") != "long":
+        s["side"] = "short"
+        s["exit"]["wing"] = max(2, int(s["exit"].get("wing") or 2))      # never naked
     return s
+
+
+def _mutate_tbs(s: dict, rng: random.Random) -> dict:
+    exi = TBS_SHORT_EXITS if s.get("side") != "long" else TBS_LONG_EXITS
+    what = rng.choice(["time", "dte", "exit", "exit", "filter_add", "filter_drop", "filter_mod", "flip"])
+    if what == "time":
+        s["entry"]["t"] = _pick(rng, TBS_TIMES)
+    elif what == "dte":
+        s["dte"] = _pick(rng, TBS_DTE)
+    elif what == "filter_add" and len(s.get("filters") or []) < 3:
+        s.setdefault("filters", []).append(_rand_filter(rng, TBS_FILTERS))
+    elif what == "filter_drop" and s.get("filters"):
+        s["filters"].pop(rng.randrange(len(s["filters"])))
+    elif what == "filter_mod" and s.get("filters"):
+        i = rng.randrange(len(s["filters"]))
+        n, op, _ = s["filters"][i]
+        opts = [v for (a, b, v) in TBS_FILTERS if a == n and b == op]
+        if opts:
+            s["filters"][i][2] = _pick(rng, opts[0])
+    elif what == "flip" and rng.random() < 0.3:          # implied-vs-forecast mirror: sell rich ↔ buy cheap
+        s["side"] = "long" if s.get("side") != "long" else "short"
+        s["exit"] = {k: _pick(rng, v) for k, v in (TBS_SHORT_EXITS if s["side"] == "short" else TBS_LONG_EXITS).items()}
+        flip = {"gt": "lt", "lt": "gt"}
+        s["filters"] = [[n, op, v] if n != "em_ratio" else
+                        [n, flip[op], _pick(rng, [x for (a, b, x) in TBS_FILTERS if a == n and b == flip[op]][0])]
+                        for n, op, v in s.get("filters") or []]
+    else:
+        k = rng.choice(list(exi))
+        s["exit"][k] = _pick(rng, exi[k])
+    return _fix(s)
 
 
 def mutate(spec: dict, rng: random.Random) -> dict:
     s = deepcopy(spec)
     s.pop("meta", None)
+    inst = s["inst"]
+    if inst == "NIFTY_OPT_TBS":
+        return _mutate_tbs(s, rng)
+    if inst == "NIFTY_OPT_BUY" and rng.random() < 0.2:
+        # directional signal → NIFTY futures with a HARD stop instead of buying premium
+        s["inst"] = "NIFTY_FUT"
+        s["exit"] = {k: _pick(rng, v) for k, v in R_EXITS.items()}
+        s["exit"]["stop"] = _pick(rng, [["atr", 1.0], ["atr", 1.5], ["pct", 0.003], ["orb", 15]])
+        return _fix(s)
     inst = s["inst"]
     tables = {"NIFTY_OPT_BUY": (NIFTY_ENTRIES, NIFTY_FILTERS, OPT_EXITS),
               "NIFTY_OPT_CREDIT": (NIFTY_ENTRIES, NIFTY_FILTERS, CREDIT_EXITS),
@@ -316,8 +398,21 @@ def mutate(spec: dict, rng: random.Random) -> dict:
 
 
 def crossover(a: dict, b: dict, rng: random.Random) -> dict:
-    if a["inst"] != b["inst"]:
+    if a["inst"] != b["inst"] or a.get("side") != b.get("side"):
         return mutate(a, rng)
+    if a["inst"] == "NIFTY_OPT_TBS":
+        c = deepcopy(a)
+        c.pop("meta", None)
+        part = rng.choice(["exit", "filters", "time", "dte"])
+        if part == "exit":
+            c["exit"] = deepcopy(b["exit"])
+        elif part == "filters":
+            c["filters"] = deepcopy(b.get("filters") or [])
+        elif part == "time":
+            c["entry"] = deepcopy(b["entry"])
+        else:
+            c["dte"] = b.get("dte")
+        return _fix(c)
     c = deepcopy(a)
     c.pop("meta", None)
     part = rng.choice(["exit", "filters", "win_dir", "entry"])
@@ -398,6 +493,27 @@ def seeds() -> list:
     add("MCX_EMA_TREND", {"inst": "MCX_SWING", "entry": {"type": "SMA_X", "fast": 10, "slow": 50}, "sym": "ALL",
                           "dir": "both", "filters": [], "exit": {"atr_stop": 2.0, "tgt_r": None, "hold": 20,
                                                                   "trail_atr": 3.0}})
+    # time-based straddle family (published configs; the hedged 9:20 variant was evaluated on the
+    # full year by earlier research → contaminated lineage like every other seed)
+    tbs = lambda t, dte, ex, fl=None, side="short": {"inst": "NIFTY_OPT_TBS", "side": side,
+                                                    "entry": {"type": "TIME", "t": t}, "dte": dte,
+                                                    "filters": fl or [], "exit": ex}
+    sx = {"off": 0, "wing": 4, "leg_sl": 0.25, "comb_sl": None, "exit_t": "15:20"}
+    add("TBS_920_IFLY_ZERODHA", tbs("09:20", "0-2", {**sx, "leg_sl": 0.20}))
+    add("TBS_920_IFLY_VIX13_23_SL35", tbs("09:20", "0-2", {**sx, "leg_sl": 0.35}, [["vix_band", "in", [13, 23]]]))
+    add("TBS_2DTE_IFLY", tbs("09:20", "2", sx, [["blackout", "eq", 1]]))
+    add("TBS_RICH_SELL", tbs("09:20", "0-2", {**sx, "comb_sl": 0.5},
+                             [["em_ratio", "gt", 1.15], ["vix_band", "in", [12, 22]], ["blackout", "eq", 1]]))
+    add("TBS_CHEAP_BUY", tbs("09:20", "0-2", {"sl": 0.3, "tgt": 0.5, "exit_t": "15:20"},
+                             [["em_ratio", "lt", 0.85]], side="long"))
+    # directional option-buy seeds re-expressed as NIFTY futures with a hard stop
+    for x in [x for x in S if x["inst"] == "NIFTY_OPT_BUY"]:
+        f = deepcopy(x)
+        f.pop("meta", None)
+        f["inst"] = "NIFTY_FUT"
+        f["exit"] = {"stop": ["atr", 1.5], "tgt_r": 2.0, "trail_r": [1.0, 1.0], "be": 1, "hold": None,
+                     "vix_exit": None}
+        add("FUT_" + x["meta"]["seed"].rstrip("~"), f)
     return S
 
 
@@ -742,6 +858,200 @@ def sim_opt_credit(nd, i: int, side: int, ex: dict, iv=None) -> Optional[dict]:
         t["j_out"] = _tidx(nd, t["t_out"])
         t["side"] = "PUTSPREAD" if side > 0 else "CALLSPREAD"
     return t
+
+
+# ── time-based straddle / strangle (NIFTY_OPT_TBS) ────────────────────────────
+class TradeClock:
+    """Pricing proxy for the TBS family.  Real recorded option closes are used whenever they exist
+    (ctx.prem).  Otherwise Black-Scholes on a TRADING-TIME variance clock: 375 min per session,
+    a night = 0.25 session, an extra non-trading day = 0.10 session (TC_NIGHT / TC_OFFDAY).
+
+    Why: the VIX-driven IV model is calibrated on real option bars that are mostly 5–60 days to
+    expiry and prices on a 24-h calendar clock.  At 0–2 DTE that is an extrapolation and it
+    under-prices the near-expiry straddle (0DTE 9:20 straddle ≈ 56 pts vs a median realised
+    9:20→15:20 move of ≈ 105 pts on the discovery window) and decays it too slowly intraday.
+    Here the volatility is taken from the model at a reference horizon it was fitted on
+    (≥ TC_REF_DAYS calendar days) and converted to trading-time units with a fixed, theory-based
+    factor (equal total variance over 30 calendar days), so short-dated premium and its intraday
+    decay follow market hours.  Nothing here is fitted to the sealed holdout."""
+
+    def __init__(self, ctx, sessions: list, mult: float = 1.0):
+        self.c, self.sessions, self.mult = ctx, sessions, mult
+        self._units: dict = {}
+
+    def __getattr__(self, k):
+        return getattr(self.c, k)
+
+    def _after(self, expiry: date) -> float:
+        if expiry not in self._units:
+            d, u = self.c.d, 0.0
+            last = self.sessions[-1] if self.sessions else d
+            cal = [x for x in self.sessions if d < x <= expiry]
+            x = last
+            while x < expiry:
+                x += timedelta(days=1)
+                if x.weekday() < 5 and x > last:
+                    cal.append(x)
+            for x in sorted(cal):
+                u += 1.0 + TC_NIGHT + TC_OFFDAY * max((x - d).days - 1, 0)
+                d = x
+            self._units[expiry] = u
+        return self._units[expiry]
+
+    def t_trade(self, j: int, expiry: date, at_open: bool = False) -> float:
+        ts = self.c.bars[j].ts if at_open else self.c.bars[j].ts + timedelta(minutes=1)
+        mins = (datetime.combine(ts.date(), dtime(15, 30)) - ts).total_seconds() / 60.0
+        return max(max(mins, 0.0) / 375.0 + self._after(expiry), 30.0 / 375.0) / 252.0
+
+    def real_px(self, K: float, typ: str, j: int, expiry: date, at_open: bool = False):
+        real = getattr(self.c, "real", None)
+        if not real:
+            return None
+        ser = real.get((expiry, float(K), typ))
+        if not ser:
+            return None
+        jv = j - 1 if (at_open and j > 0) else j
+        return ser.get(self.c.bars[jv].ts)
+
+    def sigma(self, S, K, j, expiry, at_open=False) -> float:
+        c = self.c
+        jv = j - 1 if (at_open and j > 0) else j
+        Tref = max(c.t_at(j, expiry, at_open), TC_REF_DAYS / 365.0)
+        sig = c._sig(S, K, Tref, jv) if hasattr(c, "_sig") else c.iv
+        return sig * TC_VOL_SCALE * self.mult
+
+    def prem(self, S, K, typ, j, expiry, at_open=False, iv=None):
+        c = self.c
+        if self.real_px(K, typ, j, expiry, at_open) is not None:
+            return c.prem(S, K, typ, j, expiry, at_open, iv=(c.iv * self.mult) if self.mult != 1.0 else None)
+        return max(0.05, R.bs_price(S, K, self.t_trade(j, expiry, at_open), self.sigma(S, K, j, expiry, at_open), typ))
+
+
+def _dte_set(code: str) -> set:
+    a, _, b = str(code).partition("-")
+    return set(range(int(a), int(b or a) + 1))
+
+
+def tbs_em_ratio(tc: TradeClock, nd, j0: int, expiry: date) -> Optional[float]:
+    """Implied vs forecast move: ATM straddle at the entry bar → implied per-session σ
+    (straddle ≈ 0.8·S·σ_day·√sessions-to-expiry on the trading clock) ÷ forecast σ_day from the
+    trailing 20 sessions of 1-min data (+ overnight gaps).  > 1 = options rich."""
+    fc = nd.day.get("rv_fc_day")
+    if not fc or fc <= 0:
+        return None
+    S = tc.c.bars[j0].o
+    K = round(S / 50) * 50
+    P = tc.prem(S, K, "CE", j0, expiry, at_open=True) + tc.prem(S, K, "PE", j0, expiry, at_open=True)
+    n = tc.t_trade(j0, expiry, True) * 252.0
+    imp = P / (0.8 * S * math.sqrt(max(n, 1e-6)))
+    return imp / fc
+
+
+def _tbs_filters_ok(nd, j0: int, flt: list, em: Optional[float]) -> bool:
+    dd = nd.day
+    for name, op, v in flt:
+        if name == "vix_band":
+            x = float(nd.vix[max(j0 - 1, 0)]) if len(nd.vix) else None
+            if x is None or not (v[0] <= x <= v[1]):
+                return False
+        elif name == "em_ratio":
+            if em is None or (op == "gt" and not em > v) or (op == "lt" and not em < v):
+                return False
+        elif name == "blackout":
+            if dd.get("event_x"):
+                return False
+        elif not _filter_ok(nd, max(j0 - 1, 0), 1, [[name, op, v]]):
+            return False
+    return True
+
+
+def sim_long_straddle(tc: TradeClock, j0: int, K: float, expiry: date, ex: dict, exit_t: dtime) -> Optional[dict]:
+    import profitable_research as P
+    c = tc.c
+    lot = getattr(c, "lot", 65)
+    S0 = c.bars[j0].o
+    e = {t: tc.prem(S0, K, t, j0, expiry, at_open=True) for t in ("CE", "PE")}
+    debit = e["CE"] + e["PE"]
+    if debit <= 1.0:
+        return None
+    lots = max(0, min(P.MAX_LOTS, int(P.RISK // max(debit * ex["sl"] * lot, 1e-9))))
+    if lots < 1:
+        return None
+    q = lot * lots
+    fill = lambda px: max(P.spread(px) / 2 + P.SLIP, TBS_SLIP_PCT * px)
+    cost = sum(P.order_cost("BUY", q, px) + fill(px) * q for px in e.values())
+    reason, j, val = "time", j0, debit
+    for j in range(j0, len(c.bars)):
+        b = c.bars[j]
+        if b.ts.time() >= exit_t:
+            break
+        val = tc.prem(b.c, K, "CE", j, expiry) + tc.prem(b.c, K, "PE", j, expiry)
+        if val <= debit * (1 - ex["sl"]):
+            reason = "stop"
+            break
+        if ex.get("tgt") and val >= debit * (1 + ex["tgt"]):
+            reason = "target"
+            break
+    xs = {t: tc.prem(c.bars[j].c, K, t, j, expiry) for t in ("CE", "PE")}
+    val = xs["CE"] + xs["PE"]
+    cost += sum(P.order_cost("SELL", q, px) + fill(px) * q for px in xs.values())
+    raw = (val - debit) * q
+    return {"d": c.d, "kind": "buy", "raw": raw, "cost": cost, "net": raw - cost, "exit_reason": reason,
+            "t_in": c.bars[j0].ts, "t_out": c.bars[j].ts, "lots": lots, "debit": round(debit, 2),
+            "naked_short": False}
+
+
+def sim_tbs(U, nd, spec: dict, mult: float = 1.0) -> list:
+    import profitable_research as P
+    ctx = nd.ctx
+    if ctx is None:
+        return []
+    tdte = nd.day.get("tdte")
+    if tdte is None or int(tdte) not in _dte_set(spec["dte"]):
+        return []
+    expiry = ctx.exp_today
+    hh, mm = map(int, spec["entry"]["t"].split(":"))
+    j0 = next((k for k, b in enumerate(ctx.bars) if b.ts.time() >= dtime(hh, mm)), None)
+    if j0 is None or j0 < 1 or j0 >= len(ctx.bars) - 5:
+        return []
+    tc = TradeClock(ctx, U.sessions, mult)
+    flt = spec.get("filters") or []
+    em = tbs_em_ratio(tc, nd, j0, expiry) if any(f[0] == "em_ratio" for f in flt) else None
+    if not _tbs_filters_ok(nd, j0, flt, em):
+        return []
+    ex = spec["exit"]
+    eh, em_ = map(int, ex.get("exit_t", "15:20").split(":"))
+    exit_t = dtime(eh, em_)
+    S0 = ctx.bars[j0].o
+    atm = round(S0 / 50) * 50
+    if spec.get("side") == "long":
+        t = sim_long_straddle(tc, j0, atm, expiry, ex, exit_t)
+    else:
+        off, w = int(ex.get("off") or 0), int(ex["wing"])
+        if w < 1:
+            raise AssertionError("naked short structure refused")
+        kc, kp = atm + off * 50, atm - off * 50
+        legs = [("CE", float(kc + w * 50), +1), ("PE", float(kp - w * 50), +1),
+                ("CE", float(kc), -1), ("PE", float(kp), -1)]
+        # defined risk per lot = (wing width − credit) × lot; 1 lot is allowed while that stays
+        # ≤ 2 % of capital (otherwise cheap-premium days would be silently skipped by sizing)
+        lot = getattr(ctx, "lot", 65)
+        cr = sum(-sg * tc.prem(S0, K, ty, j0, expiry, at_open=True) for ty, K, sg in legs)
+        risk = max(w * 50 - cr, cr * 0.5) * lot
+        if cr <= 0.5 or risk > TBS_MAX_RISK_PCT * CAPITAL:
+            return []
+        lots = max(1, min(P.MAX_LOTS, int(P.RISK // max(risk, 1e-9))))
+        t = P.hsim(tc, j0, legs, expiry, per_leg_sl=ex["leg_sl"], basket_stop=ex.get("comb_sl"),
+                   exit_t=exit_t, slip_pct=TBS_SLIP_PCT, lots=lots)
+        if t:
+            assert not t.get("naked_short")
+            t["side"] = "IFLY" if off == 0 else "ICONDOR"
+    if not t:
+        return []
+    t["d"] = nd.d
+    t["dte_s"] = int(tdte)
+    t["j_out"] = _tidx(nd, t["t_out"])
+    return [t]
 
 
 def _r_path(O, H, L, C, tm, vix, j0: int, side: int, R: float, ex: dict, slip: float) -> tuple:
@@ -1303,6 +1613,11 @@ def run_spec(U, spec: dict, mode: str = "base") -> list:
                 if mode in ("iv0.9", "iv1.1"):
                     iv = nd.ctx.iv * (0.9 if mode == "iv0.9" else 1.1)
                 trades += sim_nifty_spec(nd, spec, iv=iv)
+    elif inst == "NIFTY_OPT_TBS":
+        mult = {"iv0.9": 0.9, "iv1.1": 1.1}.get(mode, 1.0)
+        for nd in U.nifty:
+            if U.visible(nd.d):
+                trades += sim_tbs(U, nd, spec, mult)
     elif inst == "STOCK_SWING":
         trades = sim_swing(U, spec, stress=(mode == "stress"))
     elif inst == "MCX_SWING":
@@ -1343,7 +1658,7 @@ def pnl_vector(trades: list, axis: list) -> np.ndarray:
 
 
 def stress_net(U, spec: dict) -> tuple:
-    if spec["inst"] in ("NIFTY_OPT_BUY", "NIFTY_OPT_CREDIT"):
+    if spec["inst"] in ("NIFTY_OPT_BUY", "NIFTY_OPT_CREDIT", "NIFTY_OPT_TBS"):
         a = sum(t["net"] for t in run_spec(U, spec, "iv0.9"))
         b = sum(t["net"] for t in run_spec(U, spec, "iv1.1"))
         return min(a, b), {"iv0.9": round(a), "iv1.1": round(b)}
@@ -1381,6 +1696,13 @@ def evaluate_spec(U, spec: dict, nfolds: int = DISC_FOLDS, with_stress: Optional
     for t in trades:
         r = str(t.get("exit_reason", "?")).split(" ")[0]
         m["exit_mix"][r] = m["exit_mix"].get(r, 0) + 1
+    if spec["inst"] == "NIFTY_OPT_TBS":
+        bd: dict = {}
+        for t in trades:
+            b = bd.setdefault(str(t.get("dte_s")), {"trades": 0, "net": 0.0, "wins": 0})
+            b["trades"] += 1; b["net"] += t["net"]; b["wins"] += t["net"] > 0
+        m["by_dte"] = {k: {"trades": v["trades"], "net": round(v["net"]), "win_pct": round(100 * v["wins"] / v["trades"], 1)}
+                       for k, v in sorted(bd.items())}
     return {"m": m, "pnl": pv, "fp": fingerprint(trades), "n": len(trades), "axis": AXIS_OF.get(spec["inst"], "nse"),
             "max_d": str(max(t["d"] for t in trades)) if trades else None,
             "min_d": str(min(t["d"] for t in trades)) if trades else None}
@@ -1488,7 +1810,21 @@ def prior_trials() -> int:
         n += int(json.loads((ROOT / "logs" / "all_agents_methods_research.json").read_text()).get("n_trials") or 0)
     except Exception:
         pass
+    try:   # manual diagnostic evaluations on the discovery window (e.g. scripts/tbs_reconcile.py)
+        n += int(json.loads((DDIR / "diagnostic_trials.json").read_text()).get("n") or 0)
+    except Exception:
+        pass
     return n
+
+
+def add_diagnostic_trials(n: int, why: str) -> int:
+    """Count manual looks at the discovery data as trials too (DSR deflation stays honest)."""
+    p = DDIR / "diagnostic_trials.json"
+    d = _load(p, {"n": 0, "log": []})
+    d["n"] = int(d.get("n", 0)) + int(n)
+    d.setdefault("log", []).append({"at": _now().isoformat(timespec="seconds"), "n": int(n), "why": why})
+    _save(p, d)
+    return d["n"]
 
 
 def seal(sessions: list, state: dict) -> dict:
@@ -1588,7 +1924,7 @@ def fitness(m: dict) -> float:
 def _short_m(m: dict) -> dict:
     keep = ("trades", "win_pct", "gross", "costs", "net", "pf", "net_wo_best5", "max_dd", "pct_per_month",
             "folds_positive", "folds_traded", "fold_pos_frac", "stress_net", "sharpe_d", "sessions", "stress", "fails",
-            "exit_mix")
+            "exit_mix", "by_dte")
     return {k: m.get(k) for k in keep if k in m}
 
 

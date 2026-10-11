@@ -55,13 +55,15 @@ def is_hedged(legs: list) -> bool:
 def hsim(ctx, j0: int, legs: list, expiry: date, per_leg_sl: Optional[float] = None,
          basket_stop: Optional[float] = None, exit_t: dtime = dtime(15, 15), iv=None,
          reentry: int = 0, reentry_until: dtime = dtime(14, 30), cross_mult: Optional[float] = None,
-         lots: Optional[int] = None) -> Optional[dict]:
+         lots: Optional[int] = None, slip_pct: Optional[float] = None) -> Optional[dict]:
     """Hedged basket. legs=[(typ, K, ±1)].  per_leg_sl: a SHORT leg is closed with
     its same-type wing when its premium ≥ entry×(1+sl) (adverse bar extreme).
     reentry: after a leg is stopped, re-sell it (+ its wing) once its premium is
     back at/below the ORIGINAL entry (AlgoTest 'RE-COST'), max `reentry` times per
     leg, only before `reentry_until`.  basket_stop: close all when loss ≥ k×credit.
-    cross_mult scales the crossed half-spread+slippage (0.5 = limit-order sensitivity)."""
+    cross_mult scales the crossed half-spread+slippage (0.5 = limit-order sensitivity).
+    slip_pct: per-fill slippage floor as a fraction of the leg premium (e.g. 0.0025 = Zerodha's
+    0.25%/leg); the fill cost is max(half-spread + SLIP, slip_pct × premium)."""
     if j0 >= len(ctx.bars) or not legs:
         return None
     cross_mult = COST_CROSS if cross_mult is None else cross_mult
@@ -88,6 +90,10 @@ def hsim(ctx, j0: int, legs: list, expiry: date, per_leg_sl: Optional[float] = N
     n_re = 0
     reason, j = "time", j0
 
+    def _fill(px):
+        base = spread(px) / 2 + SLIP
+        return max(base, slip_pct * px) if slip_pct else base
+
     def px_at(k, jj, S=None):
         t, K, s = legs[k]
         return ctx.prem(ctx.bars[jj].c if S is None else S, K, t, jj, expiry, iv=iv)
@@ -97,7 +103,7 @@ def hsim(ctx, j0: int, legs: list, expiry: date, per_leg_sl: Optional[float] = N
         t, K, s = legs[k]
         raw += s * (px - e_px[k]) * q          # short (−1) loses when its premium rises
         stat += order_cost("SELL" if s > 0 else "BUY", q, px)
-        cross += (spread(px) / 2 + SLIP) * q * cross_mult
+        cross += _fill(px) * q * cross_mult
         openl[k] = False
 
     def open_(k, px):
@@ -105,7 +111,7 @@ def hsim(ctx, j0: int, legs: list, expiry: date, per_leg_sl: Optional[float] = N
         t, K, s = legs[k]
         e_px[k] = px
         stat += order_cost("BUY" if s > 0 else "SELL", q, px)
-        cross += (spread(px) / 2 + SLIP) * q * cross_mult
+        cross += _fill(px) * q * cross_mult
         openl[k] = True
 
     for k in range(len(legs)):

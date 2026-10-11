@@ -37,6 +37,50 @@ EVENT_DAYS = {date.fromisoformat(x) for x in (
     "2025-06-04", "2025-08-06", "2025-10-08", "2025-12-05", "2026-02-06", "2026-04-09", "2026-06-05",
     "2026-08-07", "2026-10-09", "2026-12-04", "2025-02-01", "2026-02-01")}
 
+# Extended event blackout (for option selling): the NSE session AFTER a US CPI release or an FOMC
+# decision (both land after the Indian close, IST), plus Indian election-result days.
+US_EVENT_DATES = {date.fromisoformat(x) for x in (
+    # US CPI (BLS schedule; Oct-2025 release delayed to 24 Oct by the shutdown, Nov-2025 cancelled)
+    "2025-09-11", "2025-10-24", "2025-12-18", "2026-01-13", "2026-02-13", "2026-03-11", "2026-04-10",
+    "2026-05-12", "2026-06-10", "2026-07-14", "2026-08-12", "2026-09-11", "2026-10-14", "2026-11-10",
+    "2026-12-10",
+    # FOMC decision days (federalreserve.gov)
+    "2025-09-17", "2025-10-29", "2025-12-10", "2026-01-28", "2026-03-18", "2026-04-29", "2026-06-17",
+    "2026-07-29", "2026-09-16", "2026-10-28", "2026-12-09")}
+ELECTION_RESULT_DAYS = {date(2025, 11, 14), date(2026, 5, 4)}       # Bihar; WB/TN/Kerala/Assam/Puducherry
+RV_LOOKBACK = 20
+
+
+def add_vol_event_features(nifty: list, sessions: list) -> None:
+    """Causal per-day features for the volatility families (uses only sessions BEFORE the day):
+    rv_fc_intra / rv_fc_day = forecast intraday / close-to-close σ (fraction) from the trailing
+    20 sessions (sum of squared 1-min log returns, + squared opening gap); tdte = trading
+    sessions to the nearest weekly expiry (0 on expiry day); event_x = RBI/Budget day, the session
+    after a US CPI/FOMC release, or an Indian election-result day."""
+    rv, g2 = [], []
+    sess = sorted(sessions)
+    nxt = {}
+    for us in US_EVENT_DATES:
+        n = next((d for d in sess if d > us), None)
+        if n:
+            nxt[n] = True
+    prev_c = None
+    for nd in sorted(nifty, key=lambda x: x.d):
+        C = np.asarray(nd.C, dtype=float)
+        r_in = float(np.sum(np.diff(np.log(C)) ** 2)) if len(C) > 2 else float("nan")
+        gap = math.log(nd.O[0] / prev_c) ** 2 if prev_c else float("nan")
+        if len(rv) >= 10:
+            a = np.array(rv[-RV_LOOKBACK:]); b = np.array([x for x in g2[-RV_LOOKBACK:] if x == x] or [0.0])
+            nd.day["rv_fc_intra"] = float(math.sqrt(np.nanmean(a)))
+            nd.day["rv_fc_day"] = float(math.sqrt(np.nanmean(a) + float(np.mean(b))))
+        ctx = nd.ctx
+        if ctx is not None:
+            nd.day["tdte"] = 0 if getattr(ctx, "expiry_day", False) else nd.day.get("dte")
+        nd.day["event_x"] = bool(nd.day.get("event") or nd.d in nxt or nd.d in ELECTION_RESULT_DAYS)
+        rv.append(r_in); g2.append(gap)
+        prev_c = float(C[-1])
+
+
 MCX_SPECS = {   # name → (multiplier ₹ per 1.0 price move per lot, typical tick)
     "CRUDEOIL": (100.0, 1.0), "CRUDEOILM": (10.0, 1.0), "NATURALGAS": (1250.0, 0.1),
     "GOLDM": (10.0, 1.0), "SILVERM": (5.0, 1.0)}
@@ -363,6 +407,7 @@ def load_universe(log=print, with_stocks: bool = True) -> Universe:
         p = K1Y / f"MCX_{name}_CONT_day.csv"
         if p.exists():
             mcx[name] = load_daily_ohlc(p)
+    add_vol_event_features(nifty, sessions)
     log(f"universe: {len(nifty)} NIFTY sessions {sessions[0]}…{sessions[-1]}, stocks {len(sd)}, "
         f"MCX {list(mcx)} ({time.time()-t0:.0f}s)")
     return Universe(sessions, nifty, stocks, sd, nd_daily, mcx, set(info["real_days"]))
