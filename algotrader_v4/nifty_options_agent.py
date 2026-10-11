@@ -76,6 +76,10 @@ def write_gate(res: dict, methods: Optional[dict] = None) -> dict:
     if methods is None:
         methods = {k: v for k, v in prev.items() if v.get("method")}
     sig.update(methods)
+    # keep ONLY strategies that the strict 'profitable' study kept (profit_eval registry,
+    # re-checked monthly); everything else is written as blocked (retired).
+    import profit_eval as _PE
+    sig = _PE.strict_filter(sig)
     g = {"generated": res.get("generated"), "sessions": res.get("sessions"), "signals": sig,
          "oos_agent": res.get("oos_agent"), "iv_calibration": res.get("iv_calibration"),
          "pricing": res.get("pricing")}
@@ -124,8 +128,9 @@ class NiftyOptionsIntradayAgent:
         return "running", f"PAPER · signals: {lab}"
 
     def tradable_signals(self) -> dict:
-        return {s: v for s, v in (load_gate().get("signals") or {}).items()
-                if v.get("status") in ("pass", "probation")}
+        import profit_eval as _PE
+        sig = _PE.strict_filter(load_gate().get("signals") or {})     # defence in depth (registry, fail closed)
+        return {s: v for s, v in sig.items() if v.get("status") in ("pass", "probation")}
 
     def _roll(self, now: datetime) -> None:
         if self._day != now.date():

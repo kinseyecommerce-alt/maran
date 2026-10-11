@@ -173,15 +173,18 @@ def t_orb_variant_selection_uses_train_folds_only():
 
 def t_write_gate_keeps_method_rows():
     import nifty_options_agent as A
-    old = A.GATE_PATH
+    import profit_eval as PE
+    old, oreg = A.GATE_PATH, PE.REGISTRY_PATH
     A.GATE_PATH = A.Path(_d) / "gate.json"
+    PE.REGISTRY_PATH = A.Path(_d) / "reg.json"           # strict registry: X_ORB15_BUY kept
+    PE.write_registry({"X_ORB15_BUY": {"agent": "nifty_options_intraday", "size": 0.5}}, {}, {})
     try:
         A.write_gate({"gate": {"ORB15": {"status": "blocked"}}},
                      {"X_ORB15_BUY": {"status": "probation", "method": True, "kind": "buy"}})
         A.write_gate({"gate": {"ORB15": {"status": "blocked"}}})          # nightly signal-only re-run
         assert A.load_gate()["signals"]["X_ORB15_BUY"]["status"] == "probation"
     finally:
-        A.GATE_PATH = old
+        A.GATE_PATH, PE.REGISTRY_PATH = old, oreg
 
 
 for n, f in list(globals().items()):

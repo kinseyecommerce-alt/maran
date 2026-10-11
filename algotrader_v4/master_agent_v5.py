@@ -285,6 +285,11 @@ class MasterAgent:
         self._scheduler.add_job(self._weekly_backtest, "cron", hour=20, minute=0,
                                  day_of_week="sun", id="weekly_backtest", replace_existing=True,
                                  misfire_grace_time=3600)
+        # strict 'profitable' re-check (profit_eval): monthly — re-runs the 1-year study and
+        # auto-retires any strategy that no longer qualifies (checked Sundays; runs when due)
+        self._scheduler.add_job(self._monthly_profit_recheck, "cron", hour=22, minute=0,
+                                 day_of_week="sun", id="monthly_profit_recheck", replace_existing=True,
+                                 max_instances=1, coalesce=True, misfire_grace_time=6 * 3600)
         self._scheduler.add_job(self._weekly_memory_synthesis, "cron", hour=21, minute=0,
                                  day_of_week="sun", id="weekly_memory", replace_existing=True,
                                  misfire_grace_time=3600)
@@ -706,6 +711,21 @@ class MasterAgent:
             await send_telegram("\n".join(lines))
         except Exception as exc:
             logger.error("[master] Weekly backtest failed: {}", exc)
+
+    async def _monthly_profit_recheck(self) -> None:
+        """Sunday 22:00 IST, acts only when the registry's next_check (30 days) is due:
+        re-run the strict 'profitable' study (subprocess) and retire whatever stopped qualifying.
+        PAPER research only; never touches LIVE gates."""
+        try:
+            import subprocess, sys as _sys
+            from pathlib import Path as _P
+            here = _P(__file__).parent
+            cp = await asyncio.to_thread(
+                subprocess.run, [_sys.executable, str(here / "scripts" / "profitable_recheck.py"), "--if-due"],
+                cwd=str(here), capture_output=True, text=True, timeout=4 * 3600)
+            logger.info("[master] monthly profit re-check rc={} {}", cp.returncode, (cp.stdout or "")[-300:])
+        except Exception as exc:
+            logger.error("[master] monthly profit re-check failed: {}", exc)
 
     async def _weekly_db_cleanup(self) -> None:
         """Sunday 22:30 IST — archive old data and VACUUM the SQLite DB."""

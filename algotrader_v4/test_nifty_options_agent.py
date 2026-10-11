@@ -194,10 +194,13 @@ def t_rv_and_walkforward_no_peek():
 
 # ── gate ───────────────────────────────────────────────────────────────────
 def t_blocked_signals_never_trade():
-    p = A.GATE_PATH
+    import profit_eval as PE
+    p, oreg = A.GATE_PATH, PE.REGISTRY_PATH
     orig = p.read_text() if p.exists() else None
     try:
         A.GATE_PATH = __import__("pathlib").Path(_d) / "gate.json"
+        PE.REGISTRY_PATH = __import__("pathlib").Path(_d) / "reg.json"
+        PE.write_registry({"X": {"agent": "nifty_options_intraday", "size": 0.5}}, {}, {})
         A.GATE_PATH.write_text(json.dumps({"signals": {"ORB15": {"status": "blocked", "kind": "buy"},
                                                        "X": {"status": "probation", "kind": "buy"}}}))
         assert list(A.nifty_options_agent.tradable_signals()) == ["X"]
@@ -206,7 +209,7 @@ def t_blocked_signals_never_trade():
         st, why = A.nifty_options_agent.enabled_state()
         assert st == "blocked" and "BLOCKED" in why
     finally:
-        A.GATE_PATH = p
+        A.GATE_PATH, PE.REGISTRY_PATH = p, oreg
 
 
 def t_paper_only():
