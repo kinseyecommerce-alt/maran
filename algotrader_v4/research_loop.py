@@ -45,6 +45,7 @@ OUT_PATH = HERE / "logs" / "backtests" / "research_backtest.json"
 WL_PATH = HERE / "logs" / "agent_whitelist.json"
 MAX_PER_AGENT = 4
 FOCUS_OPTIONS_AGENTS = ("options", "option_scalping")   # only NIFTY-options hypotheses in focus mode
+NO_OPTIONS_PAUSED_AGENTS = {"swing", "options", "option_scalping", "nifty_options_intraday"}
 MAX_STEP = 0.35
 STATUSES = ("proposed", "backtested", "rejected", "probation", "promoted", "retired", "aborted")
 BACKTESTABLE = ("intraday", "scalping", "swing", "momentum", "mean_reversion", "futures", "options",
@@ -324,6 +325,8 @@ class Research:
             seg = AGENT_SEGMENT.get(a, "")
             if focus == "nifty_intraday_options" and a not in FOCUS_OPTIONS_AGENTS:
                 skipped[a] = "owner focus: NIFTY intraday options only"
+            elif focus == "intraday_no_options" and ("option" in a or a in NO_OPTIONS_PAUSED_AGENTS):
+                skipped[a] = "owner focus: intraday only, no options (options / positional paused)"
             elif a in pinned:
                 skipped[a] = "owner-pinned agent (logs/agent_policy.json)"
             elif seg and seg not in ("ANY", "*") and not owner_universe.segment_enabled(seg):

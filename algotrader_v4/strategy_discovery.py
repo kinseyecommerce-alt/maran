@@ -72,10 +72,20 @@ LEADERBOARD_PER_INST = 60
 EXECUTABLE_AGENT = "nifty_options_intraday"
 REG_PREFIX = "DISC_"
 
-INSTRUMENTS = ("NIFTY_OPT_BUY", "NIFTY_OPT_CREDIT", "NIFTY_FUT", "STOCK_INTRA", "STOCK_SWING", "MCX_SWING",
-               "NIFTY_OPT_TBS")
-INST_WEIGHTS = (0.20, 0.05, 0.22, 0.14, 0.08, 0.08, 0.23)
-AXIS_OF = {"MCX_SWING": "mcx"}            # everything else: the NSE session axis
+# Scope (jag 2026-10-11, owner focus `intraday_no_options`): INTRADAY ONLY — flat by square-off,
+# nothing overnight — on Nifty-50 stocks (cash MIS), NIFTY index futures and MCX futures.  NO options.
+# The option / positional families stay in the code (ALL_INSTRUMENTS) but are never generated,
+# tested on the holdout or registered while they are out of scope.
+INSTRUMENTS = ("NIFTY_FUT", "STOCK_INTRA", "MCX_INTRA")
+INST_WEIGHTS = (0.35, 0.40, 0.25)
+ALL_INSTRUMENTS = ("NIFTY_OPT_BUY", "NIFTY_OPT_CREDIT", "NIFTY_OPT_TBS", "NIFTY_FUT", "STOCK_INTRA", "STOCK_SWING",
+                   "MCX_SWING", "MCX_INTRA")
+OUT_OF_SCOPE_WHY = "out of scope: intraday Nifty-50 stocks / NIFTY futures / MCX futures only, no options, no overnight"
+AXIS_OF = {"MCX_SWING": "mcx", "MCX_INTRA": "mcx"}            # everything else: the NSE session axis
+
+
+def in_scope(spec: dict) -> bool:
+    return (spec or {}).get("inst") in INSTRUMENTS
 
 def _now() -> datetime:
     """IST wall clock (naive) — the box / server may run in UTC."""
@@ -113,6 +123,12 @@ STOCK_ENTRIES = {
     "MOM": {"win": [5, 15, 30], "k": [2.0, 2.5, 3.0]},
     "PDHL": {"buf": [0.0, 0.001]},
     "RS": {"t": [15, 30, 60], "x": [0.003, 0.006, 0.01]},
+    # mean reversion: fade a stretch from VWAP of k × (running 1-min σ · √30)
+    "VWAP_MR": {"k": [1.5, 2.0, 2.5, 3.0]},
+    # index-lead / stock-lag: NIFTY moved ≥ x over the last w min, the stock moved < lag·x the same way
+    "LEAD_LAG": {"w": [5, 10, 15], "x": [0.0015, 0.0025, 0.004], "lag": [0.0, 0.3, 0.5]},
+    # time-of-day: at minute t, stock vs its open beyond thr → continuation or reversal
+    "TOD": {"t": [30, 60, 120, 180], "thr": [0.003, 0.006, 0.01], "mode": ["cont", "rev"]},
 }
 SWING_ENTRIES = {
     "MOMO": {"look": [20, 40, 60], "top": [3, 5], "reb": [5, 10, 20]},
@@ -134,10 +150,23 @@ NIFTY_FILTERS = [
     ("gap_abs", "gt", [0.002, 0.004]), ("adx", "gt", [20, 25]), ("prev_range", "lt", [0.8, 1.0]),
     ("prev_range", "gt", [1.0, 1.2]), ("no_event", "eq", [1]), ("rsi14d", "lt", [40, 50, 60]),
     ("rsi14d", "gt", [40, 50, 60]), ("trend50_agree", "eq", [1]), ("trend20_agree", "eq", [1]),
-    ("breadth_agree", "ge", [0.55, 0.6, 0.65]),
+    ("breadth_agree", "ge", [0.55, 0.6, 0.65]), ("blackout", "eq", [1]),
 ]
 SWING_FILTERS = [("regime20", "eq", [1]), ("regime50", "eq", [1]), ("vix", "lt", [14, 16, 18]),
                  ("vix", "gt", [12, 14])]
+# MCX intraday from the continuous DAILY bars (MCX minute history only covers ~May 2026 onward):
+# signals known at the open (prior days only), entry at the open or a stop level, exit stop /
+# target / the day's close (square-off).  Intrabar order unknown → a touched stop always wins.
+MCX_INTRA_ENTRIES = {
+    "PDHL_BRK": {"buf": [0.0, 0.001, 0.002], "nr": [0, 4, 7]},
+    "GAP_GO": {"g": [0.003, 0.006, 0.01]},
+    "GAP_FADE": {"g": [0.003, 0.006, 0.01]},
+    "TREND_OPEN": {"n": [10, 20, 50]},
+    "RSI2_OPEN": {"lvl": [10, 15, 20]},
+}
+MCX_INTRA_EXITS = {"stop_atr": [0.3, 0.5, 0.75, 1.0], "tgt_r": [None, 1.0, 1.5, 2.0]}
+MCX_INTRA_FILTERS = [("trend50_agree", "eq", [1]), ("atr_rel", "lt", [0.8, 1.0, 1.2]),
+                     ("atr_rel", "gt", [0.8, 1.0, 1.2]), ("dow_not", "eq", [0, 1, 2, 3, 4])]
 MCX_FILTERS = [("trend50_agree", "eq", [1]), ("trend100_agree", "eq", [1]), ("atr_rel", "lt", [0.8, 1.0, 1.2]),
                ("atr_rel", "gt", [0.8, 1.0, 1.2]), ("dow_not", "eq", [0, 4])]
 W0 = [5, 15, 30, 45, 75, 105, 225]          # entry window start, minutes after 09:15
@@ -263,6 +292,12 @@ def random_spec(rng: random.Random, inst: Optional[str] = None) -> dict:
             s["maxd"] = 1
         else:
             s["exit"] = {k: _pick(rng, v) for k, v in R_EXITS.items()}
+    elif inst == "MCX_INTRA":
+        s["entry"] = _rand_params(rng, MCX_INTRA_ENTRIES, _pick(rng, list(MCX_INTRA_ENTRIES)))
+        s["sym"] = _pick(rng, ["CRUDEOILM", "NATURALGAS", "GOLDM", "SILVERM", "CRUDEOIL", "ALL"])
+        s["dir"] = _pick(rng, ["both", "long", "short"])
+        s["filters"] = [_rand_filter(rng, MCX_INTRA_FILTERS) for _ in range(rng.choice([0, 1, 1, 2]))]
+        s["exit"] = {k: _pick(rng, v) for k, v in MCX_INTRA_EXITS.items()}
     elif inst == "NIFTY_OPT_TBS":
         side = "short" if rng.random() < 0.7 else "long"
         s.update(side=side, entry={"type": "TIME", "t": _pick(rng, TBS_TIMES)}, dte=_pick(rng, TBS_DTE))
@@ -362,7 +397,8 @@ def mutate(spec: dict, rng: random.Random) -> dict:
               "NIFTY_FUT": (NIFTY_ENTRIES, NIFTY_FILTERS, R_EXITS),
               "STOCK_INTRA": (STOCK_ENTRIES, NIFTY_FILTERS, R_EXITS),
               "STOCK_SWING": (SWING_ENTRIES, SWING_FILTERS, SWING_EXITS),
-              "MCX_SWING": (MCX_ENTRIES, MCX_FILTERS, MCX_EXITS)}[inst]
+              "MCX_SWING": (MCX_ENTRIES, MCX_FILTERS, MCX_EXITS),
+              "MCX_INTRA": (MCX_INTRA_ENTRIES, MCX_INTRA_FILTERS, MCX_INTRA_EXITS)}[inst]
     ent, filt, exi = tables
     what = rng.choice(["entry_param", "entry_param", "exit", "exit", "filter_add", "filter_drop", "filter_mod",
                        "window", "dir", "entry_type"])
@@ -390,7 +426,7 @@ def mutate(spec: dict, rng: random.Random) -> dict:
         a = _pick(rng, W0)
         s["win"] = [a, _pick(rng, [x for x in W1 if x > a] or [315])]
     elif what == "dir" and inst not in ("STOCK_SWING",):
-        s["dir"] = _pick(rng, ["both", "long", "short"] + (["trend20", "breadth", "gap"] if inst != "MCX_SWING" else []))
+        s["dir"] = _pick(rng, ["both", "long", "short"] + (["trend20", "breadth", "gap"] if inst not in ("MCX_SWING", "MCX_INTRA") else []))
     else:
         k = rng.choice(list(exi))
         s["exit"][k] = _pick(rng, exi[k])
@@ -514,7 +550,19 @@ def seeds() -> list:
         f["exit"] = {"stop": ["atr", 1.5], "tgt_r": 2.0, "trail_r": [1.0, 1.0], "be": 1, "hold": None,
                      "vix_exit": None}
         add("FUT_" + x["meta"]["seed"].rstrip("~"), f)
-    return S
+    # intraday MCX (daily-bar) and new stock ideas — fresh lineage is irrelevant: seeds stay flagged
+    add("MCX_PDH_BREAK_INTRA", {"inst": "MCX_INTRA", "entry": {"type": "PDHL_BRK", "buf": 0.0, "nr": 0}, "sym": "ALL",
+                                "dir": "both", "filters": [], "exit": {"stop_atr": 0.5, "tgt_r": None}})
+    add("MCX_NR7_BREAK_INTRA", {"inst": "MCX_INTRA", "entry": {"type": "PDHL_BRK", "buf": 0.0, "nr": 7}, "sym": "ALL",
+                                "dir": "both", "filters": [], "exit": {"stop_atr": 0.5, "tgt_r": 2.0}})
+    add("STK_VWAP_MR", {"inst": "STOCK_INTRA", "entry": {"type": "VWAP_MR", "k": 2.5}, "win": [30, 315], "dir": "both",
+                        "maxd": 2, "rank": "time", "filters": [],
+                        "exit": {"stop": ["atr", 1.5], "tgt_r": 1.0, "trail_r": None, "be": 0, "hold": 60, "vix_exit": None}})
+    add("STK_INDEX_LEAD_LAG", {"inst": "STOCK_INTRA", "entry": {"type": "LEAD_LAG", "w": 10, "x": 0.0025, "lag": 0.3},
+                               "win": [15, 255], "dir": "both", "maxd": 2, "rank": "time", "filters": [],
+                               "exit": {"stop": ["atr", 1.5], "tgt_r": 1.5, "trail_r": None, "be": 1, "hold": 60,
+                                        "vix_exit": None}})
+    return [x for x in S if in_scope(x)]
 
 
 def library_ideas() -> list:
@@ -725,6 +773,10 @@ def _filter_ok(nd, i: int, side: int, flt: list) -> bool:
             x = dd.get("prev_range_rel")
         elif name == "no_event":
             if dd.get("event"):
+                return False
+            continue
+        elif name == "blackout":
+            if dd.get("event_x") or dd.get("event"):
                 return False
             continue
         elif name == "rsi14d":
@@ -1235,8 +1287,35 @@ def stock_events(U, nd, spec: dict) -> list:
         rs = C[:, i] / O[:, 0] - nd.C[i] / nd.O[0]
         lo_, sh_ = z.copy(), z.copy()
         lo_[:, i] = rs >= e["x"]; sh_[:, i] = rs <= -e["x"]
+    elif t == "VWAP_MR":
+        cv = np.cumsum(V, axis=1)
+        with np.errstate(divide="ignore", invalid="ignore"):
+            vw = np.where(cv > 0, np.cumsum((H + L + C) / 3 * V, axis=1) / cv, C)
+            r = np.diff(np.log(C), axis=1, prepend=np.log(O[:, :1]))
+            idx = np.arange(1, n + 1)[None, :]
+            cs, cs2 = np.cumsum(r, axis=1), np.cumsum(r * r, axis=1)
+            sd = np.sqrt(np.maximum(cs2 / idx - (cs / idx) ** 2, 1e-12)) * math.sqrt(30)
+            dev = np.log(C / vw)
+        ok = idx > 30
+        lo_ = _edges2(ok & (dev <= -e["k"] * sd)); sh_ = _edges2(ok & (dev >= e["k"] * sd))
+    elif t == "LEAD_LAG":
+        w_, x_, lag = e["w"], e["x"], e["lag"]
+        ni = np.zeros(n); ni[w_:] = np.log(nd.C[w_:n] / nd.C[:n - w_])
+        sr = np.zeros((ns, n))
+        with np.errstate(divide="ignore", invalid="ignore"):
+            sr[:, w_:] = np.log(C[:, w_:] / C[:, :-w_])
+        up, dn = (ni >= x_)[None, :], (ni <= -x_)[None, :]
+        lo_ = _edges2(up & (sr < lag * x_)); sh_ = _edges2(dn & (sr > -lag * x_))
+    elif t == "TOD":
+        i = int(np.searchsorted(tm, e["t"]))
+        if i >= n - 1:
+            return []
+        mv = C[:, i] / O[:, 0] - 1
+        sgn = 1 if e["mode"] == "cont" else -1
+        lo_, sh_ = z.copy(), z.copy()
+        lo_[:, i] = sgn * mv >= e["thr"]; sh_[:, i] = sgn * mv <= -e["thr"]
     w = spec.get("win") or [5, 315]
-    win = (tm >= w[0]) & (tm <= w[1]) if t != "RS" else np.ones(n, bool)
+    win = (tm >= w[0]) & (tm <= w[1]) if t not in ("RS", "TOD") else np.ones(n, bool)
     win[-1] = False
     lo_ = lo_ & win[None, :] & valid[:, None]
     sh_ = sh_ & win[None, :] & valid[:, None]
@@ -1589,6 +1668,113 @@ def _sim_mcx_one(U, sym: str, spec: dict, stress: bool) -> list:
     return [x for x in out if lo_d is None or x["d"] >= lo_d]
 
 
+def sim_mcx_intra(U, spec: dict, stress: bool = False) -> list:
+    from discovery_data import MCX_SPECS
+    syms = list(MCX_SPECS) if spec.get("sym") == "ALL" else [spec.get("sym")]
+    out = []
+    for s in syms:
+        if s in U.mcx:
+            out += _sim_mcx_intra_one(U, s, spec, stress)
+    return out
+
+
+def _sim_mcx_intra_one(U, sym: str, spec: dict, stress: bool) -> list:
+    """One trade per day max, opened and closed the SAME day (MIS): decision from days < t only."""
+    from discovery_data import MCX_SPECS, atr_series
+    lo_d, hi_d = getattr(U, "lo", None), getattr(U, "hi", None)
+    rows = [r for r in U.mcx[sym] if hi_d is None or r[0] <= hi_d]
+    if len(rows) < 60:
+        return []
+    d = [r[0] for r in rows]
+    O = np.array([r[1] for r in rows]); H = np.array([r[2] for r in rows])
+    L = np.array([r[3] for r in rows]); C = np.array([r[4] for r in rows])
+    mult = MCX_SPECS[sym][0]
+    sm, cm = (STRESS["slip_mult"], STRESS["cost_mult"]) if stress else (1.0, 1.0)
+    atr = atr_series(H, L, C, 14)
+    atr_mean = _sma(atr[None, :], 50)[0]
+    sma50 = _sma(C[None, :], 50)[0]
+    e, ex = spec["entry"], spec["exit"]
+    typ = e["type"]
+    gapr = np.r_[0, O[1:] / C[:-1] - 1]
+    roll = np.abs(gapr) > np.maximum(0.03, 4 * np.r_[np.nan, (atr / C)[:-1]])
+    rsi2 = _rsi2(C[None, :])[0] if typ == "RSI2_OPEN" else None
+    smaN = _sma(C[None, :], e["n"])[0] if typ == "TREND_OPEN" else None
+    rng_ = H - L
+    out = []
+    for t in range(60, len(C)):          # t = trade day; information from days ≤ t-1 (+ the open of t)
+        if roll[t] or roll[t - 1] or (lo_d and d[t] < lo_d):
+            continue
+        a = atr[t - 1]
+        if not np.isfinite(a) or a <= 0:
+            continue
+        side, px0 = 0, O[t]
+        if typ == "PDHL_BRK":
+            nr = e.get("nr") or 0
+            if nr and not (rng_[t - 1] <= rng_[t - nr:t].min() + 1e-12):
+                continue
+            up, dn = H[t - 1] * (1 + e["buf"]), L[t - 1] * (1 - e["buf"])
+            hu, hd = H[t] >= up, L[t] <= dn
+            if hu and hd:
+                continue                          # both triggered, order unknown → skip (no guess)
+            if hu:
+                side, px0 = 1, max(O[t], up)
+            elif hd:
+                side, px0 = -1, min(O[t], dn)
+        elif typ in ("GAP_GO", "GAP_FADE"):
+            g = gapr[t]
+            if abs(g) >= e["g"]:
+                side = (1 if g > 0 else -1) * (1 if typ == "GAP_GO" else -1)
+        elif typ == "TREND_OPEN":
+            if np.isfinite(smaN[t - 1]):
+                side = 1 if C[t - 1] > smaN[t - 1] else -1
+        elif typ == "RSI2_OPEN":
+            if rsi2[t - 1] < e["lvl"]:
+                side = 1
+            elif rsi2[t - 1] > 100 - e["lvl"]:
+                side = -1
+        dr = spec.get("dir", "both")
+        if side == 0 or (dr == "long" and side < 0) or (dr == "short" and side > 0):
+            continue
+        ok = True
+        for name, op, v in spec.get("filters") or []:
+            if name == "trend50_agree" and not (np.isfinite(sma50[t - 1]) and (C[t - 1] > sma50[t - 1]) == (side > 0)):
+                ok = False
+            elif name == "atr_rel":
+                r = a / atr_mean[t - 1] if atr_mean[t - 1] else np.nan
+                if not np.isfinite(r) or (op == "lt" and not r < v) or (op == "gt" and not r > v):
+                    ok = False
+            elif name == "dow_not" and d[t].weekday() == v:
+                ok = False
+        if not ok:
+            continue
+        R = ex["stop_atr"] * a
+        lots = int(0.01 * CAPITAL // (R * mult))
+        if lots < 1 and R * mult <= 0.025 * CAPITAL:
+            lots = 1
+        lots = min(lots, int(MCX_NOTIONAL_CAP // (px0 * mult)))
+        if lots < 1:
+            continue
+        ep = px0 + side * px0 * MCX_SLIP * sm
+        stop = ep - side * R
+        tgt = ep + side * ex["tgt_r"] * R if ex.get("tgt_r") else None
+        adv, fav = (L[t], H[t]) if side > 0 else (H[t], L[t])
+        if (side > 0 and adv <= stop) or (side < 0 and adv >= stop):
+            xp, why = stop, "stop"                       # a touched stop always wins (pessimistic)
+        elif tgt is not None and ((side > 0 and fav >= tgt) or (side < 0 and fav <= tgt)):
+            xp, why = tgt, "target"
+        else:
+            xp, why = C[t], "square-off"
+        x = xp - side * xp * MCX_SLIP * sm
+        q = lots * mult
+        gross = (x - ep) * side * q
+        cost = (_oc("MCX_FUT", "BUY" if side > 0 else "SELL", q, ep, "MCX") +
+                _oc("MCX_FUT", "SELL" if side > 0 else "BUY", q, x, "MCX")) * cm
+        out.append({"d": d[t], "kind": "mcx_intra", "sym": sym, "side": "L" if side > 0 else "S",
+                    "t_in": datetime.combine(d[t], dtime(9, 0)), "net": gross - cost,
+                    "cost": cost + MCX_SLIP * sm * (ep + x) * q, "exit_reason": why, "days": 0})
+    return out
+
+
 # ════════════════════════════════════════════════════════════════════════════
 # 4. EVALUATION
 # ════════════════════════════════════════════════════════════════════════════
@@ -1622,6 +1808,8 @@ def run_spec(U, spec: dict, mode: str = "base") -> list:
         trades = sim_swing(U, spec, stress=(mode == "stress"))
     elif inst == "MCX_SWING":
         trades = sim_mcx(U, spec, stress=(mode == "stress"))
+    elif inst == "MCX_INTRA":
+        trades = sim_mcx_intra(U, spec, stress=(mode == "stress"))
     for t in trades:
         if t.get("t_in") is None:
             t["t_in"] = datetime.combine(t["d"], dtime(9, 15))
@@ -2036,7 +2224,7 @@ def _gen(rng, lb_rows: list, seen: dict, queue: list, k: int) -> list:
                 s = random_spec(rng)
                 s["meta"] = {"op": "random"}
         h = spec_hash(s)
-        if h in seen or any(spec_hash(o) == h for o in out) or is_naked_short(s):
+        if h in seen or any(spec_hash(o) == h for o in out) or is_naked_short(s) or not in_scope(s):
             continue
         out.append(s)
     return out
@@ -2064,6 +2252,15 @@ def run(budget_min: float = 120, workers: Optional[int] = None, seed: Optional[i
     seen, lineage, fps = memo["seen"], memo["lineage"], memo["fingerprints"]
     lbd = _load(LEADER_PATH, {"rows": []})
     lb = {r["h"]: r for r in lbd.get("rows", [])}
+    oos = {h: r for h, r in lb.items() if not in_scope(r.get("spec") or {"inst": r.get("inst")})}
+    if oos:          # scope change: archive (never delete) out-of-scope rows; they no longer breed or compete
+        arch = _load(DDIR / "leaderboard_out_of_scope.json", {"rows": []})
+        have = {r["h"] for r in arch["rows"]}
+        arch["rows"] += [r for h, r in oos.items() if h not in have]
+        arch["why"] = OUT_OF_SCOPE_WHY
+        _save(DDIR / "leaderboard_out_of_scope.json", arch)
+        lb = {h: r for h, r in lb.items() if h not in oos}
+        log(f"scope: {len(oos)} out-of-scope leaderboard rows archived (options / positional)")
     store = PnlStore()
     rng = random.Random(seed if seed is not None else int(time.time()))
     queue = [s for s in seeds() if spec_hash(s) not in seen]
@@ -2168,7 +2365,7 @@ def run(budget_min: float = 120, workers: Optional[int] = None, seed: Optional[i
     n_tr = prior_trials() + int(state["trials_total"])
     rows = sorted(_trim(lb).values(), key=_rank_key)
     _multiple_testing(rows, store, n_tr, log)
-    finalists = [r for r in rows if r.get("discovery_pass")]
+    finalists = [r for r in rows if r.get("discovery_pass") and in_scope(r.get("spec") or {})]
     fin = _load(FINAL_PATH, {"finalists": []})
     ledger = _load(LEDGER_PATH, {})
     hold_res = []
@@ -2303,6 +2500,8 @@ def holdout_test(UH, row: dict, ledger: dict, log=print) -> dict:
 
 def register(row: dict, res: dict) -> bool:
     """Add a rule that passed EVERY criterion to the registry as PAPER probation at half size."""
+    if not in_scope(row.get("spec") or {}):
+        return False
     name = REG_PREFIX + row["h"][:8]
     ex = executable(row["spec"])
     entry = {"agent": EXECUTABLE_AGENT if ex else None, "size": 0.5, "risk_cap_pct": 0.5, "source": "discovery",
@@ -2398,6 +2597,16 @@ def start_background(budget_min: float = 120, workers: Optional[int] = None) -> 
     return {"ok": True, "pid": p.pid, "budget_min": budget}
 
 
+def _owner_focus() -> dict:
+    try:
+        from owner_universe import owner_universe
+        st = owner_universe.status()
+        return {"focus": st.get("focus"), "label": st.get("focus_label"),
+                "instruments": (st.get("focus_spec") or {}).get("instruments"), "set_at": st.get("focus_set_at")}
+    except Exception as exc:
+        return {"focus": None, "error": str(exc)[:120]}
+
+
 def status() -> dict:
     st = load_state()
     reg = PE.load_registry() or {}
@@ -2410,7 +2619,9 @@ def status() -> dict:
             "finalists": [{k: f.get(k) for k in ("h", "desc", "status", "holdout_pass", "tested", "forward")}
                           for f in fin.get("finalists") or []],
             "registered": kept, "criteria": PE.CRITERIA, "dsr_min": DSR_MIN, "spa_p_max": SPA_P_MAX,
-            "mode": "PAPER research only — never LIVE; no orders; no naked short options",
+            "mode": "PAPER research only — never LIVE; no orders; no options; intraday only",
+            "scope": {"instruments": list(INSTRUMENTS), "why": OUT_OF_SCOPE_WHY.replace("out of scope: ", ""),
+                      "owner_focus": _owner_focus()},
             "schedule": "weekdays 18:45 IST (2 h, nice 15, after the 17:45 research cycle; stops in NSE hours); "
                         "Sat/Sun 10:00 IST (6 h)"}
 
@@ -2441,7 +2652,7 @@ def kept_executable(reg: Optional[dict] = None) -> dict:
     reg = reg if reg is not None else (PE.load_registry() or {})
     return {k: v for k, v in (reg.get("kept") or {}).items()
             if k.startswith(REG_PREFIX) and v.get("source") == "discovery" and v.get("executable")
-            and executable(v.get("spec") or {}) and v.get("mode", "PAPER") == "PAPER"}
+            and executable(v.get("spec") or {}) and in_scope(v.get("spec") or {}) and v.get("mode", "PAPER") == "PAPER"}
 
 
 def gate_rows(reg: Optional[dict] = None) -> dict:
@@ -2542,6 +2753,9 @@ def recheck_registered(log=print, U=None) -> tuple:
     UV = U.view(lo, None)
     kept, retired = {}, {}
     for name, v in rows.items():
+        if not in_scope(v.get("spec") or {}):
+            retired[name] = OUT_OF_SCOPE_WHY
+            continue
         r = evaluate_spec(UV, v["spec"], nfolds=HOLD_FOLDS, with_stress=True)
         m = r["m"]
         if m.get("profitable") and not m["fails"]:

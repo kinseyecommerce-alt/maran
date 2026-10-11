@@ -2767,7 +2767,7 @@ class OwnerUniverseRequest(BaseModel):
 
 
 class OwnerFocusRequest(BaseModel):
-    focus: Optional[str] = None                      # "nifty_intraday_options" | null/"" to clear
+    focus: Optional[str] = None      # "intraday_no_options" | "nifty_intraday_options" | null/"" to clear
     reason: str = ""
 
 

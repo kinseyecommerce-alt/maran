@@ -484,7 +484,7 @@ class KiteClient:
             self._naked_short_guard(tradingsymbol, exchange, transaction_type, quantity)
             # OWNER universe backstop (PAPER and LIVE): an order that is not
             # reducing an existing position is a NEW entry → must be allowed.
-            self._owner_universe_guard(tradingsymbol, exchange, transaction_type, quantity)
+            self._owner_universe_guard(tradingsymbol, exchange, transaction_type, quantity, product)
 
         if settings.trading_mode == "PAPER":
             return self._paper_place(tradingsymbol, exchange, transaction_type,
@@ -765,9 +765,12 @@ class KiteClient:
     # ── Internal helpers ───────────────────────────────────────────────────
 
     # ── options: naked-short guard, instrument rows, lot sizes ────────────
-    def _owner_universe_guard(self, symbol: str, exchange: str, side: str, qty: int) -> None:
+    def _owner_universe_guard(self, symbol: str, exchange: str, side: str, qty: int,
+                              product: str = "MIS") -> None:
         from owner_universe import owner_universe
         ok, why = owner_universe.allows(symbol, exchange=exchange)
+        if ok:
+            ok, why = owner_universe.product_allowed(product)
         if ok:
             return
         try:

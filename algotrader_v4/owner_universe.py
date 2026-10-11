@@ -51,10 +51,29 @@ FOCUS_MODES: dict[str, dict] = {
         "underlyings": ("NIFTY",),
         "instruments": "NIFTY index options only (weekly + nearest monthly), intraday, flat by 15:15 IST",
         "capital": 1_000_000,
+        "options_only": True,
+    },
+    # jag 2026-10-11: "Remove options" + "Only intraday".  Options are blocked everywhere (buys,
+    # sells, baskets, option scalping); positional / swing / overnight agents are paused.  New
+    # entries only from the discovery-qualified intraday executor, only MIS, only in Nifty-50
+    # cash stocks, NIFTY index futures and MCX futures.  Reversible; code kept.
+    "intraday_no_options": {
+        "label": "INTRADAY ONLY · NO OPTIONS",
+        "agents": ("discovery_intraday",),
+        "segments": ("NSE_EQ", "NSE_FO", "MCX"),
+        "underlyings": ("NIFTY",),
+        "mcx": ("CRUDEOIL", "CRUDEOILM", "NATURALGAS", "GOLDM", "SILVERM"),
+        "instruments": "INTRADAY ONLY (MIS, flat by square-off, nothing overnight): Nifty-50 stocks (cash), "
+                       "NIFTY index futures, MCX futures (CRUDEOIL/CRUDEOILM/NATURALGAS/GOLDM/SILVERM) — NO options",
+        "capital": 1_000_000,
+        "options": False,
+        "intraday_only": True,
+        "products": ("MIS",),
     },
 }
 FOCUS_LABEL = "PAUSED (focus)"
 _OPT_RE = re.compile(r"(CE|PE)$")
+_OPT_CONTRACT_RE = re.compile(r"\d(CE|PE)$")     # an option contract (digit before CE/PE): not BAJFINANCE
 
 _EXCH_SEG = {"NSE": "NSE_EQ", "NFO": "NSE_FO", "BSE": "BSE_EQ", "BFO": "BSE_EQ", "MCX": "MCX", "CDS": "CDS"}
 _UNDERLYING_RE = re.compile(r"^([A-Z&\-]+?)(?=\d|-FUT$|$)")
@@ -220,7 +239,11 @@ class OwnerUniverse:
     def allows(self, symbol: str, segment: str = "", exchange: str = "") -> tuple[bool, str]:
         """(allowed, why) for a NEW entry on `symbol`. Exits never call this."""
         spec = self.focus_spec()
-        if spec:
+        if spec and spec.get("options") is False:
+            ok, why = self._intraday_no_options_allows(spec, symbol, segment, exchange)
+            if not ok:
+                return False, why
+        elif spec:
             seg = segment_of(symbol, exchange, segment)
             sym = (symbol or "").upper().split(":", 1)[-1]
             if seg not in spec["segments"] or not _OPT_RE.search(sym) or underlying_of(sym) not in spec["underlyings"]:
@@ -243,6 +266,36 @@ class OwnerUniverse:
             if allowed and und not in allowed:
                 return False, f"PAUSED (owner): NSE_FO underlying {und} not in {allowed}"
         return True, "ok"
+
+    @staticmethod
+    def _intraday_no_options_allows(spec: dict, symbol: str, segment: str, exchange: str) -> tuple[bool, str]:
+        seg = segment_of(symbol, exchange, segment)
+        sym = (symbol or "").upper().split(":", 1)[-1].replace("-EQ", "")
+        lab = f"{FOCUS_LABEL}: {sym or symbol}"
+        if seg in ("NSE_FO", "BSE_EQ", "MCX", "CDS") and _OPT_CONTRACT_RE.search(sym):
+            return False, f"{lab} — options removed by owner ({spec['instruments']})"
+        if seg not in spec["segments"]:
+            return False, f"{lab} — {spec['instruments']}"
+        if seg == "NSE_EQ":
+            n50 = _nifty50()
+            if n50 and sym not in n50:
+                return False, f"{lab} — not a Nifty 50 stock"
+        elif seg == "NSE_FO":
+            if not sym.endswith("FUT") or underlying_of(sym) not in spec["underlyings"]:
+                return False, f"{lab} — NSE F&O: NIFTY index futures only"
+        elif seg == "MCX":
+            if _OPT_CONTRACT_RE.search(sym) or underlying_of(sym) not in spec["mcx"]:
+                return False, f"{lab} — MCX futures {'/'.join(spec['mcx'])} only"
+        return True, "ok"
+
+    def product_allowed(self, product: str) -> tuple[bool, str]:
+        """Intraday-only focus: a NEW entry must be MIS (square-off same day; no CNC/NRML carry)."""
+        spec = self.focus_spec()
+        if not spec or not spec.get("intraday_only"):
+            return True, "ok"
+        if (product or "MIS").upper() in spec.get("products", ("MIS",)):
+            return True, "ok"
+        return False, f"{FOCUS_LABEL}: product {product} — intraday only (MIS), no overnight/positional"
 
     def fo_underlying_allowed(self, underlying: str) -> bool:
         spec = self.focus_spec()
@@ -311,6 +364,7 @@ class OwnerUniverse:
                 "updated_at": pol.get("updated_at"), "updated_by": pol.get("updated_by"),
                 "history": (pol.get("history") or [])[-10:], "path": str(_path()),
                 "focus": self.focus(), "focus_spec": fspec, "focus_reason": pol.get("focus_reason"),
+                "focus_label": (fspec or {}).get("label") or ((fspec or {}).get("instruments") if fspec else None),
                 "focus_set_at": pol.get("focus_set_at"),
                 "note": "Owner setting — automation never changes it. Exits of existing positions always allowed."}
 

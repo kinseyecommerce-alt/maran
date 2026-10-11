@@ -10,7 +10,11 @@ import tempfile
 from datetime import date, datetime, time as dtime, timedelta
 from pathlib import Path
 
+import os
 import numpy as np
+
+_OU_DIR = tempfile.mkdtemp(prefix="disc-ou-")
+os.environ["OWNER_UNIVERSE_PATH"] = os.path.join(_OU_DIR, "owner_universe.json")   # never the real owner file
 
 import discovery_data as DD
 import nifty_options_research as R
@@ -81,13 +85,15 @@ def synth_universe(n=60, seed=3, drift_after=None):
 
 FUT = {"inst": "NIFTY_FUT", "entry": {"type": "ORB", "n": 15, "buf": 0.0}, "win": [15, 255], "dir": "both", "maxd": 1,
        "filters": [], "exit": {"stop": ["pct", 0.003], "tgt_r": 2.0, "trail_r": None, "be": 0, "hold": None, "vix_exit": None}}
+MCXI = {"inst": "MCX_INTRA", "entry": {"type": "PDHL_BRK", "buf": 0.0, "nr": 0}, "sym": "CRUDEOILM", "dir": "both",
+        "filters": [], "exit": {"stop_atr": 0.5, "tgt_r": 1.5}}
 MCX = {"inst": "MCX_SWING", "entry": {"type": "DONCH", "n": 10}, "sym": "CRUDEOILM", "dir": "both", "filters": [],
        "exit": {"atr_stop": 2.0, "tgt_r": None, "hold": 10, "trail_atr": None}}
 
 
 def no_option_generation():
-    SD.INST_WEIGHTS = (0.0, 0.0, 0.6, 0.0, 0.0, 0.4, 0.0)
-    SD.seeds = lambda: [dict(FUT, meta={"seed": "FUT_SEED", "seen_holdout": True}), dict(MCX, meta={"op": "random"})]
+    SD.INST_WEIGHTS = (0.6, 0.0, 0.4)
+    SD.seeds = lambda: [dict(FUT, meta={"seed": "FUT_SEED", "seen_holdout": True}), dict(MCXI, meta={"op": "random"})]
 
 
 # ════════════════════════════════════════════════════════════════════════════
@@ -99,7 +105,7 @@ def t_view_hides_holdout():
     UD = U.view(*V["discovery"])
     assert all(nd.d <= de for nd in UD.nifty) and all(r[0] <= de for r in UD.mcx["CRUDEOILM"])
     assert sl["n_discovery_sessions"] == 42 and sl["n_holdout_sessions"] == 18
-    for spec in (FUT, MCX):
+    for spec in (FUT, MCX, MCXI):
         tr = SD.run_spec(UD, spec)
         assert tr and max(t["d"] for t in tr) <= de, spec["inst"]
     UH = U.view(*V["holdout"])
@@ -113,7 +119,7 @@ def t_planted_holdout_edge_invisible_to_discovery():
     sl = SD.seal(a.sessions, {})
     de = date.fromisoformat(sl["discovery_end"])
     b = synth_universe(60, seed=5, drift_after=de)
-    for spec in (FUT, MCX):
+    for spec in (FUT, MCX, MCXI):
         ma = SD.evaluate_spec(a.view(None, de), spec)["m"]
         mb = SD.evaluate_spec(b.view(None, de), spec)["m"]
         assert ma["net"] == mb["net"] and ma["trades"] == mb["trades"], (spec["inst"], ma["net"], mb["net"])
@@ -255,24 +261,22 @@ def t_registry_paper_half_size_only_and_criteria_unchanged():
                            "stress_shift": 0.10}
     assert not PE.add_kept("X", {"size": 1.0, "mode": "PAPER"})
     assert not PE.add_kept("X", {"size": 0.5, "mode": "LIVE"})
-    spec = json.loads(json.dumps(FUT)); spec["inst"] = "NIFTY_OPT_BUY"
-    spec["exit"] = {"sl": 0.3, "tgt": None, "trail": 1, "hold": None, "flat": "15:09", "st_exit": 0}
+    spec = json.loads(json.dumps(FUT))                     # in scope: intraday NIFTY futures
     row = {"h": "abcdef123456", "spec": spec, "desc": SD.describe(spec), "m": {"trades": 50, "net": 1, "pf": 2,
            "net_wo_best5": 1, "max_dd": 1}}
     assert SD.register(row, {"holdout": {"trades": 45, "net": 10}})
     reg = PE.load_registry()
     e = reg["kept"]["DISC_abcdef12"]
-    assert e["size"] == 0.5 and e["mode"] == "PAPER" and e["agent"] == "nifty_options_intraday" and e["executable"]
+    assert e["size"] == 0.5 and e["mode"] == "PAPER" and e["source"] == "discovery"
+    # no PAPER executor for futures/stock/MCX rules yet → registered, trades nothing (fail closed)
+    assert e["agent"] is None and not e["executable"]
     assert reg["criteria"] == PE.CRITERIA
-    rows = SD.gate_rows(reg)
-    assert rows["DISC_abcdef12"]["status"] == "probation"
-    f = PE.strict_filter(rows, reg)
-    assert f["DISC_abcdef12"]["status"] == "probation"
-    # a non-executable rule (VIX filter / futures) is registered but never handed to an agent
-    s2 = json.loads(json.dumps(FUT))
-    assert not SD.executable(s2)
-    sp = json.loads(json.dumps(spec)); sp["filters"] = [["vix", "lt", 15]]
-    assert not SD.executable(sp)
+    assert SD.gate_rows(reg) == {}
+    # an option rule is out of scope: never registered, never handed to the options agent
+    opt = json.loads(json.dumps(FUT)); opt["inst"] = "NIFTY_OPT_BUY"
+    opt["exit"] = {"sl": 0.3, "tgt": None, "trail": 1, "hold": None, "flat": "15:09", "st_exit": 0}
+    assert not SD.register(dict(row, h="fedcba654321", spec=opt), {"holdout": {}})
+    assert "DISC_fedcba65" not in PE.load_registry()["kept"]
 
 
 def t_features_causal():
@@ -294,6 +298,13 @@ def t_live_events_match_backtest():
             "maxd": 2, "filters": [["adx", "gt", 20]],
             "exit": {"sl": 0.3, "tgt": None, "trail": 0, "hold": None, "flat": "15:09", "st_exit": 0}}
     reg = {"kept": {"DISC_test0001": {"source": "discovery", "executable": True, "spec": spec, "mode": "PAPER"}}}
+    nd0 = U.nifty[20]
+    t00 = datetime.combine(nd0.d, dtime(9, 15))
+    b0 = [R.Bar(t00 + timedelta(minutes=int(m)), o, h, l, c) for m, o, h, l, c in zip(nd0.tmin, nd0.O, nd0.H, nd0.L, nd0.C)]
+    assert all(SD.live_events(b0[:i + 1], {"_disc_daily": [x for x in U.nifty_daily if x[0] < nd0.d]}, reg) == []
+               for i in range(2, len(b0) - 1, 7))            # options are out of scope: the live hook stays silent
+    orig_scope = SD.in_scope
+    SD.in_scope = lambda sp: True                             # the (kept) hook code itself must still be causal
     checked = 0
     for nd in U.nifty[20:30]:
         want = [(i, s) for i, s in SD.nifty_events(nd, spec)][:2]
@@ -306,6 +317,7 @@ def t_live_events_match_backtest():
                 got.append((ev.i, 1 if ev.side == "CE" else -1))
         assert got == want, (nd.d, got, want)
         checked += len(want)
+    SD.in_scope = orig_scope
     assert checked > 0
 
 
@@ -456,6 +468,154 @@ def t_vol_features_causal():
     fomc = date(2026, 1, 28)
     nxt = min(d for d in sessions(400, date(2025, 9, 1)) if d > fomc)
     assert nxt == date(2026, 1, 29)
+
+
+# ── scope: intraday only, no options (owner focus intraday_no_options) ─────
+def _set_focus(mode):
+    from owner_universe import owner_universe
+    owner_universe.set_focus(mode, "owner(test)", "test")
+    return owner_universe
+
+
+def t_focus_intraday_no_options_allows():
+    ou = _set_focus("intraday_no_options")
+    try:
+        ok = lambda sym, ex: ou.allows(sym, exchange=ex)[0]
+        assert not ok("NIFTY26O1322500CE", "NFO") and not ok("NIFTY26OCT25000PE", "NFO")     # options removed
+        assert not ok("BANKNIFTY26OCT55000PE", "NFO")
+        assert ok("NIFTY26OCTFUT", "NFO") and not ok("BANKNIFTY26OCTFUT", "NFO")           # NIFTY futures only
+        assert not ok("RELIANCE26OCTFUT", "NFO")
+        assert ok("RELIANCE", "NSE") and ok("BAJFINANCE", "NSE")                           # Nifty-50 cash (BAJFINANCE ends in CE)
+        assert not ok("IRCTC", "NSE")
+        assert ok("CRUDEOIL26OCTFUT", "MCX") and ok("GOLDM26DECFUT", "MCX")
+        assert not ok("CRUDEOIL26OCT5000CE", "MCX") and not ok("ZINC26OCTFUT", "MCX")
+        assert not ok("USDINR26OCTFUT", "CDS")
+        for a in ("intraday", "momentum", "swing", "options", "option_scalping", "nifty_options_intraday",
+                  "strategy_inventor", "fast_scalper", "mcx_trend"):
+            assert not ou.agent_allowed(a)[0], a                                           # none until one qualifies
+        assert ou.agent_allowed("discovery_intraday")[0]
+        assert ou.product_allowed("MIS")[0] and not ou.product_allowed("CNC")[0] and not ou.product_allowed("NRML")[0]
+        st = ou.status()
+        assert st["focus"] == "intraday_no_options" and "NO OPTIONS" in st["focus_label"]
+        assert ou.segment_scope("BSE_EQ") == "PAUSED (focus)"
+    finally:
+        _set_focus(None)
+    assert ou.focus() is None and ou.allows("NIFTY26O1322500CE", exchange="NFO")[0]       # reversible
+
+
+def t_order_guard_blocks_options_and_carry():
+    import threading
+    import types
+    import kite_client as KC
+    ou = _set_focus("intraday_no_options")
+    fake = types.SimpleNamespace(_paper_positions=[], _paper_positions_lock=threading.Lock())
+    g = lambda *a: KC.KiteClient._owner_universe_guard(fake, *a)
+    try:
+        for args in (("NIFTY26O1322500CE", "NFO", "BUY", 65, "MIS"),        # option buy
+                     ("NIFTY26O1322500PE", "NFO", "SELL", 65, "MIS"),       # option sell
+                     ("RELIANCE", "NSE", "BUY", 10, "CNC"),                 # delivery / overnight
+                     ("NIFTY26OCTFUT", "NFO", "BUY", 65, "NRML")):          # carry-forward futures
+            try:
+                g(*args)
+                raise AssertionError(f"not blocked: {args}")
+            except KC.InputException:
+                pass
+        g("RELIANCE", "NSE", "BUY", 10, "MIS")
+        g("NIFTY26OCTFUT", "NFO", "SELL", 65, "MIS")
+        g("CRUDEOILM26OCTFUT", "MCX", "BUY", 1, "MIS")
+        # exits of an existing option position are never blocked
+        fake._paper_positions = [{"tradingsymbol": "NIFTY26O1322500CE", "exchange": "NFO", "quantity": 65}]
+        g("NIFTY26O1322500CE", "NFO", "SELL", 65, "MIS")
+    finally:
+        _set_focus(None)
+
+
+def t_registry_scope_and_generator_scope():
+    sandbox("scope")
+    ou = _set_focus("intraday_no_options")
+    try:
+        opt = {"inst": "NIFTY_OPT_BUY", "entry": {"type": "ORB", "n": 15}}
+        assert not PE.add_kept("X1", {"size": 0.5, "mode": "PAPER", "spec": opt})
+        assert not PE.add_kept("X2", {"size": 0.5, "mode": "PAPER"})                # legacy option row
+        assert not PE.add_kept("X3", {"size": 0.5, "mode": "PAPER", "spec": dict(MCX)})   # positional
+        assert PE.add_kept("X4", {"size": 0.5, "mode": "PAPER", "spec": dict(FUT)})
+        assert PE.load_registry()["criteria"] == PE.CRITERIA
+        row = {"h": "0123456789ab", "spec": dict(opt), "desc": "x", "m": {}}
+        assert not SD.register(row, {"holdout": {}})
+    finally:
+        _set_focus(None)
+    rng = random.Random(9)
+    for _ in range(3000):
+        sp = SD.random_spec(rng)
+        for _ in range(3):
+            sp = SD.mutate(sp, rng)
+        assert sp["inst"] in ("NIFTY_FUT", "STOCK_INTRA", "MCX_INTRA"), sp["inst"]
+    assert SD.INSTRUMENTS == ("NIFTY_FUT", "STOCK_INTRA", "MCX_INTRA")
+    import importlib
+    importlib.reload(SD)            # undo test monkeypatches of seeds / weights
+    sandbox("scope2")
+    assert all(SD.in_scope(x) for x in SD.seeds()) and SD.seeds()
+    out = SD._gen(random.Random(1), [{"inst": "NIFTY_OPT_BUY", "h": "a", "spec": opt, "n_fails": 0, "fitness": 1}] * 10,
+                  {}, [dict(opt)], 50)
+    assert out and all(SD.in_scope(x) for x in out)
+
+
+def t_mcx_intra_flat_same_day_causal_pessimistic():
+    U = synth_universe(80, seed=7)
+    tr = SD.run_spec(U, MCXI)
+    assert tr and all(t["days"] == 0 for t in tr)                 # opened and closed the same day
+    cut = U.sessions[50]
+    a = [t for t in SD.run_spec(U.view(None, cut), MCXI)]
+    b = [t for t in tr if t["d"] <= cut]
+    assert [(t["d"], round(t["net"], 6)) for t in a] == [(t["d"], round(t["net"], 6)) for t in b]
+    # a day whose range touches BOTH the stop and the target books the stop
+    rows = list(U.mcx["CRUDEOILM"])
+    k = len(rows) - 1
+    d, o, h, l, c = rows[k - 1]
+    rows[k] = (rows[k][0], o, h * 1.2, l * 0.8, c)          # huge range: breakout up, stop and target both hit
+    U2 = DD.Universe(U.sessions, U.nifty, {}, {}, U.nifty_daily, {"CRUDEOILM": rows}, set())
+    last = [t for t in SD.run_spec(U2, dict(MCXI, dir="long")) if t["d"] == rows[k][0]]
+    assert all(t["exit_reason"] in ("stop",) for t in last)
+
+
+def _stock_panel(U, ns=6, seed=3):
+    rng = np.random.default_rng(seed)
+    stocks, sd = {}, {}
+    syms = [f"S{i}" for i in range(ns)]
+    for nd in U.nifty:
+        n = len(nd.C)
+        beta = rng.uniform(0.5, 1.5, (ns, 1))
+        ir = np.diff(np.log(nd.C), prepend=np.log(nd.O[0]))[None, :]
+        r = beta * ir + rng.normal(0, 0.0008, (ns, n))
+        p0 = rng.uniform(500, 3000, (ns, 1))
+        C = p0 * np.exp(np.cumsum(r, axis=1)); O = np.concatenate([p0, C[:, :-1]], axis=1)
+        H = np.maximum(O, C) * 1.0003; L = np.minimum(O, C) * 0.9997; V = rng.uniform(1e3, 1e4, (ns, n))
+        stocks[nd.d] = (syms, np.stack([O, H, L, C, V]))
+        for i, s_ in enumerate(syms):
+            sd.setdefault(s_, {})[nd.d] = (float(O[i, 0]), float(H[i].max()), float(L[i].min()), float(C[i, -1]))
+    return DD.Universe(U.sessions, U.nifty, stocks, sd, U.nifty_daily, {}, set())
+
+
+def t_new_stock_entries_causal():
+    U = _stock_panel(synth_universe(30, seed=12))
+    SD._SPREV.clear()
+    for e in ({"type": "VWAP_MR", "k": 1.5}, {"type": "LEAD_LAG", "w": 5, "x": 0.0015, "lag": 0.3},
+              {"type": "TOD", "t": 60, "thr": 0.003, "mode": "cont"}):
+        spec = {"inst": "STOCK_INTRA", "entry": e, "win": [15, 315], "dir": "both", "maxd": 2, "rank": "time",
+                "filters": [], "exit": {"stop": ["atr", 1.5], "tgt_r": 1.0, "trail_r": None, "be": 0, "hold": 60,
+                                        "vix_exit": None}}
+        nd = U.nifty[20]
+        full = SD.stock_events(U, nd, spec)
+        assert full, e["type"]
+        cut = 200
+        syms, a = U.stocks[nd.d]
+        nd2 = DD.NDay(nd.k, nd.d, None, nd.O[:cut], nd.H[:cut], nd.L[:cut], nd.C[:cut], nd.tmin[:cut], nd.vix[:cut],
+                      nd.f, nd.day)
+        U2 = DD.Universe(U.sessions, U.nifty, {nd.d: (syms, a[:, :, :cut])}, U.stock_daily, U.nifty_daily, {}, set())
+        part = SD.stock_events(U2, nd2, spec)
+        assert [x for x in full if x[0] < cut - 1] == [x for x in part if x[0] < cut - 1], e["type"]
+        tr = SD.run_spec(U, spec)
+        assert tr and all(t["d"] in U.stocks for t in tr)
 
 
 def t_no_order_or_live_code():

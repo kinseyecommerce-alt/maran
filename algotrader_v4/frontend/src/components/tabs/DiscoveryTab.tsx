@@ -13,7 +13,7 @@ const inr = (n: any) => (n === null || n === undefined || n === '') ? '—'
   : (Number(n) < 0 ? '−₹' : '₹') + Math.abs(Math.round(Number(n))).toLocaleString('en-IN')
 const pnlCls = (n: any) => Number(n) > 0 ? 'text-emerald-400' : Number(n) < 0 ? 'text-rose-400' : 'text-slate-400'
 const v = (x: any, suf = '') => (x === null || x === undefined) ? '—' : `${x}${suf}`
-const INSTS = ['', 'NIFTY_OPT_BUY', 'NIFTY_OPT_CREDIT', 'NIFTY_OPT_TBS', 'NIFTY_FUT', 'STOCK_INTRA', 'STOCK_SWING', 'MCX_SWING']
+const INSTS = ['', 'NIFTY_FUT', 'STOCK_INTRA', 'MCX_INTRA']
 
 function Card({ title, children, right }: { title: React.ReactNode; children: React.ReactNode; right?: React.ReactNode }) {
   return (
@@ -49,8 +49,17 @@ export default function DiscoveryTab() {
   const seal = st?.seal || {}
   const last = st?.last_run || {}
   const reg = st?.registered || {}
+  const focus = st?.scope?.owner_focus || {}
   return (
     <div className="p-3 space-y-3 text-xs text-slate-300" data-testid="discovery-tab">
+      <div className="rounded border border-amber-700/60 bg-amber-950/30 px-3 py-2 text-amber-200" data-testid="owner-focus-banner">
+        <span className="font-semibold">Owner focus: {focus.label || focus.focus || 'none'}</span>
+        {focus.instruments && <span className="text-amber-300/80"> — {focus.instruments}</span>}
+        <div className="text-[11px] text-amber-300/70 mt-0.5">
+          Search space: {(st?.scope?.instruments || []).join(' · ') || '—'}. Options and positional/overnight
+          strategies are removed (code kept, reversible). Nothing trades until a rule passes every strict criterion on the sealed holdout.
+        </div>
+      </div>
       <div className="flex items-center gap-2">
         <Telescope className="w-4 h-4 text-violet-400" />
         <div className="text-sm font-semibold text-slate-100">Strategy discovery (PAPER research)</div>

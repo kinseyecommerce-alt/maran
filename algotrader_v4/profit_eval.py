@@ -183,11 +183,32 @@ def strict_filter(signals: dict, registry: Optional[dict] = None, *, fail_closed
     return out
 
 
+# Owner scope (jag 2026-10-11 "remove options" + "only intraday"): while the owner focus is
+# `intraday_no_options`, the registry accepts only intraday non-option rule sets.
+OUT_OF_SCOPE_INSTS = ("NIFTY_OPT_BUY", "NIFTY_OPT_CREDIT", "NIFTY_OPT_TBS", "STOCK_SWING", "MCX_SWING")
+
+
+def scope_ok(entry: dict) -> bool:
+    try:
+        from owner_universe import owner_universe
+        focus = owner_universe.focus()
+    except Exception:
+        focus = None
+    if focus != "intraday_no_options":
+        return True
+    inst = ((entry or {}).get("spec") or {}).get("inst")
+    if inst is None:        # legacy (non-discovery) rows are option strategies → out of scope
+        return False
+    return inst not in OUT_OF_SCOPE_INSTS
+
+
 def add_kept(name: str, entry: dict, path: Optional[_Path] = None) -> bool:
     """Add ONE strategy to `kept` (PAPER probation, half size) without touching the criteria or the
     other rows — used by the discovery loop for a finalist that passed EVERY criterion on its
     sealed holdout.  Refuses anything that is not PAPER / half size."""
     if str(entry.get("mode", "PAPER")).upper() != "PAPER" or float(entry.get("size", 1.0)) > 0.5:
+        return False
+    if not scope_ok(entry):
         return False
     p = path or REGISTRY_PATH
     reg = load_registry(p) or {"generated": _dt.now().isoformat(timespec="seconds"),
@@ -200,6 +221,7 @@ def add_kept(name: str, entry: dict, path: Optional[_Path] = None) -> bool:
     (reg.get("retired") or {}).pop(name, None)
     reg["data_recording_only"] = not reg["kept"]
     reg["note"] = f"{len(reg['kept'])} strategy(ies) on PAPER probation at half size."
+    reg["scope"] = "intraday only (Nifty-50 stocks MIS, NIFTY futures, MCX futures); no options; no overnight"
     p.parent.mkdir(parents=True, exist_ok=True)
     tmp = p.with_suffix(".tmp")
     tmp.write_text(_json.dumps(reg, indent=1, default=str))
