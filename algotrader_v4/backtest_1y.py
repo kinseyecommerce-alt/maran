@@ -289,6 +289,8 @@ def run(write_gate: bool = True, png: Optional[str] = None, log=print) -> dict:
     for base, m in M.AGENT_EXEC.items():
         wf = M.walk_forward(m, ctxs, 65, widths)
         tl[f"EXEC:{m.name}"] = wf["oos_uncond"]
+    variants = {f"sl{int(sl*100)}_{ft:%H%M}": M.x_orb_variant(sl, ft) for sl, ft in M.ORB_GRID}
+    tl["EXEC:X_ORB15_SEL"] = M.walk_forward_select(variants, ctxs, 65, widths)["oos_uncond"]
     agent_tr = [dict(t, d=date.fromisoformat(t["d"]) if isinstance(t["d"], str) else t["d"],
                      t_in=datetime.fromisoformat(t["t_in"]) if isinstance(t["t_in"], str) else t["t_in"])
                 for t in res_sig.get("oos_trades", [])]
@@ -304,6 +306,7 @@ def run(write_gate: bool = True, png: Optional[str] = None, log=print) -> dict:
     for base, v in res_m["agent_exec"].items():
         if v.get("variant"):
             verdict_of[f"EXEC:{v['variant']}"] = (gate_m.get(v["variant"]) or {}).get("status", v["verdict"])
+    verdict_of["EXEC:X_ORB15_SEL"] = (gate_m.get("X_ORB15_SEL") or {}).get("status", "blocked")
 
     table = {}
     for k, ts in tl.items():

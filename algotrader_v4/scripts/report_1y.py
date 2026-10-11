@@ -42,6 +42,10 @@ def main():
     bn = sorted((n for _, n in cur_.get(best, [])), reverse=True)
     vv = im_ = opt["iv_model"]["validation"]
     gw_ = opt.get("gate_written") or {}
+    posx = [k for k, v in ex.items() if v["net"] > 0]
+
+    def ex5_(k):
+        return sum(sorted((n for _, n in cur_.get(k, [])), reverse=True)[5:])
     w("## Summary\n")
     w(f"- **Data:** 1 year of real Kite 1-minute data for the NIFTY 50 index, India VIX and all 50 Nifty stocks "
       f"(2025-09-01 … 2026-10-09). Real NIFTY option prices exist for only **{opt['iv_model']['real_option_sessions']} sessions** "
@@ -56,8 +60,9 @@ def main():
       f"PF {ag['pf']}, {ag['pct_per_month_10L']:+.2f}% a month on ₹10L. **No strategy passes** the gate: the best deflated "
       f"Sharpe (DSR) of any tradable variant is {max((v.get('why') or '').count('DSR') and float((v.get('why') or '').split('DSR ')[1].split()[0].rstrip(';,')) or 0 for v in {**opt['gate_signals'], **opt['gate_methods']}.values() if 'DSR ' in (v.get('why') or '') and v.get('status') != 'blocked'):.2f}, against the 0.95 needed.")
     w(f"- **Best single variant:** {best.split(':')[1]}, {inr(ex[best]['net'])} ({ex[best]['pct_per_month_10L']:+.2f}%/month). "
-      f"Without its 5 best trades it is {inr(sum(bn[5:]))}. Every positive buy strategy depends on a few big "
-      f"trend days, so this is a fat-tailed bet, not a steady earner.")
+      f"Without its 5 best trades it is {inr(sum(bn[5:]))}. Of the {len(posx)} tradable variants that are positive, "
+      f"{sum(1 for k in posx if ex5_(k) <= 0)} turn negative without their 5 best trades: the profit comes from a few "
+      f"big trend days, so it's a fat-tailed bet, not a steady earner.")
     w(f"- **Gate (rules unchanged):** probation now = {', '.join(k for k, v in gw_.items() if v == 'probation') or 'none'}. "
       f"FIRST_HOUR_TREND and X_CPR_NARROW dropped to blocked. Nothing is `pass`, and LIVE stays locked.")
     others = []
