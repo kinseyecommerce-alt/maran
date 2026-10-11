@@ -3,7 +3,7 @@ import {
   Activity, Terminal, Cpu, WifiOff, ShieldCheck,
   TrendingUp, TrendingDown, BarChart3,
   Zap, Play, Square, Database, Crosshair,
-  LayoutDashboard, ClipboardList, Target, Scale, History, Brain, Lightbulb, GraduationCap, Layers, Gauge, FlaskConical,
+  LayoutDashboard, ClipboardList, Target, Scale, History, Brain, Lightbulb, GraduationCap, Layers, Gauge, FlaskConical, Telescope,
 } from 'lucide-react'
 import Header from './components/Header'
 import IndexStrip from './components/IndexStrip'
@@ -24,6 +24,7 @@ import LearningTab from './components/tabs/LearningTab'
 import OptionsTab from './components/tabs/OptionsTab'
 import ScalperTab from './components/tabs/ScalperTab'
 import ResearchTab from './components/tabs/ResearchTab'
+import DiscoveryTab from './components/tabs/DiscoveryTab'
 import { connectWS } from './ws/websocket'
 import { useStore } from './store'
 import { api } from './api/client'
@@ -45,6 +46,7 @@ const TAB_COMPONENTS: Record<string, React.ComponentType> = {
   options:   OptionsTab,
   scalper:   ScalperTab,
   research:  ResearchTab,
+  discovery: DiscoveryTab,
 }
 
 const SIDEBAR_NAV: { id: PageId; label: string; Icon: React.ComponentType<{ className?: string }> }[] = [
@@ -59,6 +61,7 @@ const SIDEBAR_NAV: { id: PageId; label: string; Icon: React.ComponentType<{ clas
   { id: 'options',   label: 'Options',       Icon: Layers          },
   { id: 'scalper',   label: 'Scalper',       Icon: Gauge           },
   { id: 'research',  label: 'Research',      Icon: FlaskConical    },
+  { id: 'discovery', label: 'Discovery',     Icon: Telescope       },
   { id: 'sebi',      label: 'SEBI',          Icon: Scale           },
   { id: 'history',   label: 'Trade History', Icon: History         },
   { id: 'gate',      label: 'Claude Gate',   Icon: Brain           },

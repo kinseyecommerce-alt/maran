@@ -78,8 +78,26 @@ class PlatformScheduler:
             hour=17, minute=45, day_of_week="mon-fri", id="research_cycle",
             max_instances=1, coalesce=True,
         )
+        # strategy discovery (separate nice'd process, PAPER research only): weekdays after the
+        # 17:45 research cycle, longer on weekends; forward-holdout data refresh after the close.
+        self._sched.add_job(
+            self._discovery_cycle, "cron",
+            hour=18, minute=45, day_of_week="mon-fri", id="discovery_weekday",
+            max_instances=1, coalesce=True, kwargs={"budget_min": 120},
+        )
+        self._sched.add_job(
+            self._discovery_cycle, "cron",
+            hour=10, minute=0, day_of_week="sat,sun", id="discovery_weekend",
+            max_instances=1, coalesce=True, kwargs={"budget_min": 360},
+        )
+        self._sched.add_job(
+            self._forward_data_update, "cron",
+            hour=16, minute=30, day_of_week="mon-fri", id="forward_data",
+            max_instances=1, coalesce=True,
+        )
         self._sched.start()
-        logger.info("[platform] research loop scheduled 17:45 IST (after learning, history, agent backtests)")
+        logger.info("[platform] research loop scheduled 17:45 IST (after learning, history, agent backtests); "
+                    "discovery 18:45 IST weekdays (2 h) / 10:00 IST weekends (6 h); forward data 16:30 IST")
         logger.info("[platform] scheduler started (Kite@08:50, Report@09:00, Data@09:10, "
                     "Start@09:16, SelfLearn@15:45, History@16:00, Learn@16:45, AgentBT@17:15 IST)")
 
@@ -196,6 +214,35 @@ class PlatformScheduler:
                         rep.get("elapsed_s"))
         except Exception as exc:
             logger.error("[platform] research cycle failed: {}", exc)
+
+    async def _discovery_cycle(self, budget_min: float = 120) -> None:
+        """Strategy discovery loop (strategy_discovery.py) in a separate nice'd subprocess —
+        PAPER research only; skipped in LIVE mode and during NSE trading hours."""
+        if settings.trading_mode != "PAPER":
+            return
+        try:
+            import strategy_discovery as SD
+            r = SD.start_background(budget_min)
+            logger.info("[platform] discovery: {}", r)
+        except Exception as exc:
+            logger.error("[platform] discovery launch failed: {}", exc)
+
+    async def _forward_data_update(self) -> None:
+        """16:30 IST: append today's NIFTY / India VIX / Nifty-50 minute bars to logs/kite_1y —
+        the expanding FORWARD holdout of the discovery loop (needs a Kite session)."""
+        from ist_clock import is_nse_holiday, now_ist
+        if is_nse_holiday(now_ist().date()) or kite_client._kite is None:
+            return
+        try:
+            import subprocess, sys
+            from pathlib import Path
+            here = Path(__file__).parent
+            cp = await asyncio.to_thread(
+                subprocess.run, ["nice", "-n", "15", sys.executable, str(here / "scripts" / "kite_forward_update.py")],
+                cwd=str(here), capture_output=True, text=True, timeout=3600)
+            logger.info("[platform] forward data update rc={} {}", cp.returncode, (cp.stdout or "")[-300:])
+        except Exception as exc:
+            logger.error("[platform] forward data update failed: {}", exc)
 
     async def _learning_cycle(self) -> None:
         """15:45 IST: self-improvement review of today's paper trades (PAPER only)."""

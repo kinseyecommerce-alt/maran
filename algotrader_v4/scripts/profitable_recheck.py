@@ -104,6 +104,19 @@ def decide(reuse: bool = False, log=print) -> dict:
         evaluated[f"EXISTING:{k}"] = {kk: m.get(kk) for kk in ("trades", "net", "pf", "net_wo_best5", "max_dd",
                                                              "fold_pos_frac", "profitable", "fails")}
         retired[f"EXISTING:{k}"] = "; ".join(m["fails"])
+    # rules registered by the discovery loop: re-checked on sealed holdout + forward data
+    # (strict criteria); anything that stops qualifying — or cannot be re-checked — is retired.
+    try:
+        import strategy_discovery as SD
+        dk, dr = SD.recheck_registered(log)
+        kept.update(dk); retired.update(dr)
+        for k, v in dk.items():
+            evaluated[k] = {"source": "discovery", **(v.get("metrics") or {}), "profitable": True}
+    except Exception as exc:
+        log(f"discovery re-check failed: {exc!r} — discovery rules retired (fail closed)")
+        for k in ((PE.load_registry() or {}).get("kept") or {}):
+            if k.startswith("DISC_"):
+                retired[k] = f"discovery re-check failed ({exc!r:.80}) — fail closed"
     reg = PE.write_registry(kept, retired, evaluated,
                             note=("No strategy meets the strict criteria — nothing trades; data recording only."
                                   if not kept else f"{len(kept)} strategy(ies) on PAPER probation at half size."))

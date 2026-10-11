@@ -43,13 +43,14 @@ def main() -> int:
     pid = SD.running_pid()
     if pid and pid != os.getpid():
         print(f"another discovery run is active (pid {pid})"); return 0
-    SD.LOCK_PATH.write_text(f"{os.getpid()} {datetime.now().isoformat(timespec='seconds')}")
+    SD.LOCK_PATH.write_text(f"{os.getpid()} {SD._now().isoformat(timespec='seconds')} IST")
     logf = open(SD.RUNLOG_PATH, "w", buffering=1)
 
     def log(*x):
         line = " ".join(str(v) for v in x)
-        print(datetime.now().strftime("%H:%M:%S"), line, flush=True)
-        logf.write(datetime.now().strftime("%Y-%m-%d %H:%M:%S ") + line + "\n")
+        now = SD._now()
+        print(now.strftime("%H:%M:%S IST"), line, flush=True)
+        logf.write(now.strftime("%Y-%m-%d %H:%M:%S IST ") + line + "\n")
     try:
         SD.run(budget_min=a.budget_min, workers=a.workers, seed=a.seed, log=log, max_trials=a.max_trials)
         return 0

@@ -86,6 +86,9 @@ export const api = {
   scalperWhitelist:  () => ax().get('/scalper/whitelist'),
   researchPipeline:  () => ax().get('/research/pipeline'),
   researchRun:       (body: { days?: number; agents?: string[] } = {}) => ax().post('/research/run', { ...body, wait: false }),
+  discoveryStatus:      () => ax().get('/discovery/status'),
+  discoveryLeaderboard: (limit = 50, inst?: string) => ax().get('/discovery/leaderboard', { params: { limit, ...(inst ? { inst } : {}) } }),
+  discoveryRun:         (budget_min = 120) => ax().post('/discovery/run', { budget_min }),
   agentsPolicy:      () => ax().get('/agents/policy'),
   scalperTicks:      () => ax().get('/scalper/ticks'),
 

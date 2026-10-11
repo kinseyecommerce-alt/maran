@@ -129,7 +129,13 @@ class NiftyOptionsIntradayAgent:
 
     def tradable_signals(self) -> dict:
         import profit_eval as _PE
-        sig = _PE.strict_filter(load_gate().get("signals") or {})     # defence in depth (registry, fail closed)
+        rows = dict(load_gate().get("signals") or {})
+        try:   # rules found by the discovery loop that passed the sealed holdout (registry kept, PAPER half size)
+            import strategy_discovery as _SD
+            rows.update(_SD.gate_rows())
+        except Exception as exc:
+            self.last_error = f"discovery rows: {exc}"
+        sig = _PE.strict_filter(rows)     # defence in depth (registry, fail closed)
         return {s: v for s, v in sig.items() if v.get("status") in ("pass", "probation")}
 
     def _roll(self, now: datetime) -> None:
@@ -216,6 +222,11 @@ class NiftyOptionsIntradayAgent:
                 evs = evs + OM.live_events(bars, self._st)
             except Exception as exc:              # a research-module error never blocks exits/other signals
                 self.last_error = f"methods: {exc}"
+            try:
+                import strategy_discovery as _SD
+                evs = evs + _SD.live_events(bars, self._st)
+            except Exception as exc:              # discovery rules fail closed, never block exits
+                self.last_error = f"discovery: {exc}"
             sigs = self.tradable_signals()
             for ev in evs:
                 g = sigs.get(ev.sig)

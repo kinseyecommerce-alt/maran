@@ -286,7 +286,7 @@ export interface IndexQuote {
   exchange_ts?: string
 }
 
-export type TabId = 'positions' | 'orders' | 'brackets' | 'risk' | 'agents' | 'invented' | 'learning' | 'scalper' | 'research' | 'options' | 'sebi' | 'history' | 'gate'
+export type TabId = 'positions' | 'orders' | 'brackets' | 'risk' | 'agents' | 'invented' | 'learning' | 'scalper' | 'research' | 'discovery' | 'options' | 'sebi' | 'history' | 'gate'
 
 export interface AgentActivityEntry {
   time?: string

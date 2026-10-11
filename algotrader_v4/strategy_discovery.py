@@ -75,6 +75,15 @@ INSTRUMENTS = ("NIFTY_OPT_BUY", "NIFTY_OPT_CREDIT", "NIFTY_FUT", "STOCK_INTRA", 
 INST_WEIGHTS = (0.34, 0.08, 0.16, 0.20, 0.10, 0.12)
 AXIS_OF = {"MCX_SWING": "mcx"}            # everything else: the NSE session axis
 
+def _now() -> datetime:
+    """IST wall clock (naive) — the box / server may run in UTC."""
+    try:
+        from ist_clock import now_ist
+        return now_ist().replace(tzinfo=None)
+    except Exception:
+        return datetime.utcnow() + timedelta(hours=5, minutes=30)
+
+
 # ════════════════════════════════════════════════════════════════════════════
 # 1. GRAMMAR
 # ════════════════════════════════════════════════════════════════════════════
@@ -1490,7 +1499,7 @@ def seal(sessions: list, state: dict) -> dict:
         return state["seal"]
     k = int(round(len(sessions) * (1 - HOLDOUT_FRAC)))
     s = {"discovery_end": str(sessions[k - 1]), "holdout_start": str(sessions[k]), "holdout_end": str(sessions[-1]),
-         "sealed_at": datetime.now().isoformat(timespec="seconds"), "holdout_frac": HOLDOUT_FRAC,
+         "sealed_at": _now().isoformat(timespec="seconds"), "holdout_frac": HOLDOUT_FRAC,
          "n_discovery_sessions": k, "n_holdout_sessions": len(sessions) - k}
     state["seal"] = s
     return s
@@ -1516,7 +1525,7 @@ def maybe_reseal(state: dict, sessions: list, log=print) -> bool:
             p.replace(arch / p.name)
     k = sessions.index(fwd[0])
     state["seal"] = {"discovery_end": str(sessions[k - 1]), "holdout_start": str(fwd[0]), "holdout_end": str(fwd[-1]),
-                     "sealed_at": datetime.now().isoformat(timespec="seconds"), "holdout_frac": round(len(fwd) / len(sessions), 3),
+                     "sealed_at": _now().isoformat(timespec="seconds"), "holdout_frac": round(len(fwd) / len(sessions), 3),
                      "n_discovery_sessions": k, "n_holdout_sessions": len(fwd), "previous": sl}
     state["epoch"] = ep + 1
     log(f"RESEAL: epoch {ep} archived; new discovery ≤ {sessions[k-1]}, new sealed holdout {fwd[0]}…{fwd[-1]}")
@@ -1723,7 +1732,7 @@ def run(budget_min: float = 120, workers: Optional[int] = None, seed: Optional[i
     rng = random.Random(seed if seed is not None else int(time.time()))
     queue = [s for s in seeds() if spec_hash(s) not in seen]
     workers = workers or max(1, min(5, (os.cpu_count() or 2) - 3))
-    run_id = datetime.now().strftime("%Y%m%d-%H%M%S")
+    run_id = _now().strftime("%Y%m%d-%H%M%S")
     stats = {"evaluated": 0, "errors": 0, "guard_refused": 0, "dup_exact": 0, "dup_corr": 0, "stored": 0,
              "by_inst": {}, "stopped": "budget"}
     log(f"discovery run {run_id}: budget {budget_min} min, {workers} workers (nice 15); seal: discovery ≤ "
@@ -1934,7 +1943,7 @@ def _multiple_testing(rows: list, store: PnlStore, n_trials: int, log=print, hea
                 mt.append(f"SPA/reality-check p {r['spa_p']} > {SPA_P_MAX} (universe {X.shape[0]:,})")
             r["mt_fails"] = mt
             r["discovery_pass"] = not r["n_fails"] and not mt
-        log(f"multiple testing [{ax}]: universe {X.shape[0]:,} stored trials, SR var {sr_var:.5f}, "
+        log(f"multiple testing [{ax}]: universe {X.shape[0]:,} stored trials, SR var {sr_var if sr_var is None else round(sr_var, 5)}, "
             f"N={n_trials:,}; head {len(cand)} → {sum(1 for r in cand if r.get('discovery_pass'))} pass")
 
 
@@ -1942,7 +1951,7 @@ def holdout_test(UH, row: dict, ledger: dict, log=print) -> dict:
     """The ONE look at the sealed holdout for this rule (ledger first, so a crash cannot re-test)."""
     spec = row["spec"]
     h = row["h"]
-    ledger[h] = {"touched": datetime.now().isoformat(timespec="seconds"), "desc": row["desc"]}
+    ledger[h] = {"touched": _now().isoformat(timespec="seconds"), "desc": row["desc"]}
     _save(LEDGER_PATH, ledger)
     r = evaluate_spec(UH, spec, nfolds=HOLD_FOLDS, with_stress=True)
     m = r["m"]
@@ -1966,7 +1975,7 @@ def register(row: dict, res: dict) -> bool:
              "metrics": {k: (res["holdout"] or {}).get(k) for k in ("trades", "net", "pf", "net_wo_best5", "max_dd",
                                                                      "pct_per_month", "stress_net", "fold_pos_frac")},
              "discovery_metrics": {k: row["m"].get(k) for k in ("trades", "net", "pf", "net_wo_best5", "max_dd")},
-             "dsr": row.get("dsr"), "spa_p": row.get("spa_p"), "registered": datetime.now().isoformat(timespec="seconds"),
+             "dsr": row.get("dsr"), "spa_p": row.get("spa_p"), "registered": _now().isoformat(timespec="seconds"),
              "mode": "PAPER"}
     return PE.add_kept(name, entry)
 
@@ -2002,10 +2011,10 @@ def forward_update(U, V, fin: dict, log=print) -> dict:
 def _persist(state, lb, store, stats, run_id, t0, sl, partial: bool, n_trials_all=None, finalists=None,
              hold_res=None, fwd=None) -> dict:
     rows = sorted(_trim(lb).values(), key=_rank_key)
-    _save(LEADER_PATH, {"generated": datetime.now().isoformat(timespec="seconds"), "run": run_id, "rows": rows,
+    _save(LEADER_PATH, {"generated": _now().isoformat(timespec="seconds"), "run": run_id, "rows": rows,
                         "criteria": PE.CRITERIA, "dsr_min": DSR_MIN, "spa_p_max": SPA_P_MAX, "dup_corr": DUP_CORR})
     store.save()
-    summ = {"run": run_id, "started": datetime.fromtimestamp(t0).isoformat(timespec="seconds"),
+    summ = {"run": run_id, "started": (_now() - timedelta(seconds=time.time() - t0)).isoformat(timespec="seconds"),
             "elapsed_min": round((time.time() - t0) / 60, 1), "partial": partial, **stats,
             "trials_total": state["trials_total"], "trials_with_prior": n_trials_all or (prior_trials() + state["trials_total"]),
             "leaderboard_size": len(rows), "finalists": len(finalists or []),
@@ -2031,6 +2040,26 @@ def running_pid() -> Optional[int]:
         return pid
     except Exception:
         return None
+
+
+def start_background(budget_min: float = 120, workers: Optional[int] = None) -> dict:
+    """Launch scripts/discovery_run.py as a detached nice'd process (single instance)."""
+    import subprocess, sys
+    if str(os.environ.get("TRADING_MODE", "PAPER")).upper() != "PAPER":
+        return {"ok": False, "why": "PAPER only"}
+    pid = running_pid()
+    if pid:
+        return {"ok": False, "why": f"already running (pid {pid})", "pid": pid}
+    if trading_hours_now():
+        return {"ok": False, "why": "NSE trading hours — discovery never runs while the market is open"}
+    budget = max(5.0, min(float(budget_min), 480.0))
+    DDIR.mkdir(parents=True, exist_ok=True)
+    cmd = ["nice", "-n", "15", sys.executable, str(ROOT / "scripts" / "discovery_run.py"), "--budget-min", str(budget),
+           "--if-not-trading-hours"] + (["--workers", str(int(workers))] if workers else [])
+    out = open(DDIR / "run_console.log", "a")
+    p = subprocess.Popen(cmd, cwd=str(ROOT), stdout=out, stderr=subprocess.STDOUT, start_new_session=True,
+                         env={**os.environ, "TRADING_MODE": "PAPER"})
+    return {"ok": True, "pid": p.pid, "budget_min": budget}
 
 
 def status() -> dict:
@@ -2182,7 +2211,7 @@ def recheck_registered(log=print, U=None) -> tuple:
         if m.get("profitable") and not m["fails"]:
             v = dict(v); v["metrics"] = {k: m.get(k) for k in ("trades", "net", "pf", "net_wo_best5", "max_dd",
                                                              "pct_per_month", "stress_net", "fold_pos_frac")}
-            v["rechecked"] = datetime.now().isoformat(timespec="seconds")
+            v["rechecked"] = _now().isoformat(timespec="seconds")
             kept[name] = v
         else:
             retired[name] = "discovery rule re-check (holdout + forward): " + "; ".join(m["fails"])

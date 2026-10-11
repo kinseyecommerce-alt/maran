@@ -2907,6 +2907,36 @@ async def research_run(req: ResearchRunRequest):
         raise HTTPException(409, str(exc))
 
 
+class DiscoveryRunRequest(BaseModel):
+    budget_min: float = 120
+    workers: Optional[int] = None
+
+
+@app.get("/discovery/status", tags=["Learning"])
+def discovery_status():
+    """Strategy-discovery loop: seal (discovery / sealed holdout / forward), cumulative trial
+    count, last runs, holdout ledger size, finalists and registered (PAPER probation) rules."""
+    import strategy_discovery as SD
+    return SD.status()
+
+
+@app.get("/discovery/leaderboard", tags=["Learning"])
+def discovery_leaderboard(limit: int = 50, inst: Optional[str] = None):
+    """Top distinct near-misses on the DISCOVERY window (holdout sealed) with why each failed."""
+    import strategy_discovery as SD
+    return SD.leaderboard(limit, inst)
+
+
+@app.post("/discovery/run", tags=["Learning"])
+def discovery_run(req: DiscoveryRunRequest):
+    """Start one bounded discovery run now (separate nice'd process; PAPER only; never during
+    NSE trading hours; places no orders)."""
+    if str(settings.trading_mode).upper() != "PAPER":
+        raise HTTPException(409, "discovery runs in PAPER mode only")
+    import strategy_discovery as SD
+    return SD.start_background(req.budget_min, req.workers)
+
+
 @app.get("/agents/policy", tags=["Learning"])
 def agents_policy():
     """Per-agent policy: params (bounded learning), hard caps, windows, today's gate state, allocation."""
