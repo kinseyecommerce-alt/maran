@@ -41,15 +41,19 @@ OPT_MAX_DTE = 120
 
 _last = [0.0]
 _nreq = [0]
+import threading  # noqa: E402
+_tl = threading.Lock()
+WORKERS = 6          # concurrent requests (latency-bound); the shared bucket still caps at RPS
 
 
 def _throttle():
-    gap = 1.0 / RPS
-    w = _last[0] + gap - time.monotonic()
-    if w > 0:
-        time.sleep(w)
-    _last[0] = time.monotonic()
-    _nreq[0] += 1
+    with _tl:
+        gap = 1.0 / RPS
+        w = _last[0] + gap - time.monotonic()
+        if w > 0:
+            time.sleep(w)
+        _last[0] = time.monotonic()
+        _nreq[0] += 1
 
 
 def kite() -> KiteConnect:
@@ -206,17 +210,25 @@ def main():
                      TODAY - timedelta(days=59)))
 
     log(f"{len(jobs)} jobs")
-    for i, (key, tok, iv, cont, oi, st) in enumerate(jobs):
+    from concurrent.futures import ThreadPoolExecutor
+    done = [0]
+
+    def one(job):
+        i, (key, tok, iv, cont, oi, st) = job
         ck = key + ("" if iv == "minute" else "_" + iv)
         if ck in cov and cov[ck].get("complete"):
-            continue
+            return
         rows = fetch(k, key, tok, st, END, iv, cont, oi)
         c = merge(key, rows, iv)
         c.update(complete=True, token=tok, continuous=cont)
-        cov[ck] = c
-        if i % 10 == 0:
-            save()
-            log(f"[{i+1}/{len(jobs)}] {ck}: {c['days']}d {c['bars']} bars ({_nreq[0]} req)")
+        with _tl:
+            cov[ck] = c
+            done[0] += 1
+            if done[0] % 20 == 0:
+                save()
+                log(f"[{i+1}/{len(jobs)}] {ck}: {c['days']}d {c['bars']} bars ({_nreq[0]} req)")
+    with ThreadPoolExecutor(WORKERS) as ex:
+        list(ex.map(one, enumerate(jobs)))
     save()
     log(f"DONE {_nreq[0]} requests")
 

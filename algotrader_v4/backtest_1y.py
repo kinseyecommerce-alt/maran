@@ -318,6 +318,11 @@ def run(write_gate: bool = True, png: Optional[str] = None, log=print) -> dict:
         if rt:
             real_tab[k] = R.metrics(rt, n_trials, sorted(real_days))
     q = {str(d): {"real": QUOTES[d][0], "model": QUOTES[d][1]} for d in sorted(real_days)}
+    try:
+        proxy = real_proxy(ctxs, res_sig, res_m)
+    except Exception as exc:                       # report, never block the main result
+        proxy = {"error": repr(exc)}
+    log(f"real-price proxy done ({time.time()-t0:.0f}s)")
     monthly = {k: month_table(ts) for k, ts in tl.items()
                if k in ("AGENT:validated_signals", "SIG:FIRST_HOUR_TREND", "EXEC:X_ORB15_BUY", "EXEC:X_ST_VWAP_BUY",
                         "EXEC:X_CPR_NARROW", "EXEC:X_IFLY_920")}
@@ -328,7 +333,7 @@ def run(write_gate: bool = True, png: Optional[str] = None, log=print) -> dict:
                      for tr, te in R.folds(len(ctxs))],
            "lot_rule": "75 for expiries ≤ 2025-12-30, 65 after", "n_trials": n_trials,
            "iv_model": ivm, "iv_calibration": cal, "real_option_days": sorted(str(d) for d in real_days),
-           "real_quote_share": q, "table": table, "real_days_table": real_tab, "monthly": monthly,
+           "real_quote_share": q, "real_proxy": proxy, "table": table, "real_days_table": real_tab, "monthly": monthly,
            "gate_signals": gate_sig, "gate_methods": gate_m,
            "agent_oos": res_sig["oos_agent"], "untestable": {**R.UNTESTABLE, **M.UNTESTABLE},
            "elapsed_s": round(time.time() - t0)}
@@ -343,6 +348,116 @@ def run(write_gate: bool = True, png: Optional[str] = None, log=print) -> dict:
         res["gate_written"] = {s: v["status"] for s, v in g["signals"].items()}
         OUT_JSON.write_text(json.dumps(res, indent=1, default=str))
     return res
+
+
+def real_proxy(ctxs: list, res_sig: dict, res_m: dict) -> dict:
+    """REAL-PRICE CHECK on every session with real option bars: the same rules,
+    but each day trades the nearest still-listed expiry with ≥1 DTE (often a
+    later weekly / the monthly — longer DTE than the agent's usual contract),
+    priced from REAL Kite option closes (model only where a minute has no trade).
+    Fixed rules (latest train selection / published params) — not walk-forward."""
+    meta = IVM.option_meta()
+    by_exp: dict = defaultdict(list)
+    for sym, m in meta.items():
+        by_exp[date.fromisoformat(m["expiry"][:10])].append((sym, float(m["strike"]), m["instrument_type"]))
+    have: dict = defaultdict(set)              # day → expiries with real bars
+    files = {p.stem[4:]: p for p in K1Y.glob("OPT_*.csv")}
+    idx = {c.d: c for c in ctxs}
+    out_ctx = []
+    for e, lst in sorted(by_exp.items()):
+        for sym, K, typ in lst:
+            p = files.get(sym)
+            if not p:
+                continue
+            with open(p) as f:
+                for r in csv.DictReader(f):
+                    have[r["date"][:10]].add(e)
+                    break
+    # load real series for the chosen (day, expiry) pairs, strikes within ±12 steps of the open
+    choice = {}
+    for d, c in idx.items():
+        exps = sorted(e for e in by_exp if e > d)
+        for e in exps:
+            ok = False
+            atm = round(c.bars[0].o / R.STEP) * R.STEP
+            for typ in ("CE", "PE"):
+                sym = next((s for s, K, t in by_exp[e] if K == atm and t == typ), None)
+                if sym and sym in files:
+                    ok = True
+            if ok:
+                choice[d] = e
+                break
+    store: dict = defaultdict(dict)
+    days_with = set()
+    for d, e in choice.items():
+        atm = round(idx[d].bars[0].o / R.STEP) * R.STEP
+        for sym, K, typ in by_exp[e]:
+            if abs(K - atm) > 12 * R.STEP or sym not in files:
+                continue
+            ser = _day_series(files[sym], d)
+            if ser:
+                store[(d, e)][(e, K, typ)] = ser
+                days_with.add(d)
+    for d in sorted(days_with):
+        c = idx[d]; e = choice[d]
+        ser = store[(d, e)]
+        atm = round(c.bars[0].o / R.STEP) * R.STEP
+        if not (ser.get((e, float(atm), "CE")) and ser.get((e, float(atm), "PE"))):
+            continue
+        if sum(len(v) for k, v in ser.items() if abs(k[1] - atm) <= R.STEP) < 300:   # ATM must actually trade
+            continue
+        T0 = R.years_to(e, c.bars[0].ts)
+        rc = VixCtx(d, c.bars, IVM.predict_iv1(c.coef, c.bars[0].o, atm, T0, c.vix[0]), e, c.exp_today,
+                    c.expiry_day, c.prev_close, vix=c.vix, coef=c.coef, lot=lot_for(e), real=ser)
+        out_ctx.append(rc)
+    _PROXY_KEEP.extend(out_ctx)
+    if not out_ctx:
+        return {"sessions": 0}
+    for rc in out_ctx:
+        QUOTES[("proxy", rc.d)] = [0, 0]
+    pos = {c.d: k for k, c in enumerate(ctxs)}
+    widths = M.cpr_widths(ctxs)
+    trades: dict = defaultdict(list)
+    before = {d: list(v) for d, v in QUOTES.items()}
+    real0 = sum(v[0] for v in QUOTES.values()); mod0 = sum(v[1] for v in QUOTES.values())
+    for rc in out_ctx:
+        k = pos[rc.d]
+        st = M.day_state(ctxs, k, widths)
+        prev = ctxs[k - 1].bars if k > 0 else None
+        for m in list(M.METHODS) + list(M.AGENT_EXEC.values()):
+            if not m.agent_legal or prev is None:
+                continue
+            for t in m.run(rc, prev, rc.lot, None, st):
+                t["sig"] = m.name
+                trades[("EXEC:" if m.name.startswith("X_") else "METHOD:") + m.name].append(t)
+        evs = {rc.d: R.day_events(rc.bars, rc.prev_close, rc.expiry_day)}
+        for s, v in res_sig["latest_selection"].items():
+            p = v.get("exits")
+            if p and s != "IC_EXPIRY_1100":
+                for t in R.simulate_agent([rc], evs, rc.lot, [0], {s: p}):
+                    trades["SIG:" + s].append(t)
+    real1 = sum(v[0] for v in QUOTES.values()); mod1 = sum(v[1] for v in QUOTES.values())
+    sess = sorted(c.d for c in out_ctx)
+    tab = {k: R.metrics(v, 1, sess) for k, v in trades.items()}
+    dte = [(c.exp_buy - c.d).days for c in out_ctx]
+    return {"sessions": len(out_ctx), "first": str(sess[0]), "last": str(sess[-1]),
+            "dte_median": statistics.median(dte), "dte_range": [min(dte), max(dte)],
+            "expiries_used": sorted({str(c.exp_buy) for c in out_ctx}),
+            "real_quote_share": round((real1 - real0) / max(1, (real1 - real0) + (mod1 - mod0)), 3),
+            "table": tab}
+
+
+_PROXY_KEEP: list = []
+
+
+def _day_series(path: Path, d: date) -> dict:
+    ser = {}
+    ds = str(d)
+    with open(path) as f:
+        for r in csv.DictReader(f):
+            if r["date"][:10] == ds:
+                ser[IVM._ts(r["date"])] = float(r["close"])
+    return ser
 
 
 def _signal_alone_trades(res_sig: dict, ctxs: list) -> dict:

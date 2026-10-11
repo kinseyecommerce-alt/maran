@@ -375,6 +375,32 @@ def nightly(sl=None) -> dict:
     """Self-learning hook: re-run the walk-forward research on all cached real
     data (bounded grid, min samples, DSR), rewrite the gate. Never loosens the
     gate thresholds; a signal only trades if its OOS record earns it."""
+    # 1-year Kite cache present → the gate comes from the 1-year walk-forward
+    # (backtest_1y, run in a SUBPROCESS because it swaps the research modules'
+    # data/pricing in-process). The 64-day harness must not overwrite a gate
+    # earned on a year of data with one earned on 3 months.
+    try:
+        import backtest_1y as _b1y
+        if _b1y.have_data():
+            import subprocess, sys as _sys
+            here = Path(__file__).parent
+            cp = subprocess.run([_sys.executable, str(here / "backtest_1y.py"), "--png",
+                                 str(here / "logs" / "abitrade_1y_equity.png")],
+                                cwd=str(here), capture_output=True, text=True, timeout=3 * 3600)
+            if cp.returncode == 0:
+                g = load_gate()
+                if sl is not None:
+                    try:
+                        sl.store.kv_set("nifty_options_gate", g)
+                    except Exception:
+                        pass
+                return {"gate": {s: v["status"] for s, v in (g.get("signals") or {}).items()},
+                        "oos": (g.get("oos_agent") or {}).get("all"), "source": "backtest_1y"}
+            logger.warning(f"backtest_1y nightly failed rc={cp.returncode}: {cp.stderr[-500:]} — gate left unchanged")
+            return {"gate": {s: v["status"] for s, v in (load_gate().get("signals") or {}).items()},
+                    "error": "backtest_1y failed — gate unchanged"}
+    except Exception as exc:
+        logger.warning(f"backtest_1y nightly unavailable: {exc}")
     from nifty_options_research import run
     res = run(out_json=str(Path(__file__).parent / "logs" / "nifty_options_research.json"))
     methods = None
