@@ -24,15 +24,54 @@ def f(x, nd=2):
 def main():
     cov = json.loads((K1Y / "coverage.json").read_text())
     opt = json.loads((HERE / "logs" / "backtest_1y_options.json").read_text())
-    ubp = HERE / "logs" / "backtests" / "unified_backtest_1y.json"
-    ub = json.loads(ubp.read_text()) if ubp.exists() else None
     mst = json.loads((K1Y / "mcx_stitch_coverage.json").read_text()) if (K1Y / "mcx_stitch_coverage.json").exists() else {}
     L = []
     w = L.append
     w("# AbiTrade — 1-year backtest on Kite data (PAPER research)\n")
-    w(f"Generated {opt['generated']} IST. Kite account YFW795, PAPER mode, no orders placed. "
+    from datetime import datetime, timedelta
+    gen = (datetime.fromisoformat(opt["generated"]) + timedelta(hours=5, minutes=30)).strftime("%Y-%m-%d %H:%M")
+    w(f"Generated {gen} IST. Kite account YFW795, PAPER mode, no orders placed. "
       f"Options walk-forward OOS window **{opt['oos_window'][0]} … {opt['oos_window'][1]} ({opt['oos_window'][2]} sessions)**, "
       f"12 expanding folds, 2-session embargo, first 40 sessions train-only.\n")
+
+    # summary
+    tab_ = opt["table"]; cur_ = opt.get("_curves", {})
+    ag = tab_["AGENT:validated_signals"]
+    ex = {k: v for k, v in tab_.items() if k.startswith("EXEC:") or k.startswith("SIG:")}
+    best = max(ex, key=lambda k: ex[k]["net"])
+    bn = sorted((n for _, n in cur_.get(best, [])), reverse=True)
+    vv = im_ = opt["iv_model"]["validation"]
+    gw_ = opt.get("gate_written") or {}
+    w("## Summary\n")
+    w(f"- **Data:** 1 year of real Kite 1-minute data for the NIFTY 50 index, India VIX and all 50 Nifty stocks "
+      f"(2025-09-01 … 2026-10-09). Real NIFTY option prices exist for only **{opt['iv_model']['real_option_sessions']} sessions** "
+      f"(2026-07-29 … 2026-10-09), because Kite drops expired contracts. The weekly contract the agent trades has real prices "
+      f"on just **{len(opt['real_option_days'])} sessions** (6–9 Oct). MCX and NIFTY futures minute data cover only "
+      f"still-listed contracts, from about 3 to 12 months.")
+    w(f"- **Option model:** it's now driven by India VIX and calibrated on those real prices. On held-out real days the "
+      f"price error fell from {vv['old_flat_k_rv20']['mape_pct']}% to {vv['new_vix_surface']['mape_pct']}% (MAPE). For ATM weekly "
+      f"options it is {vv['atm_weekly_new']['mape_pct']}%, though the model still prices them about {vv['atm_weekly_new']['bias_pct']:+.0f}% too high.")
+    w(f"- **The NIFTY options agent as it would trade** (only signals validated on earlier data, 234 unseen sessions): "
+      f"**{inr(ag['net'])}** after {inr(ag['costs_incl_spread'])} in costs, {ag['trades']} trades, win {ag['win_pct']}%, "
+      f"PF {ag['pf']}, {ag['pct_per_month_10L']:+.2f}% a month on ₹10L. **No strategy passes** the gate: the best deflated "
+      f"Sharpe (DSR) of any tradable variant is {max((v.get('why') or '').count('DSR') and float((v.get('why') or '').split('DSR ')[1].split()[0].rstrip(';,')) or 0 for v in {**opt['gate_signals'], **opt['gate_methods']}.values() if 'DSR ' in (v.get('why') or '') and v.get('status') != 'blocked'):.2f}, against the 0.95 needed.")
+    w(f"- **Best single variant:** {best.split(':')[1]}, {inr(ex[best]['net'])} ({ex[best]['pct_per_month_10L']:+.2f}%/month). "
+      f"Without its 5 best trades it is {inr(sum(bn[5:]))}. Every positive buy strategy depends on a few big "
+      f"trend days, so this is a fat-tailed bet, not a steady earner.")
+    w(f"- **Gate (rules unchanged):** probation now = {', '.join(k for k, v in gw_.items() if v == 'probation') or 'none'}. "
+      f"FIRST_HOUR_TREND and X_CPR_NARROW dropped to blocked. Nothing is `pass`, and LIVE stays locked.")
+    others = []
+    for pth in ("unified_backtest_1y_nse.json", "unified_backtest_1y_mcx.json", "unified_backtest_1y_silverm.json"):
+        q_ = HERE / "logs" / "backtests" / pth
+        if q_.exists():
+            for a_, r_ in json.loads(q_.read_text())["agents"].items():
+                st_ = r_.get("stats") or {}
+                if st_.get("trades"):
+                    others.append((a_, st_.get("net") or 0))
+    pos = [a_ for a_, n_ in others if n_ > 0]
+    w(f"- **Other agents (section 7):** {len(others)} agent runs with trades; "
+      + (f"positive after costs: {', '.join(pos)} (none pass the DSR gate)." if pos else "none makes money after costs over the year.")
+      + "\n")
 
     # coverage
     w("## 1. Data coverage (Kite historical API, cached in `logs/kite_1y/`)\n")
@@ -103,19 +142,29 @@ def main():
     w("SIG = harness signals (train-fold picks horizon/exits); METHOD = published rule set; EXEC = the agent-executable variant "
       "the live agent would run; AGENT = the agent trading only train-validated signals together. "
       "% per month = net ÷ ₹10L ÷ OOS sessions × 21.\n")
-    w("| Strategy | Trades | Win % | Gross | Costs | Net | %/month | Max DD | PF | Sharpe | DSR | Verdict |\n"
-      "|---|---|---|---|---|---|---|---|---|---|---|---|")
+    w("| Strategy | Trades | Win % | Gross | Costs | Net | %/month | Max DD | PF | Sharpe | DSR | Net without best 5 trades | Verdict |\n"
+      "|---|---|---|---|---|---|---|---|---|---|---|---|---|")
     tab = opt["table"]
+    cur = opt.get("_curves", {})
+    gm = opt.get("gate_methods", {})
     for k in sorted(tab, key=lambda k: (not k.startswith("AGENT"), -tab[k]["net"])):
         m = tab[k]
         if not m["trades"]:
             continue
+        nets = sorted((n for _, n in cur.get(k, [])), reverse=True)
+        ex5 = sum(nets[5:]) if nets else None
+        v = m["verdict"]
+        if k.startswith("METHOD:"):
+            v = f"{(gm.get(k[7:]) or {}).get('status', 'blocked')} (published rule set; method verdict: {v}; trades only via its EXEC variant)"
         w(f"| {k} | {m['trades']} | {m['win_pct']} | {inr(m['gross'])} | {inr(m['costs_incl_spread'])} | {inr(m['net'])} | "
-          f"{m['pct_per_month_10L']:+.2f}% | {inr(-m['max_dd'])} | {f(m['pf'])} | {f(m['sharpe_daily_ann'])} | {f(m['dsr'],3)} | {m['verdict']} |")
+          f"{m['pct_per_month_10L']:+.2f}% | {inr(-m['max_dd'])} | {f(m['pf'])} | {f(m['sharpe_daily_ann'])} | {f(m['dsr'],3)} | {inr(ex5)} | {v} |")
     zero = [k for k in tab if not tab[k]["trades"]]
     if zero:
         w(f"\nNo OOS trades (never validated on a train fold, or no setups): {', '.join(zero)}.")
-    w("\nUntestable with this data: " + "; ".join(f"**{k}** — {v}" for k, v in opt["untestable"].items()) + "\n")
+    w("\nNot run this time: IV-rich-morning / post-event IV-crush sells and OI/PCR shifts. India VIX minute history and "
+      "51 sessions of real option OI are now cached, so these can be built next (OI only for the last 51 sessions).\n")
+    w("DSR here uses the combined trial count of everything tested in this run (stricter); the gate rows use each module's "
+      "own trial count, as before — neither comes close to the 0.95 pass bar.\n")
 
     # real days
     w("## 4. Real-option-price days only\n")
@@ -129,15 +178,36 @@ def main():
     w("\nThis is a handful of sessions — far too few to judge any strategy; it is reported as asked, as a sanity check "
       "of the model against real fills, not as evidence.\n")
 
+    px = opt.get("real_proxy") or {}
+    if px.get("sessions"):
+        w(f"### 4b. Real-price check on all {px['sessions']} sessions with real option bars ({px['first']} … {px['last']})\n")
+        w(f"Same rules (latest train-fold exits / published parameters — NOT walk-forward), but each day trades the nearest "
+          f"listed expiry whose ATM strikes actually traded ({', '.join(px['expiries_used'])}; DTE median {px['dte_median']}, "
+          f"range {px['dte_range'][0]}–{px['dte_range'][1]} days — longer-dated than the agent's weekly). "
+          f"{100 * px['real_quote_share']:.0f}% of option quotes came from real Kite 1-minute closes. Multi-leg sells are "
+          f"marked on last-trade closes of each leg (not bid/ask), so their stop-outs here are noisier than live.\n")
+        w("| Strategy | Trades | Win % | Net | PF |\n|---|---|---|---|---|")
+        for k, m in sorted(px["table"].items(), key=lambda kv: -kv[1]["net"]):
+            w(f"| {k} | {m['trades']} | {m['win_pct']} | {inr(m['net'])} | {f(m['pf'])} |")
+        w("")
+
     # monthly
     w("## 5. Monthly OOS P&L (₹, after costs)\n")
-    mon = opt["monthly"]
+    keys = ["AGENT:validated_signals", "SIG:FIRST_HOUR_TREND", "EXEC:X_ORB15_BUY", "EXEC:X_ST_VWAP_BUY", "EXEC:X_CPR_NARROW",
+            "SIG:TWAP_REJECT", "SIG:TOD_PE_1330", "EXEC:X_IFLY_920"]
+    keys = [k for k in keys if k in cur]
+    mon = {}
+    for k in keys:
+        d = {}
+        for t, n in cur[k]:
+            d[t[:7]] = d.get(t[:7], 0) + n
+        mon[k] = d
     months = sorted({mm for v in mon.values() for mm in v})
-    keys = list(mon)
     w("| Month | " + " | ".join(k.split(":")[1] for k in keys) + " |\n|---|" + "---|" * len(keys))
     for mm in months:
         w(f"| {mm} | " + " | ".join(inr(mon[k].get(mm, 0)) for k in keys) + " |")
     w("| **Total** | " + " | ".join(f"**{inr(sum(mon[k].values()))}**" for k in keys) + " |")
+    w("| Losing months | " + " | ".join(f"{sum(1 for v in mon[k].values() if v < 0)}/{len(months)}" for k in keys) + " |")
 
     # gate
     w("\n## 6. Gate after the 1-year run (rules unchanged: pass needs OOS n ≥ 30, PF ≥ 1.2, DSR ≥ 0.95; probation needs train validation + OOS net > 0)\n")
@@ -152,25 +222,36 @@ def main():
 
     # other agents
     w("\n## 7. Other agents — unified backtest over the year (Nifty 50 stocks, NIFTY futures, MCX)\n")
-    if ub:
-        w(f"Sessions: NSE {len(ub['days'])} ({ub['days'][0]} … {ub['days'][-1]}), MCX {len(ub.get('mcx_days') or [])}. "
-          f"Run time {ub.get('elapsed_s')} s. These agents stay paused by focus mode; this is for completeness.\n")
-        w("| Agent | Trades | Win % | Gross | Costs | Net | %/month | Max DD | PF | DSR | Verdict |\n|---|---|---|---|---|---|---|---|---|---|---|")
-        nd = max(1, len(ub["days"]))
+    w("Same unified_backtest engine as before (live agent decision code, agent_policy gates, exit_policy, full costs; "
+      "walk-forward 4 expanding folds with 1-session embargo — the unified_backtest default). These agents stay paused by "
+      "focus mode; this run is for completeness and changes no gate.\n")
+    runs = [("NSE stocks + NIFTY futures/options agents", HERE / "logs/backtests/unified_backtest_1y_nse.json", False),
+            ("MCX (5 contracts, sessions where all have bars)", HERE / "logs/backtests/unified_backtest_1y_mcx.json", True),
+            ("MCX SILVERM alone (its full 248 sessions)", HERE / "logs/backtests/unified_backtest_1y_silverm.json", True)]
+    for title, pth, is_mcx in runs:
+        if not pth.exists():
+            w(f"**{title}:** not finished in this run (see remaining work).\n")
+            continue
+        ub = json.loads(pth.read_text())
+        ds = ub.get("mcx_days") if is_mcx else ub.get("days")
+        if not ds:
+            continue
+        w(f"**{title}** — {len(ds)} sessions {ds[0]} … {ds[-1]}, run time {ub.get('elapsed_s')} s.\n")
+        w("| Agent | Trades | Win % | Gross | Costs | Net | %/month on ₹10L | Max DD | PF | DSR | Verdict |\n|---|---|---|---|---|---|---|---|---|---|---|")
         for a, r in ub["agents"].items():
-            s = r.get("stats") or {}
-            if not s:
-                w(f"| {a} | — | — | — | — | — | — | — | — | — | {r.get('verdict', r.get('note', 'not run'))} |")
+            s_ = r.get("stats") or {}
+            if not s_ or not s_.get("trades"):
+                why = r.get("verdict") or r.get("note") or "no trades"
+                if is_mcx == (a in ("mcx_native", "invent")):
+                    w(f"| {a} | 0 | — | — | — | — | — | — | — | — | {why} |")
                 continue
-            dd = s.get("max_dd")
-            w(f"| {a} | {s.get('trades')} | {s.get('win_rate')} | {inr(s.get('gross'))} | {inr(s.get('costs'))} | {inr(s.get('net'))} | "
-              f"{100 * (s.get('net') or 0) / 1e6 / (len(ub.get('mcx_days') or []) if a in ('mcx_native','invent') and ub.get('mcx_days') else nd) * 21:+.2f}% | "
-              f"{inr(dd)} | {f(s.get('profit_factor'))} | {f(s.get('dsr'),3)} | {r.get('verdict')} |")
+            w(f"| {a} | {s_.get('trades')} | {s_.get('win_rate')} | {inr(s_.get('gross'))} | {inr(s_.get('costs'))} | "
+              f"{inr(s_.get('net'))} | {100 * (s_.get('net') or 0) / 1e6 / len(ds) * 21:+.2f}% | {inr(s_.get('max_dd'))} | "
+              f"{f(s_.get('profit_factor'))} | {f(s_.get('dsr'), 3)} | {r.get('verdict')} |")
         for n in ub.get("notes", []):
             w(f"- {n}")
-    else:
-        w("Not completed in this run — see remaining work.")
-    w("\nFiles: `logs/backtest_1y_options.json`, `logs/backtests/unified_backtest_1y.json`, `logs/kite_1y/coverage.json`, "
+        w("")
+    w("\nFiles: `logs/backtest_1y_options.json`, `logs/backtests/unified_backtest_1y_{nse,mcx,silverm}.json`, `logs/kite_1y/coverage.json`, "
       "`logs/kite_1y/iv_model.json`, chart `/workspace/abitrade_1y_equity.png`.")
     OUT.write_text("\n".join(L) + "\n")
     print("wrote", OUT)

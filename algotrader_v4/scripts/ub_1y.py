@@ -84,10 +84,11 @@ def prep() -> dict:
 
 def main():
     import unified_backtest as U
-    cov = prep()
+    cov = (json.loads((K1Y / "mcx_stitch_coverage.json").read_text()) if os.environ.get("UB_SKIP_PREP")
+           else prep())
     print("MCX stitch:", json.dumps({k: (v["days"], v["first"], v["last"]) for k, v in cov.items()}), flush=True)
     U.DATA_DIR = UBD
-    U.NATIVE_DIR = UBD / "_native"
+    U.NATIVE_DIR = Path(os.environ["UB_NATIVE_DIR"]) if os.environ.get("UB_NATIVE_DIR") else UBD / "_native"
     U.CACHE_DIR = K1Y / "ub_cache"
     import owner_universe as OU
     from nifty100 import NIFTY_50
@@ -98,13 +99,14 @@ def main():
     o.fo_underlying_allowed = lambda u, *a, **k: u == "NIFTY"
     OU._nifty50 = lambda: list(NIFTY_50)
     days = int(os.environ.get("UB_DAYS", "250"))
-    args = ["--agents", "all", "--days", str(days), "--workers", os.environ.get("UB_WORKERS", "6"),
-            "--out", str(HERE / "logs" / "backtests" / "unified_backtest_1y.json")]
+    agents = os.environ.get("UB_AGENTS", "all")
+    args = ["--agents", agents, "--days", str(days), "--workers", os.environ.get("UB_WORKERS", "6"),
+            "--out", os.environ.get("UB_OUT", str(HERE / "logs" / "backtests" / "unified_backtest_1y.json"))]
     # UB_SYMBOLS: the stock agents only ever trade their top-10 whitelist (ranked on TRAIN
     # turnover), so a 1-year run uses the 12 most liquid Nifty 50 names ranked on the
     # 40 sessions BEFORE the OOS window (no look-ahead) + the 5 MCX contracts.
     if os.environ.get("UB_SYMBOLS"):
-        args += ["--symbols", os.environ["UB_SYMBOLS"] + ",CRUDEOIL-FUT,CRUDEOILM-FUT,NATURALGAS-FUT,SILVERM-FUT,GOLDM-FUT"]
+        args += ["--symbols", os.environ["UB_SYMBOLS"]]
     U.main(args)
 
 
