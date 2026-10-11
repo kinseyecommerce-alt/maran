@@ -64,7 +64,8 @@ def main():
       f"{sum(1 for k in posx if ex5_(k) <= 0)} turn negative without their 5 best trades: the profit comes from a few "
       f"big trend days, so it's a fat-tailed bet, not a steady earner.")
     w(f"- **Gate (rules unchanged):** probation now = {', '.join(k for k, v in gw_.items() if v == 'probation') or 'none'}. "
-      f"FIRST_HOUR_TREND and X_CPR_NARROW dropped to blocked. Nothing is `pass`, and LIVE stays locked.")
+      f"TWAP_REJECT, TOD_PE_1330 and X_ORB15_SEL moved up from blocked (positive OOS net, weak PF/DSR; TOD_PE_1330 is a plain "
+      f"time-of-day baseline, treat with scepticism); FIRST_HOUR_TREND and X_CPR_NARROW dropped to blocked. Nothing is `pass`, and LIVE stays locked.")
     others = []
     for pth in ("unified_backtest_1y_nse.json", "unified_backtest_1y_mcx.json", "unified_backtest_1y_silverm.json"):
         q_ = HERE / "logs" / "backtests" / pth
@@ -199,7 +200,7 @@ def main():
     # monthly
     w("## 5. Monthly OOS P&L (₹, after costs)\n")
     keys = ["AGENT:validated_signals", "SIG:FIRST_HOUR_TREND", "EXEC:X_ORB15_BUY", "EXEC:X_ST_VWAP_BUY", "EXEC:X_CPR_NARROW",
-            "SIG:TWAP_REJECT", "SIG:TOD_PE_1330", "EXEC:X_IFLY_920"]
+            "EXEC:X_ORB15_SEL", "SIG:TWAP_REJECT", "SIG:TOD_PE_1330", "EXEC:X_IFLY_920"]
     keys = [k for k in keys if k in cur]
     mon = {}
     for k in keys:
@@ -220,7 +221,10 @@ def main():
     tradable = {k: s for k, s in gw.items() if s != "blocked"}
     w(f"Tradable now (paper): {', '.join(f'{k} = {s}' for k, s in tradable.items()) or '**none** — every signal is blocked'}.\n")
     prev = {"FIRST_HOUR_TREND": "probation", "X_ORB15_BUY": "probation", "X_ST_VWAP_BUY": "probation", "X_CPR_NARROW": "probation"}
-    w("| Former probation signal | Before | After 1-year run | Why |\n|---|---|---|---|")
+    for k, st in gw.items():
+        if st != "blocked" and k not in prev:
+            prev[k] = "blocked"
+    w("| Signal | Before | After 1-year run | Why |\n|---|---|---|---|")
     gs = {**opt["gate_signals"], **opt["gate_methods"]}
     for k, b in prev.items():
         w(f"| {k} | {b} | {gw.get(k, (gs.get(k) or {}).get('status'))} | {(gs.get(k) or {}).get('why', '')} |")
