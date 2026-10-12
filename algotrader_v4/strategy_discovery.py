@@ -2471,6 +2471,7 @@ def run(budget_min: float = 120, workers: Optional[int] = None, seed: Optional[i
             if r["h"] in ledger or _dup_of_ledger(r, store, ledger):
                 continue
             res = holdout_test(UH, r, ledger, log)
+            lineage[r["h"]] = True          # descendants of a holdout-tested rule are holdout-contaminated
             touched += 1
             hold_res.append(res)
             fin["finalists"].append(res)
@@ -2722,10 +2723,16 @@ def status() -> dict:
 def leaderboard(limit: int = 50, inst: Optional[str] = None) -> dict:
     d = _load(LEADER_PATH, {"rows": []})
     rows = [r for r in d.get("rows", []) if not inst or r["inst"] == inst][:max(1, min(int(limit), LEADERBOARD_KEEP * 2))]
+    ledger = _load(LEDGER_PATH, {})
     out = []
     for r in rows:
         m = r["m"]
         why = _strict_fails(m) + (r.get("mt_fails") or [])
+        lg = ledger.get(r["h"])
+        if lg and "passed" in lg:          # its one look at the sealed holdout is spent
+            why.append(f"sealed holdout {'PASSED' if lg['passed'] else 'FAILED'} (single touch {lg.get('touched')}): "
+                       f"n={lg.get('trades')} net ₹{lg.get('net'):,}" + ("" if lg["passed"] else
+                       f" — {'; '.join((lg.get('fails') or [])[:3])}"))
         if any(f.startswith("stress not run") for f in m.get("fails") or []):
             why.append("stress not run (failed earlier criteria)")
         out.append({"h": r["h"], "desc": r["desc"], "inst": r["inst"], "trades": m["trades"], "win_pct": m.get("win_pct"),
