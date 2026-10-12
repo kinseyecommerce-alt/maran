@@ -584,6 +584,65 @@ def t_mcx_intra_flat_same_day_causal_pessimistic():
     assert both[0]["net"] <= min(longs[0]["net"], shorts[0]["net"]) + 1e-9
 
 
+def t_mcx_intra_v3_data_hygiene():
+    """Audit 2026-10-12 (MCX_INTRA GAP_GO): contract splices / rolls / tender days / partial sessions,
+    roll-aware ATR, live-engine notional cap, open + square-off fill slippage."""
+    import segments
+    assert SD.MCX_NOTIONAL_CAP == segments.notional_caps("MCX")[0]          # backtest cap == live risk check
+    # flags: an OI jump (contract splice), a roll (OI + volume jump) → tender days before it, calendar skips
+    d0 = date(2025, 3, 3)                                                    # Monday
+    ds = [d0 + timedelta(days=k) for k in range(40) if (d0 + timedelta(days=k)).weekday() < 5]
+    rows = [(d, 100.0, 101.0, 99.0, 100.0, 1000.0, 5000.0) for d in ds]
+    rows[10] = rows[10][:5] + (1000.0, 1500.0)                               # OI ×0.3 → splice
+    rows[11] = rows[11][:5] + (1000.0, 5000.0)                               # OI ×3.3 back → splice
+    rows[20] = rows[20][:5] + (100.0, 800.0)
+    rows[21] = rows[21][:5] + (5000.0, 9000.0)                               # roll: OI ×11, volume ×50
+    sp, sk = SD.mcx_contract_flags(rows, "GOLDM")
+    assert sp[10] and sp[11] and sp[21] and not sp[5] and not sp[25]
+    assert sk[16:21].all() and not sk[15] and not sk[21]                     # bullion: 5 tender sessions
+    sp2, sk2 = SD.mcx_contract_flags(rows, "CRUDEOILM")
+    assert sk2[20] and not sk2[19]                                           # energy: the expiry day only
+    nse = ({d for d in ds if d != ds[7]}, ds[0], ds[-1])                     # NSE shut on ds[7] → evening-only MCX
+    wk = rows + [(date(2025, 4, 12), 100.0, 101.0, 99.0, 100.0, 1000.0, 5000.0)]   # a Saturday special session
+    _sp, sk3 = SD.mcx_contract_flags(wk, "CRUDEOILM", nse)
+    assert sk3[7] and sk3[-1] and not sk3[6]
+    assert SD.mcx_contract_flags([r[:5] for r in rows], "GOLDM")[0].sum() == 0   # no OI → no splice flags
+    # roll-aware ATR: a 10 % splice gap does not enter the true range
+    H = np.array([101.0] * 30); L = np.array([99.0] * 30); C = np.array([100.0] * 30)
+    H[20:] *= 1.1; L[20:] *= 1.1; C[20:] *= 1.1
+    spl = np.zeros(30, bool); spl[20] = True
+    assert SD.atr_spliced(H, L, C, spl, 14)[20] < 2.5 < DD.atr_series(H, L, C, 14)[20]
+    # GAP_GO: a 1 % gap on a splice day never trades; the same gap within one contract does
+    base = []
+    p = 6000.0
+    for d in [date(2024, 1, 1) + timedelta(days=i) for i in range(200)]:
+        if d.weekday() >= 5:
+            continue
+        base.append((d, p, p * 1.004, p * 0.996, p, 1000.0, 5000.0))
+    k = len(base) - 1
+    d, o, h, l, c, v, oi = base[k]
+    gap = (d, c * 1.01, c * 1.03, c * 1.0095, c * 1.025, v, oi)              # gap up, trends, stop untouched
+    spec = {"inst": "MCX_INTRA", "entry": {"type": "GAP_GO", "g": 0.006}, "sym": "CRUDEOILM", "dir": "long",
+            "filters": [], "exit": {"stop_atr": 0.3, "tgt_r": None}}
+    U = synth_universe(60, seed=5)
+    for oi_new, want in ((oi, 1), (oi * 3, 0)):
+        rr = base[:k] + [gap[:6] + (oi_new,)]
+        U2 = DD.Universe(U.sessions, U.nifty, {}, {}, [], {"CRUDEOILM": rr}, set())
+        tr = [t for t in SD.run_spec(U2, spec) if t["d"] == d]
+        assert len(tr) == want, (oi_new, tr)
+        if want:
+            q = 10.0 * min(int(0.01 * SD.CAPITAL // (0.3 * 24.0 * 10.0)) or 1, int(SD.MCX_NOTIONAL_CAP // (gap[1] * 10.0)))
+            ep = gap[1] * (1 + SD.MCX_SLIP + SD.MCX_OPEN_SLIP)                # open print + extra open slippage
+            x = gap[4] * (1 - SD.MCX_SLIP - SD.MCX_SQOFF_SLIP)                # official close − square-off slippage
+            assert tr[0]["exit_reason"] == "square-off" and tr[0]["net"] < (x - ep) * q + 1e-6
+    # a 1-lot contract notional above the cap is never traded
+    big = [(r[0], r[1] * 400, r[2] * 400, r[3] * 400, r[4] * 400, r[5], r[6]) for r in base[:k]] + \
+          [(gap[0], gap[1] * 400, gap[2] * 400, gap[3] * 400, gap[4] * 400, gap[5], gap[6])]
+    U3 = DD.Universe(U.sessions, U.nifty, {}, {}, [], {"CRUDEOILM": big}, set())
+    assert not [t for t in SD.run_spec(U3, spec) if t["d"] == d]               # 2.4M × 10 ≫ ₹10L
+    assert SD.spec_hash(spec) != SD.spec_hash(dict(spec, inst="MCX_SWING")) and SD.canon(spec)["_sim"] == 3
+
+
 def _stock_panel(U, ns=6, seed=3):
     rng = np.random.default_rng(seed)
     stocks, sd = {}, {}

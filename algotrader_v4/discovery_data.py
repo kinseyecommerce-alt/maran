@@ -277,6 +277,16 @@ def _read_ohlcv(path: Path):
     return ts, df
 
 
+def load_daily_ohlcvi(path: Path) -> list:
+    """[(d, o, h, l, c, volume, oi)] — MCX continuous series keep volume/OI (splice detection)."""
+    out = []
+    with open(path) as f:
+        for r in csv.DictReader(f):
+            out.append((date.fromisoformat(r["date"][:10]), float(r["open"]), float(r["high"]), float(r["low"]),
+                        float(r["close"]), float(r.get("volume") or 0), float(r.get("oi") or 0)))
+    return out
+
+
 def load_daily_ohlc(path: Path) -> list:
     out = []
     with open(path) as f:
@@ -339,7 +349,7 @@ class Universe:
     stocks: dict                        # d → (syms, arr[5, nstk, nbar])
     stock_daily: dict                   # sym → {d: (o,h,l,c)}
     nifty_daily: list                   # [(d,o,h,l,c)] from 2024
-    mcx: dict                           # name → [(d,o,h,l,c)]
+    mcx: dict                           # name → [(d,o,h,l,c,volume,oi)]
     real_days: set
     lo: Optional[date] = None           # visible window (inclusive); None = open-ended
     hi: Optional[date] = None
@@ -406,7 +416,7 @@ def load_universe(log=print, with_stocks: bool = True) -> Universe:
     for name in MCX_SPECS:
         p = K1Y / f"MCX_{name}_CONT_day.csv"
         if p.exists():
-            mcx[name] = load_daily_ohlc(p)
+            mcx[name] = load_daily_ohlcvi(p)
     add_vol_event_features(nifty, sessions)
     log(f"universe: {len(nifty)} NIFTY sessions {sessions[0]}…{sessions[-1]}, stocks {len(sd)}, "
         f"MCX {list(mcx)} ({time.time()-t0:.0f}s)")

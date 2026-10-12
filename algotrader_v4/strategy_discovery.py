@@ -214,8 +214,11 @@ def canon(spec: dict) -> dict:
     s.pop("meta", None)
     if "filters" in s:
         s["filters"] = sorted([list(f) for f in s["filters"]], key=lambda f: json.dumps(f))
-    if s.get("inst") == "MCX_INTRA" and (s.get("entry") or {}).get("type") == "PDHL_BRK":
-        s["_sim"] = 2     # v2: both-break days booked worse-side (v1 skipped them with hindsight) → new hashes
+    if s.get("inst") == "MCX_INTRA":
+        # v2 (PDHL_BRK): both-break days booked worse-side (v1 skipped them with hindsight).
+        # v3 (all MCX_INTRA, audit 2026-10-12): contract splices/rolls/tender days/partial sessions
+        # excluded, roll-aware ATR, ₹10L notional cap, open/square-off fill slippage → new hashes.
+        s["_sim"] = 3
     return s
 
 
@@ -858,7 +861,19 @@ EQ_POS_CAP = 400_000.0
 SW_POS = 200_000.0
 DP_CHARGE = 15.93
 MCX_SLIP = 0.0002
-MCX_NOTIONAL_CAP = 2_000_000.0
+# ONE MCX position's contract notional cap = the live engine's (segments.notional_caps("MCX")[0] =
+# segment_capital_mcx × segment_max_position_notional_x = ₹10L).  Was ₹20L, which let the backtest
+# trade 1-lot GOLDM / SILVERM (₹12–20L notional) that the PAPER/LIVE risk check rejects (audit 2026-10-12).
+MCX_NOTIONAL_CAP = 1_000_000.0
+# Daily-bar fill realism for MCX_INTRA (audit 2026-10-12): the 09:00 open print is often a thin first
+# trade (Kite day open == first minute open; the open is the day's exact low/high on ~9–15 % of days vs
+# ~2 % for a random walk) → a market order at the open pays extra; the day "close" is MCX's official
+# closing price (≈ VWAP 23:00–23:30, median 3–14 bps from the 23:20 square-off price) → extra on exit.
+MCX_OPEN_SLIP = 0.0005
+MCX_SQOFF_SLIP = 0.0005
+MCX_TENDER_DAYS = {"GOLDM": 5, "SILVERM": 5}      # sessions before a roll the CONT series sits on the
+MCX_TENDER_DEFAULT = 1                            # expiring (tender / expiry-day, illiquid) contract
+MCX_SPECIAL_SESSIONS = {date(2024, 11, 1), date(2025, 10, 21)}   # Diwali Muhurat (1-hour sessions)
 STRESS = {"slip_mult": 2.0, "cost_mult": 1.25}      # non-option stress (same as profit_eval)
 
 
@@ -1670,6 +1685,61 @@ def _sim_mcx_one(U, sym: str, spec: dict, stress: bool) -> list:
     return [x for x in out if lo_d is None or x["d"] >= lo_d]
 
 
+def _nse_dates(U) -> Optional[tuple]:
+    """(set of NSE trading dates, first, last) from the NIFTY daily file, or None (synthetic universes)."""
+    nd = getattr(U, "nifty_daily", None) or []
+    if not nd:
+        return None
+    ds = {r[0] for r in nd}
+    return ds, min(ds), max(ds)
+
+
+def mcx_contract_flags(rows: list, sym: str, nse: Optional[tuple] = None) -> tuple:
+    """Data-hygiene flags for Kite's CONTINUOUS MCX daily series (unadjusted, contract-stitched).
+
+    splice[t]: the bar of day t comes from a different contract than day t-1 (open interest jumps
+      ×>1.5 or ×<0.6 overnight — it never does within one front contract; on a roll the volume jumps
+      too).  The overnight "gap" then is the calendar spread and the true range is polluted.
+      Includes the alternating-contract stretches (e.g. SILVERM Jan–Feb 2026: OI 2k ↔ 19k daily).
+    skip[t]: not a normal tradable front-month session — the TENDER / expiry days the series spends
+      on the expiring contract before a roll (bullion 5 sessions, energy the expiry day; a live trader
+      is in the next month by then), weekend special sessions (Budget), Diwali Muhurat, and weekdays
+      on which NSE is shut (MCX runs the evening session only — the 09:00 open does not exist).
+    Contract identity and the exchange calendar are known before the open, so these flags are not
+    look-ahead; OI / volume only serve as the proxy that recovers them from the stitched series.
+    Rows without volume/OI (5-tuples) get no splice flags."""
+    n = len(rows)
+    splice = np.zeros(n, bool)
+    skip = np.zeros(n, bool)
+    if n and len(rows[0]) >= 7:
+        v = np.array([float(r[5]) for r in rows]); oi = np.array([float(r[6]) for r in rows])
+        with np.errstate(divide="ignore", invalid="ignore"):
+            oir = np.r_[1.0, oi[1:] / np.where(oi[:-1] > 0, oi[:-1], np.nan)]
+            vr = np.r_[1.0, v[1:] / np.where(v[:-1] > 0, v[:-1], np.nan)]
+        oir = np.nan_to_num(oir, nan=1.0); vr = np.nan_to_num(vr, nan=1.0)
+        splice = (oir > 1.5) | (oir < 0.6)
+        roll = (oir > 1.5) & (vr > 2.0)
+        k = MCX_TENDER_DAYS.get(sym, MCX_TENDER_DEFAULT)
+        for t in np.flatnonzero(roll):
+            skip[max(0, t - k):t] = True
+    for i, r in enumerate(rows):
+        dd = r[0]
+        if dd.weekday() >= 5 or dd in MCX_SPECIAL_SESSIONS:
+            skip[i] = True
+        elif nse and nse[1] <= dd <= nse[2] and dd not in nse[0]:
+            skip[i] = True
+    return splice, skip
+
+
+def atr_spliced(H, L, C, splice, n: int = 14) -> np.ndarray:
+    """Wilder ATR whose true range ignores the previous close across a contract splice (H−L only)."""
+    from discovery_data import wilder
+    pc = np.r_[C[0], C[:-1]]
+    tr = np.maximum(H - L, np.maximum(abs(H - pc), abs(L - pc)))
+    tr = np.where(splice, H - L, tr)
+    return wilder(tr, n)
+
+
 def sim_mcx_intra(U, spec: dict, stress: bool = False) -> list:
     from discovery_data import MCX_SPECS
     syms = list(MCX_SPECS) if spec.get("sym") == "ALL" else [spec.get("sym")]
@@ -1692,19 +1762,21 @@ def _sim_mcx_intra_one(U, sym: str, spec: dict, stress: bool) -> list:
     L = np.array([r[3] for r in rows]); C = np.array([r[4] for r in rows])
     mult = MCX_SPECS[sym][0]
     sm, cm = (STRESS["slip_mult"], STRESS["cost_mult"]) if stress else (1.0, 1.0)
-    atr = atr_series(H, L, C, 14)
+    splice, skip = mcx_contract_flags(rows, sym, _nse_dates(U))
+    atr = atr_spliced(H, L, C, splice, 14)
     atr_mean = _sma(atr[None, :], 50)[0]
     sma50 = _sma(C[None, :], 50)[0]
     e, ex = spec["entry"], spec["exit"]
     typ = e["type"]
     gapr = np.r_[0, O[1:] / C[:-1] - 1]
+    gapr[splice] = np.nan                 # a gap across a contract splice is the calendar spread, not a move
     roll = np.abs(gapr) > np.maximum(0.03, 4 * np.r_[np.nan, (atr / C)[:-1]])
     rsi2 = _rsi2(C[None, :])[0] if typ == "RSI2_OPEN" else None
     smaN = _sma(C[None, :], e["n"])[0] if typ == "TREND_OPEN" else None
     rng_ = H - L
     out = []
     for t in range(60, len(C)):          # t = trade day; information from days ≤ t-1 (+ the open of t)
-        if roll[t] or roll[t - 1] or (lo_d and d[t] < lo_d):
+        if roll[t] or roll[t - 1] or splice[t] or skip[t] or (lo_d and d[t] < lo_d):
             continue
         a = atr[t - 1]
         if not np.isfinite(a) or a <= 0:
@@ -1728,7 +1800,7 @@ def _sim_mcx_intra_one(U, sym: str, spec: dict, stress: bool) -> list:
                 side, px0 = -1, min(O[t], dn)
         elif typ in ("GAP_GO", "GAP_FADE"):
             g = gapr[t]
-            if abs(g) >= e["g"]:
+            if np.isfinite(g) and abs(g) >= e["g"]:
                 side = (1 if g > 0 else -1) * (1 if typ == "GAP_GO" else -1)
         elif typ == "TREND_OPEN":
             if np.isfinite(smaN[t - 1]):
@@ -1762,7 +1834,8 @@ def _sim_mcx_intra_one(U, sym: str, spec: dict, stress: bool) -> list:
             lots = min(lots, int(MCX_NOTIONAL_CAP // (px0 * mult)))
             if lots < 1:
                 return None
-            ep = px0 + side * px0 * MCX_SLIP * sm
+            s_in = MCX_SLIP + (MCX_OPEN_SLIP if px0 == O[t] else 0.0)      # market order into the open print
+            ep = px0 + side * px0 * s_in * sm
             stop = ep - side * R
             tgt = ep + side * ex["tgt_r"] * R if ex.get("tgt_r") else None
             adv, fav = (L[t], H[t]) if side > 0 else (H[t], L[t])
@@ -1772,14 +1845,15 @@ def _sim_mcx_intra_one(U, sym: str, spec: dict, stress: bool) -> list:
                 xp, why = tgt, "target"
             else:
                 xp, why = C[t], "square-off"
-            x = xp - side * xp * MCX_SLIP * sm
+            s_out = MCX_SLIP + (MCX_SQOFF_SLIP if why == "square-off" else 0.0)   # official close ≠ 23:20 fill
+            x = xp - side * xp * s_out * sm
             q = lots * mult
             gross = (x - ep) * side * q
             cost = (_oc("MCX_FUT", "BUY" if side > 0 else "SELL", q, ep, "MCX") +
                     _oc("MCX_FUT", "SELL" if side > 0 else "BUY", q, x, "MCX")) * cm
             return {"d": d[t], "kind": "mcx_intra", "sym": sym, "side": "L" if side > 0 else "S",
                     "t_in": datetime.combine(d[t], dtime(9, 0)), "net": gross - cost,
-                    "cost": cost + MCX_SLIP * sm * (ep + x) * q, "exit_reason": why, "days": 0}
+                    "cost": cost + sm * (s_in * ep + s_out * x) * q, "exit_reason": why, "days": 0}
 
         res = []
         for sd, px in cands:
