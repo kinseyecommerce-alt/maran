@@ -212,6 +212,55 @@ def t_fast_scalper_filter_and_unsubscribe():
         fast_scalper.insts, kite_ws_feed._tokens = saved_i, saved_t
 
 
+def t_focus_still_subscribes_and_records():
+    """intraday_no_options focus pauses scalper ENTRIES but must still subscribe +
+    record ticks for Nifty-50 stocks, the NIFTY front future and in-scope MCX futures."""
+    _jag()
+    from fast_scalper import fast_scalper, _entry_allowed
+    from kite_client import kite_client
+    from segment_engine import native_engine
+    import tick_recorder
+    masters = {
+        "NSE": [{"tradingsymbol": "RELIANCE", "instrument_token": 11, "tick_size": 0.05},
+                {"tradingsymbol": "YESBANK", "instrument_token": 12, "tick_size": 0.01}],
+        "NFO": [{"tradingsymbol": "NIFTY26OCTFUT", "instrument_token": 21, "name": "NIFTY", "segment": "NFO-FUT",
+                 "instrument_type": "FUT", "expiry": "2099-10-27", "tick_size": 0.1, "lot_size": 75},
+                {"tradingsymbol": "NIFTY26OCT25000CE", "instrument_token": 22, "name": "NIFTY", "segment": "NFO-OPT",
+                 "instrument_type": "CE", "expiry": "2099-10-27", "tick_size": 0.05, "lot_size": 75}],
+        "MCX": [{"tradingsymbol": "CRUDEOILM26OCTFUT", "instrument_token": 31, "tick_size": 1.0},
+                {"tradingsymbol": "ZINC26OCTFUT", "instrument_token": 32, "tick_size": 0.05}],
+    }
+    saved = (kite_client.get_instruments, dict(native_engine.kite_sym), dict(fast_scalper.insts),
+             owner_universe.focus())
+    import segment_engine as se
+    saved_rff = se.resolve_front_future
+    rec = []
+    saved_record = tick_recorder.depth_recorder.record
+    try:
+        owner_universe.set_focus("intraday_no_options", actor="test")
+        kite_client.get_instruments = lambda exch: masters.get(exch, [])
+        se.resolve_front_future = lambda rows, und: next((r for r in rows if r.get("instrument_type") == "FUT"
+                                                          and r.get("name") == und), None)
+        native_engine.kite_sym = {"CRUDEOILM-FUT@MCX": "MCX:CRUDEOILM26OCTFUT", "ZINC-FUT@MCX": "MCX:ZINC26OCTFUT"}
+        n = fast_scalper.build_universe()
+        keys = {i.key for i in fast_scalper.insts.values()}
+        assert n >= 3, (n, keys)
+        assert "RELIANCE@NSE_EQ" in keys and "NIFTY26OCTFUT@NSE_FO" in keys and "CRUDEOILM-FUT@MCX" in keys, keys
+        assert "ZINC-FUT@MCX" not in keys and "NIFTY26OCT25000CE@NSE_FO" not in keys, keys
+        inst = fast_scalper.insts[31]
+        assert _entry_allowed(inst)[0] is False                  # scalper itself still paused for entries
+        tick_recorder.depth_recorder.record = lambda key, t: rec.append(key)
+        fast_scalper.on_tick({"token": 31, "ltp": 5600.0, "recv_ts": 1.0})
+        assert rec == ["CRUDEOILM-FUT@MCX"], rec                    # ticks recorded with no strategy approved
+    finally:
+        tick_recorder.depth_recorder.record = saved_record
+        kite_client.get_instruments, se.resolve_front_future = saved[0], saved_rff
+        native_engine.kite_sym, fast_scalper.insts = saved[1], saved[2]
+        for tok in (11, 12, 21, 22, 31, 32):
+            fast_scalper.state.pop(tok, None)
+        owner_universe.set_focus(saved[3], actor="test")
+
+
 def t_inventor_respects_universe():
     _jag()
     from strategy_inventor import strategy_inventor
@@ -273,6 +322,7 @@ for n, f in [("no owner file → unrestricted (legacy)", t_default_unrestricted)
              ("master scan promotion (add_symbols) filtered", t_base_agent_add_symbols_filtered),
              ("options engine: baskets/buys only NIFTY", t_options_engine_only_nifty),
              ("fast scalper drops + unsubscribes paused instruments; MCX kept; open scalp kept", t_fast_scalper_filter_and_unsubscribe),
+             ("focus intraday_no_options: still subscribes + records N50/NIFTY fut/MCX", t_focus_still_subscribes_and_records),
              ("strategy inventor + master approval respect universe", t_inventor_respects_universe),
              ("tick engine does not stream paused symbols", t_tick_engine_does_not_stream_paused),
              ("learning readiness still reports paused segments", t_learning_reports_paused_segments),

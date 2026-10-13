@@ -161,6 +161,15 @@ class Ctx:
     max_age: float = SCALP_TICK_MAX_AGE
 
 
+def _entry_allowed(inst: "Inst") -> tuple:
+    """NEW scalp entry gate: focus mode must allow the fast_scalper agent AND the symbol."""
+    from owner_universe import owner_universe
+    ok, why = owner_universe.agent_allowed("fast_scalper")
+    if not ok:
+        return False, why
+    return owner_universe.allows(inst.symbol, segment=inst.segment)
+
+
 def seg_key(inst: "Inst") -> str:
     return OPT_SEG_KEY if inst.kind == "opt" else inst.segment
 
@@ -628,10 +637,12 @@ class FastScalper:
         an instrument with an open scalp or resting order is kept until it exits."""
         from owner_universe import owner_universe
         out = {}
-        focus_ok = owner_universe.agent_allowed("fast_scalper")[0]     # focus mode pauses the scalper
+        # NOTE: focus mode pausing the scalper must NOT empty the subscription —
+        # in-scope instruments are still subscribed and their ticks RECORDED for
+        # future backtests; NEW entries are blocked separately in _ctx.universe_fn.
         for tok, i in insts.items():
             st = self.state.get(tok)
-            if (focus_ok and owner_universe.allows(i.symbol, segment=i.segment)[0]) or (st and (st.pos or st.order)):
+            if owner_universe.allows(i.symbol, segment=i.segment)[0] or (st and (st.pos or st.order)):
                 out[tok] = i
         return out
 
@@ -749,7 +760,7 @@ class FastScalper:
 
         return Ctx(risk_fn=risk_fn, capital_fn=lambda s: _limits(s)["capital"], wl=whitelist.get(),
                    windows_fn=scalper_config.windows,
-                   universe_fn=lambda i: owner_universe.allows(i.symbol, segment=i.segment),
+                   universe_fn=lambda i: _entry_allowed(i),
                    atm_fn=lambda u: ((self._opt_atm.get(u), self._opt_step.get(u))
                                      if self._opt_atm.get(u) else None),
                    hard_cap_fn=scalper_config.hard_cap, symbol_hard_cap=int(scalper_config.get()["symbol_hard_cap"]),
