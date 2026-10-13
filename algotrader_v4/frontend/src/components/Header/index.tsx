@@ -14,7 +14,7 @@ function DarkInput({ type = 'text', value, onChange, placeholder, className = ''
     <input
       type={type} value={value} onChange={onChange} placeholder={placeholder}
       readOnly={readOnly}
-      className={`w-full px-3 py-2 bg-slate-900 border border-slate-700 rounded-lg text-slate-200 text-xs placeholder:text-slate-600 focus:outline-none focus:ring-1 focus:ring-emerald-500 focus:border-emerald-500 font-mono transition-all ${readOnly ? 'opacity-50 cursor-default' : ''} ${className}`}
+      className={`w-full px-3 py-2 bg-[#0a0c10] border border-[#1e2430] rounded text-slate-200 text-xs placeholder:text-slate-600 focus:outline-none focus-visible:ring-2 focus-visible:ring-emerald-600/50 focus:border-emerald-800 font-mono transition-all ${readOnly ? 'opacity-50 cursor-default' : ''} ${className}`}
     />
   )
 }
@@ -23,12 +23,12 @@ function DarkBtn({ children, onClick, variant = 'default', disabled = false, cla
   children: React.ReactNode; onClick?: () => void
   variant?: 'default' | 'danger' | 'buy' | 'outline'; disabled?: boolean; className?: string
 }) {
-  const base = 'inline-flex items-center justify-center px-3 py-1.5 rounded-lg text-xs font-medium transition-colors disabled:opacity-50 disabled:cursor-not-allowed'
+  const base = 'inline-flex items-center justify-center px-3 py-1.5 rounded text-xs font-medium transition-colors disabled:opacity-40 disabled:cursor-not-allowed focus:outline-none focus-visible:ring-2 focus-visible:ring-emerald-600/50'
   const variants = {
-    default: 'bg-emerald-600 hover:bg-emerald-500 text-white',
-    buy:     'bg-emerald-600 hover:bg-emerald-500 text-white',
-    danger:  'bg-rose-600 hover:bg-rose-500 text-white',
-    outline: 'bg-transparent border border-slate-600 text-slate-300 hover:bg-slate-800',
+    default: 'bg-emerald-800 hover:bg-emerald-700 text-white border border-emerald-700/40',
+    buy:     'bg-emerald-800 hover:bg-emerald-700 text-white border border-emerald-700/40',
+    danger:  'bg-rose-900 hover:bg-rose-800 text-rose-100 border border-rose-800/50',
+    outline: 'bg-transparent border border-slate-700 text-slate-300 hover:bg-slate-800',
   }
   return (
     <button className={`${base} ${variants[variant]} ${className}`} onClick={onClick} disabled={disabled}>
@@ -39,10 +39,10 @@ function DarkBtn({ children, onClick, variant = 'default', disabled = false, cla
 
 function StatusBadge({ children, variant }: { children: React.ReactNode; variant: 'live' | 'paper' | 'ok' | 'warn' }) {
   const styles = {
-    live:  'bg-rose-500/20 text-rose-400 border border-rose-500/30',
-    paper: 'bg-amber-500/20 text-amber-400 border border-amber-500/30',
-    ok:    'bg-emerald-500/20 text-emerald-400 border border-emerald-500/30',
-    warn:  'bg-slate-700 text-slate-400 border border-slate-600',
+    live:  'bg-rose-950/50 text-rose-400 border border-rose-900/50',
+    paper: 'bg-amber-950/40 text-amber-400 border border-amber-900/50',
+    ok:    'bg-emerald-950/40 text-emerald-400 border border-emerald-900/50',
+    warn:  'bg-slate-800/60 text-slate-400 border border-slate-700/50',
   }
   return (
     <span className={`inline-flex items-center px-2 py-0.5 rounded text-[10px] font-bold tracking-wider font-mono ${styles[variant]}`}>
@@ -833,6 +833,7 @@ function SaveSection({ onSave, saving, label = 'Save' }: { onSave: () => void; s
 function TradingConfigPanel({ addToast }: { addToast: (msg: string, type?: any) => void }) {
   const [mode, setMode]             = useState('PAPER')
   const [modeConfirm, setModeConfirm] = useState(false)
+  const [modeConfirmText, setModeConfirmText] = useState('')
   const [modeSaving, setModeSaving] = useState(false)
 
   const [cap, setCap] = useState({
@@ -876,12 +877,18 @@ function TradingConfigPanel({ addToast }: { addToast: (msg: string, type?: any) 
   }, [])
 
   const handleModeSwitch = async (target: string) => {
-    if (target === 'LIVE' && !modeConfirm) { setModeConfirm(true); return }
+    if (target === 'LIVE' && !modeConfirm) { setModeConfirm(true); setModeConfirmText(''); return }
+    // Real-money gate: the operator must type SEND (server enforces it too).
+    if (target === 'LIVE' && modeConfirmText.trim() !== 'SEND') {
+      addToast('Type SEND to switch to LIVE', 'error'); return
+    }
     setModeSaving(true)
     try {
-      const r = await api.setTradingMode(target as 'PAPER' | 'LIVE', target === 'LIVE')
+      const r = await api.setTradingMode(target as 'PAPER' | 'LIVE', target === 'LIVE',
+                                         target === 'LIVE' ? modeConfirmText.trim() : '')
       setMode(r.data.trading_mode)
       setModeConfirm(false)
+      setModeConfirmText('')
       addToast(`Switched to ${r.data.trading_mode} mode (in-memory)`, target === 'LIVE' ? 'buy' : 'info')
     } catch (e: any) {
       addToast(e.response?.data?.detail || 'Mode switch failed', 'error')
@@ -942,10 +949,13 @@ function TradingConfigPanel({ addToast }: { addToast: (msg: string, type?: any) 
             ))}
             {modeConfirm && (
               <div className="flex items-center gap-2 ml-2">
-                <span className="text-xs text-rose-400">⚠ Confirm switch to LIVE?</span>
-                <button onClick={() => handleModeSwitch('LIVE')}
-                  className="text-xs px-2 py-1 bg-rose-600 text-white rounded-lg">Yes</button>
-                <button onClick={() => setModeConfirm(false)}
+                <span className="text-xs text-rose-400">⚠ Real orders — type SEND:</span>
+                <input value={modeConfirmText} onChange={e => setModeConfirmText(e.target.value)}
+                  placeholder="SEND" autoComplete="off" spellCheck={false} data-testid="live-confirm-text"
+                  className="w-20 px-2 py-1 bg-slate-900 border border-rose-700 rounded-lg text-xs text-slate-100 font-mono" />
+                <button onClick={() => handleModeSwitch('LIVE')} disabled={modeConfirmText.trim() !== 'SEND' || modeSaving}
+                  className="text-xs px-2 py-1 bg-rose-600 text-white rounded-lg disabled:opacity-40">Go LIVE</button>
+                <button onClick={() => { setModeConfirm(false); setModeConfirmText('') }}
                   className="text-xs px-2 py-1 border border-slate-600 text-slate-300 rounded-lg">No</button>
               </div>
             )}
@@ -1162,7 +1172,8 @@ function RiskLimitsPanel({ addToast }: { addToast: (msg: string, type?: any) => 
 // ─── Main Header ──────────────────────────────────────────────────────────────
 
 export default function Header() {
-  const { health, botStatus, wsConnected, setHealth, setBotStatus, addToast } = useStore()
+  const { health, wsConnected, setHealth, setBotStatus, addToast, engine, setEngine } = useStore()
+  const engineState = engine?.state
 
   const [time, setTime]         = useState(new Date())
   const [configOpen, setConfigOpen] = useState(false)
@@ -1196,9 +1207,11 @@ export default function Header() {
       api.botStatus().then(r => setBotStatus(r.data)).catch(() => {})
     }
     poll()
-    const t = setInterval(poll, 5000)
+    // Poll fast while the engine is starting so every indicator flips to
+    // RUNNING together (WS "engine" events also push changes instantly).
+    const t = setInterval(poll, engineState === 'starting' ? 1500 : 5000)
     return () => clearInterval(t)
-  }, [])
+  }, [engineState])
 
   useEffect(() => {
     if (!configOpen) return
@@ -1242,23 +1255,24 @@ export default function Header() {
   const handleBotToggle = useCallback(async () => {
     setBotLoading(true)
     try {
-      if (botStatus?.master_running) {
-        await api.botStop()
+      if (engine?.state === 'running') {
+        const r = await api.botStop()
+        setEngine(r.data?.engine)
         addToast('Bot stopped', 'info')
-        setBotStatus(null)
+        api.botStatus().then(s => setBotStatus(s.data)).catch(() => {})
       } else {
         const r = await api.botStart(['intraday', 'scalping'])
+        setEngine(r.data?.engine)
         if (r.status === 202 || r.data.status === 'starting') {
-          addToast('Loading instruments… agents will be live in a few seconds', 'info')
+          addToast('Engine starting — loading instruments…', 'info')
         } else {
           addToast(`Bot started — ${r.data.watchlist?.length || 0} symbols`, 'buy')
         }
-        setBotStatus(r.data)
       }
     } catch (e: any) {
       addToast(e.response?.data?.detail || 'Bot toggle failed', 'error')
     } finally { setBotLoading(false) }
-  }, [botStatus])
+  }, [engine])
 
   const saveBrokerCreds = async (fields: string[], successMsg: string) => {
     const payload: Record<string, string> = {}
@@ -1329,27 +1343,26 @@ export default function Header() {
   return (
     <>
       {/* ── Header bar ───────────────────────────────────────────────────── */}
-      <header className="h-12 bg-slate-900 border-b border-slate-800 flex items-center px-4 gap-4 shrink-0 z-30">
+      <header className="h-11 sticky top-0 bg-[#11141a] border-b border-[#1e2430] flex items-center px-4 gap-3 shrink-0 z-30">
         <div className="flex items-center gap-2 min-w-max">
-          <Cpu className="w-5 h-5 text-emerald-400" />
-          <div className="font-bold tracking-widest text-base leading-none">
-            <span className="text-emerald-400">ALGO</span><span className="text-white">PRO</span>
+          <Cpu className="w-4 h-4 text-emerald-500/90" />
+          <div className="font-bold tracking-[0.18em] text-sm leading-none font-mono">
+            <span className="text-emerald-400">ALGO</span><span className="text-slate-100">PRO</span>
           </div>
-          <span className="text-[10px] text-slate-500 font-mono ml-1">{health?.version || 'v4'}</span>
+          <span className="text-[10px] text-slate-600 font-mono">{health?.version || 'v4'}</span>
         </div>
 
-        <div className="h-5 w-px bg-slate-700" />
+        <div className="h-4 w-px bg-[#1e2430]" />
 
         <div className={clsx(
-          'flex items-center gap-1.5 px-2 py-1 rounded text-xs font-mono',
-          wsConnected ? 'text-emerald-400 bg-emerald-400/10' : 'text-slate-500 bg-slate-800',
+          'flex items-center gap-1.5 px-2 py-0.5 rounded text-[10px] font-mono border',
+          wsConnected
+            ? 'text-emerald-400/90 bg-emerald-950/30 border-emerald-900/40'
+            : 'text-slate-500 bg-slate-900 border-slate-800',
         )}>
           {wsConnected ? (
             <>
-              <span className="relative flex h-2 w-2">
-                <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-emerald-400 opacity-75" />
-                <span className="relative inline-flex rounded-full h-2 w-2 bg-emerald-500" />
-              </span>
+              <span className="inline-flex rounded-full h-1.5 w-1.5 bg-emerald-500" />
               NSE {marketOpen ? 'OPEN' : 'CONNECTED'}
             </>
           ) : (
@@ -1360,38 +1373,43 @@ export default function Header() {
         <StatusBadge variant={mode === 'LIVE' ? 'live' : 'paper'}>{mode}</StatusBadge>
 
         {health?.ticker_source && (
-          <span className="text-xs text-slate-500 font-mono hidden sm:block">
-            TICKS: <span className="text-slate-300">{health.ticker_source}</span>
+          <span className="text-[10px] text-slate-600 font-mono hidden sm:block">
+            TICKS <span className="text-slate-400">{health.ticker_source}</span>
           </span>
         )}
 
         <div className="flex-1" />
 
-        <DarkBtn variant={botStatus?.master_running ? 'danger' : 'buy'} onClick={handleBotToggle}
-          disabled={botLoading || ['scanning_instruments','loading_instruments'].includes(botStatus?.start_phase ?? '')}>
-          {botStatus?.master_running
-            ? <><ZapOff className="w-3.5 h-3.5 mr-1.5" />Stop Bot</>
-            : botStatus?.start_phase === 'scanning_instruments'
-              ? <><Zap className="w-3.5 h-3.5 mr-1.5 animate-pulse" />Scanning…</>
-              : botStatus?.start_phase === 'loading_instruments'
-              ? <><Zap className="w-3.5 h-3.5 mr-1.5 animate-pulse" />Loading instruments…</>
-              : <><Zap className="w-3.5 h-3.5 mr-1.5" />Start Bot</>}
-        </DarkBtn>
+        {/* Driven ONLY by store.engine (same object as agents panel + footer). */}
+        <span data-testid="engine-header" data-engine-state={engine?.state ?? 'unknown'}
+              title={engine?.error || engine?.label || ''}>
+          <DarkBtn variant={engineState === 'running' ? 'danger' : 'buy'} onClick={handleBotToggle}
+            disabled={botLoading || !engine || engineState === 'starting'}>
+            {engineState === 'running'
+              ? <><ZapOff className="w-3.5 h-3.5 mr-1.5" />Stop Bot</>
+              : engineState === 'starting'
+                ? <><Zap className="w-3.5 h-3.5 mr-1.5 animate-pulse" />Starting · {engine?.label}</>
+                : engineState === 'error'
+                  ? <><Zap className="w-3.5 h-3.5 mr-1.5" />Start failed — retry</>
+                  : <><Zap className="w-3.5 h-3.5 mr-1.5" />Start Bot</>}
+          </DarkBtn>
+        </span>
 
         <button onClick={openSettings}
-          className="p-1.5 rounded-lg hover:bg-slate-800 text-slate-500 hover:text-slate-300 transition-colors relative"
+          aria-label="Settings"
+          className="p-1.5 rounded hover:bg-slate-800 text-slate-500 hover:text-slate-300 transition-colors relative focus-ring"
         >
           <Settings className="w-4 h-4" />
           {connectedCount > 0 && (
-            <span className="absolute -top-0.5 -right-0.5 w-2 h-2 rounded-full bg-emerald-400" />
+            <span className="absolute -top-0.5 -right-0.5 w-1.5 h-1.5 rounded-full bg-emerald-500" />
           )}
         </button>
       </header>
 
       {/* ── Settings overlay ─────────────────────────────────────────────── */}
       {configOpen && (
-        <div className="fixed inset-0 z-50 flex flex-col bg-slate-950 font-sans">
-          <div className="flex items-center gap-2.5 px-5 py-3 border-b border-slate-800/60 shrink-0">
+        <div className="fixed inset-0 z-50 flex flex-col bg-[#0a0c10] font-sans">
+          <div className="flex items-center gap-2.5 px-5 py-3 border-b border-[#1e2430] shrink-0">
             <span className="text-emerald-400 font-bold tracking-widest text-xs">ALGOPRO</span>
             <span className="text-slate-700 text-sm">/</span>
             <span className="text-slate-400 text-xs">Settings</span>

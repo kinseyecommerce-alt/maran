@@ -9,6 +9,27 @@ Run:  python test_safety_properties.py
 All 12 must pass.  Any failure = block deployment.
 """
 from __future__ import annotations
+# Test isolation: keep test trades/P&L out of the app's real SQLite DB
+# (logs/algotrader.db). Without this, running the suite on a deployed box
+# wrote synthetic P&L that the server restored as "today's P&L" on its next
+# boot — enough to trip the daily-loss halt. Override with DATABASE_PATH.
+import os as _os_iso, tempfile as _tf_iso
+_iso_dir = _tf_iso.mkdtemp(prefix="algotrader-test-")
+_os_iso.environ.setdefault("DATABASE_PATH", _os_iso.path.join(_iso_dir, "algotrader.db"))
+_os_iso.environ["LEARNING_DB"] = _os_iso.path.join(_iso_dir, "learning.db")   # never the real logs/learning.db
+_os_iso.environ.setdefault("ADAPTIVE_DATA_DIR", _os_iso.path.join(_iso_dir, "adaptive"))
+_os_iso.environ.setdefault("SEBI_AUDIT_DIR", _iso_dir)
+_os_iso.environ.setdefault("SEGMENT_PAPER_AFTER_HOURS", "true")   # segment hours are tested explicitly in test_segments.py
+
+# Segment hours are ALWAYS enforced (the after-hours switch is ignored since
+# the 2026-10-10 audit fix): pin the segment clock to a mid-session weekday so
+# these safety properties don't depend on when the suite runs.
+def _pin_session_clock():
+    from datetime import datetime as _dt_pin
+    from zoneinfo import ZoneInfo as _ZI_pin
+    from segments import segment_manager as _sm_pin
+    _sm_pin._now_fn = lambda: _dt_pin(2026, 10, 7, 11, 0, tzinfo=_ZI_pin("Asia/Kolkata"))
+_pin_session_clock()
 
 import asyncio
 import sys

@@ -55,6 +55,7 @@ import numpy as np
 from loguru import logger
 
 from strategy_signals import GATE_THRESHOLDS, STRATEGY_CONFIG
+from ist_clock import today_ist as _today_ist
 
 
 # ── Trade record ───────────────────────────────────────────────────────────────
@@ -242,7 +243,7 @@ class AdaptiveLearningEngine:
             self._queue_rebacktest(strategy, params.symbol, "performance_decay")
 
     async def nightly_review(self, current_vix: float = 14.0, regime_changed: bool = False) -> dict:
-        report = {"date": date.today().isoformat(), "strategies_ok": [],
+        report = {"date": _today_ist().isoformat(), "strategies_ok": [],
                   "strategies_adapt": [], "strategies_retire": [],
                   "rebacktest_needed": [], "vix": current_vix, "regime_changed": regime_changed}
         with self._lock:

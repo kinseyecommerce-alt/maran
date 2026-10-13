@@ -4,22 +4,71 @@
 
 * { box-sizing: border-box; }
 
+html, body, #root {
+  height: 100%;
+  background: #0a0c10;
+  color: #c8cdd5;
+}
+
 body {
   font-family: 'Inter', system-ui, sans-serif;
   -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  font-feature-settings: 'tnum' 1;
 }
 
-.font-mono { font-family: 'JetBrains Mono', monospace; }
+.font-mono,
+.tabular {
+  font-family: 'JetBrains Mono', 'IBM Plex Mono', ui-monospace, monospace;
+  font-variant-numeric: tabular-nums;
+}
 
-/* Scrollbar styling */
-::-webkit-scrollbar { width: 4px; height: 4px; }
-::-webkit-scrollbar-track { background: #F1F5F9; }
-::-webkit-scrollbar-thumb { background: #CBD5E1; border-radius: 2px; }
-::-webkit-scrollbar-thumb:hover { background: #94A3B8; }
+/* Dense desk scrollbars */
+::-webkit-scrollbar { width: 5px; height: 5px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb { background: #2a3140; border-radius: 3px; }
+::-webkit-scrollbar-thumb:hover { background: #3d4658; }
 
-/* Smooth number transitions */
-.tick-up { color: #16A34A !important; }
-.tick-down { color: #DC2626 !important; }
+.acc-scroll::-webkit-scrollbar { width: 4px; }
+.acc-scroll::-webkit-scrollbar-track { background: transparent; }
+.acc-scroll::-webkit-scrollbar-thumb { background: #2a3140; border-radius: 3px; }
 
-/* Chart container */
+.tick-up { color: #22c55e !important; }
+.tick-down { color: #ef4444 !important; }
+
 .chart-container { position: relative; width: 100%; }
+
+/* Professional desk table */
+@layer components {
+  .desk-table {
+    @apply w-full text-xs border-collapse;
+  }
+  .desk-table thead th {
+    @apply sticky top-0 z-10 bg-[#11141a] text-[10px] font-medium uppercase tracking-wider text-[#6b7280]
+           border-b border-[#1e2430] px-3 py-2 whitespace-nowrap;
+  }
+  .desk-table tbody tr {
+    @apply border-b border-[#1e2430]/70 transition-colors;
+  }
+  .desk-table tbody tr:nth-child(even) {
+    @apply bg-[#0d1016];
+  }
+  .desk-table tbody tr:hover {
+    @apply bg-[#161a22];
+  }
+  .desk-table td {
+    @apply px-3 py-1.5 align-middle;
+  }
+  .desk-num {
+    @apply font-mono text-right tabular-nums;
+  }
+  .desk-panel {
+    @apply bg-[#11141a] border border-[#1e2430];
+  }
+  .desk-chip {
+    @apply inline-flex items-center px-1.5 py-0.5 rounded text-[10px] font-mono tracking-wide border;
+  }
+  .focus-ring {
+    @apply focus:outline-none focus-visible:ring-2 focus-visible:ring-emerald-600/60 focus-visible:ring-offset-1 focus-visible:ring-offset-[#0a0c10];
+  }
+}

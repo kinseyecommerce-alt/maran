@@ -1,7 +1,7 @@
 """
 test_all_agents_e2e.py
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-Pre-deployment end-to-end proof — ALL 8 strategy agents fire orders, every entry
+Pre-deployment end-to-end proof — all 8 strategy agents are exercised (6 place orders; options hands off to options_engine; pairs is disabled since 4a84d8d), every entry
 is protected by an SL-M (bounded loss), and the PAPER→LIVE switch routes to the
 real Kite API.
 
@@ -20,6 +20,18 @@ Run:
     python test_all_agents_e2e.py
 """
 from __future__ import annotations
+# Test isolation: keep test trades/P&L out of the app's real SQLite DB
+# (logs/algotrader.db). Without this, running the suite on a deployed box
+# wrote synthetic P&L that the server restored as "today's P&L" on its next
+# boot — enough to trip the daily-loss halt. Override with DATABASE_PATH.
+import os as _os_iso, tempfile as _tf_iso
+_iso_dir = _tf_iso.mkdtemp(prefix="algotrader-test-")
+_os_iso.environ.setdefault("DATABASE_PATH", _os_iso.path.join(_iso_dir, "algotrader.db"))
+_os_iso.environ.setdefault("ADAPTIVE_DATA_DIR", _os_iso.path.join(_iso_dir, "adaptive"))
+_os_iso.environ.setdefault("SEBI_AUDIT_DIR", _iso_dir)
+_os_iso.environ["LEARNING_DB"] = _os_iso.path.join(_iso_dir, "learning.db")   # never the real logs/learning.db
+_os_iso.environ["OWNER_UNIVERSE_PATH"] = _os_iso.path.join(_iso_dir, "owner_universe.json")  # explicit universe: no owner focus/pauses
+_os_iso.environ.setdefault("SEGMENT_PAPER_AFTER_HOURS", "true")   # segment hours are tested explicitly in test_segments.py
 
 import asyncio
 import os
@@ -30,6 +42,10 @@ os.environ.setdefault("TRADING_MODE", "PAPER")
 from unittest.mock import MagicMock, patch
 
 from config import settings
+# these suites pin pre-existing behaviour; the all-agents policy gate and smart
+# exits are covered by test_all_agents_policy.py
+settings.use_agent_policy_gate = False
+settings.use_smart_exits = False
 from kite_client import kite_client
 from risk_manager import risk_manager
 from trailing_sl_engine import trailing_sl_engine
@@ -44,7 +60,9 @@ from agents.strategy_agents import (
 from agents.base_agent import _otag
 
 # Reuse the proven snapshot builder + harness from test_full_pipeline.
-from test_full_pipeline import mk, ok, fail, check, section, summary, _orders_with_tag, MKT
+from test_full_pipeline import (mk, ok, fail, check, section, summary,
+                                _orders_with_tag, MKT, _aged_swing,
+                                stage_options_handoff)
 
 
 # ── State isolation ───────────────────────────────────────────────────────────
@@ -94,6 +112,9 @@ def build_momentum():
     # Volume-surge trend: vol≥2.0, ema9>ema21>ema50>0, macd_hist>0
     snap = mk("LT", 3600, rsi=58, volume_ratio=2.5, macd_hist=1.5,
               ema9=3620, ema21=3605, ema50=3580, ema200=3500, n_candles=30)
+    # VOL_SURGE_TREND is ADX-gated (>=25) since the 2026-07-15 redesign —
+    # a real trend, not a volume blip in choppy tape.
+    snap.indicators.adx_14 = 30.0
     with patch("agents.strategy_agents.now_ist", return_value=MKT):
         action, signal = agent.evaluate_tick(snap)
     return agent, "LT", snap, action, signal
@@ -102,6 +123,11 @@ def build_momentum():
 def build_pairs():
     agent = PairsAgent()
     from datetime import timedelta
+    # The z-score baseline is now a 60-trading-day DAILY-close window read from
+    # logs/historical_data/{sym}/1d.csv (2026-07-15 redesign). This mechanics
+    # test has no daily history on disk, so pin the baseline to the TCS/INFY
+    # warm-up ratio cluster below (3500/1600 ≈ 2.1875, tight std).
+    agent._pair_daily_baseline = lambda pair, today: (3500.0 / 1600.0, 0.02)
     # Prime INFY (leg b) price so the TCS/INFY ratio can be computed.
     with patch("agents.strategy_agents.now_ist", return_value=MKT):
         agent.evaluate_tick(mk("INFY", 1600.0, n_candles=30))
@@ -134,16 +160,12 @@ def recipes():
             mk("TCS", 3512, rsi=60, vwap=3496, macd_hist=1.6, volume_ratio=2.4,
                ema9=3500, ema21=3496, ema50=3482, spread=0.6, n_candles=30),
         ])),
-        ("swing", build_simple(SwingAgent(), "HDFCBANK", [
+        # SwingAgent scores against real daily bars now — reuse the
+        # mechanics fixture from test_full_pipeline (see _aged_swing docstring).
+        ("swing", build_simple(_aged_swing(), "HDFCBANK", [
             mk("HDFCBANK", 1700, rsi=50, vwap=1690, macd_hist=1.0,
                volume_ratio=1.5, ema9=1705, ema21=1700, ema50=1690,
                ema200=1600, n_candles=210),
-        ])),
-        ("options", build_simple(OptionsAgent(), "INFY", [
-            mk("INFY", 1620, rsi=50, vwap=1612, macd_hist=0.5, volume_ratio=1.6,
-               ema9=1615, ema21=1618, ema50=1610, ema200=1500, n_candles=30),
-            mk("INFY", 1626, rsi=58, vwap=1612, macd_hist=1.4, volume_ratio=1.9,
-               ema9=1624, ema21=1618, ema50=1612, ema200=1500, n_candles=30),
         ])),
         # FuturesAgent only trades INDEX futures (LOT_SIZES) — a stock like SBIN is
         # rejected by the index-only guard. Use NIFTY (funded futures bucket below
@@ -156,13 +178,12 @@ def recipes():
         ])),
         ("mean_reversion", build_mean_reversion()),
         ("momentum",       build_momentum()),
-        ("pairs",          build_pairs()),
     ]
 
 
 # ── Stage 1 + 2 + 3 — signal → order → protective SL, for all 8 agents ─────────
 async def stage_all_agents():
-    section("STAGE 1/2/3 — All 8 agents: signal → entry+SL-M → bounded-loss check")
+    section("STAGE 1/2/3 — 6 order-placing agents: signal → entry+SL-M → bounded-loss check")
 
     def _stub_assess(snap, action, signal, name):
         async def _coro():
@@ -221,8 +242,29 @@ async def stage_all_agents():
               f"order_id {oid} not tracked")
         fired.append(name)
 
-    check("ALL 8 agents fired an order", len(fired) == 8,
+    check("all 6 order-placing agents fired an order", len(fired) == 6,
           f"only fired: {fired}")
+
+
+# ── Pairs — single-leg trading disabled since 4a84d8d (audit #19) ─────────────
+def stage_pairs():
+    section("PAIRS — disabled by default (one unhedged leg ≠ stat-arb), mechanics intact")
+    check("pairs: pairs_single_leg_enabled defaults to False",
+          settings.pairs_single_leg_enabled is False,
+          f"pairs_single_leg_enabled={settings.pairs_single_leg_enabled}")
+    agent, symbol, trig, action, signal = build_pairs()
+    check("pairs: disabled → evaluate_tick HOLDs (no entry)",
+          action == "HOLD" and signal is None, f"action={action}")
+    # The z-score mechanics still work when explicitly re-enabled (signal only;
+    # no order is placed — atomic two-leg execution does not exist yet).
+    saved = settings.pairs_single_leg_enabled
+    settings.pairs_single_leg_enabled = True
+    try:
+        agent, symbol, trig, action, signal = build_pairs()
+    finally:
+        settings.pairs_single_leg_enabled = saved
+    check("pairs: z-score divergence still produces BUY TCS when enabled (mechanics)",
+          action == "BUY" and signal is not None, f"action={action}")
 
 
 # ── Stage 4 — PAPER→LIVE switch routes to the real Kite API ───────────────────
@@ -302,6 +344,8 @@ async def main() -> int:
     settings.total_capital       = 5_000_000.0
     try:
         await stage_all_agents()
+        await stage_options_handoff()
+        stage_pairs()
         await stage_live_switch()
     finally:
         settings.use_multi_timeframe = saved["mtf"]

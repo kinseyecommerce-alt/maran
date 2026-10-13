@@ -68,14 +68,158 @@ See `algotrader_v4/deploy/setup-vps.sh` for the full runbook.
 
 - **PAPER** (default) — simulated orders, no real money; safe for testing
 - **LIVE** — real Zerodha Kite orders; set `TRADING_MODE=LIVE` after verification
+- Runtime switch to LIVE (`POST /settings/trading-mode`, dashboard / SPA mode
+  panel) needs `confirm=true` **and** the typed phrase `confirm_text="SEND"`
+  (exact, case-sensitive). Switching back to PAPER is always allowed.
+
+### Paper mode without Kite credentials
+
+`TRADING_MODE=PAPER API_KEY=<local value> uvicorn main:app` runs with no
+broker session at all:
+
+- prices come from the GBM simulator (`market_data.paper_sim`), seeded from the
+  real index levels / last NSE bhavcopy close; candle buffers get synthetic
+  warm-up bars (`paper_synthetic_backfill`) so agents evaluate immediately
+- agents approve watchlist symbols whose startup backtest had no data
+  (`paper_approve_untested`); symbols that FAIL a real backtest stay rejected,
+  and LIVE always uses the strict gate
+- every order goes through `kite_client._paper_place` — Kite's order API is
+  never called in PAPER
+
+### Live index prices
+
+`index_feed.py` polls NIFTY, BANKNIFTY, FINNIFTY, MIDCPNIFTY, INDIA VIX and
+SENSEX: Kite `quote()` when a session exists, otherwise NSE's public
+`allIndices` (no key; SENSEX needs Kite). Stale quotes are flagged; with no
+source at all the simulator level is shown labelled `SIMULATED`, or
+`UNAVAILABLE`. `GET /market/indices`, WebSocket event `indices`, and the
+index strip under the SPA header. Daily index history for the regime
+detector comes from NSE's public `ind_close_all` archive.
+
+### Market-segment agents
+
+One supervising agent per segment, each with its own capital, risk limits
+(daily loss = 2% of segment capital, max positions, max entries/day), kill
+switch, P&L, instrument universe, trading-hours window and PAPER/LIVE gate
+(`segments.py`):
+
+| Segment | Kite | Hours (IST) | Strategies | Feed |
+|---|---|---|---|---|
+| NSE_EQ  NSE stocks | NSE | 09:15–15:30 | intraday, scalping, swing, momentum, mean_reversion, pairs | Kite/TrueData, else SIMULATED |
+| NSE_FO  NSE F&O | NFO | 09:15–15:30 | options, futures | Kite/TrueData, else SIMULATED |
+| BSE_EQ  BSE stocks | BSE | 09:15–15:30 | bse_momentum, bse_mean_reversion | SIMULATED (starts at real NSE close) |
+| MCX  commodities | MCX | 09:00–23:30 (`MCX_CLOSE_TIME`) | mcx_trend, mcx_mean_reversion | SIMULATED (synthetic levels) |
+| CDS  currency | CDS | 09:00–17:00 | cds_trend, cds_mean_reversion | SIMULATED (synthetic levels) |
+
+- Strategies run only while their segment is open; the supervisor stops them
+  at close and restarts them at the next open. `SEGMENT_PAPER_AFTER_HOURS=true`
+  lets PAPER keep trading on the simulator after hours.
+- Every agent entry passes `risk_manager.check_before_order(..., agent=)`, which
+  applies the segment's kill switch, LIVE arming, hours, loss, positions,
+  entries/day and capital. Orders that only reduce a position always pass.
+- LIVE for a segment needs the global mode LIVE **and**
+  `POST /segments/{code}/mode {"mode":"LIVE","confirm":true,"confirm_text":"SEND"}`.
+  With the global mode LIVE, an un-armed segment places no entries. Switching
+  the global mode to PAPER disarms every segment. BSE_EQ/MCX/CDS can't be armed,
+  and `kite_client.place_order` refuses LIVE orders on BSE/MCX/CDS.
+- BSE/MCX/CDS strategies run in `segment_engine.py`: a SIMULATED feed and their
+  own paper ledger. They never call Kite.
+- Endpoints: `GET /segments`, `GET /segments/{code}`, `POST /segments/{code}/kill`
+  (with `flatten`), `/rearm`, `/mode`. The dashboard panel and Agents tab render
+  `engine.segments` / `engine.strategies` from `/health`, `/bot/status` and the
+  WebSocket `engine` event.
+- Stubbed in the Kite client (`segments.KITE_STUBS`): MCX/CDS instrument master,
+  contract resolution and rollover, commodity margins, MCX/CDS lot sizes,
+  MCX/CDS/BSE tick subscription, BSE quotes, and per-segment square-off in the
+  master agent.
+
+### Market overview and engine status
+
+`GET /market/overview` (SPA right-hand panel) shows indices from the same
+feed as the strip. Stock rows say where each price came from: `KITE` or
+`TRUEDATA` when a real feed is connected (marked `STALE` when old),
+otherwise `SIMULATED` (the PAPER simulator, which paper fills use), shown
+with the real NSE end-of-day close for reference. NSE's public per-stock
+quote APIs are blocked, so real stock prices need Kite or TrueData. The
+NIFTY chart uses NSE daily closes, and today's point is added only when the
+live level is real and fresh.
+
+All engine/bot indicators (header button, agents panel, footer, agent cards)
+come from a single `engine_status()` with states `stopped`, `starting`
+(including the start phase, e.g. Loading instruments…), `running` and
+`error`. It is returned by `/health`, `/bot/status`, `/bot/start` and
+`/bot/stop`, and pushed as the WebSocket event `engine` whenever it changes.
+
+### One book: positions, orders, P&L
+
+`book.py` is a read-only view that combines the NSE/NFO Kite paper book
+(or the real Kite book in LIVE) with the BSE/MCX/CDS segment paper ledgers.
+Each row says its `segment`, its `strategy` (taken from the order tag or the
+guard owner), and its `price_source`/`simulated`. The following all read the
+same rows:
+- `/portfolio/positions?segment=` and `/portfolio/orders?segment=`, shown in
+  the Positions/Orders tabs with a segment filter and a SIMULATED badge;
+- `/portfolio/book`;
+- `engine.book` (header POSITIONS/ORDERS, sidebar Today P&L with a
+  per-segment breakdown);
+- `engine.strategies[*]` (agent cards: trades = entries today, P&L =
+  realised + open).
+
+Kill-switch square-off and closing-time square-off (10 min before close, or
+when the engine finds a segment already closed) write exit orders and
+realised P&L to the ledger, so every view updates together.
+
+Unauthenticated `/health` returns only states. P&L, capital, positions and
+orders need auth, like `/portfolio/*` and `/segments`.
+
+`book.build()` reads each ledger once. The native engine is copied under its
+lock, so every row uses the same price tick. P&L is derived like this:
+- **Realised** is the sum of `pnl` on today's listed exit orders. Native exit
+  orders and the reducing fills in the Kite paper book record their realised
+  P&L.
+- **Open** is the sum of the listed positions' P&L, with the lot multiplier
+  applied once.
+- **Total** is realised + open.
+
+"Today" is the IST date. The SPA polls one `/portfolio/book` snapshot every
+2 s, and immediately when `engine.book.rev` changes. The header counters, nav
+badges, Today P&L (realised · N closed / open · M pos), Positions, Orders
+(with a Realised column) and the agent and segment cards all render that
+snapshot. Load errors are shown on screen. A 401 (for example after a server
+restart, which issues a new JWT secret) returns to the login screen. A stored
+cross-origin `api_base` is ignored. API JSON is sent `Cache-Control:
+no-store`.
+
+The paper book (native positions, prices and bars, today's orders and closed
+trades, the Kite paper book and its order journal, agent counters, segment
+kill switches) is saved every 2 s, and on shutdown, to the `kv_store` table
+of the SQLite DB (`DATABASE_PATH`, default `logs/algotrader.db`; tests use a
+temp dir). It is restored at startup. Open positions always come back. Orders,
+realised P&L and counters come back only if they were saved today (IST).
+LIVE arming is never persisted.
+
+The simulator scales tick volatility so that a session's expected high-low
+matches the instrument's typical day range: gold 1%, silver 1.8%, crude 2.5%,
+natural gas 3.5%, copper 1.2%, USDINR 0.3%, EURINR 0.45%, GBP/JPY 0.5%, BSE
+large caps 2%. The stop is max(30% of the day range, 2.5σ of realised 10-min
+moves), the target is 1.6× the stop, and there is a 60-min time stop. After
+NSE hours, the PAPER NSE tick simulator slows to one tick every 5 s
+(`PAPER_OFFHOURS_TICK_SEC`).
 
 ## Tests
 
 ```bash
 cd algotrader_v4
 python test_full_pipeline.py    # 30/30  — all 5 agents: ingestion→order→exit
-python test_pipeline.py         # 306/306 — cross-module: risk/guard/SEBI/kite/TSL + Phases 1-5
+python test_pipeline.py         # 1282 checks — cross-module: risk/guard/SEBI/kite/TSL + Phases 1-5
 python test_sim_orders_flow.py  # 13/13  — PAPER order/guard/risk flow
+python test_safety_properties.py # 12/12 safety properties
+python test_all_agents_e2e.py   # every agent: signal → paper order
+python test_index_feed_and_safety.py  # index feed, typed-SEND LIVE gate, paper gate
+python test_dashboard_status_and_prices.py  # one engine status; honest price sources
+python test_segments.py  # segment agents, per-segment gates, one agent state
+python test_book.py      # one book: positions/orders/P&L across segments
+python test_book_consistency.py  # orders view, P&L split, simulator vol, persistence
 python nse_day_simulation.py    # offline GBM day simulation, all 5 agents
 ```
 

@@ -222,6 +222,11 @@ class PositionSL:
     # (underlying move) × qty × pnl_scale ≈ premium move × qty.
     pnl_scale:      float = 1.0
 
+    # Smart exits (exit_policy, jag 2026-10-10): initial risk R in price units
+    # and the adverse book-imbalance observation counter.
+    r_dist:         float = 0.0
+    flip_count:     int   = 0
+
     @property
     def closing_side(self) -> str:
         """Transaction side that flattens this position on the instrument."""
@@ -308,6 +313,98 @@ class TrailingSLEngine:
         self.on_target_hit:  Optional[Callable] = None   # async (pos: PositionSL, level: int)
         self.on_sl_moved:    Optional[Callable] = None   # async (pos: PositionSL, old_sl: float)
         self.on_partial_exit: Optional[Callable] = None  # async (pos, ltp, qty, reason) -> int exited
+        self._book_imb: dict[str, tuple[float, float]] = {}  # symbol → (bid share of top-5 qty, ts)
+
+    def observe_book(self, symbol: str, imbalance: float) -> None:
+        self._book_imb[symbol] = (float(imbalance), time.time())
+
+    def _imbalance(self, symbol: str) -> Optional[float]:
+        v = self._book_imb.get(symbol)
+        return v[0] if v and time.time() - v[1] <= 5.0 else None
+
+    async def _smart_exits(self, pos: "PositionSL", ltp: float, atr_14: float, cb_sl_hit, cb_sl_moved) -> bool:
+        """exit_policy overlay for the agents under agent_policy: breakeven at
+        +be_r R, partial at +partial_r R, chandelier trail best − k×ATR after
+        breakeven, time stop when not at breakeven after time_stop_min, adverse
+        book-flip exit. Stops only TIGHTEN. Returns True when the position was
+        closed here (caller stops evaluating)."""
+        try:
+            from config import settings as _st
+            if not getattr(_st, "use_smart_exits", True):
+                return False
+            from agent_policy import POLICY_SPECS, live_params
+            if pos.strategy not in POLICY_SPECS or pos.r_dist <= 0:
+                return False
+            p = live_params(pos.strategy)
+        except Exception:
+            return False
+        sgn = 1 if pos.side == "BUY" else -1
+        fav_best = (pos.best_price - pos.entry_price) * sgn
+        R = pos.r_dist
+
+        async def _close(why: str) -> bool:
+            with self._lock:
+                if pos.status != SLStatus.ACTIVE:
+                    return True
+                pos.status = SLStatus.HIT
+            _qty = pos.quantity_remaining or pos.quantity
+            pnl = (ltp - pos.entry_price) * _qty * pos.pnl_scale * sgn
+            logger.warning("⏹ {}: {} {} @ ₹{:.2f} | P&L ₹{:.0f}", why, pos.symbol, pos.side, ltp, pnl)
+            if cb_sl_hit:
+                try:
+                    await cb_sl_hit(pos, ltp, pnl)
+                except Exception as exc:
+                    logger.error("[TSL] smart-exit callback failed for {}: {}", pos.symbol, exc)
+            with self._lock:
+                self._positions.pop(pos.order_id, None)
+            return True
+
+        # partial profit at +partial_r R (replaces the % T1 scale-out)
+        cb_partial = pos._on_partial_exit
+        if (cb_partial and not pos.partial_exit_done and float(p["partial_frac"]) > 0
+                and fav_best >= float(p["partial_r"]) * R and pos.quantity_remaining > 1):
+            exit_qty = int(pos.quantity_remaining * float(p["partial_frac"]))
+            if exit_qty > 0:
+                try:
+                    done = int(await cb_partial(pos, ltp, exit_qty, "PARTIAL_R") or 0)
+                except Exception as exc:
+                    done = 0
+                    logger.error("[TSL] partial-R callback failed for {}: {}", pos.symbol, exc)
+                if done > 0:
+                    pos.partial_exit_done = True
+                    pos.quantity_remaining -= done
+        # breakeven at +be_r R
+        if not pos.breakeven_hit and fav_best >= float(p["be_r"]) * R:
+            be = round(pos.entry_price, 2)
+            if (be - pos.current_sl) * sgn > 0:
+                old = pos.current_sl
+                pos.current_sl, pos.breakeven_hit = be, True
+                pos.sl_moves += 1
+                logger.info("✅ Breakeven at +{:g}R: {} SL → ₹{:.2f}", float(p["be_r"]), pos.symbol, be)
+                if cb_sl_moved:
+                    await cb_sl_moved(pos, old, "BREAKEVEN")
+        # chandelier trail after breakeven (tighten only)
+        if pos.breakeven_hit and atr_14 > 0 and float(p["trail_atr_mult"]) > 0:
+            ch = round(pos.best_price - sgn * float(p["trail_atr_mult"]) * atr_14, 2)
+            if (ch - pos.current_sl) * sgn > 0 and abs(ch - pos.current_sl) / max(pos.current_sl, 1e-9) >= 0.0005:
+                old = pos.current_sl
+                pos.current_sl = ch
+                pos.sl_moves += 1
+                if cb_sl_moved:
+                    await cb_sl_moved(pos, old, "TRAIL")
+        # adverse order-book flip (only before any partial; needs live depth)
+        imb = self._imbalance(pos.symbol)
+        thr = float(p.get("book_flip_imb", 0.30) or 0.0)
+        if imb is not None and thr > 0 and not pos.partial_exit_done:
+            against = (0.5 - imb) if sgn > 0 else (imb - 0.5)
+            pos.flip_count = pos.flip_count + 1 if against >= thr / 2 else 0
+            if pos.flip_count >= int(p.get("book_flip_n", 3) or 3):
+                return await _close("BOOK FLIP EXIT")
+        # time stop: not at breakeven after time_stop_min → the idea failed
+        ts_min = float(p["time_stop_min"])
+        if ts_min > 0 and not pos.breakeven_hit and time.time() - pos.opened_at >= ts_min * 60:
+            return await _close(f"TIME STOP {ts_min:g} min")
+        return False
 
     # ── Registration ──────────────────────────────────────────────────
 
@@ -356,6 +453,7 @@ class TrailingSLEngine:
             best_price=entry_price, atr=atr, atr_at_entry=atr,
             quantity_remaining=quantity,
             exit_side=exit_side, pnl_scale=pnl_scale,
+            r_dist=abs(float(entry_price) - float(init_sl)),
             _on_sl_hit=on_sl_hit,
             _on_target_hit=on_target_hit,
             _on_sl_moved=on_sl_moved,
@@ -529,6 +627,10 @@ class TrailingSLEngine:
                 pos.status = SLStatus.HIT
                 with self._lock:
                     self._positions.pop(pos.order_id, None)
+            return
+
+        # ── 2b. Smart exits (all agents) ───────────────────────────────
+        if await self._smart_exits(pos, ltp, atr_14, cb_sl_hit, cb_sl_moved):
             return
 
         # ── 3. Target 2 hit ────────────────────────────────────────────

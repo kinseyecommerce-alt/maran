@@ -400,7 +400,9 @@ class AltDataEngine:
             ("Accept", "application/json, text/plain, */*"),
             ("Accept-Language", "en-US,en;q=0.9"),
             ("Referer", "https://www.nseindia.com/"),
-            ("Accept-Encoding", "gzip, deflate, br"),
+            # gzip only: the handler below can gunzip, but urllib cannot
+            # decode brotli — offering "br" made NSE return undecodable bytes.
+            ("Accept-Encoding", "gzip"),
             ("Connection", "keep-alive"),
         ]
         opener.addheaders = _NSE_HEADERS

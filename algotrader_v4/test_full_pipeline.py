@@ -31,6 +31,18 @@ Run:
     python test_full_pipeline.py --live     # non-destructive LIVE checks (VPS only)
 """
 from __future__ import annotations
+# Test isolation: keep test trades/P&L out of the app's real SQLite DB
+# (logs/algotrader.db). Without this, running the suite on a deployed box
+# wrote synthetic P&L that the server restored as "today's P&L" on its next
+# boot — enough to trip the daily-loss halt. Override with DATABASE_PATH.
+import os as _os_iso, tempfile as _tf_iso
+_iso_dir = _tf_iso.mkdtemp(prefix="algotrader-test-")
+_os_iso.environ.setdefault("DATABASE_PATH", _os_iso.path.join(_iso_dir, "algotrader.db"))
+_os_iso.environ.setdefault("ADAPTIVE_DATA_DIR", _os_iso.path.join(_iso_dir, "adaptive"))
+_os_iso.environ.setdefault("SEBI_AUDIT_DIR", _iso_dir)
+_os_iso.environ["LEARNING_DB"] = _os_iso.path.join(_iso_dir, "learning.db")   # never the real logs/learning.db
+_os_iso.environ["OWNER_UNIVERSE_PATH"] = _os_iso.path.join(_iso_dir, "owner_universe.json")  # explicit universe: no owner focus/pauses
+_os_iso.environ.setdefault("SEGMENT_PAPER_AFTER_HOURS", "true")   # segment hours are tested explicitly in test_segments.py
 
 import asyncio
 import os
@@ -42,6 +54,10 @@ from unittest.mock import patch
 os.environ.setdefault("TRADING_MODE", "PAPER")
 
 from config import settings
+# these suites pin pre-existing behaviour; the all-agents policy gate and smart
+# exits are covered by test_all_agents_policy.py
+settings.use_agent_policy_gate = False
+settings.use_smart_exits = False
 # This suite verifies pipeline MECHANICS (ingestion → order → exit), not
 # pattern/agent selection policy — run with the evidence kill-list cleared
 # and the regime gate off so crafted scenarios can use any pattern/agent
@@ -60,6 +76,12 @@ settings.min_hold_before_indicator_exit_sec = 0
 # real INFY results date (first hit: 2026-07-13, Q1 results Jul 15).
 from alt_data import alt_data_engine as _alt_engine
 _alt_engine.is_earnings_period = lambda *a, **k: False
+# No live NSE network in a deterministic suite: bulk-deal / announcement fetches
+# took 3–8 s each (HTTP 403/404 from nseindia.com) and pushed order placement past
+# the stage's 3 s wait, so entries "never happened" depending on the network.
+_alt_engine.get_bulk_deals = lambda *a, **k: []
+_alt_engine._fetch_announcements = lambda *a, **k: []
+_alt_engine.refresh_fii_dii = lambda *a, **k: {}
 from tick_engine import (
     tick_engine, MarketSnapshot, Tick, LiveIndicators, Candle, TickBuffer,
 )
@@ -137,6 +159,11 @@ def summary() -> int:
 
 # ── Snapshot builder (same shape as test_pipeline._make_snap) ─────────────────
 MKT = datetime(2026, 5, 29, 10, 30, 0)   # Friday, mid-session IST
+# Freeze the ONE IST clock (segment hours, risk-manager hours, policy windows) at MKT so
+# the suite is deterministic on weekends/evenings — patching only strategy_agents.now_ist
+# left risk_manager refusing every entry with "NSE Stocks closed" outside real hours.
+import ist_clock as _ist_clock
+_ist_clock.freeze_clock(MKT)
 
 
 def mk(symbol, ltp, *, rsi=55.0, trend="UP", vwap=None, macd_hist=1.5,
@@ -187,12 +214,8 @@ def recipes():
                volume_ratio=1.5, ema9=1705, ema21=1700, ema50=1690,
                ema200=1600, n_candles=210),
         ]),
-        "options": (OptionsAgent(), "INFY", [
-            mk("INFY", 1620, rsi=50, vwap=1612, macd_hist=0.5, volume_ratio=1.6,
-               ema9=1615, ema21=1618, ema50=1610, ema200=1500, n_candles=30),
-            mk("INFY", 1626, rsi=58, vwap=1612, macd_hist=1.4, volume_ratio=1.9,
-               ema9=1624, ema21=1618, ema50=1612, ema200=1500, n_candles=30),
-        ]),
+        # OptionsAgent no longer places single option legs (2026-10-09
+        # options-engine hand-off) — it is covered by stage_options_handoff().
         # FuturesAgent only trades INDEX futures (in LOT_SIZES); stock futures like
         # SBIN are rejected at evaluate_tick's index-only guard. NIFTY now trades on
         # margin-based sizing (75 × ~24k × 20% ≈ ₹360k margin/lot, funded above) and
@@ -263,7 +286,7 @@ async def stage_ingestion():
 
 # ── Stages B & C — per-agent entry (evaluate→gate→place) + forced exit ────────
 async def stage_agents():
-    section("STAGE B/C — All 5 agents: signal → gate → entry+SL → exit")
+    section("STAGE B/C — 4 order-placing agents: signal → gate → entry+SL → exit")
 
     # Deterministic gate: exercise the gate STAGE without network/Claude flakiness.
     def _stub_assess(snap, action, signal, name):
@@ -337,6 +360,87 @@ async def stage_agents():
               oid not in trailing_sl_engine._positions)
 
 
+# ── OptionsAgent → options_engine hand-off (2026-10-09 design) ────────────────
+# The agent returns HOLD and hands index ideas to options_engine (defined-risk
+# baskets for SELL ideas, cost/theta-aware buyer for BUY ideas); stock-option
+# ideas are dropped. The same EMA-cross shape as the old INFY recipe, on NIFTY.
+_NIFTY_SCALE = 24000 / 1620
+
+
+def options_handoff_snaps(sym: str = "NIFTY"):
+    k = _NIFTY_SCALE if sym == "NIFTY" else 1.0
+    return [
+        mk(sym, 1620 * k, rsi=50, vwap=1612 * k, macd_hist=0.5, volume_ratio=1.6,
+           ema9=1615 * k, ema21=1618 * k, ema50=1610 * k, ema200=1500 * k, n_candles=30),
+        mk(sym, 1626 * k, rsi=58, vwap=1612 * k, macd_hist=1.4, volume_ratio=1.9,
+           ema9=1624 * k, ema21=1618 * k, ema50=1612 * k, ema200=1500 * k, n_candles=30),
+    ]
+
+
+class HandoffRecorder:
+    """Stands in for options_engine.submit_agent_signal (no Kite chain on a
+    test box); records exactly what the agent handed off."""
+    def __init__(self):
+        self.calls = []
+
+    def __call__(self, und, opt_type, pattern, score=0.0, is_sell=False):
+        self.calls.append(dict(und=und, opt_type=opt_type, pattern=pattern,
+                               score=score, is_sell=is_sell))
+        return {"result": "recorded"}
+
+
+async def stage_options_handoff():
+    section("STAGE D — OptionsAgent → options_engine hand-off (no single legs)")
+    import options_engine as _oe
+    for sym, expect_handoff in (("NIFTY", True), ("INFY", False)):
+        agent = OptionsAgent()
+        agent._approved.add(sym)
+        rec = HandoffRecorder()
+        before = {o["order_id"] for o in kite_client._paper_orders.values()}
+        q: asyncio.Queue = asyncio.Queue()
+        agent.start(q)
+        try:
+            with patch("agents.strategy_agents.now_ist", return_value=MKT), \
+                 patch.object(_oe.options_engine, "submit_agent_signal", rec):
+                import time as _t
+                for s in options_handoff_snaps(sym):
+                    s.tick._monotonic_ts = _t.monotonic()
+                    await q.put(s)
+                for _ in range(60):
+                    await asyncio.sleep(0.05)
+                    if rec.calls:
+                        break
+                await asyncio.sleep(0.2)
+        finally:
+            agent.stop()
+        new = [o for o in kite_client._paper_orders.values()
+               if o["order_id"] not in before and str(o.get("tag", "")).startswith("Agent-options")]
+        check(f"options/{sym}: agent placed NO single-leg order itself",
+              not new, f"orders={[o.get('tradingsymbol') for o in new]}")
+        if expect_handoff:
+            c = rec.calls[0] if rec.calls else {}
+            check(f"options/{sym}: idea handed to options_engine",
+                  c.get("und") == "NIFTY" and c.get("opt_type") in ("CE", "PE") and c.get("pattern"),
+                  f"calls={rec.calls}")
+        else:
+            check(f"options/{sym}: stock-option idea dropped (no hand-off)",
+                  not rec.calls, f"calls={rec.calls}")
+
+    # Engine routing contract: SELL ideas only ever become defined-risk baskets.
+    eng = _oe.options_engine
+    seen = []
+    with patch.object(eng, "open_basket", lambda s, und, reason="": seen.append(("basket", s)) or {}), \
+         patch.object(eng, "open_buy", lambda *a, **k: seen.append(("buy", a[1])) or {}):
+        eng.submit_agent_signal("NIFTY", "CE", "STRANGLE_SELL", is_sell=True)
+        eng.submit_agent_signal("NIFTY", "PE", "PE_SELL", is_sell=True)
+        eng.submit_agent_signal("NIFTY", "CE", "CE_SELL", is_sell=True)
+        eng.submit_agent_signal("NIFTY", "CE", "EMA_CROSS", is_sell=False)
+    check("options engine: SELL ideas → IRON_CONDOR / BULL_PUT / BEAR_CALL baskets only",
+          seen[:3] == [("basket", "IRON_CONDOR"), ("basket", "BULL_PUT"), ("basket", "BEAR_CALL")],
+          f"seen={seen}")
+    check("options engine: BUY idea → engine buyer", seen[3:] == [("buy", "CE")], f"seen={seen}")
+
+
 # ── PAPER pipeline driver ─────────────────────────────────────────────────────
 async def run_paper():
     print("\n" + "═" * 62)
@@ -393,6 +497,7 @@ async def run_paper():
     try:
         await stage_ingestion()
         await stage_agents()
+        await stage_options_handoff()
     finally:
         settings.use_multi_timeframe   = saved["mtf"]
         settings.use_claude_trade_gate = saved["gate"]

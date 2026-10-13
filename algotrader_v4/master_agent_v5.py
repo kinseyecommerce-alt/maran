@@ -157,6 +157,10 @@ class MasterAgent:
         self._rolling_sharpe_below_count: dict[str, int] = {}
         # Portfolio optimizer: latest allocations updated every 15 min
         self._latest_allocations: dict[str, float] = {}
+        # Why a strategy is paused — read by segments.strategy_states() so every
+        # UI shows the same reason (regime plan vs master review).
+        self.regime_paused: set[str] = set()
+        self.directive_paused: set[str] = set()
 
     # ── Lifecycle ──────────────────────────────────────────────────────────────
 
@@ -227,6 +231,14 @@ class MasterAgent:
                             strat, len(approved))
             else:
                 approved = agent.filter_watchlist(watchlist)
+            # OWNER universe (jag): approvals never widen beyond the allowed universe
+            from owner_universe import owner_universe
+            _ou = owner_universe.filter_agent_items(strat, approved)
+            if len(_ou) != len(approved):
+                logger.info("[master_v5] {} owner universe: {} → {} symbols", strat, len(approved), len(_ou))
+                approved = _ou
+                agent._approved = {item["symbol"] for item in approved}
+                agent.state.approved_symbols = [a["symbol"] for a in approved]
             self._agent_watchlists[strat] = approved
             report[strat] = {
                 "total": len(watchlist),
@@ -249,6 +261,12 @@ class MasterAgent:
             if not is_agent_enabled(strat):
                 continue
             if self._agent_watchlists.get(strat):
+                # Segment agent decides: closed window / kill switch → held,
+                # and started by segments.supervise() when the segment opens.
+                from segments import segment_manager
+                if not segment_manager.can_run(strat):
+                    segment_manager.hold(strat, segment_manager.run_block_reason(strat) or "closed")
+                    continue
                 q = tick_engine.add_subscriber(f"agent_{strat}")
                 agent.start(q)
 
@@ -267,6 +285,11 @@ class MasterAgent:
         self._scheduler.add_job(self._weekly_backtest, "cron", hour=20, minute=0,
                                  day_of_week="sun", id="weekly_backtest", replace_existing=True,
                                  misfire_grace_time=3600)
+        # strict 'profitable' re-check (profit_eval): monthly — re-runs the 1-year study and
+        # auto-retires any strategy that no longer qualifies (checked Sundays; runs when due)
+        self._scheduler.add_job(self._monthly_profit_recheck, "cron", hour=22, minute=0,
+                                 day_of_week="sun", id="monthly_profit_recheck", replace_existing=True,
+                                 max_instances=1, coalesce=True, misfire_grace_time=6 * 3600)
         self._scheduler.add_job(self._weekly_memory_synthesis, "cron", hour=21, minute=0,
                                  day_of_week="sun", id="weekly_memory", replace_existing=True,
                                  misfire_grace_time=3600)
@@ -312,8 +335,16 @@ class MasterAgent:
     async def stop(self) -> None:
         self.running = False
         tick_engine.stop()
-        for a in ALL_AGENTS.values():
+        for _n, a in ALL_AGENTS.items():
             a.stop()
+            tick_engine.remove_subscriber(f"agent_{_n}")   # no dead mailboxes left behind after /bot/stop
+        try:
+            from segment_engine import native_engine
+            from segments import segment_manager
+            native_engine.stop_strategies()
+            segment_manager.release_holds()
+        except Exception as exc:
+            logger.warning("[master_v5] segment stop error: {}", exc)
         try:
             self._scheduler.shutdown(wait=False)
         except Exception as exc:
@@ -681,6 +712,21 @@ class MasterAgent:
         except Exception as exc:
             logger.error("[master] Weekly backtest failed: {}", exc)
 
+    async def _monthly_profit_recheck(self) -> None:
+        """Sunday 22:00 IST, acts only when the registry's next_check (30 days) is due:
+        re-run the strict 'profitable' study (subprocess) and retire whatever stopped qualifying.
+        PAPER research only; never touches LIVE gates."""
+        try:
+            import subprocess, sys as _sys
+            from pathlib import Path as _P
+            here = _P(__file__).parent
+            cp = await asyncio.to_thread(
+                subprocess.run, [_sys.executable, str(here / "scripts" / "profitable_recheck.py"), "--if-due"],
+                cwd=str(here), capture_output=True, text=True, timeout=4 * 3600)
+            logger.info("[master] monthly profit re-check rc={} {}", cp.returncode, (cp.stdout or "")[-300:])
+        except Exception as exc:
+            logger.error("[master] monthly profit re-check failed: {}", exc)
+
     async def _weekly_db_cleanup(self) -> None:
         """Sunday 22:30 IST — archive old data and VACUUM the SQLite DB."""
         try:
@@ -822,6 +868,8 @@ class MasterAgent:
         else:
             paused_list = plan.paused
             active_list = plan.active
+        self.regime_paused = {s for s in paused_list if s in ALL_AGENTS}
+        from segments import segment_manager
 
         for strat in paused_list:
             agent = ALL_AGENTS.get(strat)
@@ -838,6 +886,9 @@ class MasterAgent:
                 if not is_agent_enabled(strat):
                     continue
                 if self._agent_watchlists.get(strat):
+                    if not segment_manager.can_run(strat):
+                        segment_manager.hold(strat, segment_manager.run_block_reason(strat) or "closed")
+                        continue
                     q = tick_engine.add_subscriber(f"agent_{strat}")
                     agent.start(q)
                     logger.info("[master] Regime {} → started {}", regime.value, strat)
@@ -850,6 +901,10 @@ class MasterAgent:
             action = directive.get("action", "run")
             if action == "pause" and settings.force_all_agents:
                 action = "reduce_size"   # honour caution via sizing, never stop the agent
+            if action == "pause":
+                self.directive_paused.add(strat)
+            elif action in ("run", "reduce_size"):
+                self.directive_paused.discard(strat)
             if action == "pause" and agent.state.running:
                 agent.stop()
                 tick_engine.remove_subscriber(f"agent_{strat}")
@@ -857,6 +912,10 @@ class MasterAgent:
                 if not is_agent_enabled(strat):
                     continue
                 if self._agent_watchlists.get(strat):
+                    from segments import segment_manager
+                    if not segment_manager.can_run(strat):
+                        segment_manager.hold(strat, segment_manager.run_block_reason(strat) or "closed")
+                        continue
                     q = tick_engine.add_subscriber(f"agent_{strat}")
                     agent.start(q)
 

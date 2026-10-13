@@ -323,3 +323,40 @@ Playwright Chromium path (this environment):
 - Python 3.11 — no backslash inside f-string `{}` braces
 - `anthropic>=0.50.0` required when `httpx>=0.28.0` is installed
 - Server must start from `algotrader_v4/` directory (relative imports)
+
+---
+
+## 2026-10-06 — branch `jag/complete-algotrader` (local, from `claude/test-ywyv1r`)
+
+- Offline PAPER now trades autonomously with no Kite session: untested-symbol
+  approval (PAPER only), synthetic simulator warm-up bars, NSE UDiFF bhavcopy.
+- Live index prices: `index_feed.py` (Kite → NSE allIndices → SIMULATED /
+  UNAVAILABLE), `GET /market/indices`, WS `indices`, SPA `IndexStrip`.
+  Regime detector gets NIFTY daily history from NSE `ind_close_all`.
+- LIVE switch needs `confirm=true` + typed `confirm_text="SEND"` (API + both UIs).
+- Fixed: option TSL wrote the underlying's price into the option SL-M trigger.
+- Tests isolate DB / adaptive params / SEBI audit in a temp dir
+  (`DATABASE_PATH`, `ADAPTIVE_DATA_DIR`, `SEBI_AUDIT_DIR`).
+- Engine status: single `engine_status()` (stopped/starting/running/error)
+  feeds every indicator via `/health`, `/bot/status` and WS `engine`.
+- `market_overview.py` + `GET /market/overview`: indices come from index_feed;
+  stocks are KITE/TRUEDATA when real, else labelled SIMULATED with the NSE EOD
+  close as reference. Tick rows carry `price_source`/`simulated`.
+- Segment agents (`segments.py`, `segment_engine.py`): NSE_EQ / NSE_FO / BSE_EQ /
+  MCX / CDS, each with its own capital, limits, kill switch, P&L, universe,
+  hours and PAPER/LIVE gate (typed SEND per segment; global PAPER disarms all).
+  The 8 strategies live in NSE_EQ/NSE_FO. BSE/MCX/CDS run native strategies on a
+  SIMULATED feed with their own paper ledger. engine.strategies/segments drive
+  both the dashboard panel and the Agents tab. Tests: test_segments.py.
+- `book.py`: one read model (Kite paper book + segment ledgers). It feeds
+  `/portfolio/positions|orders|book`, `engine.book` (header counters, Today
+  P&L + per-segment breakdown) and the agent cards' trades/P&L. Native trades
+  are counted on entry. Public `/health` is redacted (states only).
+  Tests: test_book.py.
+- One snapshot (`book.build()`, `/portfolio/book`) drives every SPA view.
+  Realised = Σ exit-order pnl, open = Σ positions, "today" is IST. The Kite
+  paper journal keeps the whole day (the hot list prunes after 30 min).
+  `paper_store.py` persists the paper book to `kv_store` (restored at startup,
+  saved every 2 s). Simulator σ is calibrated to day ranges. Stops are ≥30% of
+  the day range. NSE sim ticks every 5 s after hours. The daily-loss gate still
+  uses the agents' counters. Tests: test_book_consistency.py.

@@ -1216,6 +1216,11 @@
       use the simulated GBM feed until you <strong>restart the server</strong> with
       <code style="background:#1a0a0a;padding:1px 5px;border-radius:3px">TRADING_MODE=LIVE</code> in <code style="background:#1a0a0a;padding:1px 5px;border-radius:3px">.env</code>.<br><br>
       <strong>For full LIVE trading:</strong> set <code style="background:#1a0a0a;padding:1px 5px;border-radius:3px">TRADING_MODE=LIVE</code> in .env and restart.
+      <div style="margin-top:10px;color:#f5b7b1">Type <strong>SEND</strong> to confirm real-money order routing:</div>
+      <input id="mode-switch-confirm-text" type="text" autocomplete="off" spellcheck="false"
+             placeholder="Type SEND" oninput="updateModeConfirmBtn()"
+             style="margin-top:6px;width:100%;padding:6px 8px;border-radius:4px;border:1px solid #c0392b;
+                    background:#1a0a0a;color:#fff;font-family:monospace">
     </div>
     <div class="dialog-btns">
       <button class="btn btn-ghost" onclick="closeModeToggle()">Cancel</button>
@@ -4416,8 +4421,19 @@ function openModeToggle() {
   btn.textContent   = `Switch to ${target}`;
   btn.style.background = isToLive ? '#c0392b' : 'var(--accent)';
   btn._target = target;
+  const txt = document.getElementById('mode-switch-confirm-text');
+  if (txt) txt.value = '';
+  updateModeConfirmBtn();
   const ol = document.getElementById('mode-switch-overlay');
   ol.style.display = 'flex';
+}
+
+// LIVE needs the typed phrase SEND (enforced server-side too).
+function updateModeConfirmBtn() {
+  const btn = document.getElementById('mode-switch-confirm-btn');
+  const txt = document.getElementById('mode-switch-confirm-text');
+  if (!btn) return;
+  btn.disabled = btn._target === 'LIVE' && (!txt || txt.value.trim() !== 'SEND');
 }
 
 function closeModeToggle() {
@@ -4433,7 +4449,8 @@ async function confirmModeSwitch() {
     const res = await fetch('/settings/trading-mode', {
       method: 'POST',
       headers: {'Content-Type':'application/json'},
-      body: JSON.stringify({ mode: target, confirm: true }),
+      body: JSON.stringify({ mode: target, confirm: true,
+        confirm_text: (document.getElementById('mode-switch-confirm-text') || {}).value || '' }),
     });
     const data = await res.json();
     if (!res.ok) throw new Error(data.detail || 'Failed');
@@ -4443,8 +4460,8 @@ async function confirmModeSwitch() {
   } catch(e) {
     showToast(`Mode switch failed: ${e.message}`, 'error');
   } finally {
-    btn.disabled = false;
     btn.textContent = `Switch to ${target}`;
+    updateModeConfirmBtn();
   }
 }
 

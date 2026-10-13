@@ -261,6 +261,7 @@ class RiskManager:
         transaction_type: str,
         exchange: str = "NSE",
         slots_bonus: int = 0,
+        agent: str = "",
     ) -> tuple[bool, str]:
         """slots_bonus: extra open-position headroom for this caller — the
         manual/dashboard path passes settings.manual_extra_slots so a human
@@ -300,6 +301,25 @@ class RiskManager:
                     return False, msg
 
             ok, msg = self._check_position_size(quantity, price, exchange)
+            if not ok:
+                return False, msg
+
+            # Per-segment agent gate: kill switch, PAPER/LIVE arming (typed
+            # SEND per segment), trading-hours window, segment daily loss,
+            # positions, trades/day and capital. Reducing orders pass.
+            try:
+                from segments import segment_manager, segment_of
+                code = segment_of(agent, exchange)
+                cash = (exchange or "NSE").upper() in ("NSE", "BSE")
+                fut = (exchange or "").upper() == "NFO" and str(symbol or "").upper().endswith("FUT")
+                fut_m = float(getattr(settings, "futures_margin_pct", 20.0)) / 100.0
+                ok, msg = segment_manager.entry_check(
+                    code, notional=(quantity * price) if cash else (quantity * price * fut_m if fut else 0.0),
+                    transaction_type=transaction_type, symbol=symbol,
+                    contract_notional=(quantity * price) if fut else 0.0)
+            except Exception as exc:          # fail closed
+                logger.error("[RiskManager] segment gate error: {}", exc)
+                return False, f"segment gate error: {exc}"
             if not ok:
                 return False, msg
 

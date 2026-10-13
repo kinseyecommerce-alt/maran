@@ -5,14 +5,18 @@ export const Badge = ({
   children, variant = 'neutral'
 }: { children: React.ReactNode; variant?: 'buy' | 'sell' | 'neutral' | 'warning' | 'paper' | 'live' }) => {
   const cls = {
-    buy:     'bg-green-100 text-green-800',
-    sell:    'bg-red-100 text-red-800',
-    neutral: 'bg-slate-100 text-slate-700',
-    warning: 'bg-amber-100 text-amber-800',
-    paper:   'bg-amber-100 text-amber-800',
-    live:    'bg-green-100 text-green-800',
+    buy:     'bg-emerald-950/50 text-emerald-400 border-emerald-900/60',
+    sell:    'bg-rose-950/50 text-rose-400 border-rose-900/60',
+    neutral: 'bg-slate-800/60 text-slate-400 border-slate-700/60',
+    warning: 'bg-amber-950/40 text-amber-400 border-amber-900/50',
+    paper:   'bg-amber-950/40 text-amber-400 border-amber-900/50',
+    live:    'bg-rose-950/50 text-rose-400 border-rose-900/60',
   }[variant]
-  return <span className={clsx('inline-flex items-center px-2 py-0.5 rounded text-xs font-semibold', cls)}>{children}</span>
+  return (
+    <span className={clsx('inline-flex items-center px-1.5 py-0.5 rounded text-[10px] font-semibold font-mono tracking-wide border', cls)}>
+      {children}
+    </span>
+  )
 }
 
 export const Btn = ({
@@ -27,17 +31,17 @@ export const Btn = ({
   type?: 'button' | 'submit'
 }) => {
   const variants = {
-    primary: 'bg-indigo-600 hover:bg-indigo-700 text-white',
-    buy:     'bg-green-600 hover:bg-green-700 text-white',
-    sell:    'bg-red-600 hover:bg-red-700 text-white',
-    danger:  'bg-red-600 hover:bg-red-700 text-white',
-    ghost:   'bg-transparent hover:bg-slate-100 text-slate-700',
-    outline: 'border border-slate-300 hover:bg-slate-50 text-slate-700',
+    primary: 'bg-emerald-700 hover:bg-emerald-600 text-white border border-emerald-600/40',
+    buy:     'bg-emerald-700 hover:bg-emerald-600 text-white border border-emerald-600/40',
+    sell:    'bg-rose-800 hover:bg-rose-700 text-white border border-rose-700/40',
+    danger:  'bg-rose-800 hover:bg-rose-700 text-white border border-rose-700/40',
+    ghost:   'bg-transparent hover:bg-slate-800 text-slate-400 border border-transparent',
+    outline: 'border border-slate-700 hover:bg-slate-800/80 text-slate-300 bg-transparent',
   }[variant]
   const sizes = {
-    sm: 'px-3 py-1 text-sm',
-    md: 'px-4 py-2 text-sm',
-    lg: 'px-6 py-3 text-base',
+    sm: 'px-2 py-1 text-[11px]',
+    md: 'px-3 py-1.5 text-xs',
+    lg: 'px-4 py-2 text-sm',
   }[size]
   return (
     <button
@@ -45,9 +49,9 @@ export const Btn = ({
       onClick={onClick}
       disabled={disabled}
       className={clsx(
-        'rounded-lg font-medium transition-colors focus:outline-none focus:ring-2 focus:ring-indigo-500 focus:ring-offset-1',
+        'rounded font-medium transition-colors focus:outline-none focus-visible:ring-2 focus-visible:ring-emerald-600/50 focus-visible:ring-offset-1 focus-visible:ring-offset-[#0a0c10]',
         variants, sizes,
-        disabled && 'opacity-50 cursor-not-allowed',
+        disabled && 'opacity-40 cursor-not-allowed',
         className,
       )}
     >
@@ -57,7 +61,7 @@ export const Btn = ({
 }
 
 export const Card = ({ children, className }: { children: React.ReactNode; className?: string }) => (
-  <div className={clsx('bg-white rounded-xl border border-slate-200 shadow-sm', className)}>
+  <div className={clsx('bg-[#11141a] rounded border border-[#1e2430]', className)}>
     {children}
   </div>
 )
@@ -67,9 +71,9 @@ export const Input = React.forwardRef<HTMLInputElement, React.InputHTMLAttribute
     <input
       ref={ref}
       className={clsx(
-        'w-full border border-slate-200 rounded-lg px-3 py-2 text-sm text-slate-900',
-        'focus:outline-none focus:ring-2 focus:ring-indigo-500 focus:border-transparent',
-        'placeholder:text-slate-400 bg-white',
+        'w-full border border-slate-700 rounded bg-slate-900 px-3 py-2 text-sm text-slate-200 font-mono',
+        'focus:outline-none focus-visible:ring-2 focus-visible:ring-emerald-600/50 focus:border-emerald-700',
+        'placeholder:text-slate-600',
         className,
       )}
       {...props}
@@ -83,9 +87,9 @@ export const Select = React.forwardRef<HTMLSelectElement, React.SelectHTMLAttrib
     <select
       ref={ref}
       className={clsx(
-        'w-full border border-slate-200 rounded-lg px-3 py-2 text-sm text-slate-900',
-        'focus:outline-none focus:ring-2 focus:ring-indigo-500',
-        'bg-white cursor-pointer',
+        'w-full border border-slate-700 rounded bg-slate-900 px-3 py-2 text-sm text-slate-200',
+        'focus:outline-none focus-visible:ring-2 focus-visible:ring-emerald-600/50',
+        'cursor-pointer',
         className,
       )}
       {...props}
@@ -97,22 +101,22 @@ export const Select = React.forwardRef<HTMLSelectElement, React.SelectHTMLAttrib
 Select.displayName = 'Select'
 
 export const Pnl = ({ value }: { value: number }) => (
-  <span className={clsx('font-mono text-sm font-medium', value >= 0 ? 'text-green-600' : 'text-red-600')}>
+  <span className={clsx('font-mono text-xs font-semibold tabular-nums', value >= 0 ? 'text-emerald-400' : 'text-rose-400')}>
     {value >= 0 ? '+' : ''}₹{value.toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
   </span>
 )
 
 export const Ltp = ({ value, prev }: { value: number; prev?: number }) => {
-  const dir = prev === undefined ? '' : value > prev ? 'text-green-600' : value < prev ? 'text-red-600' : 'text-slate-900'
+  const dir = prev === undefined ? '' : value > prev ? 'text-emerald-400' : value < prev ? 'text-rose-400' : 'text-slate-200'
   return (
-    <span className={clsx('font-mono font-semibold tabular-nums', dir || 'text-slate-900')}>
+    <span className={clsx('font-mono font-semibold tabular-nums', dir || 'text-slate-200')}>
       ₹{value.toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
     </span>
   )
 }
 
 export const StatusDot = ({ online }: { online: boolean }) => (
-  <span className={clsx('inline-block w-2 h-2 rounded-full', online ? 'bg-green-500' : 'bg-red-500')} />
+  <span className={clsx('inline-block w-1.5 h-1.5 rounded-full', online ? 'bg-emerald-500' : 'bg-slate-600')} />
 )
 
 export const Modal = ({
@@ -121,9 +125,9 @@ export const Modal = ({
   if (!open) return null
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center">
-      <div className="absolute inset-0 bg-black/40" onClick={onClose} />
-      <div className="relative bg-white rounded-2xl shadow-2xl p-6 w-full max-w-md mx-4">
-        <h2 className="text-lg font-semibold text-slate-900 mb-4">{title}</h2>
+      <div className="absolute inset-0 bg-black/70" onClick={onClose} />
+      <div className="relative bg-[#11141a] border border-[#1e2430] rounded-lg shadow-2xl p-6 w-full max-w-md mx-4">
+        <h2 className="text-sm font-semibold text-slate-100 mb-4 tracking-wide">{title}</h2>
         {children}
       </div>
     </div>

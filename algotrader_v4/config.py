@@ -214,6 +214,27 @@ class Settings(BaseSettings):
 
     # Pre-learned system (set after running historical_learner.py)
     skip_startup_backtest: bool = False   # use pre-learned approved_symbols.json
+    # PAPER only: approve watchlist symbols whose startup backtest could not
+    # run for lack of history (no Kite/TrueData session), so agents trade
+    # autonomously on the simulator. Symbols that FAIL a real backtest are
+    # still rejected; LIVE always keeps the strict gate.
+    paper_approve_untested: bool = True
+    # Untested (no backtest evidence) symbols approved in PAPER trade on
+    # PROBATION at this size factor until they have evidence (audit X12).
+    paper_block_sim_entries_when_live_wanted: bool = True   # audit X3
+    live_cnc_gtt_enabled: bool = False      # audit #14: LIVE CNC entries refused until a GTT stop path exists
+    pairs_single_leg_enabled: bool = False  # audit #19: pairs agent trades one unhedged leg — off
+    paper_stop_slippage_bps: float = 2.0     # adverse sweep on paper SL/SL-M fills (audit X11)
+    paper_stop_gap_error_pct: float = 5.0    # stop gaps beyond this need a confirming tick
+    paper_untested_size_factor: float = Field(default=0.5, ge=0.0, le=1.0)
+    # Cash-equity single-position notional cap as a fraction of segment capital
+    # (MIS leverage widens affordability, never past this) — audit X9/X10.
+    nse_eq_max_position_notional_frac: float = Field(default=0.25, gt=0, le=5.0)
+    # PAPER + GBM simulator only: when Kite 1-min history is unavailable, seed
+    # candle buffers with SYNTHETIC warm-up bars drawn from the simulator's
+    # own GBM, so agents can evaluate immediately instead of after 10-50 min.
+    # Never used when a real feed is active (LIVE, TrueData, Kite data).
+    paper_synthetic_backfill: bool = True
     use_nifty100_watchlist: bool = False  # auto-use full Nifty 100 as watchlist
 
     # Intelligence layer — Claude Opus real-time market timing gate
@@ -316,6 +337,13 @@ class Settings(BaseSettings):
     # Per-agent override (min_edge_cost_ratio_<agent_name>); 0 = use the global.
     # Scalping gets a stricter floor — its edge is thinnest relative to costs.
     min_edge_cost_ratio_scalping: float = 3.0
+    # All-agents "trade less, better" (jag 2026-10-10): agent_policy gate
+    # (windows, liquidity whitelist, caps, cool-downs, loss stops, event/VIX/
+    # spread filters, cost-edge) and exit_policy smart exits (breakeven, partial,
+    # chandelier trail, time stop, book flip). Both only ever block/shrink/tighten.
+    use_agent_policy_gate: bool = True
+    use_smart_exits: bool = True
+    research_loop_enabled: bool = True                  # nightly master research loop (PAPER only)
 
     # Decision cadence — THE churn fix (live 2026-07-10: tick-cadence
     # decisions produced 200 round trips in 32 minutes; gross −₹5.4k but
@@ -628,14 +656,20 @@ class Settings(BaseSettings):
     # ₹2L slice → ~₹66k notional, then compounded down by Kelly/conviction/gate,
     # so the ₹10L pools sat barely used. 2.0% ~4× the risk budget; ATR sizing
     # still caps each position at the pool slice, so it can't overshoot capital.
-    risk_per_trade_pct: float = Field(default=2.0, gt=0, le=50)
+    # Audit X9 (2026-10-10): back to 1% — and _compute_qty now clamps the FINAL
+    # quantity (after Kelly / conviction / consensus / gate multipliers) to this
+    # rupee risk at the stop and to the notional cap.
+    risk_per_trade_pct: float = Field(default=1.0, gt=0, le=50)
+    # Hard ceiling for the FINAL per-trade risk clamp — god_mode / overrides
+    # raising risk_per_trade_pct cannot lift sizing past it.
+    risk_per_trade_hard_cap_pct: float = Field(default=1.0, gt=0, le=5)
     use_conviction_sizing: bool = True  # score-proportional size (floor loosened: low=0.75×, mid=1.0×, high=1.25×)
     # Conviction concentration: a signal that reaches sizing with a FULL gate
     # size-factor (top score bucket AND gate-confident) earns a doubled capital
     # slice — the "manual trader" concentration on the highest-probability
     # setups (replay win rates at top scores run 60-96%). Scales the proven
     # edge linearly; caps at max_position_size and 2x the per-agent slice.
-    conviction_2x_enabled: bool = True
+    conviction_2x_enabled: bool = False   # audit X9: off by default; even when on, the final risk/notional clamp binds
     conviction_2x_mult: float = Field(default=2.0, ge=1.0, le=3.0)
     # MIS intraday leverage: Zerodha margins equity intraday at min 20%
     # (SEBI VAR+ELM floor) = up to 5x buying power on the MIS list. Sizing
@@ -706,13 +740,29 @@ class Settings(BaseSettings):
     # simulator so paper trading works without a broker connection / off-hours.
     paper_use_live_data: bool = False
 
+    # Live index prices (NIFTY / BANKNIFTY / FINNIFTY / MIDCPNIFTY / INDIA VIX /
+    # SENSEX) — see index_feed.py. Source priority: Kite quote (when a Kite
+    # session is connected and market data is not stubbed) → NSE public
+    # allIndices API (no credentials needed) → last good value (marked stale)
+    # → the PAPER simulator's own price (labelled SIMULATED).
+    index_feed_enabled: bool = True
+    index_feed_interval_sec: float = Field(default=5.0, ge=1.0, le=300.0)
+    index_feed_use_nse: bool = True       # allow the free NSE public fallback
+    index_feed_stale_sec: float = Field(default=120.0, ge=5.0)
+    # PAPER without a live tick feed: anchor the GBM simulator's index prices
+    # to the real index level from index_feed, so index futures/options agents
+    # paper-trade around today's real NIFTY/BANKNIFTY instead of a ₹1000 seed.
+    # Orders stay 100% simulated — only the simulated price is re-anchored.
+    index_feed_nse_min_interval_sec: float = 15.0   # be polite to NSE's public API
+    paper_anchor_indices: bool = True
+
     # Daily capital allocation. Each of the 8 strategy agents gets its own
     # independent pool (capital_per_agent) — no sharing across siblings, so
     # intraday/scalping/mean_reversion/momentum/pairs no longer split one
     # bucket 5 ways. total_capital = capital_per_agent × len(ALL_AGENTS),
     # used only for whole-book risk limits (portfolio VaR, god_mode sizing).
     capital_per_agent:      float = Field(default=1_000_000.0, gt=0)  # ₹ per agent (₹10L)
-    total_capital:          float = Field(default=8_000_000.0, gt=0)  # whole-book capital (₹) — VaR/god_mode only
+    total_capital:          float = Field(default=5_000_000.0, gt=0)  # whole-book capital (₹) = 5 segments × ₹10L — VaR/god_mode only
     # Legacy per-type percentages — retained for the /settings/capital-allocation
     # report endpoint's backward-compat fields; max_capital_for_agent() no
     # longer reads these (each agent has its own flat pool above).
@@ -728,6 +778,70 @@ class Settings(BaseSettings):
     # Hard fat-finger guard for F&O orders (which are exempt from the equity ₹1M
     # per-order value cap): cap the number of lots per single order. 0 = no cap.
     max_futures_lots_per_order: int = Field(default=10, ge=0)
+
+    # ── Market-segment agents (segments.py) ───────────────────────────────────
+    # One supervising agent per segment, each with its own capital, risk limits,
+    # kill switch, P&L, universe and trading-hours window. Capital is the
+    # segment's paper/live book in ₹; daily loss is a hard per-segment stop.
+    # Paper allocation (jag, 2026-10-09): ₹10,00,000 for EACH segment agent,
+    # ₹50L total. Risk scales with it: per-trade risk 1% of segment capital,
+    # daily loss cap 2.5% — hitting it flattens and halts the segment for the
+    # rest of the IST day (auto-released on the next day).
+    segment_capital_nse_eq:   float = Field(default=1_000_000.0, gt=0)
+    segment_capital_nse_fo:   float = Field(default=1_000_000.0, gt=0)
+    segment_capital_bse_eq:   float = Field(default=1_000_000.0, gt=0)
+    segment_capital_mcx:      float = Field(default=1_000_000.0, gt=0)
+    segment_capital_cds:      float = Field(default=1_000_000.0, gt=0)
+    segment_daily_loss_pct:   float = Field(default=2.5, gt=0, le=100)  # of segment capital
+    segment_risk_per_trade_pct: float = Field(default=1.0, gt=0, le=10)  # max loss at stop, % of segment capital
+    segment_max_positions_nse_eq: int = Field(default=10, ge=1)
+    segment_max_positions_nse_fo: int = Field(default=4, ge=1)
+    segment_max_positions_bse_eq: int = Field(default=5, ge=1)
+    segment_max_positions_mcx:    int = Field(default=5, ge=1)
+    segment_max_positions_cds:    int = Field(default=5, ge=1)
+    segment_max_trades_per_day:   int = Field(default=40, ge=1)          # per segment
+    # PAPER only: let segments keep trading on the simulator outside their
+    # real trading-hours window (labelled AFTER-HOURS SIM). Off by default so
+    # every segment follows its real exchange hours. LIVE always enforces hours.
+    segment_paper_after_hours: bool = False   # IGNORED since 2026-10-10 (audit X1): hours always enforced
+    # ── Audit fixes 2026-10-10 (all PAPER/LIVE, only ever tighten) ───────────
+    # no new entries in the last N minutes before a segment's square-off window
+    segment_no_entry_before_squareoff_min: int = Field(default=5, ge=0)
+    # notional caps (futures/commodities): one position ≤ X × segment capital,
+    # all open positions together ≤ Y × segment capital (margin is NOT exposure)
+    segment_max_position_notional_x: float = Field(default=1.0, gt=0, le=5)
+    segment_max_gross_notional_x:    float = Field(default=3.0, gt=0, le=10)
+    # NSE_FO: one NIFTY/BANKNIFTY lot is ~₹16–17L notional on a ₹10L segment
+    segment_max_position_notional_x_nse_fo: float = Field(default=2.0, gt=0, le=5)
+    # a quote is fresh for an ENTRY only if its EXCHANGE timestamp is this young
+    quote_entry_max_age_sec: float = Field(default=20.0, gt=0)
+    # native/invented entries: expected edge at target ≥ N × round-trip costs
+    native_min_edge_cost_ratio: float = Field(default=2.0, ge=0)
+    # native strategies: per-symbol re-entry cooldown after an exit
+    native_reentry_cooldown_sec: int = Field(default=300, ge=0)
+    # invented strategies: no new entry when the remaining TTL < this
+    invent_min_hold_sec: int = Field(default=900, ge=0)
+    # ── Strategy inventor (trend-driven short-lived strategies) ──────────────
+    invent_enabled_default: bool = False   # dashboard toggle; off until jag enables
+    invent_max_concurrent_global: int = 10   # 2 per segment × 5 segments
+    invent_max_per_segment: int = 2
+    invent_cooldown_sec: int = 900         # min seconds between invents per segment
+    invent_ttl_sec: int = 7200             # strategy lifetime
+    invent_paper_warmup_fills: int = 3     # paper fills before live_eligible
+    invent_paper_warmup_min: int = 30      # OR minutes active with ≥1 fill, no breach
+    invent_live_tiny_qty_equity: int = 1   # LIVE tiny size (shares / 1 lot)
+    # Master agent approves invented strategies itself — PAPER ONLY. LIVE still
+    # needs the global typed-SEND switch + segment SEND + per-strategy SEND arm.
+    invent_master_auto_approve: bool = True
+    invent_risk_per_trade_pct: float = 0.5  # paper risk per invented trade, % of segment capital
+    # PAPER + live data: BSE/MCX/CDS paper engines price off Kite quotes
+    # (front-month futures for MCX/CDS) and fall back to the simulator per
+    # instrument when no quote is available. Prices are labelled KITE/SIMULATED.
+    native_kite_quotes: bool = True
+    native_kite_quote_interval_sec: float = 3.0
+    # MCX evening session end (IST). ~23:30 in Indian winter / ~23:55 when US
+    # DST is in force; configurable rather than guessed per date.
+    mcx_close_time: str = "23:30"
 
     # Max concurrent positions per agent (capital divided per-symbol to avoid overrun)
     max_intraday_positions: int = 5
@@ -761,6 +875,7 @@ class Settings(BaseSettings):
     ws_max_connections:       int   = 50     # max simultaneous WebSocket clients
     order_max_retries:        int   = 3      # kite_client retry attempts on transient error
     tick_interval_ms:         int   = 250    # PAPER mode poll interval (ms); 250 = 4 ticks/s
+    paper_offhours_tick_sec:  float = 5.0    # PAPER simulator pace outside NSE hours
 
     # Server
     host: str = "0.0.0.0"
